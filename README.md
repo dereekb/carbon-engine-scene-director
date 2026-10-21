@@ -11,7 +11,9 @@ saved scenes. **Movement** (in progress): every ship flies as a Destiny ball
 from [`@carbonenginejs/server`](https://github.com/dereekb/carbon-engine-server),
 and `order_ship` gives live direction and stop orders. Orbit, approach, warp,
 combat and timelines come in later phases; the document's `orders` and
-`timeline` fields stay reserved until then.
+`timeline` fields stay reserved until then. **Fleets**: the document holds EVE
+fleet structure (fleet commander, wings, squads with a role and an anchor),
+stored and reported but not flown yet.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -93,9 +95,9 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature and align time, as published and as flown with every skill at V, optionally with a prop mod (see below) |
 | `load_scene` | page | replaces the scene with a document |
 | `get_scene` | page | the current document |
-| `patch_scene` | page | edits by operation (add, update, remove, camera, environment, rename) |
+| `patch_scene` | page | edits by operation (ships, camera, environment, rename, fleets) |
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), distances, the simulation tick |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), distances, the simulation tick, fleet membership and the fleet tree |
 | `order_ship` | page | a live movement order for a ship: fly along a direction at a speed fraction, or stop (see Movement) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
@@ -162,7 +164,8 @@ node bin/scene-director.js call get_scene --out current.json                   #
 Metres and degrees, Y up. `rotation` is `[yaw, pitch, roll]`. A `null` camera
 target frames every ship; a `null` distance fits the target. Unknown fields are
 reported as warnings and dropped. `orders` on a ship and a top-level `timeline`
-are stored but not played yet.
+are stored but not played yet. A top-level `fleets` list groups ships into EVE
+fleets (see Fleets below).
 
 A ship's flight numbers come from its EVE type (see Ship stats below). `type`
 names it explicitly, as a type id or an exact English name; without it, the
@@ -176,9 +179,10 @@ not used yet.
 
 Edits are diffed against the current document: a DNA change rebuilds that
 ship, a placement change moves it in place, a `type`, `stats` or `pilot` change
-retunes it (the diff's `retuned` list: new flight numbers, no rebuild), and an
-environment change reloads the page (the scene's environment is initialized
-with the device).
+retunes it (the diff's `retuned` list: new flight numbers, no rebuild), a fleet
+change regroups the ships whose membership changed (the diff's `regrouped`
+list: no rebuild), and an environment change reloads the page (the scene's
+environment is initialized with the device).
 
 ## Movement
 
@@ -252,6 +256,119 @@ tools-core runs with `--no-sde-auto-prepare`, so the SDE build it reports
 (`builds.sde` in `/eve/latest/build`) must be prepared once:
 `node bin/cjs-sde-prepare.js --build <n>` in the tools-core checkout (Node 22).
 A ship with all four `stats` needs no SDE.
+
+## Fleets
+
+A scene's `fleets` are EVE fleets: a fleet commander (FC) commands the fleet, the
+fleet splits into wings, and each wing into squads. This is structure only: it
+is validated, edited by `patch_scene`, saved and reported by `get_state`, but
+ships do not follow it yet (Follow the FC builds on it).
+
+```json
+{
+  "schema": "cjs-scene/1",
+  "name": "tfi-fleet",
+  "ships": [
+    { "id": "fc", "dna": "mb2_t1:minmatarnavy:minmatar", "name": "FC" },
+    { "id": "tfi-1", "dna": "mb2_t1:minmatarnavy:minmatar", "position": [1500, 0, 0] },
+    { "id": "tfi-2", "dna": "mb2_t1:minmatarnavy:minmatar", "position": [-1500, 0, 0] },
+    { "id": "tfi-3", "dna": "mb2_t1:minmatarnavy:minmatar", "position": [0, 0, 1500] },
+    { "id": "guardian-1", "dna": "ac3_t2:carthum:amarr", "position": [30000, 0, 0] },
+    { "id": "guardian-2", "dna": "ac3_t2:carthum:amarr", "position": [31000, 0, 0] }
+  ],
+  "fleets": [
+    {
+      "id": "tfi",
+      "name": "TFI fleet",
+      "commander": "fc",
+      "wings": [
+        {
+          "id": "wing-1",
+          "squads": [
+            { "id": "dps", "role": "dps", "members": ["tfi-1", "tfi-2", "tfi-3"], "anchor": { "range": 1000 } },
+            { "id": "logi", "role": "logi", "commander": "guardian-1", "members": ["guardian-1", "guardian-2"], "anchor": { "ship": "guardian-1", "range": 30000 } }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The FC holds the fleet commander's slot (in no squad); it may also sit in one of
+its fleet's squads. The three TFIs keep 1 km on the FC. The logi squad anchors
+on its own logi anchor, guardian-1: guardian-1 holds 30 km off the FC and
+guardian-2 anchors up on it at 1 km.
+
+**Fields.** A fleet is `{ id, name?, commander, wings }`, a wing
+`{ id, name?, commander?, squads }`, a squad
+`{ id, name?, role, commander?, members, anchor? }` and an anchor
+`{ ship?, range? }`. `wings`, `squads` and `members` default to `[]`; an empty
+fleet, wing or squad is valid. `role` is required: `dps`, `logi`, `tackle`,
+`ewar`, `boost` or `support` (read case-insensitively). `null` on an optional
+field means absent, and `fleets: []` is the same as no `fleets`.
+
+**Anchors.** A squad anchors on `anchor.ship` (default: the FC, whoever that is)
+and keeps `anchor.range` metres, surface to surface as EVE's overview measures
+it (default by role: logi 30,000 m, every other role 1,000 m, EVE's "anchor
+up"). Both are stored as written, so an omitted value follows a new FC or role.
+
+- An anchor on the FC or on a ship outside the squad: every member except the FC
+  keeps the range on it.
+- An anchor on one of the squad's own members (not the FC): that ship is the
+  squad's lead, as a logi anchor is. It keeps the range on the FC, and the other
+  members anchor up on it at 1,000 m.
+- The FC follows nobody: the fleet takes its heading from it. A wing commander in
+  no squad anchors up on the FC.
+- Anchors are ships of the same fleet (the FC, a wing commander or a squad
+  member), and every anchor chain must end at the FC: loops are refused.
+
+**Rules a valid document keeps.**
+
+- Ids use the ship-id pattern. Fleet ids are unique in the scene; wing and squad
+  ids are unique within their fleet (a squad is addressed by fleet + squad, so
+  two fleets can both have a `dps` squad).
+- A ship holds positions (FC, wing commander, squad member) in at most one
+  fleet, and sits in at most one squad.
+- The FC sits in one of its fleet's squads or in none. A wing commander sits in
+  one of its own wing's squads or in none, and commands one wing. A squad
+  commander is one of its squad's members. One ship may combine these commands.
+- `team` is independent of fleets: a team is the side a ship is on (hostility,
+  for combat), a fleet is who commands it and where it flies. Fleets neither set
+  nor check teams, and a fleet may mix them.
+
+**Edits.** The object an `add_*` op adds sits under its noun; every other
+`fleet`, `wing` or `squad` key is an id.
+
+| Op | Shape | Notes |
+| --- | --- | --- |
+| `add_fleet` / `update_fleet` / `remove_fleet` | `{ fleet }` / `{ fleet, set: { name?, commander? } }` / `{ fleet }` | an old FC left holding no position leaves the fleet |
+| `add_wing` / `update_wing` / `remove_wing` | `{ fleet, wing }` / `{ fleet, wing, set: { name?, commander? } }` / `{ fleet, wing }` | removing a wing removes its squads |
+| `add_squad` / `update_squad` / `remove_squad` | `{ fleet, wing, squad }` / `{ fleet, squad, set: { name?, role?, commander?, anchor? } }` / `{ fleet, squad }` | `add_squad` never moves ships; `update_squad` replaces `anchor` whole |
+| `move_to_squad` | `{ ships, fleet, squad }` | leaves the old squad (and its command), a wing command for another wing, and another fleet |
+| `remove_from_fleet` | `{ ships }` | takes ships out of every position |
+| `set_anchor` | `{ fleet, squad, anchor: { ship?, range? } }` | merged; `null` resets `ship` to the FC and `range` to the role default |
+
+`null` in a `set` clears that field. Ids and child lists cannot be set: use the
+remove/add and the child ops. Removing a fleet, wing or squad keeps its ships in
+the scene.
+
+**Removal and fallback.** Removing a ship (`remove_ship`) takes it out of its
+fleet automatically, as it clears `camera.target`. Whenever an edit takes a ship
+out of a fleet or a squad, the ship gives up the commands it can no longer hold,
+and a squad anchored on it falls back down the chain: its squad commander, then
+its wing commander (whichever is set and still in the fleet), otherwise the FC.
+The range is kept. Lost commands and re-pointed anchors come back as warnings.
+A fleet commander is never removed implicitly: give the fleet another commander
+(`update_fleet`) or remove the fleet first. Operations run in order, so
+`update_fleet` then `remove_ship` in one patch works.
+
+**`get_state`.** Each ship in a fleet reports `fleet`, `wing`, `squad`, `role`,
+`commands` (`fleet`, `wing`, `squad`) and `anchor` (`{ ship, range }`: what it
+keeps range on under the rules above; `null` for the FC). Ships in no fleet have
+none of these keys. `fleets` is the fleet tree with `ships` (every ship holding a
+position) and each squad's anchor resolved; `scene.fleets` counts them. An edit's
+`changes.regrouped` counts the ships whose membership changed.
 
 ## Development
 

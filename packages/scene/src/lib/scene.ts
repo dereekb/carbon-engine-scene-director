@@ -1,4 +1,6 @@
 import type { Maybe } from '@dereekb/util';
+import { ID_PATTERN, isPlainObject, type JsonObject, readNumber, readString, reportUnknownKeys, sameJson } from './json';
+import { FLEET_OPERATIONS, type FleetOperationContext, applyFleetOperation, normalizeFleets, removeShipFromFleets, type SceneFleet, toFleetMemberships } from './fleets';
 import { type HullStatOverrides, normalizeHullStatOverrides } from './stats';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
@@ -80,6 +82,11 @@ export interface SceneDocument {
   camera: SceneCamera;
   ships: SceneShip[];
   /**
+   * EVE fleets: a fleet commander, wings and squads with a role and an anchor (see fleets/fleet.ts). Stored and
+   * reported, not flown yet. Omitted when there are none.
+   */
+  fleets?: SceneFleet[];
+  /**
    * Reserved for the timeline phase: stored, not played yet.
    */
   timeline?: unknown;
@@ -105,9 +112,16 @@ export interface SceneDiff {
    * Kept ships whose type, stats or pilot changed: their flight numbers need recomputing, not a rebuild.
    */
   readonly retuned: SceneShip[];
+  /**
+   * Whether the fleets changed at all, a name included.
+   */
+  readonly fleets: boolean;
+  /**
+   * Ships present before and after (rebuilt or not) whose fleet membership changed (fleet, wing, squad, role,
+   * commands or resolved anchor), joining or leaving a fleet included: the ships whose following must be re-issued.
+   */
+  readonly regrouped: SceneShip[];
 }
-
-type JsonObject = Record<string, unknown>;
 
 /**
  * A document mid-edit: operations write unvalidated values into it, and normalizeScene checks the result.
@@ -120,7 +134,7 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
 const RESERVED_SCENE_KEYS = ['timeline'] as const;
 const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'camera', 'ships', ...RESERVED_SCENE_KEYS]);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'camera', 'ships', 'fleets', ...RESERVED_SCENE_KEYS]);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -129,7 +143,6 @@ const ENVIRONMENT_KEYS = new Set<string>(['universe']);
  * hull:faction:race, then optional `:command?args` segments.
  */
 const DNA_PATTERN = /^[^:\s]+:[^:\s]+:[^:\s]+(:\S+)*$/u;
-const ID_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/u;
 const UNIVERSE_PATTERN = /^res:\/.+\.(black|red)$/iu;
 const MAX_TYPE_NAME_LENGTH = 100;
 
@@ -203,6 +216,10 @@ export function normalizeScene(input: unknown): NormalizedScene {
   if (target != null && !ids.has(target)) {
     problems.push(`camera.target "${target}" is not a ship id`);
   }
+  const fleets = normalizeFleets({ input: input['fleets'], shipIds: ids });
+  problems.push(...fleets.problems);
+  warnings.push(...fleets.warnings);
+  if (fleets.fleets) scene.fleets = fleets.fleets;
   for (const key of RESERVED_SCENE_KEYS) {
     if (input[key] === undefined) continue;
     scene[key] = structuredClone(input[key]);
@@ -221,10 +238,18 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "add_ship", ship }
  *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, orders?, pilot? } }
  *                                       each key replaces the ship's value (stats as a whole); null clears type, stats and pilot
- *   { op: "remove_ship", id }
+ *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused)
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
  *   { op: "rename", name }
+ *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander? } }   { op: "remove_fleet", fleet }
+ *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander? } }   { op: "remove_wing", fleet, wing }
+ *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor? } }
+ *   { op: "remove_squad", fleet, squad }
+ *   { op: "move_to_squad", ships, fleet, squad }   { op: "remove_from_fleet", ships }
+ *   { op: "set_anchor", fleet, squad, anchor: { ship?, range? } }   merged; null resets ship to the FC and range to the role default
+ *                                       a ship taken out of a squad falls squads anchored on it back to their squad
+ *                                       commander, then wing commander, then the FC, with a warning
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -235,21 +260,24 @@ export function applySceneOperations(scene: SceneDocument, operations: unknown):
   if (!Array.isArray(operations) || operations.length === 0) throw new SceneError(['operations must be a non-empty array']);
   const next = structuredClone(scene) as unknown as SceneDraft;
   const problems: string[] = [];
+  const warnings: string[] = [];
 
   for (const [index, operation] of operations.entries()) {
     const where = `operations[${index}]`;
     if (isPlainObject(operation) && typeof operation['op'] === 'string') {
-      applyOperation(next, operation, where, problems);
+      applyOperation(operation, { draft: next, where, problems, warnings });
     } else {
       problems.push(`${where} must be an object with an "op" string`);
     }
   }
 
   if (problems.length) throw new SceneError(problems);
-  return normalizeScene(next);
+  const normalized = normalizeScene(next);
+  return { scene: normalized.scene, warnings: [...warnings, ...normalized.warnings] };
 }
 
-function applyOperation(next: SceneDraft, operation: JsonObject, where: string, problems: string[]): void {
+function applyOperation(operation: JsonObject, context: FleetOperationContext & { readonly draft: SceneDraft }): void {
+  const { draft: next, where, problems } = context;
   switch (operation['op']) {
     case 'add_ship': {
       const ship = operation['ship'];
@@ -274,6 +302,7 @@ function applyOperation(next: SceneDraft, operation: JsonObject, where: string, 
       } else {
         next.ships.splice(index, 1);
         if (next.camera['target'] === operation['id']) next.camera['target'] = null;
+        removeShipFromFleets(String(operation['id']), context);
       }
       break;
     }
@@ -289,7 +318,8 @@ function applyOperation(next: SceneDraft, operation: JsonObject, where: string, 
       next['name'] = operation['name'];
       break;
     default:
-      problems.push(`${where}: unknown op "${String(operation['op'])}"`);
+      if (FLEET_OPERATIONS.has(String(operation['op']))) applyFleetOperation(operation, context);
+      else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
 
@@ -298,7 +328,8 @@ function applyOperation(next: SceneDraft, operation: JsonObject, where: string, 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move, relabel and retune, and whether the environment or camera changed.
+ * @returns The ships to add, remove, rebuild, move, relabel, retune and regroup, and whether the environment, camera or
+ *   fleets changed.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
   const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
@@ -311,8 +342,12 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     rebuilt: [],
     moved: [],
     relabelled: [],
-    retuned: []
+    retuned: [],
+    fleets: !sameJson(before?.fleets ?? [], after.fleets ?? []),
+    regrouped: []
   };
+  const membershipsBefore = toFleetMemberships(before ?? {});
+  const membershipsAfter = toFleetMemberships(after);
 
   for (const [id, ship] of previous) if (!current.has(id)) diff.removed.push(ship);
   for (const [id, ship] of current) {
@@ -326,6 +361,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     } else {
       diff.rebuilt.push(ship);
     }
+    if (old && !sameJson(membershipsBefore.get(id), membershipsAfter.get(id))) diff.regrouped.push(ship);
   }
   return diff;
 }
@@ -408,37 +444,10 @@ function readShipType(value: unknown, where: string, problems: string[]): number
   return type;
 }
 
-function reportUnknownKeys(object: JsonObject, allowed: Set<string>, where: string, warnings: string[]): void {
-  for (const key of Object.keys(object)) {
-    if (!allowed.has(key)) warnings.push(`${where}.${key} is not a known field and was dropped`);
-  }
-}
-
-function readString(value: unknown, where: string, problems: string[]): string {
-  if (typeof value === 'string' && value.trim()) return value.trim();
-  problems.push(`${where} must be a non-empty string`);
-  return '';
-}
-
-function readNumber(value: unknown, where: string, problems: string[], { min = -Infinity, max = Infinity }: { readonly min?: number; readonly max?: number } = {}): number {
-  if (typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max) return value;
-  const range = min > -Infinity || max < Infinity ? ` in [${min}, ${max}]` : '';
-  problems.push(`${where} must be a finite number${range}`);
-  return 0;
-}
-
 function readVector(value: unknown, where: string, problems: string[]): SceneVector {
   if (Array.isArray(value) && value.length === 3 && value.every((component) => typeof component === 'number' && Number.isFinite(component))) {
     return [value[0], value[1], value[2]];
   }
   problems.push(`${where} must be an array of three finite numbers`);
   return [0, 0, 0];
-}
-
-function isPlainObject(value: unknown): value is JsonObject {
-  return value !== null && typeof value === 'object' && !Array.isArray(value);
-}
-
-function sameJson(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) === JSON.stringify(b);
 }

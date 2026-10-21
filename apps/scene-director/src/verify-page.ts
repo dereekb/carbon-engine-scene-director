@@ -13,6 +13,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
+import type { FleetReport, ShipFleetMembership } from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -34,7 +35,7 @@ interface ShipReport {
 }
 
 interface SceneResult {
-  readonly scene: { readonly name: string; readonly ships: unknown[] };
+  readonly scene: { readonly name: string; readonly ships: unknown[]; readonly fleets?: unknown[] };
   readonly ships: ShipReport[];
   readonly changes: Record<string, number>;
 }
@@ -43,7 +44,7 @@ interface SceneListing {
   readonly scenes: { readonly name: string; readonly store: string }[];
 }
 
-interface ShipState {
+interface ShipState extends Partial<ShipFleetMembership> {
   readonly id: string;
   readonly position?: [number, number, number];
   readonly velocity?: [number, number, number];
@@ -57,6 +58,7 @@ interface ViewerState {
   readonly simulation: { readonly tick: number; readonly seconds: number };
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
+  readonly fleets: FleetReport[];
 }
 
 interface LogEntry {
@@ -327,6 +329,26 @@ try {
     return 'refused';
   });
 
+  // The fleet stays in the scene, so the save checks below prove it survives both stores.
+  await Check('get_state reports fleet membership and the fleet tree', async () => {
+    const fleet = { id: 'verify-fleet', commander: 'punisher', wings: [{ id: 'wing-1', squads: [{ id: 'dps', role: 'dps', members: ['rifter'] }] }] };
+    const { changes } = await call<SceneResult>('patch_scene', { operations: [{ op: 'add_fleet', fleet }] });
+    Expect(changes['regrouped'] === 2 && changes['moved'] === 0 && changes['rebuilt'] === 0 && changes['added'] === 0, JSON.stringify(changes));
+    const state = await call<ViewerState>('get_state');
+    const byId = Object.fromEntries(state.ships.map((ship) => [ship.id, ship]));
+    const rifter = byId['rifter'];
+    const punisher = byId['punisher'];
+    const expected = { fleet: 'verify-fleet', wing: 'wing-1', squad: 'dps', role: 'dps', commands: [], anchor: { ship: 'punisher', range: 1000 } };
+    const actual = { fleet: rifter.fleet, wing: rifter.wing, squad: rifter.squad, role: rifter.role, commands: rifter.commands, anchor: rifter.anchor };
+    Expect(JSON.stringify(actual) === JSON.stringify(expected), `rifter: ${JSON.stringify(rifter)}`);
+    Expect(JSON.stringify(punisher.commands) === '["fleet"]' && punisher.squad === null && punisher.anchor === null, `punisher: ${JSON.stringify(punisher)}`);
+    const anchor = state.fleets[0]?.wings[0]?.squads[0]?.anchor;
+    Expect(JSON.stringify(anchor) === JSON.stringify({ ship: 'punisher', range: 1000 }), `fleets: ${JSON.stringify(state.fleets)}`);
+    const reanchored = await call<SceneResult>('patch_scene', { operations: [{ op: 'set_anchor', fleet: 'verify-fleet', squad: 'dps', anchor: { range: 2500 } }] });
+    Expect(reanchored.changes['regrouped'] === 1, JSON.stringify(reanchored.changes));
+    return 'rifter anchors on punisher at 2500 m';
+  });
+
   await Check('save, list, open and delete round-trip through IndexedDB', async () => {
     await call('save_scene', { name: 'verify-saved', store: 'browser' });
     Expect(
@@ -337,6 +359,7 @@ try {
     const opened = await call<SceneResult & { store: string }>('open_scene', { name: 'verify-saved' });
     Expect(opened.store === 'browser', `opened from ${opened.store}`);
     Expect(opened.scene.ships.length === 2, `opened ${opened.scene.ships.length} ships`);
+    Expect(opened.scene.fleets?.length === 1, `opened ${opened.scene.fleets?.length ?? 0} fleets`);
     Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-saved', store: 'browser' })).deleted, 'not deleted');
   });
 
@@ -350,6 +373,7 @@ try {
     await call('load_scene', { scene: { name: 'empty', ships: [] } });
     const opened = await call<SceneResult & { store: string }>('open_scene', { name: 'verify-saved-disk' });
     Expect(opened.store === 'disk' && opened.scene.ships.length === 2, `opened ${opened.scene.ships.length} ships from ${opened.store}`);
+    Expect(opened.scene.fleets?.length === 1, `opened ${opened.scene.fleets?.length ?? 0} fleets from disk`);
     Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-saved-disk' })).deleted, 'not deleted');
     // The reload check below expects the IndexedDB check's scene back.
     await call('load_scene', { scene: { ...opened.scene, name: 'verify-saved' } });

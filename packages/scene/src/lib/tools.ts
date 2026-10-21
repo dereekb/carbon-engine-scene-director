@@ -8,6 +8,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { DEFAULT_ANCHOR_RANGES, DEFAULT_ANCHOR_UP_RANGE, SQUAD_ROLES } from './fleets';
 import { SHIP_ORDER_TYPES } from './orders';
 import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 
@@ -45,7 +46,8 @@ const SCENE_FORMAT = `Scene document (${SCENE_SCHEMA}). Metres and degrees, Y up
 }
 dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find hull names. rotation is [yaw, pitch, roll].
 "type" (EVE type id or name) and "stats" ({ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional) set a ship's flight numbers; ship_stats shows them.
-"orders" and "pilot" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.`;
+"orders" and "pilot" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.
+"fleets" (optional) groups ships into EVE fleets: [{ "id", "name"?, "commander": "<FC ship id>", "wings": [{ "id", "name"?, "commander"?, "squads": [{ "id", "name"?, "role": "${SQUAD_ROLES.join('|')}", "commander"?: "<a member>", "members": ["<ship id>"], "anchor"?: { "ship"?: "<ship id; default the FC>", "range"?: <metres, surface to surface; default logi ${DEFAULT_ANCHOR_RANGES.logi}, others ${DEFAULT_ANCHOR_UP_RANGE}> } }] }] }]. A squad anchored on one of its own members (a logi anchor) puts that ship at range off the FC, and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m. A ship holds positions in one fleet and sits in at most one squad. Fleets are stored and reported by get_state; ships do not follow yet. "team" is independent of fleets.`;
 
 const STORE_ARGUMENT = {
   type: 'string',
@@ -127,6 +129,12 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "set_camera", "camera": { ...fields to change } }
 { "op": "set_environment", "environment": { "universe": "res:/..." } }   (reloads the page)
 { "op": "rename", "name": "<name>" }
+{ "op": "add_fleet", "fleet": { ...fleet } }   { "op": "update_fleet", "fleet": "<id>", "set": { "name"?, "commander"? } }   { "op": "remove_fleet", "fleet": "<id>" }
+{ "op": "add_wing", "fleet": "<id>", "wing": { ...wing } }   { "op": "update_wing", "fleet", "wing": "<id>", "set": { "name"?, "commander"? } }   { "op": "remove_wing", "fleet", "wing" }
+{ "op": "add_squad", "fleet", "wing", "squad": { ...squad } }   { "op": "update_squad", "fleet", "squad": "<id>", "set": { "name"?, "role"?, "commander"?, "anchor"? } }   { "op": "remove_squad", "fleet", "squad" }
+{ "op": "move_to_squad", "ships": ["<id>"], "fleet", "squad" }   { "op": "remove_from_fleet", "ships": ["<id>"] }
+{ "op": "set_anchor", "fleet", "squad", "anchor": { "ship"?, "range"? } }   (merged; null resets ship to the FC and range to the role default)
+Taking a ship out of a squad (remove_ship, remove_from_fleet, move_to_squad, remove_squad, remove_wing) falls a squad anchored on it back to its squad commander, then its wing commander, then the FC, with a warning; a fleet commander must be replaced (update_fleet) or its fleet removed first. Removing a fleet, wing or squad keeps its ships in the scene.
 Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it.`,
     inputSchema: {
       type: 'object',
@@ -169,7 +177,7 @@ Changing dna rebuilds that ship (it keeps flying); changing position or rotation
     name: 'get_state',
     where: 'page',
     description:
-      "Live state of the viewer: renderer status, frame rate, camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, ...) and the physics it flies with (mass kg, agility, maxVelocity m/s, radius m). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client.",
+      "Live state of the viewer: renderer status, frame rate, camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, ...) and the physics it flies with (mass kg, agility, maxVelocity m/s, radius m). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client. Ships in a fleet also report fleet, wing, squad, role, commands and anchor (the ship they keep range on, and the range); fleets is the fleet tree with each squad's anchor resolved. Fleets do not move ships yet.",
     inputSchema: { type: 'object', properties: {} }
   },
   {

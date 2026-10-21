@@ -16,7 +16,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrder, SceneError, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipOrder } from '@scene-director/scene';
+import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrder, SceneError, toFleetMemberships, toFleetReports, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipFleetMembership, type ShipOrder } from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { AttachShipCurves, DocumentRotation, ShipPhysicsFromHull, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
 import { EncodePng, type Engine, type EngineStats } from './engine';
@@ -180,7 +180,8 @@ export class Director {
   }
 
   State(): object {
-    const ships = (this.scene?.ships ?? []).map((doc) => this.ShipState(doc));
+    const memberships = this.scene ? toFleetMemberships(this.scene) : new Map<string, ShipFleetMembership>();
+    const ships = (this.scene?.ships ?? []).map((doc) => this.ShipState(doc, memberships.get(doc.id)));
     const distances = [];
     for (let a = 0; a < ships.length; a++) {
       for (let b = a + 1; b < ships.length; b++) {
@@ -195,12 +196,13 @@ export class Director {
     const renderer: ({ available: true } & EngineStats) | { available: false; reason: string } = this.engine ? { available: true, ...this.engine.Stats() } : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
-      scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length } : null,
+      scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0 } : null,
       camera: this.engine?.camera.Get() ?? null,
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
-      distances
+      distances,
+      fleets: this.scene ? toFleetReports(this.scene) : []
     };
   }
 
@@ -280,7 +282,7 @@ export class Director {
       scene,
       warnings,
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
-      changes: { added: diff.added.length, rebuilt: diff.rebuilt.length, retried: retried.length, moved: diff.moved.length, removed: diff.removed.length }
+      changes: { added: diff.added.length, rebuilt: diff.rebuilt.length, retried: retried.length, moved: diff.moved.length, removed: diff.removed.length, regrouped: diff.regrouped.length }
     };
   }
 
@@ -358,10 +360,10 @@ export class Director {
     return sphere;
   }
 
-  private ShipState(doc: SceneShip): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number } & Partial<ShipMotion> {
+  private ShipState(doc: SceneShip, membership: Maybe<ShipFleetMembership>): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number } & Partial<ShipFleetMembership> & Partial<ShipMotion> {
     const sphere = this.WorldSphere(doc);
     const motion = this.world.Motion(doc.id);
-    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion };
+    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion };
   }
 
   private ShipReport(id: string): ShipReport {

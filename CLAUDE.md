@@ -6,8 +6,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 ## Layout (nx workspace)
 
 - `packages/scene` (`@scene-director/scene`, `@nx/js:tsc`): the `cjs-scene/1` document schema (validation, patch
-  operations, diff), the shared tool list, and `src/lib/stats/` (ship stats math, skills, prop mods, the pilot
-  context). No runtime imports; the hub, the page and the tests all use it.
+  operations, diff), the shared tool list, `src/lib/stats/` (ship stats math, skills, prop mods, the pilot
+  context) and `src/lib/fleets/` (fleets, wings and squads: validation, edits, and the anchor rules, resolved only in
+  `toFleetMemberships`; Follow the FC must fly those, not re-derive them). No runtime imports; the hub, the page and the
+  tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. Building it builds the viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
