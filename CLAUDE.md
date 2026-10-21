@@ -75,8 +75,13 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 
 ## Boundaries
 
-- Upstream clones in `/mnt/a/github/carbonenginejs/` (runtime, tools-core, server, tools-blender, format-gr2) are
-  read-only references. DO NOT EDIT THEM.
+- Upstream clones in `/mnt/a/github/carbonenginejs/` (runtime, tools-core, tools-blender, format-gr2) are read-only
+  references. DO NOT EDIT THEM.
+- `server` is the exception: it tracks the user's fork (`origin` = github.com/dereekb/carbon-engine-server, over SSH;
+  `upstream` = carbonenginejs/server). Server changes this project needs go on its `scene-director` branch, pass its
+  `npm test`, and are pushed to `origin`, never `upstream`. `dist/` is gitignored, so run `npm run build` there after
+  a checkout. Fork `eadbdd1` moved the 29 `modelledOn` defines to `Modelled on:` JSDoc lines; upstream main still
+  throws "Class donors and modelledOn are retired" against runtime f77ed790c.
 - The runtime dependency is a copy of `../carbonenginejs/runtime/npm` (install-links, pinned at runtime commit
   f77ed790c; see `runtimePin` in package.json). Rebuild that checkout at the pinned commit before reinstalling.
 - The viewer UI is a plain DOM overlay. dbx-web / dbx-components and Angular are acceptable when a feature
