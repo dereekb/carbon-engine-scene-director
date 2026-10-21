@@ -6,9 +6,12 @@ the browser, driven by Claude through MCP tools. Rendering is
 ship and environment data come from a local
 [tools-core](https://github.com/carbonenginejs/tools-core) service.
 
-**Phase 1** (this): scene documents, ships placed from SOF DNA, camera,
-screenshots, saved scenes. Movement orders, combat and timelines are reserved
-fields in the document and come in later phases.
+**Phase 1**: scene documents, ships placed from SOF DNA, camera, screenshots,
+saved scenes. **Movement** (in progress): every ship flies as a Destiny ball
+from [`@carbonenginejs/server`](https://github.com/dereekb/carbon-engine-server),
+and `order_ship` gives live direction and stop orders. Orbit, approach, warp,
+combat and timelines come in later phases; the document's `orders` and
+`timeline` fields stay reserved until then.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -31,6 +34,11 @@ working scene from IndexedDB and Claude can reconnect at any time.
 - Node 22+ for this project; tools-core needs Node 22 for its SQLite binding.
 - A runtime build in `../carbonenginejs/runtime` (`npm run build:npm` there).
   It is copied into `node_modules` on install; see `runtimePin` in package.json.
+- The Destiny server in `../carbonenginejs/server` (the user's fork, branch
+  `scene-director`; run `npm run build` there after a checkout, since `dist/` is
+  not committed). It is copied into `node_modules` on install and must dedupe
+  onto the runtime above (`npm ls @carbonenginejs/runtime` shows `deduped`
+  under it); see `serverPin` in package.json.
 - tools-core serving on 127.0.0.1:5510. In its checkout:
   `node bin/cjs-tools-service.js --no-audio-auto-prepare --no-sde-auto-prepare`
 - Chrome or Edge with WebGPU, on a machine with a GPU. Under WSL2, open the
@@ -44,7 +52,7 @@ An nx workspace:
 |---|---|---|---|
 | `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema, the tool list, and the ship stats math and its pilot context, shared by the hub and the page |
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI and `verify-page` |
-| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, storage, hub link |
+| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, the Destiny world and its clock, storage, hub link; node specs for the clock and the Destiny wiring |
 
 `bin/scene-director.js` launches the built CLI (`dist/apps/scene-director/main.js`).
 
@@ -87,7 +95,8 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `get_scene` | page | the current document |
 | `patch_scene` | page | edits by operation (add, update, remove, camera, environment, rename) |
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
-| `get_state` | page | renderer status, per-ship build status and placement, distances |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), distances, the simulation tick |
+| `order_ship` | page | a live movement order for a ship: fly along a direction at a speed fraction, or stop (see Movement) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
 
@@ -171,6 +180,41 @@ retunes it (the diff's `retuned` list: new flight numbers, no rebuild), and an
 environment change reloads the page (the scene's environment is initialized
 with the device).
 
+## Movement
+
+Each document ship has a Destiny ball (`apps/viewer/src/lib/destiny.ts`), built
+or not, and the ball drives the drawn ship's translation and rotation curves.
+
+- **Two parks in lockstep.** A master park holds the authoritative state that
+  `get_state`, distances and camera framing read. A replica park creates the
+  `CjsDestinyClientBall` renderer curves the server documents
+  (`docs/destiny-client-curves.md` there): they interpolate, sample two ticks
+  back and damp rotation like EVE's client. Replication is not ported, so
+  `DestinyWorld` applies every change to both parks in the same call and they
+  stay bit-identical.
+- **One clock.** The page's animation loop advances a scene clock (100 ns ticks)
+  by the real frame time, evolves both parks to it, then draws at it. A frame
+  advances it by at most one second, so a hidden tab pauses the scene instead of
+  fast-forwarding it. The loop runs without WebGPU too, so headless checks see
+  ships move.
+- **Absolute coordinates.** The replica's ego is a fixed ball at the origin, so
+  the curves give world positions.
+- **Orders apply at the next 1 s tick**, as EVE applies commands before a tick.
+  The drawn ship trails the reported state by up to a tick, as in the client.
+- **Placement.** `load_scene` and `open_scene` put every ship back at rest at its
+  document placement. `patch_scene` touches only what it changes: a new position
+  or rotation puts that ship there at rest; a new DNA rebuilds the ship and it
+  keeps flying. A ship at rest faces its document rotation exactly; under way it
+  faces its velocity, keeping the document's roll. After a teleport, any banking
+  from the previous turn levels out over a few seconds, as Destiny's client does.
+- **Orders are live only.** They are not written to the document, so a save or a
+  reload starts from the document's placements.
+- **Physics are class defaults**, not dogma: mass, agility and max velocity by
+  the SOF hull category (frigate, cruiser, battleship, ...), or by its bounding
+  radius when the category is unknown, with the radius from the hull. The
+  document's `stats` (mass, agility, maxVelocity) override them. Until a ship's
+  build reads its hull, it flies with cruiser defaults.
+
 ## Ship stats and the pilot
 
 `packages/scene/src/lib/stats/` computes the numbers a ship flies by, with no
@@ -249,9 +293,17 @@ Drawing is checked in a real Chrome or Edge tab through `get_state`,
   the template lacks them, plus the sun's lens flare. A universe file carries
   none of these, and without dynamic exposure the nebula (median texel about
   0.01 linear) renders at the level of the clear colour.
-- Ships hold still through `StaticPosition`/`StaticRotation` curves
-  (`apps/viewer/src/lib/ships.ts`); Destiny-driven balls replace them in the
-  movement phase.
+- Destiny balls drive the ships (see Movement). The ClientBall is the
+  translation curve; `BallRotation` wraps it for rotation and overrides the
+  `*__Ticks` methods it serves, because the runtime's curve bases pass their
+  arguments in the opposite order from their docs.
+- `runtime-sim.ts` is the light half of the import point (math, the Blue curve
+  bases, the Destiny server); `runtime.ts` re-exports it. The node-tested modules
+  (`clock.ts`, `destiny.ts`) import only `runtime-sim.ts`, so their specs never
+  load the renderer. The server's types are in `carbonenginejs-server.d.ts`.
+- The esbuild plugin fails the build if any `@carbonenginejs/runtime` import,
+  the server's included, resolves outside the page's runtime copy: a nested
+  second copy would duplicate every class.
 
 ## EVE content
 

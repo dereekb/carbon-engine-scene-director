@@ -43,9 +43,19 @@ interface SceneListing {
   readonly scenes: { readonly name: string; readonly store: string }[];
 }
 
+interface ShipState {
+  readonly id: string;
+  readonly position?: [number, number, number];
+  readonly velocity?: [number, number, number];
+  readonly speed?: number;
+  readonly mode?: string;
+}
+
 interface ViewerState {
   readonly renderer: { readonly available: boolean; readonly adapter?: string; readonly reason?: string };
   readonly environment: Maybe<{ readonly background: { readonly ready: boolean }; readonly dressing: { readonly state: string } }>;
+  readonly simulation: { readonly tick: number; readonly seconds: number };
+  readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
 }
 
@@ -103,6 +113,20 @@ function SkipWithoutSde(error: unknown): never {
  */
 function Close(a: number, b: number): boolean {
   return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
+}
+
+/**
+ * A ship's live state from get_state.
+ *
+ * @param state - The viewer state.
+ * @param id - The ship id.
+ * @returns The ship.
+ * @throws {Error} When get_state does not list it.
+ */
+function ShipIn(state: ViewerState, id: string): ShipState {
+  const ship = state.ships.find((entry) => entry.id === id);
+  if (!ship) throw new Error(`get_state has no ship "${id}"`);
+  return ship;
 }
 
 /**
@@ -226,6 +250,16 @@ try {
     return `punisher ${byId['punisher'].status}, rifter ${byId['rifter'].status}, bogus failed: ${byId['bogus'].error}`;
   });
 
+  await Check('Destiny holds ships at their document placement', async () => {
+    const state = await call<ViewerState>('get_state');
+    const placements: Record<string, number[]> = { punisher: [0, 0, 0], rifter: [2500, 0, 0], bogus: [0, 2000, 0] };
+    for (const [id, position] of Object.entries(placements)) {
+      const ship = ShipIn(state, id);
+      Expect(JSON.stringify(ship.position) === JSON.stringify(position) && ship.speed === 0 && ship.mode === 'stop', `${id}: ${JSON.stringify(ship)}`);
+    }
+    return `3 balls at rest, tick ${state.simulation.tick}`;
+  });
+
   await Check('patch_scene moves, removes and renames without rebuilding', async () => {
     const result = await call<SceneResult>('patch_scene', {
       operations: [
@@ -239,6 +273,46 @@ try {
     const distance = (await call<ViewerState>('get_state')).distances[0];
     Expect(Math.abs(distance.centreToCentre - 4000) < 300, JSON.stringify(distance));
     return `centre-to-centre ${distance.centreToCentre} m`;
+  });
+
+  let stoppingSpeed = 0;
+  await Check('order_ship moves a ship through its ball', async () => {
+    const ordered = await call<{ id: string; tick: number }>('order_ship', { id: 'rifter', order: { type: 'direction', direction: [0, 0, 1] } });
+    Expect(ordered.id === 'rifter', JSON.stringify(ordered));
+    let rifter = ShipIn(await call<ViewerState>('get_state'), 'rifter');
+    // Orders apply at the next 1 s tick, then the ship accelerates.
+    for (let attempt = 0; attempt < 40 && (rifter.position?.[2] ?? 0) <= 100; attempt++) {
+      await Delay(250);
+      rifter = ShipIn(await call<ViewerState>('get_state'), 'rifter');
+    }
+    Expect((rifter.position?.[2] ?? 0) > 100, `after 10 s: ${JSON.stringify(rifter)}`);
+    Expect(rifter.mode === 'goto' && rifter.position?.[0] === 4000 && (rifter.speed ?? 0) > 0, JSON.stringify(rifter));
+    stoppingSpeed = rifter.speed ?? 0;
+    return `z ${rifter.position?.[2]} m at ${rifter.speed} m/s`;
+  });
+
+  await Check('stop slows it down', async () => {
+    await call('order_ship', { id: 'rifter', order: { type: 'stop' } });
+    await Delay(3000);
+    const rifter = ShipIn(await call<ViewerState>('get_state'), 'rifter');
+    Expect(rifter.mode === 'stop' && (rifter.speed ?? Infinity) < stoppingSpeed, `from ${stoppingSpeed} m/s: ${JSON.stringify(rifter)}`);
+    return `${stoppingSpeed} m/s down to ${rifter.speed} m/s`;
+  });
+
+  await Check('bad orders are refused', async () => {
+    const refusal = async (args: Record<string, unknown>): Promise<string> => {
+      try {
+        await call('order_ship', args);
+      } catch (error) {
+        return `${ErrorMessage(error)} ${(ErrorProblems(error) ?? []).join(' ')}`;
+      }
+      throw new Error(`accepted ${JSON.stringify(args)}`);
+    };
+    const unknown = await refusal({ id: 'nobody', order: { type: 'stop' } });
+    Expect(/no ship "nobody"/u.test(unknown), unknown);
+    const warp = await refusal({ id: 'rifter', order: { type: 'warp' } });
+    Expect(/order\.type must be one of/u.test(warp), warp);
+    return 'unknown ship and warp refused';
   });
 
   await Check('an invalid patch is refused with its problems', async () => {

@@ -16,11 +16,24 @@ const RUNTIME_DIST = path.dirname(require.resolve('@carbonenginejs/runtime'));
 /**
  * `runtime-dist/<file>` reaches runtime files the package does not export: the WebGPU abstraction-layer context
  * (trinityal/webgpu/internal.js), which the runtime keeps internal by design, and global/blue/children.js.
+ *
+ * It also guards against a second runtime copy. `@carbonenginejs/server` imports the runtime too; npm dedupes it onto
+ * the page's copy today, but a nested `node_modules/@carbonenginejs/server/node_modules/@carbonenginejs/runtime`
+ * would silently bundle every class twice. Any runtime import that resolves outside RUNTIME_DIST fails the build.
  */
 const runtimeDistAlias = {
   name: 'runtime-dist',
   setup(build) {
     build.onResolve({ filter: /^runtime-dist\// }, (args) => ({ path: path.join(RUNTIME_DIST, args.path.slice('runtime-dist/'.length)) }));
+    build.onResolve({ filter: /^@carbonenginejs\/runtime(\/|$)/ }, async (args) => {
+      if (args.pluginData?.runtimeGuard) return undefined;
+      const resolved = await build.resolve(args.path, { kind: args.kind, importer: args.importer, resolveDir: args.resolveDir, pluginData: { runtimeGuard: true } });
+      if (resolved.errors.length) return { errors: resolved.errors };
+      if (!resolved.path.startsWith(RUNTIME_DIST + path.sep)) {
+        return { errors: [{ text: `${args.path} (imported by ${args.importer}) resolves to ${resolved.path}, outside the page's runtime ${RUNTIME_DIST}; a second runtime copy would duplicate its classes` }] };
+      }
+      return { path: resolved.path, namespace: resolved.namespace, external: resolved.external, sideEffects: resolved.sideEffects, suffix: resolved.suffix };
+    });
   }
 };
 

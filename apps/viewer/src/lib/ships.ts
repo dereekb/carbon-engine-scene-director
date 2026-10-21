@@ -1,10 +1,10 @@
 /**
- * Ships: SOF values from DNA, hydration into live EveShip2 graphs, placement
- * curves, and retirement of a removed ship's device resources.
+ * Ships: SOF values from DNA, hydration into live EveShip2 graphs, and
+ * retirement of a removed ship's device resources. Destiny balls place and
+ * move them (destiny.ts).
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { SceneShip } from '@scene-director/scene';
 import { ErrorText, FileExists, FilesReady, ResourceBytes } from './resources';
 import {
   blue,
@@ -14,9 +14,6 @@ import {
   EveChildLineSet,
   EveSOF,
   EveSpherePin,
-  ITriQuaternionFunction,
-  ITriVectorFunction,
-  quat,
   Tr2CurveLineSet,
   Tr2DirectInstanceData,
   Tr2GrannyPrimitiveSet,
@@ -26,12 +23,10 @@ import {
   Tr2RuntimeInstanceData,
   TriDevice,
   TriFloat,
-  vec3,
   type CjsModelValues,
-  type EveShip2,
-  type Quat,
-  type Vec3
+  type EveShip2
 } from './runtime';
+import type { ShipHull } from './destiny';
 
 /**
  * The client's one generic booster trail mesh (Carbon leaves the setting empty for the client to fill).
@@ -41,7 +36,6 @@ const VOLUMETRIC_TRAIL = 'res:/dx9/model/ship/booster/volumetrictrail.gr2';
  * A faction-insert lookup that never arrives should not hold a build for ever.
  */
 const FILE_INDEX_WAIT_MS = 15000;
-const DEGREES = Math.PI / 180;
 /**
  * A lazy catalog learns a name is unknown when its record file is missing.
  */
@@ -61,6 +55,10 @@ interface Teardownable {
 export interface ShipBuild {
   readonly values: CjsModelValues;
   readonly diagnostics: unknown[];
+  /**
+   * The hull's class and size, for the ball's physics; null when SOF has no record for it.
+   */
+  readonly hull: Maybe<ShipHull>;
 }
 
 let sofReady: Maybe<Promise<EveSOF>> = null;
@@ -113,13 +111,32 @@ export function BuildShipValues(dna: string): Promise<ShipBuild> {
       throw error;
     }
     const diagnostics = (await sof.GetBuildDiagnostics()) ?? [];
-    return { values, diagnostics };
+    return { values, diagnostics, hull: await ReadHull(sof, dna) };
   });
   buildQueue = run.then(
     () => undefined,
     () => undefined
   );
   return run;
+}
+
+/**
+ * The SOF record of a DNA's hull, reduced to what the ball's physics use.
+ *
+ * @param sof - The SOF.
+ * @param dna - SOF DNA.
+ * @returns The hull's category and bounding radius, or null when it cannot be read.
+ */
+async function ReadHull(sof: EveSOF, dna: string): Promise<Maybe<ShipHull>> {
+  try {
+    const data = await sof.GetHullData(dna.split(':')[0]);
+    if (!data) return null;
+    const radius = data.boundingSphere?.[3];
+    return { category: data.category ?? null, radius: typeof radius === 'number' ? radius : null };
+  } catch (error) {
+    console.warn(`hull data for "${dna}" is unavailable (${ErrorText(error)}); the ship flies with default physics`);
+    return null;
+  }
 }
 
 /**
@@ -183,79 +200,6 @@ export function RetireShips(roots: object[], retained: object[]): void {
   for (const model of candidates) {
     if (!keep.has(model)) Teardown(model, managed);
   }
-}
-
-/**
- * A position that holds still: the ship's ball stand-in until movement arrives.
- */
-export class StaticPosition extends ITriVectorFunction {
-  readonly value: Vec3 = vec3.create();
-
-  constructor(position: ArrayLike<number> = [0, 0, 0]) {
-    super();
-    this.Set(position);
-  }
-
-  Set(position: ArrayLike<number>): void {
-    vec3.set(this.value, position[0], position[1], position[2]);
-  }
-
-  // The base *__Ticks methods pass arguments in the opposite order from their docs, so each one is overridden.
-  override Update__Ticks(_time: number, out: Vec3): Vec3 {
-    return vec3.copy(out, this.value);
-  }
-
-  override GetValueAt__Ticks(_time: number, out: Vec3): Vec3 {
-    return vec3.copy(out, this.value);
-  }
-
-  override GetValueDotAt__Ticks(_time: number, out: Vec3): Vec3 {
-    return vec3.set(out, 0, 0, 0);
-  }
-
-  override GetValueDoubleDotAt__Ticks(_time: number, out: Vec3): Vec3 {
-    return vec3.set(out, 0, 0, 0);
-  }
-}
-
-/**
- * A fixed orientation from [yaw, pitch, roll] degrees: yaw about +Y, then pitch about +X, then roll about +Z.
- */
-export class StaticRotation extends ITriQuaternionFunction {
-  readonly value: Quat = quat.create();
-
-  constructor(rotation: ArrayLike<number> = [0, 0, 0]) {
-    super();
-    this.Set(rotation);
-  }
-
-  Set(rotation: ArrayLike<number>): void {
-    const yawQ = quat.setAxisAngle(quat.create(), [0, 1, 0], rotation[0] * DEGREES);
-    const pitchQ = quat.setAxisAngle(quat.create(), [1, 0, 0], rotation[1] * DEGREES);
-    const rollQ = quat.setAxisAngle(quat.create(), [0, 0, 1], rotation[2] * DEGREES);
-    quat.multiply(this.value, yawQ, quat.multiply(this.value, pitchQ, rollQ));
-  }
-
-  override Update__Ticks(_time: number, out: Quat): Quat {
-    return quat.copy(out, this.value);
-  }
-
-  override GetValueAt__Ticks(_time: number, out: Quat): Quat {
-    return quat.copy(out, this.value);
-  }
-}
-
-/**
- * Places a live ship at a document ship's position and rotation.
- *
- * @param ship - The live ship.
- * @param placement - The document ship's position and rotation.
- */
-export function PlaceShip(ship: EveShip2, { position, rotation }: Pick<SceneShip, 'position' | 'rotation'>): void {
-  if (ship.translationCurve instanceof StaticPosition) ship.translationCurve.Set(position);
-  else ship.translationCurve = new StaticPosition(position);
-  if (ship.rotationCurve instanceof StaticRotation) ship.rotationCurve.Set(rotation);
-  else ship.rotationCurve = new StaticRotation(rotation);
 }
 
 /**

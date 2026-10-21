@@ -5,18 +5,25 @@
  * names: build added ships, rebuild ships whose DNA changed, move ships whose
  * placement changed, retire removed ones.
  *
+ * Every document ship also has a Destiny ball (destiny.ts), whether or not it is
+ * built: the ball drives the built ship's curves, and get_state reports its
+ * motion. Loading a document restarts every ship at rest at its placement; a
+ * patch places only the ships whose placement it changes.
+ *
  * Without a renderer (no WebGPU), the director still validates documents and
  * builds each ship's SOF values, so DNA mistakes surface; it just has nothing
  * to draw into.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, SceneError, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip } from '@scene-director/scene';
+import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrder, SceneError, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipOrder } from '@scene-director/scene';
+import type { SceneClock } from './clock';
+import { AttachShipCurves, DocumentRotation, ShipPhysicsFromHull, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
 import { EncodePng, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ErrorText } from './resources';
-import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
-import { BuildShipValues, HydrateShip, PlaceShip, RetireShips } from './ships';
+import { vec3, type EveShip2, type Vec3 } from './runtime';
+import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
 
 /**
@@ -37,6 +44,10 @@ export interface LiveShip {
   ship: Maybe<EveShip2>;
   error: Maybe<string>;
   diagnostics: string[];
+  /**
+   * The hull's class and size once the build has read them.
+   */
+  hull: Maybe<ShipHull>;
 }
 
 export interface ShipReport {
@@ -55,9 +66,33 @@ export interface DirectorOptions {
   readonly engineError: Maybe<Error>;
   readonly store: SceneStore;
   /**
+   * The Destiny simulation the ships fly in.
+   */
+  readonly world: DestinyWorld;
+  /**
+   * The clock the world and the renderer run on.
+   */
+  readonly clock: SceneClock;
+  /**
    * Called after any visible change.
    */
   readonly onChange?: () => void;
+}
+
+interface ApplyOptions {
+  /**
+   * Put every kept ship back at rest at its placement (load_scene).
+   */
+  readonly restart?: boolean;
+}
+
+export interface OrderShipResult {
+  readonly id: string;
+  readonly order: ShipOrder;
+  /**
+   * The Destiny tick when the order was given; it applies at the next one.
+   */
+  readonly tick: number;
 }
 
 interface WorldSphere {
@@ -77,15 +112,19 @@ export class Director {
   readonly engine: Maybe<Engine>;
   readonly engineError: Maybe<Error>;
   readonly store: SceneStore;
+  readonly world: DestinyWorld;
+  readonly clock: SceneClock;
   readonly live = new Map<string, LiveShip>();
   scene: Maybe<SceneDocument> = null;
   private readonly onChange: () => void;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor({ engine, engineError, store, onChange = () => undefined }: DirectorOptions) {
+  constructor({ engine, engineError, store, world, clock, onChange = () => undefined }: DirectorOptions) {
     this.engine = engine;
     this.engineError = engineError;
     this.store = store;
+    this.world = world;
+    this.clock = clock;
     this.onChange = onChange;
   }
 
@@ -103,7 +142,8 @@ export class Director {
       delete_scene: async ({ name }) => ({ deleted: await this.store.Delete(RequireName(name)), name }),
       get_state: () => this.State(),
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
-      frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs)
+      frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
+      order_ship: ({ id, order }) => this.OrderShip(id, order)
     };
   }
 
@@ -111,7 +151,17 @@ export class Director {
    * Replaces the scene with a document.
    */
   Load(input: unknown): Promise<unknown> {
-    return this.Serialize(() => this.Apply(normalizeScene(input)));
+    return this.Serialize(() => this.Apply(normalizeScene(input), { restart: true }));
+  }
+
+  /**
+   * Gives a ship a live movement order; it applies at the next Destiny tick and is not saved.
+   */
+  OrderShip(id: unknown, order: unknown): OrderShipResult {
+    if (typeof id !== 'string' || !this.scene?.ships.some((doc) => doc.id === id)) throw new Error(`no ship "${String(id)}"`);
+    const normalized = normalizeShipOrder(order);
+    if (!this.world.Order(id, normalized)) throw new Error(`ship "${id}" has no Destiny ball`);
+    return { id, order: normalized, tick: this.world.tick };
   }
 
   async Save(name: unknown): Promise<{ saved: string; ships: number }> {
@@ -148,6 +198,7 @@ export class Director {
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length } : null,
       camera: this.engine?.camera.Get() ?? null,
       environment: this.engine?.Environment() ?? null,
+      simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
       distances
     };
@@ -190,7 +241,7 @@ export class Director {
     return run;
   }
 
-  private async Apply({ scene, warnings }: NormalizedScene): Promise<object> {
+  private async Apply({ scene, warnings }: NormalizedScene, { restart = false }: ApplyOptions = {}): Promise<object> {
     // Changing the universe re-creates the scene's environment, which is
     // initialized with the device; a reload is the reliable way to do it.
     if (this.engine && this.engine.universe !== scene.environment.universe) {
@@ -199,20 +250,25 @@ export class Director {
       return { reloading: true, note: 'The environment changed, so the viewer is reloading with the new scene. Call get_state in a few seconds.', warnings };
     }
 
+    const previous = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
     const diff = diffScenes(this.scene, scene);
     // A ship that failed before is retried whenever the scene is applied again.
     const changed = new Set([...diff.rebuilt, ...diff.added].map((doc) => doc.id));
     const retried = scene.ships.filter((doc) => !changed.has(doc.id) && (this.live.get(doc.id)?.status ?? 'failed') === 'failed');
     const builds = [...diff.rebuilt, ...diff.added, ...retried];
     for (const doc of [...diff.removed, ...diff.rebuilt]) this.Retire(doc.id);
+    for (const doc of diff.removed) this.world.RemoveShip(doc.id);
     this.scene = scene;
     await this.store.Put(CURRENT_KEY, scene);
 
-    for (const doc of diff.moved) {
-      const entry = this.live.get(doc.id);
-      if (entry?.ship) PlaceShip(entry.ship, doc);
+    // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying.
+    for (const doc of scene.ships) {
+      const before = previous.get(doc.id);
+      if (!this.world.Curves(doc.id)) this.world.AddShip(doc, ShipPhysicsFromHull(null, doc.stats));
+      else if (restart || !before || !SamePlacement(before, doc)) this.world.PlaceShip(doc);
     }
-    for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [] });
+    for (const doc of diff.retuned) this.world.SetPhysics(doc.id, ShipPhysicsFromHull(this.live.get(doc.id)?.hull, doc.stats));
+    for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
     this.onChange();
 
     // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order.
@@ -234,12 +290,15 @@ export class Director {
     entry.status = 'building';
     this.onChange();
     try {
-      const { values, diagnostics } = await BuildShipValues(doc.dna);
+      const { values, diagnostics, hull } = await BuildShipValues(doc.dna);
       entry.diagnostics = diagnostics.slice(0, 10).map((item) => (typeof item === 'string' ? item : JSON.stringify(item)));
       if (this.live.get(doc.id) !== entry) return;
+      entry.hull = hull;
+      this.world.SetPhysics(doc.id, ShipPhysicsFromHull(hull, doc.stats));
       if (this.engine) {
         const ship = HydrateShip(values);
-        PlaceShip(ship, doc);
+        const curves = this.world.Curves(doc.id);
+        if (curves) AttachShipCurves(ship, curves);
         this.engine.AddShip(ship);
         entry.ship = ship;
         entry.status = 'ready';
@@ -284,14 +343,14 @@ export class Director {
   }
 
   /**
-   * A ship's bounding sphere in world space; the document's placement when it is not built.
+   * A ship's bounding sphere in world space, centred on its ball; the ball alone when it is not built.
    */
   private WorldSphere(doc: SceneShip): WorldSphere {
     const ship = this.live.get(doc.id)?.ship;
-    const position = vec3.fromValues(...doc.position);
+    const position = vec3.fromValues(...(this.world.Motion(doc.id)?.position ?? doc.position));
     let sphere: WorldSphere;
     if (ship) {
-      const centre = vec3.transformQuat(vec3.create(), ship.boundingSphereCenter, ship.rotationCurve?.value ?? quat.create());
+      const centre = vec3.transformQuat(vec3.create(), ship.boundingSphereCenter, ship.rotationCurve?.value ?? DocumentRotation(doc.rotation));
       sphere = { centre: vec3.add(centre, centre, position), radius: ship.boundingSphereRadius || UNBUILT_RADIUS };
     } else {
       sphere = { centre: position, radius: UNBUILT_RADIUS };
@@ -299,9 +358,10 @@ export class Director {
     return sphere;
   }
 
-  private ShipState(doc: SceneShip): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number } {
+  private ShipState(doc: SceneShip): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number } & Partial<ShipMotion> {
     const sphere = this.WorldSphere(doc);
-    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius) };
+    const motion = this.world.Motion(doc.id);
+    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion };
   }
 
   private ShipReport(id: string): ShipReport {
@@ -315,6 +375,17 @@ export class Director {
       ...(entry.diagnostics.length ? { diagnostics: entry.diagnostics } : {})
     };
   }
+}
+
+/**
+ * Whether two versions of a document ship sit at the same placement.
+ *
+ * @param a - One version.
+ * @param b - The other.
+ * @returns True when position and rotation match.
+ */
+function SamePlacement(a: SceneShip, b: SceneShip): boolean {
+  return a.position.every((value, index) => value === b.position[index]) && a.rotation.every((value, index) => value === b.rotation[index]);
 }
 
 /**

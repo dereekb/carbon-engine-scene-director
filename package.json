@@ -34,6 +34,7 @@
     "@angular/core": "22.1.4",
     "@angular/platform-browser": "22.1.4",
     "@carbonenginejs/runtime": "file:../carbonenginejs/runtime/npm",
+    "@carbonenginejs/server": "file:../carbonenginejs/server",
     "@dereekb/dbx-cli": "14.9.0",
     "@dereekb/util": "14.9.0",
     "@dereekb/vitest": "14.9.0",
@@ -76,5 +77,11 @@
     "repository": "https://github.com/carbonenginejs/runtime",
     "commit": "f77ed790c",
     "note": "The runtime is installed by copy from ../carbonenginejs/runtime/npm (install-links). Rebuild that checkout at this commit before reinstalling."
+  },
+  "serverPin": {
+    "repository": "https://github.com/dereekb/carbon-engine-server",
+    "branch": "scene-director",
+    "commit": "eadbdd1",
+    "note": "The Destiny server is installed by copy from ../carbonenginejs/server (install-links), the user's fork. Its dist/ is gitignored: run npm run build there after a checkout, then reinstall. It must dedupe onto the runtime copy above."
   }
 }

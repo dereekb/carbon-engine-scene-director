@@ -26,7 +26,7 @@
       "executor": "nx:run-commands",
       "outputs": [],
       "options": {
-        "command": "tsc --noEmit -p apps/viewer/tsconfig.app.json"
+        "command": "tsc --noEmit -p apps/viewer/tsconfig.spec.json"
       }
     },
     "lint": {

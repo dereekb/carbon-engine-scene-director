@@ -8,6 +8,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { SHIP_ORDER_TYPES } from './orders';
 import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 
 /**
@@ -103,7 +104,7 @@ export const TOOLS: ToolDefinition[] = [
   {
     name: 'load_scene',
     where: 'page',
-    description: `Replaces the scene in the viewer with a scene document and builds it. Returns the normalized document, warnings, and per-ship build results.\n\n${SCENE_FORMAT}`,
+    description: `Replaces the scene in the viewer with a scene document and builds it. Returns the normalized document, warnings, and per-ship build results. Every ship starts at rest at its document placement (ships already flying are put back).\n\n${SCENE_FORMAT}`,
     inputSchema: {
       type: 'object',
       properties: { scene: { type: 'object', description: 'The scene document.' } },
@@ -126,7 +127,7 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "set_camera", "camera": { ...fields to change } }
 { "op": "set_environment", "environment": { "universe": "res:/..." } }   (reloads the page)
 { "op": "rename", "name": "<name>" }
-Changing dna rebuilds that ship; changing position or rotation moves it in place. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it.`,
+Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it.`,
     inputSchema: {
       type: 'object',
       properties: { operations: { type: 'array', items: { type: 'object' }, minItems: 1 } },
@@ -167,8 +168,33 @@ Changing dna rebuilds that ship; changing position or rotation moves it in place
   {
     name: 'get_state',
     where: 'page',
-    description: 'Live state of the viewer: renderer status, frame rate, camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres.',
+    description:
+      "Live state of the viewer: renderer status, frame rate, camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, ...) and the physics it flies with (mass kg, agility, maxVelocity m/s, radius m). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client.",
     inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'order_ship',
+    where: 'page',
+    description: `Gives a ship a live movement order through its Destiny ball. Orders take effect at the next 1 s Destiny tick and are not saved in the scene document. Orders:
+{ "type": "direction", "direction": [x, y, z], "speed": 0..1 }   fly along a direction at a fraction of max velocity (speed defaults to 1)
+{ "type": "stop" }   decelerate to a halt
+Returns { id, order, tick }. get_state shows the ship's position, velocity, speed and mode.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Ship id.' },
+        order: {
+          type: 'object',
+          properties: {
+            type: { type: 'string', enum: [...SHIP_ORDER_TYPES] },
+            direction: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            speed: { type: 'number', exclusiveMinimum: 0, maximum: 1 }
+          },
+          required: ['type']
+        }
+      },
+      required: ['id', 'order']
+    }
   },
   {
     name: 'screenshot',

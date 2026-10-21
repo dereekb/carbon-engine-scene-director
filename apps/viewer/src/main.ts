@@ -1,10 +1,16 @@
 /**
- * The viewer page: restores the last scene, starts the renderer, and serves
- * the page-side tools over the hub link.
+ * The viewer page: restores the last scene, starts the Destiny simulation and
+ * the renderer, and serves the page-side tools over the hub link.
+ *
+ * One animation loop drives everything: it advances the scene clock, evolves
+ * the Destiny parks to it, then draws at it, so the ships' ball curves are
+ * sampled on the clock the parks run on. It runs with or without WebGPU.
  */
 
 import type { Maybe } from '@dereekb/util';
 import { normalizeScene, SCENE_SCHEMA } from '@scene-director/scene';
+import { SceneClock } from './lib/clock';
+import { DestinyWorld } from './lib/destiny';
 import { Director } from './lib/director';
 import { Engine } from './lib/engine';
 import { HubLink } from './lib/link';
@@ -123,8 +129,27 @@ async function Start(): Promise<void> {
     console.warn(`the saved working scene could not be restored (${ErrorText(error)}); showing the welcome scene`);
   }
 
+  const clock = new SceneClock();
+  const world = new DestinyWorld();
   let engine: Maybe<Engine> = null;
   let engineError: Maybe<Error> = null;
+  let tickError: Maybe<string> = null;
+  const frame = (timestamp: number): void => {
+    const now = clock.Advance(timestamp);
+    try {
+      world.Tick(now);
+      tickError = null;
+    } catch (error) {
+      // A failed tick must not end the loop; log each distinct failure once.
+      const message = ErrorText(error);
+      if (tickError !== message) console.error(`destiny tick failed: ${message}\n${(error as Maybe<Error>)?.stack ?? ''}`);
+      tickError = message;
+    }
+    engine?.Frame(timestamp, now);
+    requestAnimationFrame(frame);
+  };
+  requestAnimationFrame(frame);
+
   try {
     const universe = normalizeScene(initial).scene.environment.universe;
     engine = await Engine.Create({ canvas: RequireElement<HTMLCanvasElement>('view'), universe });
@@ -134,7 +159,7 @@ async function Start(): Promise<void> {
     console.error(`renderer unavailable: ${engineError.message}`);
   }
 
-  const director: Director = new Director({ engine, engineError, store, onChange: () => overlay.Render(director) });
+  const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director) });
   overlay.Render(director);
   for (const [name, handler] of Object.entries(director.Handlers())) link.Handle(name, handler);
   link.Connect();
@@ -146,7 +171,7 @@ async function Start(): Promise<void> {
     console.error(`initial scene failed: ${ErrorText(error)}`);
   }
   // For poking at from the browser console.
-  Object.assign(globalThis, { sceneDirector: { director, engine, link } });
+  Object.assign(globalThis, { sceneDirector: { director, engine, link, world, clock } });
 }
 
 Start().catch((error: unknown) => console.error(`viewer failed to start: ${ErrorText(error)}\n${(error as Maybe<Error>)?.stack ?? ''}`));

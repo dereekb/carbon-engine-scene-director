@@ -18,6 +18,7 @@ declare module '@carbonenginejs/runtime/math/vec3' {
     add<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, b: ArrayLike<number>): T;
     scale<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, scale: number): T;
     normalize<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>): T;
+    dot(a: ArrayLike<number>, b: ArrayLike<number>): number;
     length(a: ArrayLike<number>): number;
     distance(a: ArrayLike<number>, b: ArrayLike<number>): number;
     transformQuat<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, q: ArrayLike<number>): T;
@@ -32,6 +33,11 @@ declare module '@carbonenginejs/runtime/math/quat' {
     copy<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>): T;
     setAxisAngle<T extends ArrayLike<number>>(out: T, axis: ArrayLike<number>, radians: number): T;
     multiply<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, b: ArrayLike<number>): T;
+    conjugate<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>): T;
+    /**
+     * Ry(yaw) * Rx(pitch) * Rz(roll), in radians.
+     */
+    fromYawPitchRoll<T extends ArrayLike<number>>(out: T, yaw: number, pitch: number, roll: number): T;
   };
 }
 
@@ -82,6 +88,16 @@ declare module '@carbonenginejs/runtime/blue' {
    * order from their own docs, so subclasses override every one they need.
    */
   export class ITriVectorFunction {
+    Update__Ticks(time: number, out: Vec3): Vec3;
+    GetValueAt__Ticks(time: number, out: Vec3): Vec3;
+    GetValueDotAt__Ticks(time: number, out: Vec3): Vec3;
+    GetValueDoubleDotAt__Ticks(time: number, out: Vec3): Vec3;
+  }
+
+  /**
+   * What a ship's translation curve must answer: an ITriVectorFunction, or a Destiny CjsDestinyClientBall.
+   */
+  export interface TriVectorCurve {
     Update__Ticks(time: number, out: Vec3): Vec3;
     GetValueAt__Ticks(time: number, out: Vec3): Vec3;
     GetValueDotAt__Ticks(time: number, out: Vec3): Vec3;
@@ -217,7 +233,7 @@ declare module '@carbonenginejs/runtime/trinity/renderJob' {
 }
 
 declare module '@carbonenginejs/runtime/trinity' {
-  import type { ITriQuaternionFunction, ITriVectorFunction } from '@carbonenginejs/runtime/blue';
+  import type { ITriQuaternionFunction, TriVectorCurve } from '@carbonenginejs/runtime/blue';
   import type { Quat } from '@carbonenginejs/runtime/math/quat';
   import type { Vec3 } from '@carbonenginejs/runtime/math/vec3';
   import type { CjsBatchManager, DeviceResource, Tr2RenderContext } from '@carbonenginejs/runtime/trinity/core';
@@ -356,12 +372,22 @@ declare module '@carbonenginejs/runtime/trinity' {
    * A hydrated ship (CjsSchema.from of SOF values).
    */
   export interface EveShip2 {
-    translationCurve: ITriVectorFunction | null;
+    translationCurve: TriVectorCurve | null;
     rotationCurve: (ITriQuaternionFunction & { readonly value?: Quat }) | null;
     readonly boundingSphereCenter: Vec3;
     readonly boundingSphereRadius: number;
     speed: TriFloat | null;
+    /**
+     * Sampled from the curves by UpdateWorldTransform each frame.
+     */
+    readonly worldPosition: Vec3;
+    readonly worldVelocity: Vec3;
+    readonly worldRotation: Quat;
     StartControllers(): void;
+    /**
+     * Samples the translation and rotation curves at `time` (100 ns ticks).
+     */
+    UpdateWorldTransform(time: number): boolean;
   }
 
   /**
@@ -476,6 +502,21 @@ declare module '@carbonenginejs/runtime/sof' {
     InspectDna(dna: string): Promise<DnaInspection>;
     BuildValuesFromDNAAsync(dna: string): Promise<CjsModelValues>;
     GetBuildDiagnostics(): Promise<unknown[] | null>;
+    GetHullData(name: string): Promise<EveSofHullData | null>;
+  }
+
+  /**
+   * The hull record members the page reads.
+   */
+  export interface EveSofHullData {
+    /**
+     * The hull class, for example "frigate" or "battleship".
+     */
+    readonly category?: string;
+    /**
+     * [x, y, z, radius] in metres.
+     */
+    readonly boundingSphere?: ArrayLike<number>;
   }
 }
 

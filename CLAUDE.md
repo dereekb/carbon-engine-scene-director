@@ -12,13 +12,16 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. Building it builds the viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
   `src/lib/carbonenginejs-runtime.d.ts` types those imports (the runtime ships no `.d.ts`). Add a member to the
-  declarations file when the page starts using it; do not reach for `any`.
+  declarations file when the page starts using it; do not reach for `any`. `src/lib/runtime-sim.ts` is its light half
+  (math, Blue curve bases, the Destiny server, typed by `carbonenginejs-server.d.ts`), re-exported by `runtime.ts`.
+  `clock.ts` (the scene clock) and `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship) have node
+  specs: the viewer has a `test` target (`project: viewer`).
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Commands
 
 - Build: `npx nx build scene-director` (scene, viewer and the CLI). Serve the hub by hand: `npx nx run scene-director:serve`.
-- Tests: the `dbx-claude-test` tool (`project: scene` / `scene-director`). The MCP spec spawns the built CLI, so
+- Tests: the `dbx-claude-test` tool (`project: scene` / `viewer` / `scene-director`). The MCP spec spawns the built CLI, so
   `test` depends on `build`.
 - Real-page check: `npx nx run scene-director:verify-page` against a running tools-core. It checks everything but
   drawing (see below).
@@ -37,8 +40,24 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   subpaths load, so classes are never duplicated.
 - Runtime HEAD removed `Traverse`; `ships.ts` walks a graph with `blue.FindAllReferences(root).keys()` plus the root.
 - Runtime ca8b32652 renamed `Destroy()` to `Destruct()`; `ships.ts` `Teardown` calls whichever exists.
-- `ITriVectorFunction`'s base `Update__Ticks` passes arguments in the opposite order from its own docs, so the
-  `StaticPosition` / `StaticRotation` curves override every `*__Ticks` method directly.
+- `ITriVectorFunction`'s base `Update__Ticks` passes arguments in the opposite order from its own docs, so
+  `destiny.ts`'s `BallRotation` overrides every `*__Ticks` method it serves directly.
+- The Destiny master and replica parks must stay in lockstep (replication is unported): only `DestinyWorld` touches
+  them, every change goes to both in one call, and movement orders apply to both right before the `OnTick` that
+  evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `engine.Frame(timestamp, now)`, so
+  `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame at 1 s so the master's 6-tick
+  backlog drop never fires.
+- Node-tested modules (`clock.ts`, `destiny.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are
+  fine): the full facade drags in the renderer and the `runtime-dist/` alias, which vitest does not have.
+- Destiny's heading snap (`SetBallVelocity`) keeps the ClientBall's banking roll, so a teleported ship's roll levels out
+  over a few seconds; its forward vector is exact at once. A ClientBall caches its sample per time: a teleport shows
+  from the next frame.
+- `apps/viewer/esbuild.config.mjs` fails the build if any `@carbonenginejs/runtime` import resolves outside the page's
+  runtime copy (a nested copy under the server would duplicate every class).
+- The runtime's `package-lock.json` entry MUST keep `"resolved": "file:../carbonenginejs/runtime/npm"`. Without it npm
+  installs the published `@carbonenginejs/runtime@0.1.0-alpha.11` from the registry, an older build without the
+  `modelledOn` retirement (CjsSchema.js md5 240e178d… instead of runtime/npm's ed288d32…); that is how the page ran on a
+  stale runtime after the repo move. Check the md5 after any reinstall.
 - The scene needs the EVE client's dressing (`environment.ts`): a sun template post process with the client's
   tonemapping and dynamic exposure, plus the lens flare. Without dynamic exposure the nebula (median ~0.01 linear)
   renders at about the clear colour's level, the most likely reason it looked like no background (static analysis
@@ -80,7 +99,8 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - `server` is the exception: it tracks the user's fork (`origin` = github.com/dereekb/carbon-engine-server, over SSH;
   `upstream` = carbonenginejs/server). Server changes this project needs go on its `scene-director` branch, pass its
   `npm test`, and are pushed to `origin`, never `upstream`. `dist/` is gitignored, so run `npm run build` there after
-  a checkout. Fork `eadbdd1` moved the 29 `modelledOn` defines to `Modelled on:` JSDoc lines; upstream main still
+  a checkout, then `npm install` here (it is an install-links copy; see `serverPin` in package.json, pinned at
+  `eadbdd1`). Fork `eadbdd1` moved the 29 `modelledOn` defines to `Modelled on:` JSDoc lines; upstream main still
   throws "Class donors and modelledOn are retired" against runtime f77ed790c.
 - The runtime dependency is a copy of `../carbonenginejs/runtime/npm` (install-links, pinned at runtime commit
   f77ed790c; see `runtimePin` in package.json). Rebuild that checkout at the pinned commit before reinstalling.

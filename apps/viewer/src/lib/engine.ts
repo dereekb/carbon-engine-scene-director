@@ -134,9 +134,13 @@ export class Engine {
    * The swap-chain image this frame went into.
    */
   private presented: Maybe<GPUTexture> = null;
+  /**
+   * The scene clock of the frame being drawn.
+   */
+  private frameNow = 0;
 
   /**
-   * Creates the device and an initialized, empty scene, and starts drawing.
+   * Creates the device and an initialized, empty scene. The page's animation loop draws it through Frame.
    *
    * @param options - The canvas and the universe to dress the scene with.
    * @returns The running engine.
@@ -333,15 +337,22 @@ export class Engine {
     const pump = CreateFramePump(gTriDev.device, () => {
       al.SetRenderTarget(0, renderTarget);
       al.SetDepthStencil(null);
-      const now = Math.round(performance.now() * 10000);
-      driver.Execute([renderTarget], null, now, now, null, renderContext);
+      // The scene clock's tick, the same value the Destiny parks were just evolved to (destiny.ts).
+      driver.Execute([renderTarget], null, this.frameNow, this.frameNow, null, renderContext);
     });
     this.parts = { scene, driver, camera, renderTarget, al, pump, format };
-    requestAnimationFrame((timestamp) => this.Tick(timestamp));
   }
 
-  private Tick(timestamp: number): void {
+  /**
+   * Draws one frame. The page's animation loop (main.ts) calls it after evolving the Destiny parks to `now`, so the
+   * ships' ball curves are sampled on the clock the parks run on.
+   *
+   * @param timestamp - The animation frame's timestamp, in milliseconds.
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  Frame(timestamp: number, now: number): void {
     if (this.deviceLost) return;
+    this.frameNow = now;
     const { camera, renderTarget, pump, al, format } = this.Parts();
     try {
       if (FitCanvasSize(this.canvas)) renderTarget.Configure({ width: this.canvas.width, height: this.canvas.height });
@@ -363,7 +374,6 @@ export class Engine {
       this.fps.frames = 0;
       this.fps.since = timestamp;
     }
-    requestAnimationFrame((next) => this.Tick(next));
   }
 }
 

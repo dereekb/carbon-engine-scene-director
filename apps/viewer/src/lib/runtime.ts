@@ -8,13 +8,17 @@
  * not export: the WebGPU abstraction-layer context, which the runtime keeps
  * internal by design, and the child-list helpers. Both resolve to the same
  * files the public subpaths load, so there is still one copy of each class.
+ *
+ * Math, the Blue curve bases and the Destiny server come from runtime-sim.ts,
+ * re-exported here; node-tested modules import that file directly.
  */
 
 // SOF hull values carry audio classes (AudEmitter and friends); hydrating them
 // needs the audio class families registered.
 import '@carbonenginejs/runtime/audio';
 
-export { blue, BlueResFileSystemRemote, ITriQuaternionFunction, ITriVectorFunction, RemoteFileCache } from '@carbonenginejs/runtime/blue';
+export * from './runtime-sim';
+export { blue, BlueResFileSystemRemote, RemoteFileCache } from '@carbonenginejs/runtime/blue';
 export { addChild, removeChild } from 'runtime-dist/global/blue/children.js';
 export { CjsSchema } from '@carbonenginejs/runtime/schema';
 export type { CjsModelValues } from '@carbonenginejs/runtime/schema';
@@ -54,7 +58,3 @@ export { default as CjsWebgpuFormat } from '@carbonenginejs/runtime/resource/for
 export { CjsBlackFormat } from '@carbonenginejs/runtime/resource/formats/black';
 export { CjsPngFormat } from '@carbonenginejs/runtime/resource/formats/png';
 export { ImageIO } from '@carbonenginejs/runtime/resource/imageio';
-export { quat } from '@carbonenginejs/runtime/math/quat';
-export type { Quat } from '@carbonenginejs/runtime/math/quat';
-export { vec3 } from '@carbonenginejs/runtime/math/vec3';
-export type { Vec3 } from '@carbonenginejs/runtime/math/vec3';
