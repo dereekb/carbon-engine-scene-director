@@ -1,4 +1,36 @@
+# compiled output
+/dist
+/tmp
+/out-tsc
+/.tmp
+
+# dependencies
 node_modules/
-dist/
+
+# IDEs and editors
+/.idea
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# misc
+/coverage
 *.log
+.DS_Store
+Thumbs.db
+
+# scratch output (verify-page screenshots, experiments)
 .scratch/
+
+# Claude
+/.claude/settings.local.json
+/.claude/worktrees
+scheduled_tasks.lock
+
+# CI/Testing
+.reports/
+vitest.config.*.timestamp*
+
+# Nx
+.nx
+.cache

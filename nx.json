@@ -1,0 +1,77 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "cacheDirectory": ".nx/cache",
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json", "{workspaceRoot}/package-lock.json", "{workspaceRoot}/vitest.preset.config.mts"],
+    "production": ["default", "!{projectRoot}/eslint.config.mjs", "!{projectRoot}/**/?(*.)+(spec|test).[jt]s?(x)?(.snap)", "!{projectRoot}/tsconfig.spec.json", "!{projectRoot}/vitest.config.mts", "!{projectRoot}/src/test-setup.[jt]s", "!{projectRoot}/test-setup.[jt]s"]
+  },
+  "plugins": [
+    {
+      "plugin": "@nx/vitest",
+      "options": {
+        "testTargetName": "test",
+        "testMode": "run"
+      }
+    }
+  ],
+  "tui": {
+    "enabled": false
+  },
+  "cli": {
+    "packageManager": "npm"
+  },
+  "targetDefaults": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["production", "^production"],
+      "cache": true
+    },
+    "test": {
+      "cache": true,
+      "dependsOn": ["build"],
+      "inputs": ["default", "^production", "{workspaceRoot}/vitest.preset.config.mts"],
+      "outputs": ["{workspaceRoot}/.reports/junit/{projectName}.junit.xml", "{workspaceRoot}/coverage/{projectName}"]
+    },
+    "@nx/eslint:lint": {
+      "cache": false,
+      "inputs": ["default", "{workspaceRoot}/eslint.config.mjs", "{workspaceRoot}/eslint.config.library.mjs"],
+      "options": {
+        "cache": true,
+        "cacheLocation": ".cache/eslint",
+        "cacheStrategy": "content"
+      }
+    },
+    "@nx/js:tsc": {
+      "cache": true,
+      "dependsOn": ["^build"],
+      "inputs": ["production", "^production"]
+    },
+    "@nx/esbuild:esbuild": {
+      "cache": true,
+      "dependsOn": ["^build"],
+      "inputs": [
+        "production",
+        "^production",
+        {
+          "json": "{workspaceRoot}/tsconfig.base.json",
+          "fields": ["extends", "files", "include"]
+        }
+      ]
+    }
+  },
+  "generators": {},
+  "workspaceLayout": {
+    "appsDir": "apps",
+    "libsDir": "packages"
+  },
+  "pluginsConfig": {
+    "@nx/js": {
+      "analyzeSourceFiles": true
+    }
+  },
+  "useInferencePlugins": false,
+  "neverConnectToCloud": true,
+  "defaultBase": "main",
+  "analytics": false
+}

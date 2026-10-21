@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "kind": "nx-workspace",
+  "capabilities": ["audit", "dbx-claude", "dbx-ts"],
+  "commit": {
+    "autoCommit": {
+      "enabled": true,
+      "branches": ["develop"]
+    },
+    "test": {
+      "enabled": true,
+      "scope": "affected",
+      "mode": "block"
+    }
+  }
+}

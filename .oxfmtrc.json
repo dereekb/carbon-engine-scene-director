@@ -1,0 +1,18 @@
+{
+  "$schema": "./node_modules/oxfmt/configuration_schema.json",
+  "arrowParens": "always",
+  "bracketSameLine": true,
+  "singleQuote": true,
+  "bracketSpacing": true,
+  "trailingComma": "none",
+  "quoteProps": "as-needed",
+  "semi": true,
+  "useTabs": false,
+  "tabWidth": 2,
+  "htmlWhitespaceSensitivity": "ignore",
+  "endOfLine": "lf",
+  "printWidth": 320,
+  "sortImports": false,
+  "sortPackageJson": false,
+  "ignorePatterns": ["/.claude", "/.dbx-claude", "/.vscode", "/.reports", "/.scratch", "/dist", "/coverage", "*.md", "/.nx/cache", "/.nx/workspace-data", "package-lock.json"]
+}

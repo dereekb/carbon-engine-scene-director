@@ -2,7 +2,7 @@
   "mcpServers": {
     "scene-director": {
       "command": "node",
-      "args": [ "bin/scene-director.js", "mcp" ]
+      "args": ["bin/scene-director.js", "mcp"]
     }
   }
 }

@@ -1,0 +1,36 @@
+{
+  "name": "viewer",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/viewer/src",
+  "projectType": "application",
+  "tags": [],
+  "targets": {
+    "build": {
+      "executor": "@nx/esbuild:esbuild",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/apps/viewer",
+        "main": "apps/viewer/src/main.ts",
+        "tsConfig": "apps/viewer/tsconfig.app.json",
+        "assets": [{ "input": "apps/viewer/src", "glob": "index.html", "output": "." }],
+        "bundle": true,
+        "thirdParty": true,
+        "platform": "browser",
+        "format": ["esm"],
+        "target": "es2022",
+        "sourcemap": true,
+        "esbuildConfig": "apps/viewer/esbuild.config.mjs"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "outputs": [],
+      "options": {
+        "command": "tsc --noEmit -p apps/viewer/tsconfig.app.json"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint"
+    }
+  }
+}

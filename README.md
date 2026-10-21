@@ -35,12 +35,24 @@ IndexedDB and Claude can reconnect at any time.
 - Chrome or Edge with WebGPU, on a machine with a GPU. Under WSL2, open the
   viewer from Windows; localhost forwarding reaches the hub.
 
+## Layout
+
+An nx workspace:
+
+| Project | Path | Builds | Holds |
+|---|---|---|---|
+| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema and the tool list, shared by the hub and the page |
+| `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI and `verify-page` |
+| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, storage, hub link |
+
+`bin/scene-director.js` launches the built CLI (`dist/apps/scene-director/main.js`).
+
 ## Run
 
 ```sh
 npm install
-npm run build          # bundles the page into dist/page
-npm run serve          # hub only, for using the page by hand
+npx nx build scene-director              # the scene library, the viewer page and the CLI
+npx nx run scene-director:serve          # hub only, for using the page by hand
 ```
 
 Open http://127.0.0.1:5520/. With nothing saved, it shows a welcome scene.
@@ -104,8 +116,9 @@ the page (the scene's environment is initialized with the device).
 ## Development
 
 ```sh
-npm test               # scene, hub and MCP tests, offline
-npm run verify:page    # the real page in headless Chromium against a running tools-core
+npx nx run-many -t lint typecheck build test       # what the commit gate runs; tests are offline
+npx nx run scene-director:verify-page              # the real page in headless Chromium against a running tools-core
+npx oxfmt --write .                                # formatting
 ```
 
 Headless Chromium usually has no WebGPU adapter, so `verify:page` checks
@@ -113,13 +126,16 @@ everything but drawing: SOF builds from real data, edits, storage and reload.
 
 ## Runtime notes
 
-- `src/page/runtime.js` is the single import point for the runtime. The WebGPU
-  render context is internal to the runtime package and is reached through the
-  `runtime-dist/` alias that `scripts/build-page.js` resolves.
+- `apps/viewer/src/lib/runtime.ts` is the single import point for the runtime,
+  and `carbonenginejs-runtime.d.ts` beside it types those imports (the runtime
+  ships no declarations). The WebGPU render context is internal to the runtime
+  package and is reached through the `runtime-dist/` alias that
+  `apps/viewer/esbuild.config.mjs` resolves.
 - The bundle ignores the runtime's `sideEffects` list: many listed files
   register classes on import, and dropping them breaks Black reading.
 - Ships hold still through `StaticPosition`/`StaticRotation` curves
-  (`src/page/ships.js`); Destiny-driven balls replace them in the movement phase.
+  (`apps/viewer/src/lib/ships.ts`); Destiny-driven balls replace them in the
+  movement phase.
 
 ## EVE content
 

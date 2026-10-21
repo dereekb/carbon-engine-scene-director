@@ -1,0 +1,57 @@
+{
+  "name": "scene-director",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "apps/scene-director/src",
+  "projectType": "application",
+  "tags": [],
+  "implicitDependencies": ["viewer"],
+  "targets": {
+    "build": {
+      "executor": "@nx/esbuild:esbuild",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/apps/scene-director",
+        "main": "apps/scene-director/src/main.ts",
+        "additionalEntryPoints": ["apps/scene-director/src/verify-page.ts"],
+        "tsConfig": "apps/scene-director/tsconfig.app.json",
+        "bundle": true,
+        "thirdParty": false,
+        "platform": "node",
+        "format": ["esm"],
+        "target": "node22",
+        "sourcemap": true,
+        "esbuildOptions": {
+          "banner": {
+            "js": "#!/usr/bin/env node"
+          }
+        }
+      }
+    },
+    "serve": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["build"],
+      "options": {
+        "command": "node dist/apps/scene-director/main.js serve"
+      }
+    },
+    "verify-page": {
+      "executor": "nx:run-commands",
+      "dependsOn": ["build"],
+      "cache": false,
+      "options": {
+        "command": "node dist/apps/scene-director/verify-page.js",
+        "forwardAllArgs": true
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "outputs": [],
+      "options": {
+        "command": "tsc --noEmit -p apps/scene-director/tsconfig.spec.json"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint"
+    }
+  }
+}

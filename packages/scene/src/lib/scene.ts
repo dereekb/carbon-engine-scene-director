@@ -1,0 +1,399 @@
+import type { Maybe } from '@dereekb/util';
+/**
+ * The scene document: the JSON a person or Claude writes to describe a scene,
+ * and the only state a saved scene keeps. The page translates it into runtime
+ * objects; nothing here imports the runtime, so the hub, the page and the
+ * tests share one definition.
+ *
+ * Units are EVE's: metres for positions and distances, degrees for angles.
+ * Y is up.
+ */
+
+export const SCENE_SCHEMA = 'cjs-scene/1';
+
+export const DEFAULT_UNIVERSE = 'res:/dx9/scene/universe/a01_cube.black';
+
+export const DEFAULT_SCENE_NAME = 'untitled';
+
+/**
+ * A position in metres or a rotation in degrees (`[yaw, pitch, roll]`).
+ */
+export type SceneVector = [number, number, number];
+
+export interface SceneShip {
+  id: string;
+  /**
+   * SOF DNA: hull:faction:race[:commands].
+   */
+  dna: string;
+  name?: string;
+  team?: string;
+  position: SceneVector;
+  rotation: SceneVector;
+  /**
+   * Reserved for the movement phase: stored, not played yet.
+   */
+  orders?: unknown;
+}
+
+export interface SceneCamera {
+  /**
+   * Ship id to frame, or null to frame every ship.
+   */
+  target: Maybe<string>;
+  /**
+   * Metres from the target, or null to fit it.
+   */
+  distance: Maybe<number>;
+  yaw: number;
+  pitch: number;
+  fov: number;
+}
+
+export interface SceneEnvironment {
+  /**
+   * res:/ path of the EveSpaceScene whose values dress the scene.
+   */
+  universe: string;
+}
+
+export interface SceneDocument {
+  schema: typeof SCENE_SCHEMA;
+  name: string;
+  environment: SceneEnvironment;
+  camera: SceneCamera;
+  ships: SceneShip[];
+  /**
+   * Reserved for the timeline phase: stored, not played yet.
+   */
+  timeline?: unknown;
+}
+
+export interface NormalizedScene {
+  readonly scene: SceneDocument;
+  readonly warnings: string[];
+}
+
+/**
+ * What changed between two documents, in the terms the page acts on.
+ */
+export interface SceneDiff {
+  readonly environment: boolean;
+  readonly camera: boolean;
+  readonly added: SceneShip[];
+  readonly removed: SceneShip[];
+  readonly rebuilt: SceneShip[];
+  readonly moved: SceneShip[];
+  readonly relabelled: SceneShip[];
+}
+
+type JsonObject = Record<string, unknown>;
+
+/**
+ * A document mid-edit: operations write unvalidated values into it, and normalizeScene checks the result.
+ */
+type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
+
+/**
+ * Keys reserved for later phases; accepted and kept, but not acted on yet.
+ */
+const RESERVED_SCENE_KEYS = ['timeline'] as const;
+const RESERVED_SHIP_KEYS = ['orders'] as const;
+
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'camera', 'ships', ...RESERVED_SCENE_KEYS]);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', ...RESERVED_SHIP_KEYS]);
+const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov']);
+const ENVIRONMENT_KEYS = new Set<string>(['universe']);
+
+/**
+ * hull:faction:race, then optional `:command?args` segments.
+ */
+const DNA_PATTERN = /^[^:\s]+:[^:\s]+:[^:\s]+(:\S+)*$/u;
+const ID_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/u;
+const UNIVERSE_PATTERN = /^res:\/.+\.(black|red)$/iu;
+
+/**
+ * A document that cannot be used, with every problem found rather than the first.
+ */
+export class SceneError extends Error {
+  readonly problems: string[];
+
+  constructor(problems: string[]) {
+    super(`Invalid scene document:\n- ${problems.join('\n- ')}`);
+    this.name = 'SceneError';
+    this.problems = problems;
+  }
+}
+
+/**
+ * The smallest valid document.
+ *
+ * @param name - The document's name.
+ * @returns A document with default environment and camera and no ships.
+ */
+export function createEmptyScene(name: string = DEFAULT_SCENE_NAME): SceneDocument {
+  return {
+    schema: SCENE_SCHEMA,
+    name,
+    environment: { universe: DEFAULT_UNIVERSE },
+    camera: { target: null, distance: null, yaw: 45, pitch: -15, fov: 45 },
+    ships: []
+  };
+}
+
+/**
+ * Validates a document and fills defaults. Unknown keys are reported as
+ * warnings and dropped, so a typo is visible instead of silently ignored.
+ *
+ * @param input - A candidate document.
+ * @returns The normalized copy and its warnings.
+ * @throws {SceneError} When the document cannot be used.
+ */
+export function normalizeScene(input: unknown): NormalizedScene {
+  const problems: string[] = [];
+  const warnings: string[] = [];
+
+  if (!isPlainObject(input)) throw new SceneError(['the scene must be a JSON object']);
+  if (input['schema'] !== undefined && input['schema'] !== SCENE_SCHEMA) {
+    problems.push(`schema must be "${SCENE_SCHEMA}", got ${JSON.stringify(input['schema'])}`);
+  }
+  reportUnknownKeys(input, SCENE_KEYS, 'scene', warnings);
+
+  const scene: SceneDocument = {
+    schema: SCENE_SCHEMA,
+    name: input['name'] === undefined ? DEFAULT_SCENE_NAME : readString(input['name'], 'name', problems),
+    environment: normalizeEnvironment(input['environment'], problems, warnings),
+    camera: normalizeCamera(input['camera'], problems, warnings),
+    ships: []
+  };
+
+  const ships = input['ships'];
+  if (ships !== undefined && !Array.isArray(ships)) problems.push('ships must be an array');
+  const ids = new Set<string>();
+  for (const [index, ship] of (Array.isArray(ships) ? ships : []).entries()) {
+    const normalized = normalizeShip(ship, `ships[${index}]`, problems, warnings);
+    if (!normalized) continue;
+    if (ids.has(normalized.id)) problems.push(`ships[${index}].id "${normalized.id}" is used more than once`);
+    ids.add(normalized.id);
+    scene.ships.push(normalized);
+  }
+
+  const target = scene.camera.target;
+  if (target != null && !ids.has(target)) {
+    problems.push(`camera.target "${target}" is not a ship id`);
+  }
+  for (const key of RESERVED_SCENE_KEYS) {
+    if (input[key] === undefined) continue;
+    scene[key] = structuredClone(input[key]);
+    warnings.push(`${key} is reserved for a later phase and is stored but not played yet`);
+  }
+
+  if (problems.length) throw new SceneError(problems);
+  return { scene, warnings };
+}
+
+/**
+ * Applies edit operations to a document and returns the normalized result; the
+ * input is not modified. Operations run in order and all must succeed.
+ *
+ * Operations:
+ *   { op: "add_ship", ship }
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, orders? } }
+ *   { op: "remove_ship", id }
+ *   { op: "set_camera", camera }            merged into the current camera
+ *   { op: "set_environment", environment }  merged into the current environment
+ *   { op: "rename", name }
+ *
+ * @param scene - A normalized document.
+ * @param operations - The edits.
+ * @returns The edited, normalized copy and its warnings.
+ * @throws {SceneError} When an operation is malformed or the result is invalid.
+ */
+export function applySceneOperations(scene: SceneDocument, operations: unknown): NormalizedScene {
+  if (!Array.isArray(operations) || operations.length === 0) throw new SceneError(['operations must be a non-empty array']);
+  const next = structuredClone(scene) as unknown as SceneDraft;
+  const problems: string[] = [];
+
+  for (const [index, operation] of operations.entries()) {
+    const where = `operations[${index}]`;
+    if (isPlainObject(operation) && typeof operation['op'] === 'string') {
+      applyOperation(next, operation, where, problems);
+    } else {
+      problems.push(`${where} must be an object with an "op" string`);
+    }
+  }
+
+  if (problems.length) throw new SceneError(problems);
+  return normalizeScene(next);
+}
+
+function applyOperation(next: SceneDraft, operation: JsonObject, where: string, problems: string[]): void {
+  switch (operation['op']) {
+    case 'add_ship': {
+      const ship = operation['ship'];
+      if (!isPlainObject(ship)) problems.push(`${where}.ship must be an object`);
+      else if (next.ships.some((candidate) => candidate['id'] === ship['id'])) problems.push(`${where}: ship "${String(ship['id'])}" already exists`);
+      else next.ships.push(structuredClone(ship));
+      break;
+    }
+    case 'update_ship': {
+      const ship = next.ships.find((candidate) => candidate['id'] === operation['id']);
+      const set = operation['set'];
+      if (!ship) problems.push(`${where}: no ship "${String(operation['id'])}"`);
+      else if (!isPlainObject(set)) problems.push(`${where}.set must be an object`);
+      else if ('id' in set) problems.push(`${where}: a ship's id cannot be changed; remove and add it instead`);
+      else Object.assign(ship, structuredClone(set));
+      break;
+    }
+    case 'remove_ship': {
+      const index = next.ships.findIndex((ship) => ship['id'] === operation['id']);
+      if (index < 0) {
+        problems.push(`${where}: no ship "${String(operation['id'])}"`);
+      } else {
+        next.ships.splice(index, 1);
+        if (next.camera['target'] === operation['id']) next.camera['target'] = null;
+      }
+      break;
+    }
+    case 'set_camera':
+      if (isPlainObject(operation['camera'])) Object.assign(next.camera, structuredClone(operation['camera']));
+      else problems.push(`${where}.camera must be an object`);
+      break;
+    case 'set_environment':
+      if (isPlainObject(operation['environment'])) Object.assign(next.environment, structuredClone(operation['environment']));
+      else problems.push(`${where}.environment must be an object`);
+      break;
+    case 'rename':
+      next['name'] = operation['name'];
+      break;
+    default:
+      problems.push(`${where}: unknown op "${String(operation['op'])}"`);
+  }
+}
+
+/**
+ * What changed between two normalized documents, in the terms the page acts on.
+ *
+ * @param before - The document the page currently shows, or null on a first load.
+ * @param after - The document to show.
+ * @returns The ships to add, remove, rebuild, move and relabel, and whether the environment or camera changed.
+ */
+export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
+  const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
+  const current = new Map(after.ships.map((ship) => [ship.id, ship]));
+  const diff: SceneDiff = {
+    environment: !sameJson(before?.environment, after.environment),
+    camera: !sameJson(before?.camera, after.camera),
+    added: [],
+    removed: [],
+    rebuilt: [],
+    moved: [],
+    relabelled: []
+  };
+
+  for (const [id, ship] of previous) if (!current.has(id)) diff.removed.push(ship);
+  for (const [id, ship] of current) {
+    const old = previous.get(id);
+    if (!old) {
+      diff.added.push(ship);
+    } else if (old.dna === ship.dna) {
+      if (!sameJson(old.position, ship.position) || !sameJson(old.rotation, ship.rotation)) diff.moved.push(ship);
+      if (old.name !== ship.name || old.team !== ship.team) diff.relabelled.push(ship);
+    } else {
+      diff.rebuilt.push(ship);
+    }
+  }
+  return diff;
+}
+
+function normalizeEnvironment(input: unknown, problems: string[], warnings: string[]): SceneEnvironment {
+  const environment: SceneEnvironment = { universe: DEFAULT_UNIVERSE };
+  if (input === undefined) return environment;
+  if (!isPlainObject(input)) {
+    problems.push('environment must be an object');
+    return environment;
+  }
+  reportUnknownKeys(input, ENVIRONMENT_KEYS, 'environment', warnings);
+  if (input['universe'] !== undefined) {
+    const universe = readString(input['universe'], 'environment.universe', problems);
+    if (universe && !UNIVERSE_PATTERN.test(universe)) problems.push('environment.universe must be a res:/ path to a .black or .red file');
+    environment.universe = universe;
+  }
+  return environment;
+}
+
+function normalizeCamera(input: unknown, problems: string[], warnings: string[]): SceneCamera {
+  const camera = createEmptyScene().camera;
+  if (input === undefined) return camera;
+  if (!isPlainObject(input)) {
+    problems.push('camera must be an object');
+    return camera;
+  }
+  reportUnknownKeys(input, CAMERA_KEYS, 'camera', warnings);
+  if (input['target'] !== undefined && input['target'] !== null) camera.target = readString(input['target'], 'camera.target', problems);
+  if (input['distance'] !== undefined && input['distance'] !== null) camera.distance = readNumber(input['distance'], 'camera.distance', problems, { min: 1 });
+  if (input['yaw'] !== undefined) camera.yaw = readNumber(input['yaw'], 'camera.yaw', problems);
+  if (input['pitch'] !== undefined) camera.pitch = readNumber(input['pitch'], 'camera.pitch', problems, { min: -89, max: 89 });
+  if (input['fov'] !== undefined) camera.fov = readNumber(input['fov'], 'camera.fov', problems, { min: 5, max: 120 });
+  return camera;
+}
+
+function normalizeShip(input: unknown, where: string, problems: string[], warnings: string[]): Maybe<SceneShip> {
+  if (!isPlainObject(input)) {
+    problems.push(`${where} must be an object`);
+    return null;
+  }
+  reportUnknownKeys(input, SHIP_KEYS, where, warnings);
+
+  const ship: SceneShip = {
+    id: readString(input['id'], `${where}.id`, problems),
+    dna: readString(input['dna'], `${where}.dna`, problems),
+    position: input['position'] === undefined ? [0, 0, 0] : readVector(input['position'], `${where}.position`, problems),
+    rotation: input['rotation'] === undefined ? [0, 0, 0] : readVector(input['rotation'], `${where}.rotation`, problems)
+  };
+  if (ship.id && !ID_PATTERN.test(ship.id)) problems.push(`${where}.id must be 1-64 letters, digits, "_", "-" or "."`);
+  if (ship.dna && !DNA_PATTERN.test(ship.dna)) problems.push(`${where}.dna "${ship.dna}" is not hull:faction:race[:commands]`);
+  if (input['name'] !== undefined) ship.name = readString(input['name'], `${where}.name`, problems);
+  if (input['team'] !== undefined) ship.team = readString(input['team'], `${where}.team`, problems);
+  for (const key of RESERVED_SHIP_KEYS) {
+    if (input[key] === undefined) continue;
+    ship[key] = structuredClone(input[key]);
+    warnings.push(`${where}.${key} is reserved for a later phase and is stored but not played yet`);
+  }
+  return ship;
+}
+
+function reportUnknownKeys(object: JsonObject, allowed: Set<string>, where: string, warnings: string[]): void {
+  for (const key of Object.keys(object)) {
+    if (!allowed.has(key)) warnings.push(`${where}.${key} is not a known field and was dropped`);
+  }
+}
+
+function readString(value: unknown, where: string, problems: string[]): string {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  problems.push(`${where} must be a non-empty string`);
+  return '';
+}
+
+function readNumber(value: unknown, where: string, problems: string[], { min = -Infinity, max = Infinity }: { readonly min?: number; readonly max?: number } = {}): number {
+  if (typeof value === 'number' && Number.isFinite(value) && value >= min && value <= max) return value;
+  const range = min > -Infinity || max < Infinity ? ` in [${min}, ${max}]` : '';
+  problems.push(`${where} must be a finite number${range}`);
+  return 0;
+}
+
+function readVector(value: unknown, where: string, problems: string[]): SceneVector {
+  if (Array.isArray(value) && value.length === 3 && value.every((component) => typeof component === 'number' && Number.isFinite(component))) {
+    return [value[0], value[1], value[2]];
+  }
+  problems.push(`${where} must be an array of three finite numbers`);
+  return [0, 0, 0];
+}
+
+function isPlainObject(value: unknown): value is JsonObject {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function sameJson(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
