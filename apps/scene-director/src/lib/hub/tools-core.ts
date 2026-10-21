@@ -9,12 +9,21 @@ import { ErrorMessage } from './tool-call';
 
 export const DEFAULT_TOOLS_CORE = 'http://127.0.0.1:5510';
 
+/**
+ * How long a status probe waits for tools-core.
+ */
+const STATUS_PROBE_TIMEOUT_MS = 3000;
+
 export type SofCatalogKind = 'hulls' | 'factions' | 'races';
 
 export interface ToolsCoreStatus {
   readonly reachable: boolean;
   readonly url: string;
   readonly build: Maybe<string>;
+  /**
+   * tools-core's current build, reported only when it moved on from the pinned one (restart the hub to follow it).
+   */
+  readonly latestBuild?: string;
   readonly error?: string;
 }
 
@@ -91,30 +100,56 @@ export class ToolsCore implements ToolsCoreApi {
   }
 
   /**
-   * Reachability and the pinned build, never throwing.
+   * Reachability and the pinned build, never throwing. Probes tools-core on
+   * every call: a build resolved earlier says nothing about whether it is still
+   * up. The pinned build is kept either way, so resource URLs never switch
+   * builds mid-session.
    */
   async Status(): Promise<ToolsCoreStatus> {
+    let status: ToolsCoreStatus;
     try {
-      return { reachable: true, url: this.url, build: await this.ResolveBuild() };
+      const probed = Boolean(this.build);
+      const build = await this.ResolveBuild();
+      // Resolving just now was itself the probe.
+      const latest = probed ? await this.FetchBuild(STATUS_PROBE_TIMEOUT_MS) : build;
+      this.lastError = null;
+      status = { reachable: true, url: this.url, build, ...(latest === build ? {} : { latestBuild: latest }) };
     } catch (error) {
-      return { reachable: false, url: this.url, build: this.build, error: ErrorMessage(error) };
+      status = { reachable: false, url: this.url, build: this.build, error: this.Unreachable(error).message };
     }
+    return status;
   }
 
   private async FetchLatestBuild(): Promise<string> {
     try {
-      const response = await this.fetchImpl(`${this.url}/eve/latest/build`, { signal: AbortSignal.timeout(15000) });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const body = (await response.json()) as Maybe<{ build?: unknown }>;
-      if (!body?.build) throw new Error('no build in the answer');
-      this.build = String(body.build);
+      this.build = await this.FetchBuild(15000);
       this.lastError = null;
       return this.build;
     } catch (error) {
-      this.lastError = `tools-core at ${this.url} is not reachable (${ErrorMessage(error)}). Start it with: node bin/cjs-tools-service.js in the tools-core checkout.`;
-      throw new Error(this.lastError, { cause: error });
+      throw this.Unreachable(error);
     } finally {
       this.resolving = null;
     }
+  }
+
+  /**
+   * tools-core's current build.
+   */
+  private async FetchBuild(timeoutMs: number): Promise<string> {
+    const response = await this.fetchImpl(`${this.url}/eve/latest/build`, { signal: AbortSignal.timeout(timeoutMs) });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const body = (await response.json()) as Maybe<{ build?: unknown }>;
+    if (!body?.build) throw new Error('no build in the answer');
+    return String(body.build);
+  }
+
+  /**
+   * Records why tools-core is unreachable, with how to start it.
+   */
+  private Unreachable(error: unknown): Error {
+    // A failed resolve already carries the full message.
+    if (error instanceof Error && error.message === this.lastError) return error;
+    this.lastError = `tools-core at ${this.url} is not reachable (${ErrorMessage(error)}). Start it with: node bin/cjs-tools-service.js in the tools-core checkout.`;
+    return new Error(this.lastError, { cause: error });
   }
 }

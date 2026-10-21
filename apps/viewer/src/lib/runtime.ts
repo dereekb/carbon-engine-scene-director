@@ -19,7 +19,27 @@ export { addChild, removeChild } from 'runtime-dist/global/blue/children.js';
 export { CjsSchema } from '@carbonenginejs/runtime/schema';
 export type { CjsModelValues } from '@carbonenginejs/runtime/schema';
 export { CjsBatchManager, gTriDev, Tr2QuadRenderer, Tr2Renderer, Tr2RenderContext_GetMainThreadRenderContext, TriDevice, TriRenderBatchAccumulator } from '@carbonenginejs/runtime/trinity/core';
-export { EveCamera, EveChildBehaviorSystem, EveChildLineSet, EveSpaceScene, EveSpaceSceneRenderDriver, EveSpherePin, Tr2CurveLineSet, Tr2DirectInstanceData, Tr2GrannyPrimitiveSet, Tr2ImpostorManager, Tr2InstancedMesh, Tr2ParticleSystem, Tr2RuntimeInstanceData, Tr2SSAO, TriFloat } from '@carbonenginejs/runtime/trinity';
+export {
+  EveCamera,
+  EveChildBehaviorSystem,
+  EveChildLineSet,
+  EveLensflare,
+  EveSpaceScene,
+  EveSpaceSceneRenderDriver,
+  EveSpherePin,
+  Tr2CurveLineSet,
+  Tr2DirectInstanceData,
+  Tr2GrannyPrimitiveSet,
+  Tr2ImpostorManager,
+  Tr2InstancedMesh,
+  Tr2ParticleSystem,
+  Tr2PostProcess2,
+  Tr2PPDynamicExposureEffect,
+  Tr2PPTonemappingEffect,
+  Tr2RuntimeInstanceData,
+  Tr2SSAO,
+  TriFloat
+} from '@carbonenginejs/runtime/trinity';
 export type { EveShip2 } from '@carbonenginejs/runtime/trinity';
 export { Tr2RenderJobs, TriRenderJob, TriStepPythonCB } from '@carbonenginejs/runtime/trinity/renderJob';
 export { RenderingMode, TR2SHADERMODEL, TriBatchType } from '@carbonenginejs/runtime/consts/graphics';

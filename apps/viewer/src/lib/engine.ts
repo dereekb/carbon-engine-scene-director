@@ -8,6 +8,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { CountBackgroundQuads, CreateSceneDressing, DressScene, EnvironmentReport, ReadRenderOptions, type SceneDressing, type SceneEnvironmentReport } from './environment';
 import { ErrorText, ResourceBytes } from './resources';
 import {
   addChild,
@@ -48,6 +49,11 @@ const DEGREES = Math.PI / 180;
 const WANTED_FEATURES: GPUFeatureName[] = ['texture-compression-bc', 'texture-compression-bc-sliced-3d', 'float32-filterable', 'depth-clip-control'];
 
 /**
+ * Distinct WebGPU error messages logged before the rest are only counted.
+ */
+const MAX_GPU_ERROR_MESSAGES = 20;
+
+/**
  * A captured frame: top-down RGBA, alpha forced opaque.
  */
 export interface CapturedFrame {
@@ -70,6 +76,14 @@ export interface EngineStats {
   readonly drawnBatches: Maybe<number>;
   readonly lastFrameError: Maybe<string>;
   readonly deviceLost: Maybe<string>;
+  /**
+   * WebGPU's uncaptured errors (validation, out-of-memory, internal): every one counted, the first distinct ones kept.
+   */
+  readonly gpuErrors: { readonly count: number; readonly messages: string[] };
+}
+
+export interface EngineEnvironment extends SceneEnvironmentReport {
+  readonly universe: Maybe<string>;
 }
 
 export interface CameraPlacement {
@@ -113,6 +127,8 @@ export class Engine {
   deviceLost: Maybe<string> = null;
   private readonly capture: FrameCapture;
   private readonly fps = { frames: 0, since: performance.now(), value: 0 };
+  private readonly gpuErrors = { count: 0, messages: [] as string[], capped: false };
+  private dressing: Maybe<SceneDressing> = null;
   private parts: Maybe<EngineParts> = null;
   /**
    * The swap-chain image this frame went into.
@@ -158,6 +174,8 @@ export class Engine {
       this.capture.Fail(new Error(`device lost: ${this.deviceLost}`));
       console.error(`WebGPU device lost: ${this.deviceLost}`);
     });
+    // Chrome prints WebGPU validation errors to DevTools only; this is how they reach page_log.
+    device.addEventListener('uncapturederror', (event) => this.OnGpuError(event.error));
   }
 
   get camera(): OrbitCamera {
@@ -201,8 +219,35 @@ export class Engine {
       fps: this.fps.value,
       drawnBatches: this.parts?.al.GetDrawnBatchCount?.() ?? null,
       lastFrameError: this.lastError,
-      deviceLost: this.deviceLost
+      deviceLost: this.deviceLost,
+      gpuErrors: { count: this.gpuErrors.count, messages: [...this.gpuErrors.messages] }
     };
+  }
+
+  /**
+   * The scene's background and the client dressing, for get_state.
+   */
+  Environment(): Maybe<EngineEnvironment> {
+    const { parts, dressing } = this;
+    return parts && dressing ? { universe: this.universe, ...EnvironmentReport(parts.scene, dressing) } : null;
+  }
+
+  /**
+   * Counts every uncaptured WebGPU error and logs each distinct one once, up to a cap.
+   */
+  private OnGpuError(error: GPUError): void {
+    const errors = this.gpuErrors;
+    errors.count += 1;
+    // Native error classes keep their names: GPUValidationError, GPUOutOfMemoryError, GPUInternalError.
+    const message = `${error.constructor.name}: ${error.message}`;
+    const known = errors.messages.includes(message);
+    if (!known && errors.messages.length < MAX_GPU_ERROR_MESSAGES) {
+      errors.messages.push(message);
+      console.error(`WebGPU ${message}`);
+    } else if (!known && !errors.capped) {
+      errors.capped = true;
+      console.error(`WebGPU: ${MAX_GPU_ERROR_MESSAGES} distinct errors logged; further WebGPU errors are counted, not logged`);
+    }
   }
 
   private Parts(): EngineParts {
@@ -275,6 +320,15 @@ export class Engine {
     const camera = new OrbitCamera(canvas);
     driver.view = camera.eve.GetViewMatrix();
     driver.projection = camera.eve.GetProjection();
+
+    // The client's post process and sun flare (environment.ts), applied to the
+    // live scene once they load; the first frames draw without them.
+    const options = ReadRenderOptions();
+    if (!options.antiAliasing) driver.antiAliasingQuality = EveSpaceSceneRenderDriver.AntiAliasingQuality.Disabled;
+    CountBackgroundQuads();
+    const dressing = CreateSceneDressing(options);
+    this.dressing = dressing;
+    void DressScene(scene, options, dressing);
 
     const pump = CreateFramePump(gTriDev.device, () => {
       al.SetRenderTarget(0, renderTarget);

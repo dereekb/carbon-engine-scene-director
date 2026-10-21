@@ -17,6 +17,8 @@ declare module '@carbonenginejs/runtime/math/vec3' {
     copy<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>): T;
     add<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, b: ArrayLike<number>): T;
     scale<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, scale: number): T;
+    normalize<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>): T;
+    length(a: ArrayLike<number>): number;
     distance(a: ArrayLike<number>, b: ArrayLike<number>): number;
     transformQuat<T extends ArrayLike<number>>(out: T, a: ArrayLike<number>, q: ArrayLike<number>): T;
   };
@@ -155,6 +157,12 @@ declare module '@carbonenginejs/runtime/trinity/core' {
   export class Tr2Renderer {
     static getSettings(): Tr2RendererSettings;
     static SetShaderModel(model: number): void;
+    /**
+     * Draws a camera-space quad (the nebula) through the blitter; false when it
+     * refused (no material, shader, prepared resources or mapped vertex buffer).
+     * A plain writable static: the page wraps it to count draws.
+     */
+    static drawCameraSpaceScreenQuad: (renderContext: Tr2RenderContext, shader: unknown, material: unknown) => boolean;
   }
 
   export interface Tr2RenderContext {
@@ -240,10 +248,81 @@ declare module '@carbonenginejs/runtime/trinity' {
     GetFrustum(): object;
   }
 
+  /**
+   * A loaded resource; `state` is CjsResource.State ("empty" ... "prepared", "failed").
+   */
+  export interface CjsResourceState {
+    readonly state: string;
+    readonly error: Error | null;
+    IsPrepared(): boolean;
+    IsFailed(): boolean;
+  }
+
+  export interface TriTextureRes extends CjsResourceState {
+    /**
+     * The GPU format, a DXGI number once decoded.
+     */
+    readonly format: number | null;
+    readonly width: number;
+    readonly height: number;
+    /**
+     * 6 for a cube map.
+     */
+    readonly arraySize: number;
+  }
+
+  /**
+   * An effect resource parameter; texture parameters carry a path and a texture.
+   */
+  export interface TriEffectResourceParameter {
+    readonly name: string;
+    readonly resourcePath?: string;
+    readonly resource?: TriTextureRes | null;
+  }
+
+  export interface Tr2Effect {
+    readonly effectFilePath: string;
+    readonly effectResource: CjsResourceState | null;
+    readonly shader: object | null;
+    readonly resources: Iterable<TriEffectResourceParameter>;
+  }
+
+  export class Tr2PPTonemappingEffect {}
+
+  export class Tr2PPDynamicExposureEffect {}
+
+  /**
+   * A scene post process: an environment template, or the client's effects alone.
+   */
+  export class Tr2PostProcess2 {
+    readonly tonemapping: Tr2PPTonemappingEffect | null;
+    readonly dynamicExposure: Tr2PPDynamicExposureEffect | null;
+    SetTonemapping(effect: Tr2PPTonemappingEffect | null): void;
+    SetDynamicExposure(effect: Tr2PPDynamicExposureEffect | null): void;
+  }
+
+  export class EveLensflare {
+    /**
+     * Where the flare sits; its direction is the negated position.
+     */
+    readonly position: Vec3;
+  }
+
   export class EveSpaceScene {
     readonly objects: object[];
     readonly updateContext: EveUpdateContext;
     gpuParticleSystem: unknown;
+    postprocess: Tr2PostProcess2 | null;
+    readonly lensflares: EveLensflare[];
+    readonly sunDirection: Vec3;
+    backgroundRenderingEnabled: boolean;
+    display: boolean;
+    nebulaIntensity: number;
+    readonly backgroundEffect: Tr2Effect | null;
+    envMapResPath: string;
+    envMap1ResPath: string;
+    envMap2ResPath: string;
+    envMap3ResPath: string;
     Initialize(renderContext: Tr2RenderContext): void;
     UpdateQuadRenderer(frustum: object, objects: object[], renderContext: Tr2RenderContext): void;
   }
@@ -251,6 +330,16 @@ declare module '@carbonenginejs/runtime/trinity' {
   export class Tr2SSAO {}
 
   export class EveSpaceSceneRenderDriver {
+    static readonly AntiAliasingQuality: {
+      readonly Disabled: number;
+      readonly Low: number;
+      readonly Medium: number;
+      readonly High: number;
+    };
+    /**
+     * TAA quality; a scene post process turns TAA on at this setting.
+     */
+    antiAliasingQuality: number;
     SSAO: Tr2SSAO | null;
     enableDistortion: boolean;
     clearColor: number[];

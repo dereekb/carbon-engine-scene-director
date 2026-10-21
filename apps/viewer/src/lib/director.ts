@@ -147,6 +147,7 @@ export class Director {
       renderer,
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length } : null,
       camera: this.engine?.camera.Get() ?? null,
+      environment: this.engine?.Environment() ?? null,
       ships,
       distances
     };

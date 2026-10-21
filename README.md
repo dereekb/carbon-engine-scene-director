@@ -169,6 +169,20 @@ npx oxfmt --write .                                # formatting
 Headless Chromium usually has no WebGPU adapter, so `verify:page` checks
 everything but drawing: SOF builds from real data, edits, storage and reload.
 
+Drawing is checked in a real Chrome or Edge tab through `get_state`,
+`screenshot` and `page_log`:
+
+- `get_state.environment` reports the background: the nebula effect and each of
+  its textures (state, format, cube), the scene dressing (below), and
+  `backgroundQuad.drawn`, which grows each frame the nebula is drawn.
+- `get_state.renderer.gpuErrors` counts WebGPU's uncaptured errors (validation,
+  out-of-memory, internal), and each distinct message also goes to `page_log`.
+- Page URL switches for A/B checks: `?post=off|<template>` (the sun environment
+  template under `res:/dx9/postprocess/environmenttemplate/`, default
+  `env_sun_yellow_01a`), `?flare=off|<name>` (under `res:/fisfx/lensflare/`,
+  default `yellow`), `?aa=off` (no TAA) and `?tier=lo|hi` (the shader tier,
+  default `depth`).
+
 ## Runtime notes
 
 - `apps/viewer/src/lib/runtime.ts` is the single import point for the runtime,
@@ -178,6 +192,12 @@ everything but drawing: SOF builds from real data, edits, storage and reload.
   `apps/viewer/esbuild.config.mjs` resolves.
 - The bundle ignores the runtime's `sideEffects` list: many listed files
   register classes on import, and dropping them breaks Black reading.
+- The scene is dressed the way the EVE client dresses every space scene
+  (`apps/viewer/src/lib/environment.ts`): a sun environment template as the
+  post process, with the client's tonemapping and dynamic exposure added when
+  the template lacks them, plus the sun's lens flare. A universe file carries
+  none of these, and without dynamic exposure the nebula (median texel about
+  0.01 linear) renders at the level of the clear colour.
 - Ships hold still through `StaticPosition`/`StaticRotation` curves
   (`apps/viewer/src/lib/ships.ts`); Destiny-driven balls replace them in the
   movement phase.

@@ -38,6 +38,12 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - Runtime ca8b32652 renamed `Destroy()` to `Destruct()`; `ships.ts` `Teardown` calls whichever exists.
 - `ITriVectorFunction`'s base `Update__Ticks` passes arguments in the opposite order from its own docs, so the
   `StaticPosition` / `StaticRotation` curves override every `*__Ticks` method directly.
+- The scene needs the EVE client's dressing (`environment.ts`): a sun template post process with the client's
+  tonemapping and dynamic exposure, plus the lens flare. Without dynamic exposure the nebula (median ~0.01 linear)
+  renders at about the clear colour's level, the most likely reason it looked like no background (static analysis
+  as of 2026-10-21; a real-GPU check is pending). `?post=off` / `?flare=off` / `?aa=off` A/B it.
+- WebGPU validation errors reach `page_log` (and `get_state.renderer.gpuErrors`) only through `engine.ts`'s
+  `uncapturederror` listener; Chrome otherwise prints them to DevTools alone.
 - `runtime.ts` imports `@carbonenginejs/runtime/audio` for its side effects: SOF hull values carry audio classes.
   `resources.ts` registers `CjsPngFormat` with `ImageIO`: the post process reads PNGs.
 - The MCP process must never write to stdout except MCP protocol messages; the hub logs to stderr.
@@ -46,12 +52,19 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `SceneFileStore`; never let a test write to the default per-user scenes directory.
 - tools-core needs Node 22 (its better-sqlite3 binding; Node 24 is the default here). Start it with:
   `cd /mnt/a/github/carbonenginejs/tools-core && /root/.nvm/versions/node/v22.23.4/bin/node bin/cjs-tools-service.js --cache "$PWD/.cache/tool-core" --data "$PWD/data.local" --no-audio-auto-prepare --no-sde-auto-prepare`
+  The clones moved to `/root/github/carbonenginejs` on 2026-10-21 (the old path is a symlink) without their
+  `node_modules`, so that fails with "Cannot find package '@carbonenginejs/runtime'" until they are reinstalled. Until
+  then, run the same command from `/mnt/a/github/_pre-wsl-move/carbonenginejs/tools-core` (same commit, deps intact)
+  with `--cache`/`--data` pointing at `/root/github/carbonenginejs/tools-core/...`. Startup takes ~20 s.
 - Headless Chromium in this WSL has no WebGPU adapter (Dawn finds SwiftShader but cannot create its context
   provider), so verify-page checks everything except drawing. Do not sink time into headless GPU. Ask the user to
   open http://127.0.0.1:5520/ in Windows Chrome or Edge, then use the `screenshot` and `page_log` tools.
 - This is WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
-- The hub on 5520 is often owned by a Claude Code session's MCP server (`bin/scene-director.js mcp`). After a
-  rebuild, that session must reconnect its MCP server (`/mcp`) for the hub to serve the new page and code.
+- The hub on 5520 is often owned by a Claude Code session's MCP server (`bin/scene-director.js mcp`). It streams the
+  built viewer from disk on every request, so a page-only change needs a rebuild plus a tab reload (changing
+  `environment.universe` makes a connected tab reload itself). Hub code changes need the owning session to reconnect
+  its MCP server (`/mcp`). Page tools go to the newest connected tab, so a running verify-page takes them from the
+  user's tab.
 
 ## Boundaries
 

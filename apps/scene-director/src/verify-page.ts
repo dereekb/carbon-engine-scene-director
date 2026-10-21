@@ -43,6 +43,7 @@ interface SceneListing {
 
 interface ViewerState {
   readonly renderer: { readonly available: boolean; readonly adapter?: string; readonly reason?: string };
+  readonly environment: { readonly background: { readonly ready: boolean }; readonly dressing: { readonly state: string } } | null;
   readonly distances: { readonly centreToCentre: number }[];
 }
 
@@ -128,6 +129,12 @@ try {
   const rendering = state.renderer.available;
   const renderer = rendering ? state.renderer.adapter : `unavailable (${state.renderer.reason})`;
   results.push(`info  renderer: ${renderer}; EVE build ${status.build}`);
+
+  await Check('get_state reports the environment only with a renderer', async () => {
+    const { environment } = state;
+    Expect(rendering === (environment !== null), rendering ? 'no environment with a renderer' : 'an environment without a renderer');
+    return environment ? `background ${environment.background.ready ? 'ready' : 'loading'}, dressing ${environment.dressing.state}` : 'null without a renderer';
+  });
 
   await Check('search_hulls finds frigates', async () => {
     const found = await call<{ names: string[]; total: number }>('search_hulls', { query: 'f1_t1', limit: 5 });
