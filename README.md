@@ -42,7 +42,7 @@ An nx workspace:
 
 | Project | Path | Builds | Holds |
 |---|---|---|---|
-| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema and the tool list, shared by the hub and the page |
+| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema, the tool list, and the ship stats math and its pilot context, shared by the hub and the page |
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI and `verify-page` |
 | `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, storage, hub link |
 
@@ -82,6 +82,7 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `viewer_status` | hub | connected tabs, the URL to open, tools-core reachability |
 | `page_log` | hub | the viewer's recent console output and errors |
 | `search_hulls` | hub | SOF hull, faction or race names |
+| `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature and align time, as published and as flown with every skill at V, optionally with a prop mod (see below) |
 | `load_scene` | page | replaces the scene with a document |
 | `get_scene` | page | the current document |
 | `patch_scene` | page | edits by operation (add, update, remove, camera, environment, rename) |
@@ -154,9 +155,59 @@ target frames every ship; a `null` distance fits the target. Unknown fields are
 reported as warnings and dropped. `orders` on a ship and a top-level `timeline`
 are stored but not played yet.
 
+A ship's flight numbers come from its EVE type (see Ship stats below). `type`
+names it explicitly, as a type id or an exact English name; without it, the
+DNA's `hull:faction:race` picks it. `stats` (`{ "mass": kg, "maxVelocity": m/s,
+"agility", "signatureRadius": m }`, each optional) replaces the hull's published
+values before the pilot's skills and a prop mod apply, so `{ "maxVelocity": 200 }`
+flies at 250 m/s with the max-skills pilot; all four together pin the numbers
+with no EVE data. `update_ship` replaces `stats` as a whole, and `null` clears
+`type`, `stats` or `pilot`. `pilot` is reserved for the character system: stored,
+not used yet.
+
 Edits are diffed against the current document: a DNA change rebuilds that
-ship, a placement change moves it in place, and an environment change reloads
-the page (the scene's environment is initialized with the device).
+ship, a placement change moves it in place, a `type`, `stats` or `pilot` change
+retunes it (the diff's `retuned` list: new flight numbers, no rebuild), and an
+environment change reloads the page (the scene's environment is initialized
+with the device).
+
+## Ship stats and the pilot
+
+`packages/scene/src/lib/stats/` computes the numbers a ship flies by, with no
+runtime imports: `computeShipStats({ hull, overrides, pilot, propMod })` returns
+`mass`, `maxVelocity`, `agility`, `signatureRadius`, `radius` and `alignTime`
+(`-ln(0.25) × mass × agility / 1e6` s). `mass`, `maxVelocity`, `agility` and
+`radius` are exactly what a Destiny ball takes (`AddBall`, `SetBallMass`,
+`SetMaxSpeed`, `SetBallAgility`); throttle is an order's concern.
+
+- **The pilot** is a `PilotContext` (`{ name, skillLevel(skill) }`). Every ship
+  flies with `MAX_SKILLS_PILOT` (every skill at V). `createPilotContext({ skills,
+  defaultLevel })` takes `{ typeID, level }[]` or a Record by skill name or id, so
+  a later character system plugs in without changing callers. There is no
+  character system yet.
+- **The skills** (checked against the SDE): Navigation +5 %/level max velocity;
+  Evasive Maneuvering −5 % and Spaceship Command −2 %/level agility; Advanced
+  Spaceship Command and Capital Ships −5 %/level agility on capital hulls (through
+  their `advancedAgility` / `advancedCapitalAgility` hooks); Acceleration Control
+  +5 %/level prop mod speed factor. Afterburner, High Speed Maneuvering, Fuel
+  Conservation and Warp Drive Operation touch only capacitor and duration.
+- **A prop mod** (MWD or AB, as the game applies it): mass += massAddition, then
+  `maxVelocity × (1 + speedFactor × thrust / mass / 100)`, and an MWD's signature
+  bloom. `HULL_SIZED_PROP_MODS` names the Tech II module for each hull size.
+- **Not modelled:** hull trait bonuses, rigs, implants, boosters, fleet command
+  bursts, heat, other modules, server tick rounding.
+
+Base values come from tools-core's SDE at run time, through the hub: a ship
+resolves to an EVE type by its `type` (a name goes through `dna/resolve`), or by
+its DNA base in tools-core's DNA index (bare-hull matches, lowest type id; the
+others are reported as `candidates`). `ship_stats` answers with the published
+values, the max-skills stats and, with `propMod` (`"mwd"`, `"ab"` or a module
+type id), the stats with it running. `GET /ship-stats?dna=&type=&propMod=` gives
+the page the same JSON (404 unknown hull, 409 ambiguous name, 503 no SDE).
+tools-core runs with `--no-sde-auto-prepare`, so the SDE build it reports
+(`builds.sde` in `/eve/latest/build`) must be prepared once:
+`node bin/cjs-sde-prepare.js --build <n>` in the tools-core checkout (Node 22).
+A ship with all four `stats` needs no SDE.
 
 ## Development
 

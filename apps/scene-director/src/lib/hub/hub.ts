@@ -2,6 +2,9 @@
  * The hub: one local HTTP + WebSocket server that serves the viewer page,
  * proxies EVE resources from tools-core, and routes tool calls.
  *
+ * HTTP routes: /build, /resfileindex.txt, /resource/<path> (tools-core proxies),
+ * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /health, and the viewer files.
+ *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
  *   controller  another process (an MCP bridge started after this hub) that sends calls
@@ -22,9 +25,11 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { findTool } from '@scene-director/scene';
+import { findTool, SceneError } from '@scene-director/scene';
 import { SceneFileStore } from '../store/scene-files';
 import { SavedScenes } from './saved-scenes';
+import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
+import { AnswerShipStats } from './ship-stats-tool';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
 import { ToolsCore, type SofCatalogKind, type ToolsCoreApi } from './tools-core';
 
@@ -68,6 +73,10 @@ export interface HubOptions {
    */
   readonly scenes?: SceneFileStore;
   /**
+   * Hull and prop mod values from tools-core's SDE; read from `toolsCore.url` when omitted.
+   */
+  readonly shipData?: ShipDataApi;
+  /**
    * Diagnostics sink; stderr by default, never stdout (MCP owns stdout).
    */
   readonly log?: (line: string) => void;
@@ -109,6 +118,7 @@ export class Hub implements ToolCaller {
   readonly toolsCore: ToolsCoreApi;
   readonly viewerDirectory: Maybe<string>;
   readonly savedScenes: SavedScenes;
+  readonly shipData: ShipDataApi;
   private readonly log: (line: string) => void;
   private readonly pages: WebSocket[] = [];
   private readonly pending = new Map<number, PendingCall>();
@@ -117,10 +127,11 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), shipData, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
+    this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
     this.savedScenes = new SavedScenes({
       files: scenes,
@@ -253,6 +264,8 @@ export class Hub implements ToolCaller {
         const matches = names.filter((entry) => String(entry).toLowerCase().includes(query));
         return { kind, total: matches.length, names: matches.slice(0, limit) };
       }
+      case 'ship_stats':
+        return AnswerShipStats(this.shipData, args);
       default:
         throw new ToolError(`hub tool "${name}" has no handler`);
     }
@@ -320,12 +333,36 @@ export class Hub implements ToolCaller {
       await this.Proxy(await this.toolsCore.ResFileIndexUrl(), response);
     } else if (pathname.startsWith('/resource/')) {
       await this.Proxy(await this.toolsCore.ResourceUrl(pathname.slice('/resource/'.length)), response);
+    } else if (pathname === '/ship-stats') {
+      await this.ServeShipStats(url, response);
     } else if (pathname === '/health') {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ ok: true, tabs: this.pages.length }));
     } else {
       await this.ServeViewerFile(pathname, response);
     }
+  }
+
+  /**
+   * The ship_stats answer for the page: dna, type and propMod from the query. Errors map to
+   * 400 (bad arguments), 404 (no such hull or module), 409 (ambiguous name) and 503 (no SDE).
+   */
+  private async ServeShipStats(url: URL, response: ServerResponse): Promise<void> {
+    const args: ToolArgs = {};
+    for (const key of ['dna', 'type', 'propMod']) {
+      const value = url.searchParams.get(key);
+      if (value) args[key] = value;
+    }
+    let status = 200;
+    let body: unknown;
+    try {
+      body = await AnswerShipStats(this.shipData, args);
+    } catch (error) {
+      status = ShipStatsErrorStatus(error);
+      body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };
+    }
+    response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify(body));
   }
 
   /**
@@ -381,6 +418,21 @@ export class Hub implements ToolCaller {
     response.writeHead(404, { 'content-type': 'text/plain' });
     response.end(`not found: ${what}`);
   }
+}
+
+const SHIP_DATA_FAILURE_STATUS: Record<ShipDataError['failure'], number> = { invalid: 400, 'not-found': 404, ambiguous: 409, unavailable: 503 };
+
+/**
+ * The HTTP status for a failed ship stats answer.
+ *
+ * @param error - Whatever AnswerShipStats threw.
+ * @returns 400 for bad arguments, the lookup failure's status, or 500.
+ */
+function ShipStatsErrorStatus(error: unknown): number {
+  let status = 500;
+  if (error instanceof ShipDataError) status = SHIP_DATA_FAILURE_STATUS[error.failure];
+  else if (error instanceof SceneError || error instanceof ToolError) status = 400;
+  return status;
 }
 
 /**

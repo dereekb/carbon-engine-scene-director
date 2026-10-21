@@ -6,7 +6,8 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 ## Layout (nx workspace)
 
 - `packages/scene` (`@scene-director/scene`, `@nx/js:tsc`): the `cjs-scene/1` document schema (validation, patch
-  operations, diff) and the shared tool list. No runtime imports; the hub, the page and the tests all use it.
+  operations, diff), the shared tool list, and `src/lib/stats/` (ship stats math, skills, prop mods, the pilot
+  context). No runtime imports; the hub, the page and the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. Building it builds the viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
@@ -46,6 +47,12 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `uncapturederror` listener; Chrome otherwise prints them to DevTools alone.
 - `runtime.ts` imports `@carbonenginejs/runtime/audio` for its side effects: SOF hull values carry audio classes.
   `resources.ts` registers `CjsPngFormat` with `ImageIO`: the post process reads PNGs.
+- Prop mod effects 6730/6731 carry no dogma modifiers (the game applies them in code), so the MWD/AB formula lives in
+  `stats/ship-stats.ts`: add the mass first, then `speedFactor × thrust / mass`, as Pyfa does. The skill table in
+  `stats/skills.ts` is hard-coded and was checked against the SDE (ESI, 2026-10-21); re-check it when CCP rebalances.
+- `ship_stats` and `/ship-stats` need a prepared SDE. tools-core runs with `--no-sde-auto-prepare` and answers only
+  for the exact `builds.sde` it reports; prepare it with `node bin/cjs-sde-prepare.js --build <n> --cache <its cache>`
+  (Node 22, about a minute). `dna/resolve` sends `typeID` as a string.
 - The MCP process must never write to stdout except MCP protocol messages; the hub logs to stderr.
 - The saved-scene tools are `where: 'hub'` (`apps/scene-director/src/lib/hub/saved-scenes.ts`): disk files by default,
   forwarded to the page's IndexedDB handlers for `store: "browser"`. Tests and verify-page pass a temp

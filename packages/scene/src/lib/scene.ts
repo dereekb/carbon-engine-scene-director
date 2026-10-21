@@ -1,4 +1,5 @@
 import type { Maybe } from '@dereekb/util';
+import { type HullStatOverrides, normalizeHullStatOverrides } from './stats';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -31,9 +32,24 @@ export interface SceneShip {
   position: SceneVector;
   rotation: SceneVector;
   /**
+   * The EVE type the ship flies as: a type id, or an exact English type name. When
+   * omitted, the DNA's hull:faction:race picks the type (see ship_stats).
+   */
+  type?: number | string;
+  /**
+   * Replacements for the hull's published flight values (mass kg, maxVelocity m/s,
+   * agility, signatureRadius m), applied before the pilot's skills and the prop mod.
+   * All four together pin the numbers without the EVE data.
+   */
+  stats?: HullStatOverrides;
+  /**
    * Reserved for the movement phase: stored, not played yet.
    */
   orders?: unknown;
+  /**
+   * Reserved for the character system: stored, not used yet. Ships fly with the max-skills pilot.
+   */
+  pilot?: unknown;
 }
 
 export interface SceneCamera {
@@ -85,6 +101,10 @@ export interface SceneDiff {
   readonly rebuilt: SceneShip[];
   readonly moved: SceneShip[];
   readonly relabelled: SceneShip[];
+  /**
+   * Kept ships whose type, stats or pilot changed: their flight numbers need recomputing, not a rebuild.
+   */
+  readonly retuned: SceneShip[];
 }
 
 type JsonObject = Record<string, unknown>;
@@ -98,10 +118,10 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
  * Keys reserved for later phases; accepted and kept, but not acted on yet.
  */
 const RESERVED_SCENE_KEYS = ['timeline'] as const;
-const RESERVED_SHIP_KEYS = ['orders'] as const;
+const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'camera', 'ships', ...RESERVED_SCENE_KEYS]);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', ...RESERVED_SHIP_KEYS]);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
@@ -111,6 +131,7 @@ const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 const DNA_PATTERN = /^[^:\s]+:[^:\s]+:[^:\s]+(:\S+)*$/u;
 const ID_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/u;
 const UNIVERSE_PATTERN = /^res:\/.+\.(black|red)$/iu;
+const MAX_TYPE_NAME_LENGTH = 100;
 
 /**
  * A document that cannot be used, with every problem found rather than the first.
@@ -198,7 +219,8 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *
  * Operations:
  *   { op: "add_ship", ship }
- *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, orders? } }
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, orders?, pilot? } }
+ *                                       each key replaces the ship's value (stats as a whole); null clears type, stats and pilot
  *   { op: "remove_ship", id }
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
@@ -276,7 +298,7 @@ function applyOperation(next: SceneDraft, operation: JsonObject, where: string, 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move and relabel, and whether the environment or camera changed.
+ * @returns The ships to add, remove, rebuild, move, relabel and retune, and whether the environment or camera changed.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
   const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
@@ -288,7 +310,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     removed: [],
     rebuilt: [],
     moved: [],
-    relabelled: []
+    relabelled: [],
+    retuned: []
   };
 
   for (const [id, ship] of previous) if (!current.has(id)) diff.removed.push(ship);
@@ -299,6 +322,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     } else if (old.dna === ship.dna) {
       if (!sameJson(old.position, ship.position) || !sameJson(old.rotation, ship.rotation)) diff.moved.push(ship);
       if (old.name !== ship.name || old.team !== ship.team) diff.relabelled.push(ship);
+      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(old.pilot, ship.pilot)) diff.retuned.push(ship);
     } else {
       diff.rebuilt.push(ship);
     }
@@ -355,12 +379,33 @@ function normalizeShip(input: unknown, where: string, problems: string[], warnin
   if (ship.dna && !DNA_PATTERN.test(ship.dna)) problems.push(`${where}.dna "${ship.dna}" is not hull:faction:race[:commands]`);
   if (input['name'] !== undefined) ship.name = readString(input['name'], `${where}.name`, problems);
   if (input['team'] !== undefined) ship.team = readString(input['team'], `${where}.team`, problems);
-  for (const key of RESERVED_SHIP_KEYS) {
-    if (input[key] === undefined) continue;
-    ship[key] = structuredClone(input[key]);
-    warnings.push(`${where}.${key} is reserved for a later phase and is stored but not played yet`);
+  if (input['type'] != null) ship.type = readShipType(input['type'], `${where}.type`, problems);
+
+  const stats = normalizeHullStatOverrides({ input: input['stats'], where: `${where}.stats` });
+  problems.push(...stats.problems);
+  warnings.push(...stats.warnings);
+  if (stats.overrides) ship.stats = stats.overrides;
+
+  if (input['orders'] !== undefined) {
+    ship.orders = structuredClone(input['orders']);
+    warnings.push(`${where}.orders is reserved for a later phase and is stored but not played yet`);
+  }
+  const pilot = input['pilot'];
+  if (pilot != null && !isPlainObject(pilot) && !(typeof pilot === 'string' && pilot.trim())) {
+    problems.push(`${where}.pilot must be an object or a pilot name`);
+  } else if (pilot != null) {
+    ship.pilot = structuredClone(pilot);
+    warnings.push(`${where}.pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot`);
   }
   return ship;
+}
+
+function readShipType(value: unknown, where: string, problems: string[]): number | string {
+  let type: number | string = '';
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) type = value;
+  else if (typeof value === 'string' && value.trim() && value.trim().length <= MAX_TYPE_NAME_LENGTH) type = value.trim();
+  else problems.push(`${where} must be a positive integer type id or an EVE type name`);
+  return type;
 }
 
 function reportUnknownKeys(object: JsonObject, allowed: Set<string>, where: string, warnings: string[]): void {

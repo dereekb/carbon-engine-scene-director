@@ -133,7 +133,7 @@ export class ToolsCore implements ToolsCoreApi {
   }
 
   /**
-   * tools-core's current build.
+   * Tools-core's current build.
    */
   private async FetchBuild(timeoutMs: number): Promise<string> {
     const response = await this.fetchImpl(`${this.url}/eve/latest/build`, { signal: AbortSignal.timeout(timeoutMs) });

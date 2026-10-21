@@ -14,6 +14,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { Hub } from './lib/hub/hub';
+import { ShipDataError } from './lib/hub/ship-data';
+import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
 import { ErrorMessage, ErrorProblems } from './lib/hub/tool-call';
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
 import { SceneFileStore } from './lib/store/scene-files';
@@ -43,7 +45,7 @@ interface SceneListing {
 
 interface ViewerState {
   readonly renderer: { readonly available: boolean; readonly adapter?: string; readonly reason?: string };
-  readonly environment: { readonly background: { readonly ready: boolean }; readonly dressing: { readonly state: string } } | null;
+  readonly environment: Maybe<{ readonly background: { readonly ready: boolean }; readonly dressing: { readonly state: string } }>;
   readonly distances: { readonly centreToCentre: number }[];
 }
 
@@ -74,6 +76,33 @@ function Option(name: string, fallback: string): string {
  */
 function Expect(condition: unknown, message: string): void {
   if (!condition) throw new Error(message);
+}
+
+/**
+ * A check that cannot run here (no prepared SDE): reported as a skip, not a failure.
+ */
+class Skipped extends Error {}
+
+/**
+ * Turns an unavailable SDE into a skip.
+ *
+ * @param error - Whatever a ship_stats call threw.
+ * @throws {Skipped} When tools-core has no SDE; otherwise the error itself.
+ */
+function SkipWithoutSde(error: unknown): never {
+  if (error instanceof ShipDataError && error.failure === 'unavailable') throw new Skipped(error.message);
+  throw error;
+}
+
+/**
+ * Whether two numbers agree to a relative tolerance.
+ *
+ * @param a - One number.
+ * @param b - The other.
+ * @returns True when they differ by at most 1e-9 of their size.
+ */
+function Close(a: number, b: number): boolean {
+  return Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
 }
 
 /**
@@ -112,8 +141,12 @@ async function Check(label: string, action: () => Promise<string | void>): Promi
     const detail = await action();
     results.push(detail ? `ok    ${label} - ${detail}` : `ok    ${label}`);
   } catch (error) {
-    failed += 1;
-    results.push(`FAIL  ${label} - ${ErrorMessage(error)}`);
+    if (error instanceof Skipped) {
+      results.push(`skip  ${label} - ${error.message}`);
+    } else {
+      failed += 1;
+      results.push(`FAIL  ${label} - ${ErrorMessage(error)}`);
+    }
   }
 }
 
@@ -140,6 +173,39 @@ try {
     const found = await call<{ names: string[]; total: number }>('search_hulls', { query: 'f1_t1', limit: 5 });
     Expect(found.names.includes('af1_t1'), `got ${found.names.join(', ')}`);
     return `${found.total} matches`;
+  });
+
+  let sdeBuild: Maybe<string> = null;
+  await Check('ship_stats reads a hull and a prop mod from the SDE', async () => {
+    const answer = await call<ShipStatsAnswer>('ship_stats', { dna: 'mb2_t1:minmatarnavy:minmatar', propMod: 'mwd' }).catch(SkipWithoutSde);
+    const { hull, stats, withPropMod } = answer;
+    sdeBuild = hull.sdeBuild ?? null;
+    Expect(hull.typeID === 17732 && hull.name === 'Tempest Fleet Issue', `resolved ${hull.typeID} ${hull.name}`);
+    Expect(answer.propMod?.typeID === 12084, `prop mod ${answer.propMod?.typeID}`);
+    Expect(hull.published && Math.abs(stats.maxVelocity - hull.published.maxVelocity * 1.25) < 1e-9, 'Navigation V is not +25 %');
+    Expect(withPropMod && withPropMod.maxVelocity > stats.maxVelocity && withPropMod.signatureRadius > stats.signatureRadius, 'the MWD neither speeds up nor blooms');
+    // The specs' fixtures (ESI, 2026-10-21); a difference means CCP rebalanced, which is news, not a failure.
+    const fixture = { maxVelocity: 162.5, withMwd: 1176.137476, signatureRadius: 2012.5 };
+    const live = { maxVelocity: stats.maxVelocity, withMwd: withPropMod?.maxVelocity ?? 0, signatureRadius: withPropMod?.signatureRadius ?? 0 };
+    const drift = (Object.keys(fixture) as (keyof typeof fixture)[]).filter((key) => Math.abs(fixture[key] - live[key]) > 1e-3);
+    const differences = drift.map((key) => `${key} ${live[key]} (fixture ${fixture[key]})`).join(', ');
+    if (drift.length) results.push(`info  SDE ${sdeBuild} differs from the spec fixtures in ${differences}`);
+    return `SDE ${sdeBuild}: TFI ${stats.maxVelocity.toFixed(2)} m/s, align ${stats.alignTime.toFixed(2)} s; with ${answer.propMod?.name} ${withPropMod?.maxVelocity.toFixed(2)} m/s, sig ${withPropMod?.signatureRadius} m`;
+  });
+
+  await Check("the skill table matches tools-core's dogma evaluation", async () => {
+    const ours = await call<ShipStatsAnswer>('ship_stats', { type: 11987 }).catch(SkipWithoutSde);
+    const build = sdeBuild ?? ours.hull.sdeBuild;
+    const response = await fetch(`${toolsCore.url}/eve/${build}/dogma/evaluate`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ typeID: 11987, profile: { mode: 'manual', skills: [3449, 3453, 3327].map((typeID) => ({ typeID, level: 5 })) }, sections: ['navigation'] })
+    });
+    Expect(response.ok, `dogma/evaluate answered ${response.status}`);
+    const { effective } = (await response.json()) as { effective: { maxVelocity: number; agility: number } };
+    Expect(Close(effective.maxVelocity, ours.stats.maxVelocity), `maxVelocity: tools-core ${effective.maxVelocity}, ours ${ours.stats.maxVelocity}`);
+    Expect(Close(effective.agility, ours.stats.agility), `agility: tools-core ${effective.agility}, ours ${ours.stats.agility}`);
+    return `Guardian ${effective.maxVelocity} m/s, agility ${effective.agility}`;
   });
 
   await Check('load_scene builds valid ships and reports the bad one', async () => {

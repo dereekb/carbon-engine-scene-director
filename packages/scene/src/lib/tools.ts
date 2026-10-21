@@ -43,7 +43,8 @@ const SCENE_FORMAT = `Scene document (${SCENE_SCHEMA}). Metres and degrees, Y up
   ]
 }
 dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find hull names. rotation is [yaw, pitch, roll].
-"orders" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.`;
+"type" (EVE type id or name) and "stats" ({ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional) set a ship's flight numbers; ship_stats shows them.
+"orders" and "pilot" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.`;
 
 const STORE_ARGUMENT = {
   type: 'string',
@@ -84,6 +85,22 @@ export const TOOLS: ToolDefinition[] = [
     }
   },
   {
+    name: 'ship_stats',
+    where: 'hub',
+    description:
+      "A hull's in-game flight numbers from the EVE data (tools-core's SDE): mass (kg), max velocity (m/s), agility, signature radius (m) and align time (s). They are given as published and as flown by a pilot with every skill at V, optionally with a prop mod running. Name the hull by dna (a scene ship's DNA; its hull:faction:race picks the EVE type) or type (an EVE type id or exact name; it wins over dna). propMod is \"mwd\" or \"ab\" (the Tech II module sized for the hull) or a module type id. stats overrides the hull's values like a scene ship's stats. For a ship in the scene, pass its dna, type and stats. Needs a prepared SDE in tools-core unless all four stats are given.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        dna: { type: 'string', description: 'SOF DNA, hull:faction:race[:commands].' },
+        type: { anyOf: [{ type: 'integer', minimum: 1 }, { type: 'string' }], description: 'EVE type id or exact English type name.' },
+        propMod: { description: '"mwd" or "ab" (sized for the hull), a module type id, or { "speedFactor", "speedBoostFactor", "massAddition", "signatureRadiusBonus"? }.' },
+        stats: { type: 'object', description: '{ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional; replaces the published values before skills.' },
+        pilot: { type: 'object', description: '{ "skills": { "Navigation": 4 }, "defaultLevel": 5 }; every skill at V when omitted' }
+      }
+    }
+  },
+  {
     name: 'load_scene',
     where: 'page',
     description: `Replaces the scene in the viewer with a scene document and builds it. Returns the normalized document, warnings, and per-ship build results.\n\n${SCENE_FORMAT}`,
@@ -104,12 +121,12 @@ export const TOOLS: ToolDefinition[] = [
     where: 'page',
     description: `Edits the current scene with a list of operations, applied in order, then updates the viewer to match. Operations:
 { "op": "add_ship", "ship": { ...ship } }
-{ "op": "update_ship", "id": "<id>", "set": { "dna"?, "name"?, "team"?, "position"?, "rotation"? } }
+{ "op": "update_ship", "id": "<id>", "set": { "dna"?, "name"?, "team"?, "position"?, "rotation"?, "type"?, "stats"? } }
 { "op": "remove_ship", "id": "<id>" }
 { "op": "set_camera", "camera": { ...fields to change } }
 { "op": "set_environment", "environment": { "universe": "res:/..." } }   (reloads the page)
 { "op": "rename", "name": "<name>" }
-Changing dna rebuilds that ship; changing position or rotation moves it in place.`,
+Changing dna rebuilds that ship; changing position or rotation moves it in place. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it.`,
     inputSchema: {
       type: 'object',
       properties: { operations: { type: 'array', items: { type: 'object' }, minItems: 1 } },

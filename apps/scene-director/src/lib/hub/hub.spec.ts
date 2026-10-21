@@ -4,10 +4,11 @@ import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { ToContent } from '../mcp/server';
-import { Hub } from './hub';
+import { Hub, type HubOptions } from './hub';
 import { SceneFileStore } from '../store/scene-files';
 import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
+import { MakeFakeShipData, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
 import type { ToolsCoreApi } from './tools-core';
 
 /** A tools-core stand-in: no network, one pinned build, a small hull catalog. */
@@ -38,9 +39,9 @@ type Handler = (args: Record<string, unknown>) => unknown;
 let hub: Hub;
 
 /** A hub on a free port whose saved scene files go to a fresh temp directory. */
-async function StartHub(): Promise<Hub> {
+async function StartHub(options: Partial<HubOptions> = {}): Promise<Hub> {
   const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-hub-')));
-  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, log: () => undefined }).Start();
+  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, log: () => undefined, ...options }).Start();
 }
 
 beforeAll(async () => {
@@ -261,6 +262,36 @@ describe('saved scenes', () => {
     } finally {
       page.close();
       await NoTabs();
+    }
+  });
+});
+
+describe('ship stats', () => {
+  it('ship_stats and GET /ship-stats answer from the SDE with no viewer tab', async () => {
+    const stats = await StartHub({ shipData: MakeFakeShipData().shipData });
+    try {
+      const answer = (await stats.Call('ship_stats', { dna: TFI_DNA, propMod: 'mwd' })) as { hull: { typeID: number }; withPropMod: { maxVelocity: number } };
+      expect(answer.hull.typeID).toBe(17732);
+      expect(answer.withPropMod.maxVelocity).toBeCloseTo(1176.137476, 3);
+      const response = await fetch(`${stats.url}ship-stats?dna=${encodeURIComponent(TFI_DNA)}&propMod=mwd`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect(await response.json()).toEqual(answer);
+      expect((await fetch(`${stats.url}ship-stats?dna=nope`)).status).toBe(400);
+    } finally {
+      await stats.Stop();
+    }
+  });
+
+  it('an unprepared SDE is a 503 and a tool error naming the prepare command', async () => {
+    const stats = await StartHub({ shipData: MakeFakeShipData(UnpreparedSdeRoutes('42', 17732)).shipData });
+    try {
+      await expect(stats.Call('ship_stats', { type: 17732 })).rejects.toThrow(/cjs-sde-prepare\.js --build 42/);
+      const response = await fetch(`${stats.url}ship-stats?type=17732`);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ failure: 'unavailable', error: { message: expect.stringMatching(/--build 42/) } });
+    } finally {
+      await stats.Stop();
     }
   });
 });

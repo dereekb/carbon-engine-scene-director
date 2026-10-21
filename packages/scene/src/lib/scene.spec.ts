@@ -102,3 +102,83 @@ describe('scene documents', () => {
     expect(diffScenes(null, before).added.map((ship) => ship.id)).toEqual(['a', 'b']);
   });
 });
+
+describe('ship flight fields', () => {
+  const guardian = { id: 'g', dna: 'ac3_t2:carthum:amarr' };
+
+  it('type is a type id or an EVE type name', () => {
+    const { scene, warnings } = normalizeScene({
+      ships: [
+        { ...guardian, type: 11987 },
+        { id: 't', dna: 'mb2_t1:minmatarnavy:minmatar', type: '  Tempest Fleet Issue ' },
+        { id: 'n', dna: guardian.dna, type: null }
+      ]
+    });
+    expect(scene.ships.map((ship) => ship.type)).toEqual([11987, 'Tempest Fleet Issue', undefined]);
+    expect('type' in scene.ships[2]).toBe(false);
+    expect(warnings).toEqual([]);
+    const error = catchSceneError(() => normalizeScene({ ships: [0, -1, 2.5, {}, '', 'x'.repeat(101)].map((type, index) => ({ id: `s${index}`, dna: guardian.dna, type })) }));
+    expect(error.problems).toHaveLength(6);
+    expect(error.problems[0]).toBe('ships[0].type must be a positive integer type id or an EVE type name');
+  });
+
+  it('stats overrides are validated, unknown stats warn, and empty means absent', () => {
+    const { scene, warnings } = normalizeScene({
+      ships: [
+        { ...guardian, stats: { maxVelocity: 300, agility: 0.5, speed: 3 } },
+        { id: 'e', dna: guardian.dna, stats: {} }
+      ]
+    });
+    expect(scene.ships[0].stats).toEqual({ maxVelocity: 300, agility: 0.5 });
+    expect(scene.ships[1].stats).toBeUndefined();
+    expect(warnings).toEqual(['ships[0].stats.speed is not a known stat and was dropped']);
+    const error = catchSceneError(() =>
+      normalizeScene({
+        ships: [
+          { ...guardian, stats: { mass: 0, maxVelocity: -1 } },
+          { id: 'x', dna: guardian.dna, stats: 5 }
+        ]
+      })
+    );
+    expect(error.problems).toEqual(['ships[0].stats.mass must be a positive number (kg)', 'ships[0].stats.maxVelocity must be a number of 0 or more (m/s)', 'ships[1].stats must be an object of mass, maxVelocity, agility and signatureRadius']);
+  });
+
+  it('pilot is reserved: stored with a warning, never interpreted', () => {
+    const { scene, warnings } = normalizeScene({
+      ships: [
+        { ...guardian, pilot: { skills: { Navigation: 4 } } },
+        { id: 'p', dna: guardian.dna, pilot: 'fc' },
+        { id: 'q', dna: guardian.dna, pilot: null }
+      ]
+    });
+    expect(scene.ships[0].pilot).toEqual({ skills: { Navigation: 4 } });
+    expect(scene.ships[1].pilot).toBe('fc');
+    expect(scene.ships[2].pilot).toBeUndefined();
+    expect(warnings).toEqual(['ships[0].pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot', 'ships[1].pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot']);
+    for (const pilot of [3, '', [1]]) {
+      expect(catchSceneError(() => normalizeScene({ ships: [{ ...guardian, pilot }] })).problems).toEqual(['ships[0].pilot must be an object or a pilot name']);
+    }
+  });
+
+  it('update_ship replaces stats as a whole and null clears type, stats and pilot', () => {
+    const { scene } = normalizeScene({ ships: [{ ...guardian, type: 11987, stats: { mass: 1e7, agility: 0.5 }, pilot: 'fc' }] });
+    const replaced = applySceneOperations(scene, [{ op: 'update_ship', id: 'g', set: { stats: { maxVelocity: 300 } } }]).scene;
+    expect(replaced.ships[0].stats).toEqual({ maxVelocity: 300 });
+    const cleared = applySceneOperations(scene, [{ op: 'update_ship', id: 'g', set: { type: null, stats: null, pilot: null } }]).scene;
+    expect(cleared.ships[0]).toEqual({ id: 'g', dna: guardian.dna, position: [0, 0, 0], rotation: [0, 0, 0] });
+  });
+
+  it('the diff retunes a ship whose type, stats or pilot changed, and still rebuilds on a DNA change', () => {
+    const { scene: before } = normalizeScene({ ...duel, ships: [...duel.ships, { ...guardian, stats: { mass: 1e7, agility: 0.5 } }] });
+    const { scene: after } = applySceneOperations(before, [
+      { op: 'update_ship', id: 'a', set: { type: 597 } },
+      { op: 'update_ship', id: 'b', set: { stats: { maxVelocity: 500 }, dna: 'mf1_t1:minmatarnavy:minmatar' } },
+      { op: 'update_ship', id: 'g', set: { stats: { agility: 0.5, mass: 1e7 } } }
+    ]);
+    const diff = diffScenes(before, after);
+    expect(diff.retuned.map((ship) => ship.id)).toEqual(['a']);
+    expect(diff.rebuilt.map((ship) => ship.id)).toEqual(['b']);
+    expect(diff.moved).toEqual([]);
+    expect(diffScenes(after, applySceneOperations(after, [{ op: 'update_ship', id: 'g', set: { pilot: 'fc' } }]).scene).retuned.map((ship) => ship.id)).toEqual(['g']);
+  });
+});
