@@ -13,6 +13,7 @@ fields in the document and come in later phases.
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
                           hub: http://127.0.0.1:5520  page + /resource proxy + /ws
+                          scenes directory: saved cjs-scene/1 files
                             │ WebSocket
                             ▼
                        viewer tab (Chrome/Edge, WebGPU)
@@ -21,9 +22,9 @@ Claude Code ──stdio──▶ scene-director mcp (Node)
                        tools-core :5510 ◀── every resource request
 ```
 
-The page owns the scene. The hub only serves it, proxies resources and
-routes tool calls, so a page reload restores the working scene from
-IndexedDB and Claude can reconnect at any time.
+The page owns the scene. The hub serves it, proxies resources, routes tool
+calls and keeps saved scene files on disk, so a page reload restores the
+working scene from IndexedDB and Claude can reconnect at any time.
 
 ## Requirements
 
@@ -84,10 +85,54 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `load_scene` | page | replaces the scene with a document |
 | `get_scene` | page | the current document |
 | `patch_scene` | page | edits by operation (add, update, remove, camera, environment, rename) |
-| `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | page | IndexedDB storage |
+| `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `get_state` | page | renderer status, per-ship build status and placement, distances |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
+
+## Saved scenes
+
+Saved scenes live in two stores, picked by each tool's `store` argument:
+
+- `disk` (the default for saving): one `cjs-scene/1` JSON file per scene in
+  the hub's scenes directory, validated on write and on read. Works with no
+  viewer tab open.
+- `browser`: the viewer tab's IndexedDB, as in phase 1. Needs a connected tab.
+
+The stores are independent: nothing is written through from one to the
+other. With `store` omitted:
+
+| Tool | Does |
+|---|---|
+| `save_scene` | writes the viewer's current scene to disk; pass `scene` to save a document directly (no tab needed) |
+| `list_scenes` | lists both stores, each entry marked `store: "disk"` or `"browser"` (the browser only when a tab is connected) |
+| `open_scene` | looks on disk first, then in the browser; with no tab, a disk scene is returned (`loaded: false`) instead of shown |
+| `delete_scene` | deletes the disk file when there is one, otherwise the browser's save |
+
+The scenes directory is `--scenes <dir>` or `SCENE_DIRECTOR_SCENES`, by
+default `scene-director/scenes` in the per-user data directory
+(`$XDG_DATA_HOME` or `~/.local/share` on Linux, `~/Library/Application Support`
+on macOS, `%LOCALAPPDATA%` on Windows). `viewer_status` reports it. It belongs
+to the process that owns the hub: an MCP server that joins a running hub uses
+that hub's directory. A `scenes/` folder in this checkout is gitignored, for
+`--scenes ./scenes`.
+
+A file is named from the scene's name, lowercased, with every run of
+characters other than letters, digits, `_` and `-` turned into `-`
+(`Duel at Jita` is `duel-at-jita.json`), so no name can reach outside the
+directory. Names that differ only in case are the same scene. Saving a
+different name that maps to a file holding another scene is refused rather
+than overwriting it. A file placed in the directory by hand is listed and
+opened by its file name.
+
+Import and export go through `call`: `--in` reads a file into the `scene`
+argument, and `--out` writes the scene a result carries to a file.
+
+```sh
+node bin/scene-director.js call save_scene '{"name":"duel"}' --in duel.json    # import a file to disk
+node bin/scene-director.js call open_scene '{"name":"duel"}' --out duel.json   # export (also shows it, when a tab is open)
+node bin/scene-director.js call get_scene --out current.json                   # the viewer's current scene
+```
 
 ## Scene document
 

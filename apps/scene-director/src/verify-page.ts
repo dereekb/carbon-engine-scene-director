@@ -9,12 +9,14 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { Hub } from './lib/hub/hub';
 import { ErrorMessage, ErrorProblems } from './lib/hub/tool-call';
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
+import { SceneFileStore } from './lib/store/scene-files';
 
 /**
  * The shapes of the tool answers this script reads.
@@ -33,6 +35,10 @@ interface SceneResult {
   readonly scene: { readonly name: string; readonly ships: unknown[] };
   readonly ships: ShipReport[];
   readonly changes: Record<string, number>;
+}
+
+interface SceneListing {
+  readonly scenes: { readonly name: string; readonly store: string }[];
 }
 
 interface ViewerState {
@@ -86,7 +92,9 @@ if (!status.reachable) {
   process.exit(1);
 }
 
-const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), log: () => undefined }).Start();
+// Saved scene files go to a throwaway directory, never the user's.
+const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-')));
+const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, log: () => undefined }).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'] });
 const results: string[] = [];
@@ -173,15 +181,32 @@ try {
   });
 
   await Check('save, list, open and delete round-trip through IndexedDB', async () => {
-    await call('save_scene', { name: 'verify-saved' });
+    await call('save_scene', { name: 'verify-saved', store: 'browser' });
     Expect(
-      (await call<{ name: string }[]>('list_scenes')).some((entry) => entry.name === 'verify-saved'),
+      (await call<SceneListing>('list_scenes')).scenes.some((entry) => entry.name === 'verify-saved' && entry.store === 'browser'),
       'not listed'
     );
     await call('load_scene', { scene: { name: 'empty', ships: [] } });
-    const opened = await call<SceneResult>('open_scene', { name: 'verify-saved' });
+    const opened = await call<SceneResult & { store: string }>('open_scene', { name: 'verify-saved' });
+    Expect(opened.store === 'browser', `opened from ${opened.store}`);
     Expect(opened.scene.ships.length === 2, `opened ${opened.scene.ships.length} ships`);
-    Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-saved' })).deleted, 'not deleted');
+    Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-saved', store: 'browser' })).deleted, 'not deleted');
+  });
+
+  await Check('save, list, open and delete round-trip through scene files', async () => {
+    const saved = await call<{ file: string; ships: number }>('save_scene', { name: 'verify-saved-disk' });
+    Expect(saved.ships === 2, `saved ${saved.ships} ships`);
+    Expect(
+      (await call<SceneListing>('list_scenes', { store: 'disk' })).scenes.some((entry) => entry.name === 'verify-saved-disk'),
+      'not listed'
+    );
+    await call('load_scene', { scene: { name: 'empty', ships: [] } });
+    const opened = await call<SceneResult & { store: string }>('open_scene', { name: 'verify-saved-disk' });
+    Expect(opened.store === 'disk' && opened.scene.ships.length === 2, `opened ${opened.scene.ships.length} ships from ${opened.store}`);
+    Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-saved-disk' })).deleted, 'not deleted');
+    // The reload check below expects the IndexedDB check's scene back.
+    await call('load_scene', { scene: { ...opened.scene, name: 'verify-saved' } });
+    return saved.file;
   });
 
   await Check('the working scene survives a reload', async () => {

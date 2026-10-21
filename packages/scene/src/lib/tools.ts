@@ -2,7 +2,9 @@
  * The MCP tool list, shared by the hub (which advertises it) and the page
  * (which implements the page-side tools). `where` says who answers a call:
  * "hub" tools are answered by the Node hub itself, so they work with no
- * browser open; "page" tools are forwarded to the connected viewer tab.
+ * browser open; "page" tools are forwarded to the connected viewer tab. The
+ * saved-scene tools are hub tools that forward to the tab for `store: "browser"`
+ * (and to show an opened scene), so the page still implements them too.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -42,6 +44,12 @@ const SCENE_FORMAT = `Scene document (${SCENE_SCHEMA}). Metres and degrees, Y up
 }
 dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find hull names. rotation is [yaw, pitch, roll].
 "orders" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.`;
+
+const STORE_ARGUMENT = {
+  type: 'string',
+  enum: ['disk', 'browser'],
+  description: "disk: scene files kept by the hub; browser: the viewer tab's IndexedDB."
+};
 
 export const TOOLS: ToolDefinition[] = [
   {
@@ -110,27 +118,34 @@ Changing dna rebuilds that ship; changing position or rotation moves it in place
   },
   {
     name: 'save_scene',
-    where: 'page',
-    description: "Saves the current scene document in the browser's storage under a name (the scene's own name when omitted).",
-    inputSchema: { type: 'object', properties: { name: { type: 'string' } } }
+    where: 'hub',
+    description: `Saves a scene under a name (the scene's own name when omitted). By default it saves the viewer's current scene as a ${SCENE_SCHEMA} JSON file in the hub's scenes directory, which works without a viewer tab when "scene" is passed. store "browser" saves in the viewer tab's IndexedDB instead. Names that differ only in case are the same scene.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string' },
+        store: STORE_ARGUMENT,
+        scene: { type: 'object', description: "A scene document to save instead of the viewer's current scene (disk only)." }
+      }
+    }
   },
   {
     name: 'list_scenes',
-    where: 'page',
-    description: "Lists scenes saved in the browser's storage.",
-    inputSchema: { type: 'object', properties: {} }
+    where: 'hub',
+    description: "Lists saved scenes, newest first, each marked with its store: scene files on disk, plus the browser's IndexedDB saves when a viewer tab is connected. Pass store to list only one.",
+    inputSchema: { type: 'object', properties: { store: STORE_ARGUMENT } }
   },
   {
     name: 'open_scene',
-    where: 'page',
-    description: 'Loads a saved scene by name into the viewer.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+    where: 'hub',
+    description: "Loads a saved scene by name into the viewer. Without store it looks on disk first, then in the browser's storage. With no viewer tab connected, a disk scene is returned without being shown.",
+    inputSchema: { type: 'object', properties: { name: { type: 'string' }, store: STORE_ARGUMENT }, required: ['name'] }
   },
   {
     name: 'delete_scene',
-    where: 'page',
-    description: 'Deletes a saved scene by name.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+    where: 'hub',
+    description: "Deletes a saved scene by name. Without store it deletes the disk file when there is one, otherwise the browser's save.",
+    inputSchema: { type: 'object', properties: { name: { type: 'string' }, store: STORE_ARGUMENT }, required: ['name'] }
   },
   {
     name: 'get_state',

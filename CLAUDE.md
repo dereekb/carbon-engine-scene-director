@@ -41,6 +41,9 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - `runtime.ts` imports `@carbonenginejs/runtime/audio` for its side effects: SOF hull values carry audio classes.
   `resources.ts` registers `CjsPngFormat` with `ImageIO`: the post process reads PNGs.
 - The MCP process must never write to stdout except MCP protocol messages; the hub logs to stderr.
+- The saved-scene tools are `where: 'hub'` (`apps/scene-director/src/lib/hub/saved-scenes.ts`): disk files by default,
+  forwarded to the page's IndexedDB handlers for `store: "browser"`. Tests and verify-page pass a temp
+  `SceneFileStore`; never let a test write to the default per-user scenes directory.
 - tools-core needs Node 22 (its better-sqlite3 binding; Node 24 is the default here). Start it with:
   `cd /mnt/a/github/carbonenginejs/tools-core && /root/.nvm/versions/node/v22.23.4/bin/node bin/cjs-tools-service.js --cache "$PWD/.cache/tool-core" --data "$PWD/data.local" --no-audio-auto-prepare --no-sde-auto-prepare`
 - Headless Chromium in this WSL has no WebGPU adapter (Dawn finds SwiftShader but cannot create its context

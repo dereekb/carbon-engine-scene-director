@@ -22,6 +22,9 @@ Thumbs.db
 # scratch output (verify-page screenshots, experiments)
 .scratch/
 
+# saved scene files (user data; --scenes ./scenes)
+/scenes/
+
 # Claude
 /.claude/settings.local.json
 /.claude/worktrees

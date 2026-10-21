@@ -23,6 +23,8 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { findTool } from '@scene-director/scene';
+import { SceneFileStore } from '../store/scene-files';
+import { SavedScenes } from './saved-scenes';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
 import { ToolsCore, type SofCatalogKind, type ToolsCoreApi } from './tools-core';
 
@@ -61,6 +63,10 @@ export interface HubOptions {
    * The built viewer: a directory holding index.html and the page bundle it loads from /app/.
    */
   readonly viewerDirectory?: Maybe<string>;
+  /**
+   * Saved scenes on disk; the per-user default directory when omitted.
+   */
+  readonly scenes?: SceneFileStore;
   /**
    * Diagnostics sink; stderr by default, never stdout (MCP owns stdout).
    */
@@ -102,6 +108,7 @@ export class Hub implements ToolCaller {
   port: number;
   readonly toolsCore: ToolsCoreApi;
   readonly viewerDirectory: Maybe<string>;
+  readonly savedScenes: SavedScenes;
   private readonly log: (line: string) => void;
   private readonly pages: WebSocket[] = [];
   private readonly pending = new Map<number, PendingCall>();
@@ -110,11 +117,19 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
+    this.savedScenes = new SavedScenes({
+      files: scenes,
+      page: {
+        Connected: () => this.pages.length > 0,
+        NotConnected: () => this.NotConnected(),
+        Call: (name, args) => this.CallPage(name, args)
+      }
+    });
     this.log = log;
   }
 
@@ -147,7 +162,7 @@ export class Hub implements ToolCaller {
       });
     });
     this.port = (server.address() as AddressInfo).port;
-    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url})`);
+    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
     this.toolsCore.ResolveBuild().then(
       (build) => this.log(`EVE resource build ${build}`),
@@ -174,10 +189,19 @@ export class Hub implements ToolCaller {
   async Call(name: string, args: ToolArgs = {}): Promise<unknown> {
     const tool = findTool(name);
     if (!tool) throw new ToolError(`unknown tool "${name}"`);
-    if (tool.where === 'hub') return this.CallHubTool(name, args);
+    return tool.where === 'hub' ? this.CallHubTool(name, args) : this.CallPage(name, args);
+  }
 
+  /**
+   * Sends one call to the most recently connected tab, whoever answers the tool in the list.
+   *
+   * @param name - Tool name.
+   * @param args - Tool arguments.
+   * @returns The page's value.
+   */
+  private async CallPage(name: string, args: ToolArgs = {}): Promise<unknown> {
     const page = this.pages.at(-1);
-    if (!page) throw new ToolError(`No viewer tab is connected. Open ${this.url} in Chrome or Edge (WebGPU required), then retry.`);
+    if (!page) throw this.NotConnected();
     const id = this.nextId++;
     const timeoutMs = SLOW_TOOLS.has(name) ? 600000 : 60000;
     return new Promise((resolve, reject) => {
@@ -200,13 +224,20 @@ export class Hub implements ToolCaller {
     });
   }
 
+  private NotConnected(): ToolError {
+    return new ToolError(`No viewer tab is connected. Open ${this.url} in Chrome or Edge (WebGPU required), then retry.`);
+  }
+
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
+    const saved = this.savedScenes.Call(name, args);
+    if (saved) return saved;
     switch (name) {
       case 'viewer_status':
         return {
           viewerUrl: this.url,
           connectedTabs: this.pages.length,
           toolsCore: await this.toolsCore.Status(),
+          scenesDirectory: this.savedScenes.files.directory,
           hint: this.pages.length ? undefined : `Open ${this.url} in Chrome or Edge on this machine.`
         };
       case 'page_log': {
