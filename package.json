@@ -1,0 +1,36 @@
+{
+  "name": "carbon-engine-scene-director",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drive CarbonEngineJS space scenes from JSON documents and MCP tools, rendered live in the browser.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "scene-director": "bin/scene-director.js"
+  },
+  "scripts": {
+    "build": "node scripts/build-page.js",
+    "serve": "node bin/scene-director.js serve",
+    "mcp": "node bin/scene-director.js mcp",
+    "test": "node --test \"test/*.test.js\"",
+    "verify:page": "node scripts/verify-page.js",
+    "check": "npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@carbonenginejs/runtime": "file:../carbonenginejs/runtime/npm",
+    "esbuild": "^0.28.2",
+    "playwright": "~1.62.1"
+  },
+  "runtimePin": {
+    "repository": "https://github.com/carbonenginejs/runtime",
+    "commit": "f77ed790c",
+    "note": "The runtime is installed by copy from ../carbonenginejs/runtime/npm (install-links). Rebuild that checkout at this commit before reinstalling."
+  }
+}
