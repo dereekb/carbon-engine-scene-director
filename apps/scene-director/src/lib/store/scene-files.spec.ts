@@ -62,7 +62,7 @@ describe('SceneFileStore', () => {
 
     const opened = await store.Get('duel at jita');
     expect(opened?.name).toBe('Duel at Jita');
-    expect(opened?.scene.ships.map((ship) => ship.id)).toEqual(['a', 'b']);
+    expect(opened?.document.ships.map((ship) => ship.id)).toEqual(['a', 'b']);
 
     const listing = await store.List();
     expect(listing.directory).toBe(directory);
@@ -116,7 +116,7 @@ describe('SceneFileStore', () => {
     expect(listing.unreadable.map((entry) => path.basename(entry.file)).sort()).toEqual(['broken.json', 'wrong.json']);
     expect(listing.unreadable.find((entry) => entry.file.endsWith('wrong.json'))?.error).toMatch(/schema must be "cjs-scene\/1"/);
 
-    expect((await store.Get('by-hand'))?.scene.name).toBe('Something Else');
+    expect((await store.Get('by-hand'))?.document.name).toBe('Something Else');
     await expect(store.Get('broken')).rejects.toThrow(/broken\.json is not a valid scene/);
     await expect(store.Put('broken', DUEL)).rejects.toThrow(/is not a readable scene/);
   });

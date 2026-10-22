@@ -1,5 +1,5 @@
 import type { Maybe } from '@dereekb/util';
-import { isPlainObject, readId, readString, reportUnknownKeys } from '../json';
+import { isPlainObject, readId, readList, readOptionalString, readString, reportUnknownKeys } from '../json';
 import { type SceneFleet, type SceneSquad, type SceneSquadAnchor, type SceneWing, SQUAD_ROLES, type SquadRole } from './fleet';
 import { toFleetAnchors } from './membership';
 
@@ -139,7 +139,7 @@ function normalizeSquad(input: unknown, where: string, report: Report): Maybe<Sc
   reportUnknownKeys(input, SQUAD_KEYS, where, report.warnings);
   const id = readId(input['id'], `${where}.id`, report.problems);
   const name = readOptionalString(input['name'], `${where}.name`, report.problems);
-  const role = readRole(input['role'], `${where}.role`, report.problems);
+  const role = readSquadRole(input['role'], `${where}.role`, report.problems);
   const commander = readOptionalString(input['commander'], `${where}.commander`, report.problems);
   const members = readList(input['members'], `${where}.members`, report.problems).map((member, index) => readString(member, `${where}.members[${index}]`, report.problems));
   const anchor = normalizeAnchor(input['anchor'], `${where}.anchor`, report);
@@ -273,18 +273,15 @@ function checkAnchorLoops(fleet: SceneFleet, where: string, problems: string[]):
   }
 }
 
-function readOptionalString(value: unknown, where: string, problems: string[]): Maybe<string> {
-  return value == null ? null : readString(value, where, problems);
-}
-
-function readList(value: unknown, where: string, problems: string[]): unknown[] {
-  let list: unknown[] = [];
-  if (Array.isArray(value)) list = value;
-  else if (value != null) problems.push(`${where} must be an array`);
-  return list;
-}
-
-function readRole(value: unknown, where: string, problems: string[]): SquadRole {
+/**
+ * Reads a squad role, case-insensitively.
+ *
+ * @param value - The candidate role.
+ * @param where - Where it sits, for messages.
+ * @param problems - Receives the problem when it is not one of SQUAD_ROLES.
+ * @returns The lower-cased role (unchecked when there is a problem).
+ */
+export function readSquadRole(value: unknown, where: string, problems: string[]): SquadRole {
   const role = typeof value === 'string' ? value.trim().toLowerCase() : '';
   const known = (SQUAD_ROLES as readonly string[]).includes(role);
   if (!known) problems.push(`${where} must be one of ${SQUAD_ROLES.join(', ')}`);

@@ -1,7 +1,8 @@
 import type { Maybe } from '@dereekb/util';
-import { ID_PATTERN, isPlainObject, type JsonObject, readNumber, readString, reportUnknownKeys, sameJson } from './json';
+import { DNA_PATTERN, ID_PATTERN, isPlainObject, type JsonObject, readNumber, readShipType, readString, readVector, reportUnknownKeys, sameJson } from './json';
 import { FLEET_OPERATIONS, type FleetOperationContext, applyFleetOperation, normalizeFleets, removeShipFromFleets, type SceneFleet, toFleetMemberships } from './fleets';
 import { type HullStatOverrides, normalizeHullStatOverrides } from './stats';
+import { applyFleetCompositionOperation, FLEET_COMPOSITION_OPERATIONS } from './compositions/operation';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -139,12 +140,7 @@ const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rot
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
-/**
- * hull:faction:race, then optional `:command?args` segments.
- */
-const DNA_PATTERN = /^[^:\s]+:[^:\s]+:[^:\s]+(:\S+)*$/u;
 const UNIVERSE_PATTERN = /^res:\/.+\.(black|red)$/iu;
-const MAX_TYPE_NAME_LENGTH = 100;
 
 /**
  * A document that cannot be used, with every problem found rather than the first.
@@ -242,7 +238,8 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
  *   { op: "rename", name }
- *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander? } }   { op: "remove_fleet", fleet }
+ *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander? } }
+ *   { op: "remove_fleet", fleet, withShips? }   withShips: true also removes every ship holding a position in it
  *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander? } }   { op: "remove_wing", fleet, wing }
  *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor? } }
  *   { op: "remove_squad", fleet, squad }
@@ -250,6 +247,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_anchor", fleet, squad, anchor: { ship?, range? } }   merged; null resets ship to the FC and range to the role default
  *                                       a ship taken out of a squad falls squads anchored on it back to their squad
  *                                       commander, then wing commander, then the FC, with a warning
+ *   { op: "add_fleet_composition", composition, position, heading? | facing?, fleet?, team? }
+ *                                       adds a cjs-fleet/1 composition's ships in formation and its fleet, with free
+ *                                       ids; every ship line needs its dna (see compositions/operation.ts)
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -319,6 +319,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       break;
     default:
       if (FLEET_OPERATIONS.has(String(operation['op']))) applyFleetOperation(operation, context);
+      else if (FLEET_COMPOSITION_OPERATIONS.has(String(operation['op']))) applyFleetCompositionOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
@@ -434,20 +435,4 @@ function normalizeShip(input: unknown, where: string, problems: string[], warnin
     warnings.push(`${where}.pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot`);
   }
   return ship;
-}
-
-function readShipType(value: unknown, where: string, problems: string[]): number | string {
-  let type: number | string = '';
-  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) type = value;
-  else if (typeof value === 'string' && value.trim() && value.trim().length <= MAX_TYPE_NAME_LENGTH) type = value.trim();
-  else problems.push(`${where} must be a positive integer type id or an EVE type name`);
-  return type;
-}
-
-function readVector(value: unknown, where: string, problems: string[]): SceneVector {
-  if (Array.isArray(value) && value.length === 3 && value.every((component) => typeof component === 'number' && Number.isFinite(component))) {
-    return [value[0], value[1], value[2]];
-  }
-  problems.push(`${where} must be an array of three finite numbers`);
-  return [0, 0, 0];
 }

@@ -53,7 +53,7 @@ An nx workspace:
 
 | Project | Path | Builds | Holds |
 |---|---|---|---|
-| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema, the tool list, and the ship stats math and its pilot context, shared by the hub and the page |
+| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema, fleets and their formation, fleet compositions (`cjs-fleet/1`) with the TFIs example, the tool list, and the ship stats math and its pilot context, shared by the hub and the page |
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI and `verify-page` |
 | `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, the Destiny world and its clock, storage, hub link; node specs for the clock and the Destiny wiring |
 
@@ -98,6 +98,8 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `get_scene` | page | the current document |
 | `patch_scene` | page | edits by operation (ships, camera, environment, rename, fleets) |
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
+| `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
+| `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
 | `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), orders, distances, the simulation tick, fleet membership and the fleet tree |
 | `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, or stop (see Movement) |
 | `screenshot` | page | the next frame as a PNG |
@@ -381,7 +383,7 @@ up"). Both are stored as written, so an omitted value follows a new FC or role.
 
 | Op | Shape | Notes |
 | --- | --- | --- |
-| `add_fleet` / `update_fleet` / `remove_fleet` | `{ fleet }` / `{ fleet, set: { name?, commander? } }` / `{ fleet }` | an old FC left holding no position leaves the fleet |
+| `add_fleet` / `update_fleet` / `remove_fleet` | `{ fleet }` / `{ fleet, set: { name?, commander? } }` / `{ fleet, withShips? }` | an old FC left holding no position leaves the fleet; `withShips: true` also removes every ship holding a position in the fleet |
 | `add_wing` / `update_wing` / `remove_wing` | `{ fleet, wing }` / `{ fleet, wing, set: { name?, commander? } }` / `{ fleet, wing }` | removing a wing removes its squads |
 | `add_squad` / `update_squad` / `remove_squad` | `{ fleet, wing, squad }` / `{ fleet, squad, set: { name?, role?, commander?, anchor? } }` / `{ fleet, squad }` | `add_squad` never moves ships; `update_squad` replaces `anchor` whole |
 | `move_to_squad` | `{ ships, fleet, squad }` | leaves the old squad (and its command), a wing command for another wing, and another fleet |
@@ -390,7 +392,8 @@ up"). Both are stored as written, so an omitted value follows a new FC or role.
 
 `null` in a `set` clears that field. Ids and child lists cannot be set: use the
 remove/add and the child ops. Removing a fleet, wing or squad keeps its ships in
-the scene.
+the scene, unless `remove_fleet` has `withShips: true`. `add_fleet_composition`
+adds a whole fleet with its ships (see Fleet compositions).
 
 **Removal and fallback.** Removing a ship (`remove_ship`) takes it out of its
 fleet automatically, as it clears `camera.target`. Whenever an edit takes a ship
@@ -408,6 +411,139 @@ keeps range on under the rules above; `null` for the FC). Ships in no fleet have
 none of these keys. `fleets` is the fleet tree with `ships` (every ship holding a
 position) and each squad's anchor resolved; `scene.fleets` counts them. An edit's
 `changes.regrouped` counts the ships whose membership changed.
+
+## Fleet compositions
+
+A fleet composition (`cjs-fleet/1`) is a doctrine fleet written once and dropped
+into a scene as often as wanted: an FC, wings, and squads of hull lines with
+counts, roles and anchors. Adding one to the scene already loaded is the main
+use; the code is in `packages/scene/src/lib/compositions/`.
+
+```json
+{
+  "schema": "cjs-fleet/1",
+  "id": "tfis",
+  "name": "TFIs",
+  "source": "https://my.minmatar.org/ships/doctrines/13-tfis/",
+  "commander": { "hull": "Tempest Fleet Issue", "dna": "mb2_t1:minmatarnavy:minmatar", "radius": 250, "name": "FC", "fit": "tfi" },
+  "wings": [
+    { "id": "mainline", "name": "Mainline", "squads": [
+      { "id": "dps-a", "name": "DPS A", "role": "dps", "ships": [{ "hull": "Tempest Fleet Issue", "count": 10, "propMod": "500MN Cold-Gas Enduring Microwarpdrive", "fit": "tfi" }] },
+      { "id": "ewar", "name": "Bhaalgorns", "role": "ewar", "anchor": { "range": 2500 }, "ships": [{ "hull": "Bhaalgorn", "count": 3 }, { "hull": "Vindicator", "count": 2 }] }
+    ] },
+    { "id": "logistics", "squads": [{ "id": "logi", "role": "logi", "ships": [{ "hull": "Guardian", "count": 5 }, { "hull": "Zarmazd", "count": 3 }] }] },
+    { "id": "capitals", "squads": [{ "id": "fax", "role": "logi", "anchor": { "on": "logi", "range": 5000 }, "ships": [{ "hull": "Apostle" }] }] }
+  ],
+  "fits": { "tfi": "[Tempest Fleet Issue, [FL33T] Tempest Fleet Issue]\n..." }
+}
+```
+
+| Where | Field | Rule |
+| --- | --- | --- |
+| top | `schema` | optional; when present `cjs-fleet/1` (a scene document passed by mistake is refused) |
+| top | `id` | required: the default fleet id and ship id prefix |
+| top | `name`, `description`, `source` | optional; `name` names the fleet in the scene and the saved composition |
+| top | `commander` | required: the FC's ship (a line without `count`), in EVE's FC slot (in no squad) |
+| top | `wings` | default `[]`; an FC-only composition is valid |
+| top | `fits` | optional EFT fit text by key; each must start with a `[Hull, Fit name]` header |
+| wing | `id`, `name?`, `squads` | ids unique in the composition |
+| squad | `id`, `name?`, `role`, `anchor?`, `ships` | ids unique across wings; `fc` and `lead` are reserved; `role` is `dps`, `logi`, `tackle`, `ewar`, `boost` or `support` |
+| line | `hull` | an exact English EVE type name or type id; becomes each ship's `type`. Omitted: the hull its fit's header names |
+| line | `dna`, `radius` | the SOF DNA and the hull's EVE radius (metres); filled by `add_fleet_composition` from the EVE data when missing |
+| line | `count` | 1 to 256, default 1 |
+| line | `name`, `propMod`, `fit` | the ship name base; a prop mod name (or `mwd` / `ab`, or a type id); a key of `fits` |
+
+A line needs a `hull`, a `dna` or a `fit`; a string `hull` must match its fit's
+header. Everything is validated together, unknown keys warn and are dropped,
+and values are kept as written (a saved composition reads back as written). A
+composition holds at most 256 ships with the FC, EVE's fleet size.
+
+**Anchors.** A squad's `anchor` is `{ on?, range? }` (metres, surface to surface):
+
+| `on` | Means | Scene anchor written |
+| --- | --- | --- |
+| `fc` (default except logi) | every ship keeps `range` (default 1,000 m) on the FC | `{ range }`, or none |
+| `lead` (logi default) | the squad's first ship keeps `range` (default 30,000 m) on the FC; the rest anchor up on it at 1,000 m | `{ ship: <first ship>, range? }` |
+| a squad id | every ship keeps `range` (default the role's) on that squad's first ship | `{ ship: <its first ship>, range? }` |
+
+These are exactly the anchors the Fleets rules resolve; nothing is re-derived.
+
+**Formation.** Ships are placed at rest (`fleets/formation.ts`): each one on a
+shell at exactly its anchor range, trailing the FC's heading (the trailing pole
+first, then a Fibonacci sphere's trailing hemisphere), on an outer shell when
+the inner one is full. No two ships sit closer than `1.5 x (r1 + r2) + 100 m` on
+their EVE radii (500 m for a hull whose radius is unknown, with a warning).
+Positions are whole metres, every ship faces the heading, and the same input
+gives the same layout. Follow the FC flies these slots. Existing scene ships are
+not avoided: a warning names any new ship landing within 500 m of one.
+
+**Ids and names.** The fleet is the composition's `id` (`tfis`), or `tfis-2`,
+`tfis-3`, ... when that fleet or any of its ship ids is taken; pass `fleet` to
+pick one. Ships are `<fleet>-fc` and `<fleet>-<squad>-<nn>` (`tfis-dps-a-01`,
+`tfis-logi-08`). The FC is named `FC` (or the commander's `name`); the others
+take the line's `name` or hull, numbered within their line when it adds more
+than one (`Tempest Fleet Issue 7`, `Zarmazd 3`).
+
+**Hull names and DNA.** A line's own `dna` and `radius` always win. The
+`add_fleet_composition` tool looks up each distinct hull missing either through
+tools-core's SDE (`dna/resolve`, the SDE `radius`), so `"hull": "Zarmazd"` is
+enough when the SDE is prepared; it reports `hulls` with where each value came
+from (`composition`, `sde` or `default`). A hull it cannot resolve is refused
+when its line has no `dna`, and a line whose `dna` names another SOF hull than
+the EVE data warns. The `add_fleet_composition` patch operation is pure: it
+needs `dna` on every line and says to use the tool otherwise. The TFIs example
+carries both on every line, so it needs no tools-core.
+
+**Adding to the live scene.**
+
+```sh
+node bin/scene-director.js call add_fleet_composition '{"name":"tfis","position":[0,0,80000],"heading":180,"team":"blue"}'
+```
+
+`position` is the FC's; `heading` is yaw degrees (0 faces +Z, 90 faces +X), or
+pass `facing` (a point) instead; `fleet` and `team` are optional. The result is
+the `patch_scene` result plus `added` (`fleet`, `commander`, `ships`) and
+`hulls`. Pass `scene` (e.g. `{ "name": "tfis-battle" }`) to add to that document
+instead, with no tab: the result is returned, not shown (`load_scene` or
+`save_scene` it). The raw operation is
+`{ "op": "add_fleet_composition", "composition", "position", "heading"? | "facing"?, "fleet"?, "team"? }`
+and composes with other ops in one patch. Take the fleet out again with
+`{ "op": "remove_fleet", "fleet": "tfis", "withShips": true }`, and look at it
+with `frame_camera { "target": "tfis-fc" }`.
+
+**Saved compositions.** `save_fleet_composition` writes one JSON file per
+composition (named like saved scenes) to `--fleets <dir>` or
+`SCENE_DIRECTOR_FLEETS`, by default `scene-director/fleets` in the per-user data
+directory; `viewer_status` reports it as `fleetsDirectory`. A composition saves
+under its `name`, else its `id`. The built-in examples are listed too
+(`store: "example"`) and are read-only; a saved composition of the same name
+shadows one. `call` imports and exports them: `--in` fills `composition` for
+`save_fleet_composition` and `add_fleet_composition`, and `--out` writes the
+composition `get_fleet_composition` returns.
+
+**The TFIs example** (`compositions/examples/tfis.json`, name `tfis`) is the
+close-range armor doctrine of
+[my.minmatar.org](https://my.minmatar.org/ships/doctrines/13-tfis/), with its 13
+`[FL33T]` EFT fits. The page gives no counts; this example chooses 44 ships:
+
+| Wing | Squad | Role | Ships | Anchor |
+| --- | --- | --- | --- | --- |
+| (FC slot) | | | 1 Tempest Fleet Issue "FC" | |
+| Mainline | `dps-a`, `dps-b` | dps | 10 Tempest Fleet Issue each | FC, 1,000 m |
+| | `ewar` (Bhaalgorns) | ewar | 3 Bhaalgorn, 2 Vindicator | FC, 2,500 m |
+| | `tackle` (HICs) | tackle | 2 Devoter | FC, 1,000 m |
+| | `boost` (Boosts) | boost | 1 Damnation, 1 Eos | FC, 1,000 m |
+| Logistics | `logi` | logi | 5 Guardian, 3 Zarmazd | own lead, 30,000 m off the FC |
+| Capitals | `dreads` | dps | 2 Revelation | FC, 10,000 m |
+| | `fax` | logi | 1 Apostle (active fit) | the logi lead, 5,000 m |
+| | `carriers` | support | 1 Thanatos, 1 Nidhoggur, 1 Archon | FC, 15,000 m |
+
+DNA and radius were checked against tools-core's SDE build 3632936. The Buffer
+Apostle and the secondary (L3ARN) fits are left out.
+
+**Not applied yet.** `propMod` (the Prop mods entry), the fits (Turrets), moving
+with the FC (Follow the FC) and arriving from warp (Fleet warp-in) are stored or
+planned, not played: added fleets sit at rest in formation.
 
 ## Development
 

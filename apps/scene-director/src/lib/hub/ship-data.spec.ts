@@ -70,6 +70,14 @@ describe('ShipData', () => {
     expect((await CaughtShipDataFailure(offline.shipData.Hull({ type: 17732 }))).failure).toBe('unavailable');
   });
 
+  it('reports the DNA of a numeric type, best effort', async () => {
+    const { shipData } = MakeFakeShipData();
+    expect(await shipData.Hull({ type: 17732 })).toMatchObject({ typeID: 17732, dna: TFI_DNA, resolvedFrom: 'type' });
+    const guardian = await shipData.Hull({ type: 11987 });
+    expect(guardian.dna).toBeNull();
+    expect(guardian.name).toBe('Guardian');
+  });
+
   it('caches lookups and retries a failed one', async () => {
     const routes: Record<string, Answer> = { ...SHIP_ROUTES, [`/eve/${SDE}/types/12058?lang=en`]: 'network-error' };
     const { shipData, calls } = MakeFakeShipData(routes);

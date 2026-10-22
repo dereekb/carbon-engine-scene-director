@@ -15,7 +15,8 @@ const INSTRUCTIONS = `scene-director drives a CarbonEngineJS (EVE Online) space 
 Workflow: viewer_status -> (open the viewer URL if no tab) -> search_hulls to find hull names -> load_scene with a scene document -> screenshot to look at it -> patch_scene to adjust.
 If a page tool fails, check page_log for the browser's errors.
 ship_stats gives a hull's in-game speed, agility, signature and align time (needs tools-core's SDE).
-order_ship flies a ship (direction, goto, approach, keep-at-range, orbit, stop) at its in-game speed; get_state shows each ship's order and motion.`;
+order_ship flies a ship (direction, goto, approach, keep-at-range, orbit, stop) at its in-game speed; get_state shows each ship's order and motion.
+add_fleet_composition drops a doctrine fleet (cjs-fleet/1, inline, saved, or the built-in "tfis") into the live scene at a position and heading; list_fleet_compositions / get_fleet_composition / save_fleet_composition manage compositions.`;
 
 export interface ServeMcpOptions {
   readonly version?: string;

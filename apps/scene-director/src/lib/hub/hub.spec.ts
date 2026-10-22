@@ -5,6 +5,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { ToContent } from '../mcp/server';
 import { Hub, type HubOptions } from './hub';
+import { applySceneOperations, createEmptyScene } from '@scene-director/scene';
+import { FleetCompositionFileStore } from '../store/composition-files';
 import { SceneFileStore } from '../store/scene-files';
 import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
@@ -38,10 +40,11 @@ type Handler = (args: Record<string, unknown>) => unknown;
 
 let hub: Hub;
 
-/** A hub on a free port whose saved scene files go to a fresh temp directory. */
+/** A hub on a free port whose saved scene and fleet composition files go to fresh temp directories. */
 async function StartHub(options: Partial<HubOptions> = {}): Promise<Hub> {
   const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-hub-')));
-  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, log: () => undefined, ...options }).Start();
+  const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-fleets-')));
+  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, compositions, log: () => undefined, ...options }).Start();
 }
 
 beforeAll(async () => {
@@ -293,5 +296,39 @@ describe('ship stats', () => {
     } finally {
       await stats.Stop();
     }
+  });
+});
+
+describe('fleet compositions', () => {
+  it('add_fleet_composition resolves hull names, then forwards one patch_scene op to the tab', async () => {
+    const fleets = await StartHub({ shipData: MakeFakeShipData().shipData });
+    const patches: Record<string, unknown>[] = [];
+    const page = await ConnectPage(
+      {
+        patch_scene: (args) => {
+          patches.push(args);
+          return applySceneOperations(createEmptyScene(), args['operations']);
+        }
+      },
+      fleets
+    );
+    try {
+      const status = (await fleets.Call('viewer_status')) as { fleetsDirectory: string };
+      expect(status.fleetsDirectory).toBe(fleets.fleetCompositions.files.directory);
+      const result = (await fleets.Call('add_fleet_composition', { composition: { id: 'g', commander: { hull: 'Guardian' } }, position: [0, 0, 0], heading: 90 })) as { added: unknown; hulls: unknown[] };
+      expect(patches).toHaveLength(1);
+      const operations = patches[0]['operations'] as Record<string, unknown>[];
+      expect(operations).toHaveLength(1);
+      expect(operations[0]).toMatchObject({ op: 'add_fleet_composition', position: [0, 0, 0], heading: 90, composition: { commander: { hull: 'Guardian', dna: 'ac3_t2:carthum:amarr', radius: 80 } } });
+      expect(result.added).toEqual({ fleet: 'g', commander: 'g-fc', ships: ['g-fc'] });
+      expect(result.hulls).toEqual([{ hull: 'Guardian', typeID: 11987, dna: 'ac3_t2:carthum:amarr', radius: 80, dnaFrom: 'sde', radiusFrom: 'sde' }]);
+    } finally {
+      page.close();
+      await fleets.Stop();
+    }
+  });
+
+  it('add_fleet_composition with no tab and no scene says to open the viewer or pass scene', async () => {
+    await expect(hub.Call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0] })).rejects.toThrow(/No viewer tab is connected\. Open http.*Or pass "scene"/su);
   });
 });

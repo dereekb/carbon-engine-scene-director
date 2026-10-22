@@ -3,9 +3,22 @@
  * normalizers both import them, so neither has to import the other at run time.
  */
 
+import type { Maybe } from '@dereekb/util';
+import type { SceneVector } from './scene';
+
 export type JsonObject = Record<string, unknown>;
 
 export const ID_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/u;
+
+/**
+ * SOF DNA: hull:faction:race, then optional `:command?args` segments.
+ */
+export const DNA_PATTERN = /^[^:\s]+:[^:\s]+:[^:\s]+(:\S+)*$/u;
+
+/**
+ * The longest EVE type name a ship's `type` may give.
+ */
+export const MAX_TYPE_NAME_LENGTH = 100;
 
 /**
  * Warns about each key the object has that is not allowed; normalizers drop them by copying only known keys.
@@ -84,4 +97,63 @@ export function isPlainObject(value: unknown): value is JsonObject {
  */
 export function sameJson(a: unknown, b: unknown): boolean {
   return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Reads an optional non-empty string: null or undefined is absent.
+ *
+ * @param value - The candidate.
+ * @param where - Where it sits, for messages.
+ * @param problems - Receives the problem when it is present but not a non-empty string.
+ * @returns The trimmed string, or null when absent.
+ */
+export function readOptionalString(value: unknown, where: string, problems: string[]): Maybe<string> {
+  return value == null ? null : readString(value, where, problems);
+}
+
+/**
+ * Reads an optional list: null or undefined is an empty list.
+ *
+ * @param value - The candidate.
+ * @param where - Where it sits, for messages.
+ * @param problems - Receives the problem when it is present but not an array.
+ * @returns The list, or an empty list.
+ */
+export function readList(value: unknown, where: string, problems: string[]): unknown[] {
+  let list: unknown[] = [];
+  if (Array.isArray(value)) list = value;
+  else if (value != null) problems.push(`${where} must be an array`);
+  return list;
+}
+
+/**
+ * Reads the EVE type a ship flies as: a positive type id, or an EVE type name of at most MAX_TYPE_NAME_LENGTH.
+ *
+ * @param value - The candidate.
+ * @param where - Where it sits, for messages.
+ * @param problems - Receives the problem when it is neither.
+ * @returns The type id or trimmed name, or an empty string.
+ */
+export function readShipType(value: unknown, where: string, problems: string[]): number | string {
+  let type: number | string = '';
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value > 0) type = value;
+  else if (typeof value === 'string' && value.trim() && value.trim().length <= MAX_TYPE_NAME_LENGTH) type = value.trim();
+  else problems.push(`${where} must be a positive integer type id or an EVE type name`);
+  return type;
+}
+
+/**
+ * Reads a position or rotation: three finite numbers.
+ *
+ * @param value - The candidate.
+ * @param where - Where it sits, for messages.
+ * @param problems - Receives the problem when it is not three finite numbers.
+ * @returns The vector, or the origin.
+ */
+export function readVector(value: unknown, where: string, problems: string[]): SceneVector {
+  if (Array.isArray(value) && value.length === 3 && value.every((component) => typeof component === 'number' && Number.isFinite(component))) {
+    return [value[0], value[1], value[2]];
+  }
+  problems.push(`${where} must be an array of three finite numbers`);
+  return [0, 0, 0];
 }

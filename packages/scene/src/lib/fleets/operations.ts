@@ -57,7 +57,7 @@ export function applyFleetOperation(operation: JsonObject, context: FleetOperati
     case 'remove_fleet': {
       const fleet = requireFleet(operation['fleet'], context);
       if (fleet && operation['op'] === 'update_fleet') updateFleet(operation, { fleet, context });
-      else if (fleet) removeFrom(context.draft, 'fleets', fleet);
+      else if (fleet) removeFleet(operation, { fleet, context });
       break;
     }
     case 'add_wing':
@@ -105,6 +105,29 @@ function addFleet(operation: JsonObject, context: FleetOperationContext): void {
   if (!isPlainObject(fleet)) problems.push(`${where}.fleet must be an object`);
   else if (findFleet(draft, fleet['id'])) problems.push(`${where}: fleet "${String(fleet['id'])}" already exists`);
   else listOf(draft, 'fleets')?.push(structuredClone(fleet));
+}
+
+/**
+ * Removes a fleet; with `withShips: true` also every ship holding a position in it (clearing a camera target on one).
+ *
+ * @param operation - The remove_fleet operation.
+ * @param edit - The fleet and the context.
+ */
+function removeFleet(operation: JsonObject, edit: FleetEdit): void {
+  const { fleet, context } = edit;
+  const withShips = operation['withShips'];
+  if (withShips != null && withShips !== true) {
+    context.problems.push(`${context.where}.withShips must be true or omitted`);
+    return;
+  }
+  removeFrom(context.draft, 'fleets', fleet);
+  if (withShips) {
+    const ships = fleetShips(fleet);
+    const list = context.draft['ships'];
+    if (Array.isArray(list)) context.draft['ships'] = list.filter((ship) => !(isPlainObject(ship) && ships.has(ship['id'] as string)));
+    const camera = context.draft['camera'];
+    if (isPlainObject(camera) && ships.has(camera['target'] as string)) camera['target'] = null;
+  }
 }
 
 function updateFleet(operation: JsonObject, edit: FleetEdit): void {

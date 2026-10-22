@@ -13,12 +13,13 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import type { FleetReport, ShipFleetMembership } from '@scene-director/scene';
+import { formationSpacing, type FleetReport, type ShipFleetMembership } from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
 import { ErrorMessage, ErrorProblems } from './lib/hub/tool-call';
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
+import { FleetCompositionFileStore } from './lib/store/composition-files';
 import { SceneFileStore } from './lib/store/scene-files';
 
 /**
@@ -85,6 +86,12 @@ interface ViewerState {
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
   readonly fleets: FleetReport[];
+}
+
+interface AddedFleetResult extends Omit<SceneResult, 'scene'> {
+  readonly added: { readonly fleet: string; readonly commander: string; readonly ships: string[] };
+  readonly hulls: { readonly hull?: string; readonly radius: number; readonly dnaFrom: string; readonly radiusFrom: string }[];
+  readonly scene: { readonly name: string; readonly ships: { readonly id: string; readonly type?: string }[] };
 }
 
 interface LogEntry {
@@ -174,9 +181,10 @@ if (!status.reachable) {
   process.exit(1);
 }
 
-// Saved scene files go to a throwaway directory, never the user's.
+// Saved scene and fleet composition files go to throwaway directories, never the user's.
 const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-')));
-const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, log: () => undefined }).Start();
+const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-fleets-')));
+const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, log: () => undefined }).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'] });
 const results: string[] = [];
@@ -528,6 +536,79 @@ try {
     }
     Expect(restored, 'the reloaded tab did not restore verify-saved');
     return 'restored';
+  });
+
+  await Check('add_fleet_composition drops the TFIs fleet in formation', async () => {
+    await call('load_scene', { scene: { name: 'verify-fleets', ships: [{ id: 'bystander', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
+    const result = await call<AddedFleetResult>('add_fleet_composition', { name: 'tfis', position: [0, 0, 80000], heading: 180, team: 'blue' });
+    Expect(result.added.fleet === 'tfis' && result.added.ships.length === 44, JSON.stringify(result.added));
+    Expect(result.changes['added'] === 44, JSON.stringify(result.changes));
+    const good = rendering ? 'ready' : 'validated';
+    const bad = result.ships.filter((ship) => ship.id.startsWith('tfis-') && ship.status !== good);
+    Expect(!bad.length, `not ${good}: ${JSON.stringify(bad.slice(0, 3))}`);
+    Expect(
+      result.hulls.every((hull) => hull.dnaFrom === 'composition' && hull.radiusFrom === 'composition'),
+      JSON.stringify(result.hulls)
+    );
+
+    const hullRadius = new Map(result.hulls.map((hull) => [hull.hull, hull.radius]));
+    const radius = new Map(result.scene.ships.filter((ship) => ship.id.startsWith('tfis-')).map((ship) => [ship.id, hullRadius.get(ship.type) ?? 0]));
+    let ships: ShipState[] = [];
+    for (let attempt = 0; attempt < 50; attempt++) {
+      ships = (await call<ViewerState>('get_state')).ships.filter((ship) => radius.has(ship.id));
+      if (ships.length === 44 && ships.every((ship) => ship.position)) break;
+      await Delay(100);
+    }
+    Expect(ships.length === 44 && ships.every((ship) => ship.position), `${ships.length} tfis ships with positions`);
+    const at = new Map(ships.map((ship) => [ship.id, ship]));
+    const fc = at.get('tfis-fc');
+    Expect(fc?.anchor === null && JSON.stringify(fc.commands) === '["fleet"]', `tfis-fc: ${JSON.stringify(fc)}`);
+    const anchors: [string, object][] = [
+      ['tfis-dps-a-01', { ship: 'tfis-fc', range: 1000 }],
+      ['tfis-logi-02', { ship: 'tfis-logi-01', range: 1000 }],
+      ['tfis-fax-01', { ship: 'tfis-logi-01', range: 5000 }]
+    ];
+    for (const [id, anchor] of anchors) Expect(JSON.stringify(at.get(id)?.anchor) === JSON.stringify(anchor), `${id}: ${JSON.stringify(at.get(id)?.anchor)}`);
+
+    const origin = fc?.position ?? [0, 0, 0];
+    let smallestGap = Infinity;
+    for (const [index, a] of ships.entries()) {
+      Expect(origin[2] - (a.position?.[2] ?? 0) <= 1, `${a.id} is ahead of the FC: ${JSON.stringify(a.position)}`);
+      for (const b of ships.slice(index + 1)) {
+        const [ra, rb] = [radius.get(a.id) ?? 0, radius.get(b.id) ?? 0];
+        const [pa, pb] = [a.position ?? origin, b.position ?? origin];
+        const apart = Math.hypot(pa[0] - pb[0], pa[1] - pb[1], pa[2] - pb[2]);
+        Expect(apart >= formationSpacing(ra, rb) - 1, `${a.id} and ${b.id} are ${apart.toFixed(0)} m apart`);
+        smallestGap = Math.min(smallestGap, apart - ra - rb);
+      }
+    }
+    const lead = at.get('tfis-logi-01')?.position ?? origin;
+    return `44 ships, smallest surface gap ${smallestGap.toFixed(0)} m, logi lead ${Math.hypot(lead[0] - origin[0], lead[1] - origin[1], lead[2] - origin[2]).toFixed(0)} m off the FC`;
+  });
+
+  await Check('compositions save, list, add by name with a unique id, and delete', async () => {
+    const rifter = { hull: 'Rifter', dna: 'mf1_t1:minmatarbase:minmatar', radius: 31 };
+    const mini = { id: 'tfis', commander: rifter, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ ...rifter, count: 3 }] }] }] };
+    await call('save_fleet_composition', { composition: mini, name: 'verify-mini' });
+    const listed = (await call<{ compositions: { name: string; store: string }[] }>('list_fleet_compositions')).compositions.map((entry) => `${entry.store}:${entry.name}`);
+    Expect(listed.includes('disk:verify-mini') && listed.includes('example:TFIs'), listed.join(', '));
+    const added = await call<AddedFleetResult>('add_fleet_composition', { name: 'verify-mini', position: [0, 0, -20000] });
+    Expect(added.added.fleet === 'tfis-2' && added.changes['added'] === 4, JSON.stringify({ added: added.added, changes: added.changes }));
+    const removed = await call<SceneResult>('patch_scene', { operations: [{ op: 'remove_fleet', fleet: 'tfis-2', withShips: true }] });
+    Expect(removed.changes['removed'] === 4, JSON.stringify(removed.changes));
+    Expect((await call<{ deleted: boolean }>('delete_fleet_composition', { name: 'verify-mini' })).deleted, 'not deleted');
+    return 'fleet tfis-2 added and removed';
+  });
+
+  await Check('add_fleet_composition resolves a hull name through the EVE data', async () => {
+    const added = await call<AddedFleetResult>('add_fleet_composition', { composition: { id: 'named', commander: { hull: 'Rifter' }, wings: [] }, position: [0, 0, -40000] }).catch((error: unknown) => {
+      if (/cjs-sde-prepare/u.test(`${ErrorMessage(error)} ${(ErrorProblems(error) ?? []).join(' ')}`)) throw new Skipped('the SDE is not prepared');
+      throw error;
+    });
+    const [hull] = added.hulls;
+    Expect(hull?.dnaFrom === 'sde' && hull.radiusFrom === 'sde' && added.added.fleet === 'named', JSON.stringify(added.hulls));
+    await call('patch_scene', { operations: [{ op: 'remove_fleet', fleet: 'named', withShips: true }] });
+    return `Rifter radius ${hull.radius} m`;
   });
 
   if (rendering) {

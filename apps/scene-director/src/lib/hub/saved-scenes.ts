@@ -141,9 +141,9 @@ export class SavedScenes {
       if (saved) {
         const opened = { opened: saved.name, store: 'disk', file: saved.file };
         if (!this.page.Connected()) {
-          return { ...opened, loaded: false, scene: saved.scene, note: 'No viewer tab is connected, so the scene was read but not shown; open the viewer and call open_scene again to show it.' };
+          return { ...opened, loaded: false, scene: saved.document, note: 'No viewer tab is connected, so the scene was read but not shown; open the viewer and call open_scene again to show it.' };
         }
-        return { ...opened, ...((await this.page.Call('load_scene', { scene: saved.scene })) as object) };
+        return { ...opened, ...((await this.page.Call('load_scene', { scene: saved.document })) as object) };
       }
       if (store === 'disk' || !this.page.Connected()) {
         const browser = store === 'disk' ? '' : ", and no viewer tab is connected to look in the browser's storage";

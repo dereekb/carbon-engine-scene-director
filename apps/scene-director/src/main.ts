@@ -6,12 +6,16 @@
  *                        is written to --out (default screenshot.png) instead of printed.
  *                        --in reads a scene file into the "scene" argument (import:
  *                        `call save_scene --in duel.json`); --out writes the scene a result
- *                        carries to a file (export: `call open_scene '{"name":"duel"}' --out duel.json`)
+ *                        carries to a file (export: `call open_scene '{"name":"duel"}' --out duel.json`).
+ *                        For save_fleet_composition and add_fleet_composition --in fills "composition"
+ *                        instead (`call save_fleet_composition --in tfis.json`), and --out writes the
+ *                        composition get_fleet_composition returns
  *
  * Options: --port <n> (5520), --host <addr> (127.0.0.1), --tools-core <url> (http://127.0.0.1:5510),
  *          --build <exact EVE build> (resolved from tools-core "latest" when omitted),
  *          --viewer <dir> (the built viewer; dist/apps/viewer beside this bundle by default),
- *          --scenes <dir> (saved scene files; a scene-director/scenes folder in the per-user data directory by default)
+ *          --scenes <dir> (saved scene files; a scene-director/scenes folder in the per-user data directory by default),
+ *          --fleets <dir> (saved fleet compositions; a scene-director/fleets folder in the per-user data directory by default)
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -23,9 +27,15 @@ import { SceneOf } from './lib/hub/saved-scenes';
 import { ErrorMessage, ErrorProblems, type ToolCaller } from './lib/hub/tool-call';
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
 import { ImageOf, ServeMcp } from './lib/mcp/server';
+import { defaultFleetCompositionsDirectory, FleetCompositionFileStore } from './lib/store/composition-files';
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
-const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--in scene.json] [--out file]\n';
+const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--in scene.json] [--out file]\n';
+
+/**
+ * The tools whose --in file is a fleet composition rather than a scene.
+ */
+const COMPOSITION_INPUT_TOOLS = new Set(['save_fleet_composition', 'add_fleet_composition']);
 
 /**
  * The value after a command-line flag.
@@ -44,6 +54,7 @@ const host = Option('--host', process.env['SCENE_DIRECTOR_HOST'] ?? '127.0.0.1')
 const port = Number(Option('--port', process.env['SCENE_DIRECTOR_PORT'] ?? String(DEFAULT_PORT)));
 const viewerDirectory = Option('--viewer', process.env['SCENE_DIRECTOR_VIEWER'] ?? path.resolve(import.meta.dirname, '../viewer'));
 const scenes = new SceneFileStore(Option('--scenes', process.env['SCENE_DIRECTOR_SCENES'] || DefaultScenesDirectory()));
+const compositions = new FleetCompositionFileStore(Option('--fleets', process.env['SCENE_DIRECTOR_FLEETS'] || defaultFleetCompositionsDirectory()));
 const toolsCore = new ToolsCore({
   url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
   build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
@@ -55,12 +66,12 @@ const toolsCore = new ToolsCore({
  * @returns The hub to send calls to.
  */
 async function StartHubOrJoin(): Promise<ToolCaller> {
-  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, log: LogToStderr });
+  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, log: LogToStderr });
   try {
     return await hub.Start();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
-    LogToStderr(`port ${port} is in use; joining the hub there as a controller (its scenes directory applies, not ${scenes.directory})`);
+    LogToStderr(`port ${port} is in use; joining the hub there as a controller (its scenes and fleets directories apply, not ${scenes.directory} and ${compositions.directory})`);
     return new RemoteHub({ host, port, log: LogToStderr });
   }
 }
@@ -69,7 +80,7 @@ async function StartHubOrJoin(): Promise<ToolCaller> {
  * Runs the hub until SIGINT or SIGTERM.
  */
 async function Serve(): Promise<void> {
-  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, log: LogToStderr }).Start();
+  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, log: LogToStderr }).Start();
   const stop = async (): Promise<void> => {
     await hub.Stop();
     process.exit(0);
@@ -100,11 +111,11 @@ async function CallOnce(name: string): Promise<void> {
     const argsText = process.argv[4] && !process.argv[4].startsWith('--') ? process.argv[4] : '{}';
     const args = JSON.parse(argsText) as Record<string, unknown>;
     const input = Option('--in', null);
-    if (input) args['scene'] = JSON.parse(await readFile(input, 'utf8')) as unknown;
+    if (input) args[COMPOSITION_INPUT_TOOLS.has(name) ? 'composition' : 'scene'] = JSON.parse(await readFile(input, 'utf8')) as unknown;
     const value = await remote.Call(name, args);
     const image = ImageOf(value);
     const out = Option('--out', null);
-    const scene = out ? SceneOf(value) : null;
+    const scene = out ? (name === 'get_fleet_composition' ? ((value as { composition?: object }).composition ?? null) : SceneOf(value)) : null;
     if (image) {
       const file = out ?? 'screenshot.png';
       await writeFile(file, Buffer.from(image.data, 'base64'));
@@ -112,7 +123,7 @@ async function CallOnce(name: string): Promise<void> {
       process.stdout.write(`${JSON.stringify({ ...rest, written: file }, null, 2)}\n`);
     } else if (out && scene) {
       await writeFile(out, `${JSON.stringify(scene, null, 2)}\n`);
-      const summary = scene === value ? { name: (scene as { name?: unknown }).name } : { ...(value as object), scene: undefined };
+      const summary = scene === value ? { name: (scene as { name?: unknown }).name } : { ...(value as object), scene: undefined, composition: undefined };
       process.stdout.write(`${JSON.stringify({ ...summary, written: out }, null, 2)}\n`);
     } else {
       if (out) process.stderr.write(`${name} returned no scene or image, so nothing was written to ${out}\n`);

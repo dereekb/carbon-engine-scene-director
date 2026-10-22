@@ -211,7 +211,7 @@ export class ShipData implements ShipDataApi {
   private async ResolveType({ dna, type }: HullLookup): Promise<ResolvedType> {
     let resolved: Promise<ResolvedType>;
     if (typeof type === 'number') {
-      resolved = Promise.resolve({ typeID: type, dna: dna ?? null, resolvedFrom: 'type', candidates: [] });
+      resolved = this.resolveTypeID(type, dna ?? null);
     } else if (typeof type === 'string' && type.trim()) {
       resolved = this.ResolveTypeName(type.trim());
     } else if (dna) {
@@ -220,6 +220,23 @@ export class ShipData implements ShipDataApi {
       resolved = Promise.reject(new ShipDataError('invalid', 'name the hull by dna or type'));
     }
     return resolved;
+  }
+
+  /**
+   * A type id's lookup; without a DNA it asks tools-core for the type's DNA, best effort (a failure leaves it null).
+   *
+   * @param typeID - The EVE type id.
+   * @param dna - The DNA the lookup gave, if any.
+   * @returns The type and its DNA.
+   */
+  private async resolveTypeID(typeID: number, dna: Maybe<string>): Promise<ResolvedType> {
+    const found =
+      dna ??
+      (await this.Cached(`typeid:${typeID}`, () => this.GetJson({ route: `dna/resolve?typeID=${typeID}`, what: `type ${typeID}'s DNA` })).then(
+        (body) => (typeof body['dna'] === 'string' ? body['dna'] : null),
+        () => null
+      ));
+    return { typeID, dna: found, resolvedFrom: 'type', candidates: [] };
   }
 
   private async ResolveTypeName(name: string): Promise<ResolvedType> {

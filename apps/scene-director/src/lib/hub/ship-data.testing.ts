@@ -73,6 +73,7 @@ export const SHIP_ROUTES: Record<string, Answer> = {
   },
   [`/eve/${SDE}/dna/search?q=${encodeURIComponent('zz9_t1:nobody:amarr')}&limit=50`]: { json: { query: 'zz9_t1:nobody:amarr', total: 0, matches: [] } },
   [`/eve/${SDE}/dna/resolve?name=Guardian`]: { json: { typeID: '11987', graphicID: '1916', skinID: null, dna: 'ac3_t2:carthum:amarr' } },
+  [`/eve/${SDE}/dna/resolve?typeID=17732`]: { json: { typeID: '17732', graphicID: '11777', skinID: null, dna: TFI_DNA } },
   [`/eve/${SDE}/dna/resolve?name=Tempest`]: { status: 409, json: { error: 'SDE name "Tempest" is ambiguous' } },
   ...Hull({ typeID: 17732, name: 'Tempest Fleet Issue', group: 'Battleship', mass: 103_300_000, radius: 250, base: { maxVelocity: 130, agility: 0.115, warpSpeedMultiplier: 3, signatureRadius: 350 }, dogma: { 1547: 3 } }),
   ...Hull({ typeID: 11987, name: 'Guardian', group: 'Logistics', mass: 11_980_000, radius: 80, base: { maxVelocity: 209, agility: 0.61, warpSpeedMultiplier: 4, signatureRadius: 70 }, dogma: { 1547: 2 } }),

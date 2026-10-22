@@ -26,7 +26,9 @@ import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { findTool, SceneError } from '@scene-director/scene';
+import { FleetCompositionFileStore } from '../store/composition-files';
 import { SceneFileStore } from '../store/scene-files';
+import { FleetCompositions } from './fleet-compositions';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
 import { AnswerShipStats } from './ship-stats-tool';
@@ -73,6 +75,10 @@ export interface HubOptions {
    */
   readonly scenes?: SceneFileStore;
   /**
+   * Saved fleet compositions on disk; the per-user default directory when omitted.
+   */
+  readonly compositions?: FleetCompositionFileStore;
+  /**
    * Hull and prop mod values from tools-core's SDE; read from `toolsCore.url` when omitted.
    */
   readonly shipData?: ShipDataApi;
@@ -118,6 +124,7 @@ export class Hub implements ToolCaller {
   readonly toolsCore: ToolsCoreApi;
   readonly viewerDirectory: Maybe<string>;
   readonly savedScenes: SavedScenes;
+  readonly fleetCompositions: FleetCompositions;
   readonly shipData: ShipDataApi;
   private readonly log: (line: string) => void;
   private readonly pages: WebSocket[] = [];
@@ -127,20 +134,19 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), shipData, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
     this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
-    this.savedScenes = new SavedScenes({
-      files: scenes,
-      page: {
-        Connected: () => this.pages.length > 0,
-        NotConnected: () => this.NotConnected(),
-        Call: (name, args) => this.CallPage(name, args)
-      }
-    });
+    const page = {
+      Connected: () => this.pages.length > 0,
+      NotConnected: () => this.NotConnected(),
+      Call: (name: string, args?: ToolArgs) => this.CallPage(name, args)
+    };
+    this.savedScenes = new SavedScenes({ files: scenes, page });
+    this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, page });
     this.log = log;
   }
 
@@ -173,7 +179,7 @@ export class Hub implements ToolCaller {
       });
     });
     this.port = (server.address() as AddressInfo).port;
-    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory})`);
+    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
     this.toolsCore.ResolveBuild().then(
       (build) => this.log(`EVE resource build ${build}`),
@@ -240,7 +246,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'viewer_status':
@@ -249,6 +255,7 @@ export class Hub implements ToolCaller {
           connectedTabs: this.pages.length,
           toolsCore: await this.toolsCore.Status(),
           scenesDirectory: this.savedScenes.files.directory,
+          fleetsDirectory: this.fleetCompositions.files.directory,
           hint: this.pages.length ? undefined : `Open ${this.url} in Chrome or Edge on this machine.`
         };
       case 'page_log': {

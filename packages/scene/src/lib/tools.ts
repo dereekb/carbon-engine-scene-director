@@ -8,7 +8,8 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { DEFAULT_ANCHOR_RANGES, DEFAULT_ANCHOR_UP_RANGE, SQUAD_ROLES } from './fleets';
+import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, FLEET_COMPOSITION_SCHEMA, MAX_FLEET_SHIPS } from './compositions/composition';
+import { DEFAULT_ANCHOR_RANGES, DEFAULT_ANCHOR_UP_RANGE, DEFAULT_FORMATION_RADIUS, FORMATION_GAP, FORMATION_SPACING, SQUAD_ROLES } from './fleets';
 import { APPROACH_RANGE, MAX_ORDER_RANGE, SHIP_ORDER_TYPES } from './orders';
 import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 
@@ -48,6 +49,27 @@ dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find 
 "type" (EVE type id or name) and "stats" ({ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional) set a ship's flight numbers; ship_stats shows them.
 "orders" and "pilot" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.
 "fleets" (optional) groups ships into EVE fleets: [{ "id", "name"?, "commander": "<FC ship id>", "wings": [{ "id", "name"?, "commander"?, "squads": [{ "id", "name"?, "role": "${SQUAD_ROLES.join('|')}", "commander"?: "<a member>", "members": ["<ship id>"], "anchor"?: { "ship"?: "<ship id; default the FC>", "range"?: <metres, surface to surface; default logi ${DEFAULT_ANCHOR_RANGES.logi}, others ${DEFAULT_ANCHOR_UP_RANGE}> } }] }] }]. A squad anchored on one of its own members (a logi anchor) puts that ship at range off the FC, and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m. A ship holds positions in one fleet and sits in at most one squad. Fleets are stored and reported by get_state; ships do not follow yet. "team" is independent of fleets.`;
+
+const FLEET_COMPOSITION_FORMAT = `Fleet composition (${FLEET_COMPOSITION_SCHEMA}): a doctrine fleet to drop into a scene. Metres.
+{
+  "schema": "${FLEET_COMPOSITION_SCHEMA}",
+  "id": "tfis",
+  "name": "TFIs",
+  "commander": { "hull": "Tempest Fleet Issue", "dna": "mb2_t1:minmatarnavy:minmatar", "radius": 250, "name": "FC" },
+  "wings": [
+    { "id": "mainline", "name": "Mainline", "squads": [
+      { "id": "dps-a", "role": "dps", "ships": [{ "hull": "Tempest Fleet Issue", "count": 10, "propMod": "500MN Cold-Gas Enduring Microwarpdrive", "fit": "tfi" }] },
+      { "id": "ewar", "role": "ewar", "anchor": { "range": 2500 }, "ships": [{ "hull": "Bhaalgorn", "count": 3 }, { "hull": "Vindicator", "count": 2 }] }
+    ] },
+    { "id": "logistics", "squads": [{ "id": "logi", "role": "logi", "ships": [{ "hull": "Guardian", "count": 5 }, { "hull": "Zarmazd", "count": 3 }] }] },
+    { "id": "capitals", "squads": [{ "id": "fax", "role": "logi", "anchor": { "on": "logi", "range": 5000 }, "ships": [{ "hull": "Apostle" }] }] }
+  ],
+  "fits": { "tfi": "[Tempest Fleet Issue, Fleet TFI]\\n<EFT text>" }
+}
+A ship line is { "hull": "<EVE type name or type id>", "count"?: 1, "dna"?: "<SOF DNA>", "radius"?: <the hull's EVE radius>, "name"?, "propMod"?, "fit"?: "<key of fits>" }; the commander is a line without count. role is ${SQUAD_ROLES.join('|')}.
+anchor is { "on"?: "${COMPOSITION_ANCHOR_FC}" | "${COMPOSITION_ANCHOR_LEAD}" | "<squad id>", "range"?: <metres, surface to surface> }. Defaults: squads keep ${DEFAULT_ANCHOR_UP_RANGE} m on the FC; logi default to "${COMPOSITION_ANCHOR_LEAD}": their first ship keeps ${DEFAULT_ANCHOR_RANGES.logi} m on the FC and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m; "on" a squad id anchors on that squad's first ship.
+Ships are placed at rest in formation: each at its anchor range on shells trailing the FC's heading, at least ${FORMATION_SPACING} x (r1 + r2) + ${FORMATION_GAP} m apart on EVE radii (${DEFAULT_FORMATION_RADIUS} m when unknown), all facing the heading. Ids: fleet "<id>" (numbered "<id>-2", ... when taken), ships "<fleet>-fc" and "<fleet>-<squad>-<nn>". At most ${MAX_FLEET_SHIPS} ships with the FC.
+Fits (EFT text) and prop mods are stored for later entries, not applied yet.`;
 
 const STORE_ARGUMENT = {
   type: 'string',
@@ -129,12 +151,13 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "set_camera", "camera": { ...fields to change } }
 { "op": "set_environment", "environment": { "universe": "res:/..." } }   (reloads the page)
 { "op": "rename", "name": "<name>" }
-{ "op": "add_fleet", "fleet": { ...fleet } }   { "op": "update_fleet", "fleet": "<id>", "set": { "name"?, "commander"? } }   { "op": "remove_fleet", "fleet": "<id>" }
+{ "op": "add_fleet", "fleet": { ...fleet } }   { "op": "update_fleet", "fleet": "<id>", "set": { "name"?, "commander"? } }   { "op": "remove_fleet", "fleet": "<id>", "withShips"?: true }
 { "op": "add_wing", "fleet": "<id>", "wing": { ...wing } }   { "op": "update_wing", "fleet", "wing": "<id>", "set": { "name"?, "commander"? } }   { "op": "remove_wing", "fleet", "wing" }
 { "op": "add_squad", "fleet", "wing", "squad": { ...squad } }   { "op": "update_squad", "fleet", "squad": "<id>", "set": { "name"?, "role"?, "commander"?, "anchor"? } }   { "op": "remove_squad", "fleet", "squad" }
 { "op": "move_to_squad", "ships": ["<id>"], "fleet", "squad" }   { "op": "remove_from_fleet", "ships": ["<id>"] }
 { "op": "set_anchor", "fleet", "squad", "anchor": { "ship"?, "range"? } }   (merged; null resets ship to the FC and range to the role default)
-Taking a ship out of a squad (remove_ship, remove_from_fleet, move_to_squad, remove_squad, remove_wing) falls a squad anchored on it back to its squad commander, then its wing commander, then the FC, with a warning; a fleet commander must be replaced (update_fleet) or its fleet removed first. Removing a fleet, wing or squad keeps its ships in the scene.
+{ "op": "add_fleet_composition", "composition": { ...${FLEET_COMPOSITION_SCHEMA} }, "position": [x, y, z], "heading"?: <yaw degrees> | "facing"?: [x, y, z], "fleet"?: "<fleet id>", "team"? }   (needs dna on every ship line; the add_fleet_composition tool resolves hull names and saved names first)
+Taking a ship out of a squad (remove_ship, remove_from_fleet, move_to_squad, remove_squad, remove_wing) falls a squad anchored on it back to its squad commander, then its wing commander, then the FC, with a warning; a fleet commander must be replaced (update_fleet) or its fleet removed first. Removing a fleet, wing or squad keeps its ships in the scene, unless remove_fleet has "withShips": true.
 Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it.
 Removing a ship stops the ships approaching, keeping range on or orbiting it (changes.stopped counts them).`,
     inputSchema: {
@@ -173,6 +196,55 @@ Removing a ship stops the ships approaching, keeping range on or orbiting it (ch
     where: 'hub',
     description: "Deletes a saved scene by name. Without store it deletes the disk file when there is one, otherwise the browser's save.",
     inputSchema: { type: 'object', properties: { name: { type: 'string' }, store: STORE_ARGUMENT }, required: ['name'] }
+  },
+  {
+    name: 'add_fleet_composition',
+    where: 'hub',
+    description: `Adds a fleet composition to the viewer's live scene: its ships in formation around the FC at position, facing heading (yaw degrees, 0 faces +Z, 90 faces +X) or the facing point, plus its fleet, with ids free in the scene. Give the composition inline or the name of a saved one or a built-in example ("tfis", the TFIs armor doctrine, 44 ships). Hull names without dna or radius are resolved through tools-core's EVE data (needs its SDE). Pass scene to add to that document instead of the viewer's, with no tab: the result is returned, not shown (load_scene or save_scene it). Returns added (fleet, commander, ships), hulls (each hull's dna and radius and where they came from), and the patch_scene result. Remove it again with patch_scene remove_fleet "withShips": true; frame_camera on "<fleet>-fc" looks at it.
+${FLEET_COMPOSITION_FORMAT}`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        composition: { type: 'object', description: `A ${FLEET_COMPOSITION_SCHEMA} composition. Give this or name.` },
+        name: { type: 'string', description: 'A saved composition or built-in example. Give this or composition.' },
+        position: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: "The FC's [x, y, z] in metres." },
+        heading: { type: 'number', description: 'The fleet heading, yaw degrees. Default 0.' },
+        facing: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'A point the fleet faces, instead of heading.' },
+        fleet: { type: 'string', description: "The fleet id. Default the composition's id, numbered when taken." },
+        team: { type: 'string', description: 'The team every added ship is on.' },
+        scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
+      },
+      required: ['position']
+    }
+  },
+  {
+    name: 'save_fleet_composition',
+    where: 'hub',
+    description: `Saves a fleet composition as a JSON file in the hub's fleets directory, under name (default its name, else its id). A saved composition shadows a built-in example of the same name. Names that differ only in case are the same composition.
+${FLEET_COMPOSITION_FORMAT}`,
+    inputSchema: {
+      type: 'object',
+      properties: { composition: { type: 'object', description: `A ${FLEET_COMPOSITION_SCHEMA} composition.` }, name: { type: 'string' } },
+      required: ['composition']
+    }
+  },
+  {
+    name: 'list_fleet_compositions',
+    where: 'hub',
+    description: 'Lists fleet compositions: the saved ones (store "disk", newest first), then the read-only built-in examples (store "example"), each with its ship and squad counts.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'get_fleet_composition',
+    where: 'hub',
+    description: 'Returns a saved fleet composition, or a built-in example, by name (or an example by id).',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+  },
+  {
+    name: 'delete_fleet_composition',
+    where: 'hub',
+    description: 'Deletes a saved fleet composition by name. Built-in examples are read-only.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
   },
   {
     name: 'get_state',

@@ -1,0 +1,230 @@
+{
+  "schema": "cjs-fleet/1",
+  "id": "tfis",
+  "name": "TFIs",
+  "description": "Close-range armor doctrine: Tempest Fleet Issue battleships with Guardian and Zarmazd logistics, Revelation dreadnoughts, an Apostle FAX and carriers, Damnation and Eos command bursts, Bhaalgorn and Vindicator support and Devoter HICs. Fits are the doctrine's [FL33T] fits from my.minmatar.org doctrine 13. The page gives no counts; this example chooses 44 ships: an FC and two DPS squads of 10 Tempest Fleet Issues, 3 Bhaalgorns and 2 Vindicators at 2.5 km, 2 Devoters, a Damnation and an Eos, 5 Guardians and 3 Zarmazds on their own lead 30 km off the FC, 2 Revelations at 10 km, an Active Apostle 5 km off the logi lead, and a Thanatos, a Nidhoggur and an Archon at 15 km. The Buffer Apostle and the secondary (L3ARN) fits are left out. DNA and radius were checked against tools-core's SDE build 3632936 on 2026-10-21.",
+  "source": "https://my.minmatar.org/ships/doctrines/13-tfis/",
+  "commander": {
+    "hull": "Tempest Fleet Issue",
+    "name": "FC",
+    "dna": "mb2_t1:minmatarnavy:minmatar",
+    "radius": 250,
+    "propMod": "500MN Cold-Gas Enduring Microwarpdrive",
+    "fit": "tfi"
+  },
+  "wings": [
+    {
+      "id": "mainline",
+      "name": "Mainline",
+      "squads": [
+        {
+          "id": "dps-a",
+          "name": "DPS A",
+          "role": "dps",
+          "ships": [
+            {
+              "hull": "Tempest Fleet Issue",
+              "count": 10,
+              "dna": "mb2_t1:minmatarnavy:minmatar",
+              "radius": 250,
+              "propMod": "500MN Cold-Gas Enduring Microwarpdrive",
+              "fit": "tfi"
+            }
+          ]
+        },
+        {
+          "id": "dps-b",
+          "name": "DPS B",
+          "role": "dps",
+          "ships": [
+            {
+              "hull": "Tempest Fleet Issue",
+              "count": 10,
+              "dna": "mb2_t1:minmatarnavy:minmatar",
+              "radius": 250,
+              "propMod": "500MN Cold-Gas Enduring Microwarpdrive",
+              "fit": "tfi"
+            }
+          ]
+        },
+        {
+          "id": "ewar",
+          "name": "Bhaalgorns",
+          "role": "ewar",
+          "anchor": {
+            "range": 2500
+          },
+          "ships": [
+            {
+              "hull": "Bhaalgorn",
+              "count": 3,
+              "dna": "ab2_t1:bloodraider:amarr",
+              "radius": 400,
+              "propMod": "500MN Quad LiF Restrained Microwarpdrive",
+              "fit": "bhaalgorn"
+            },
+            {
+              "hull": "Vindicator",
+              "count": 2,
+              "dna": "gb2_t1:serpentis:gallente",
+              "radius": 250,
+              "propMod": "500MN Quad LiF Restrained Microwarpdrive",
+              "fit": "vindicator"
+            }
+          ]
+        },
+        {
+          "id": "tackle",
+          "name": "HICs",
+          "role": "tackle",
+          "ships": [
+            {
+              "hull": "Devoter",
+              "count": 2,
+              "dna": "ac2_t2b:viziam:amarr",
+              "radius": 110,
+              "propMod": "50MN Quad LiF Restrained Microwarpdrive",
+              "fit": "devoter"
+            }
+          ]
+        },
+        {
+          "id": "boost",
+          "name": "Boosts",
+          "role": "boost",
+          "ships": [
+            {
+              "hull": "Damnation",
+              "dna": "abc1_t2a:khanidinnovation:amarr",
+              "radius": 173,
+              "propMod": "50MN Quad LiF Restrained Microwarpdrive",
+              "fit": "damnation"
+            },
+            {
+              "hull": "Eos",
+              "dna": "gbc2_t2:creodron:gallente",
+              "radius": 196,
+              "propMod": "50MN Quad LiF Restrained Microwarpdrive",
+              "fit": "eos"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "logistics",
+      "name": "Logistics",
+      "squads": [
+        {
+          "id": "logi",
+          "name": "Logi",
+          "role": "logi",
+          "ships": [
+            {
+              "hull": "Guardian",
+              "count": 5,
+              "dna": "ac3_t2:carthum:amarr",
+              "radius": 80,
+              "propMod": "10MN Afterburner II",
+              "fit": "guardian"
+            },
+            {
+              "hull": "Zarmazd",
+              "count": 3,
+              "dna": "tgc02_t2:triglavianamarr:triglavian",
+              "radius": 250,
+              "propMod": "50MN Cold-Gas Enduring Microwarpdrive",
+              "fit": "zarmazd"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "capitals",
+      "name": "Capitals",
+      "squads": [
+        {
+          "id": "dreads",
+          "name": "Dreadnoughts",
+          "role": "dps",
+          "anchor": {
+            "range": 10000
+          },
+          "ships": [
+            {
+              "hull": "Revelation",
+              "count": 2,
+              "dna": "adn1_t1:amarrbase:amarr",
+              "radius": 1700,
+              "fit": "revelation"
+            }
+          ]
+        },
+        {
+          "id": "fax",
+          "name": "FAX",
+          "role": "logi",
+          "anchor": {
+            "on": "logi",
+            "range": 5000
+          },
+          "ships": [
+            {
+              "hull": "Apostle",
+              "dna": "afaux1_t1:amarrbase:amarr",
+              "radius": 3000,
+              "fit": "apostle-active"
+            }
+          ]
+        },
+        {
+          "id": "carriers",
+          "name": "Carriers",
+          "role": "support",
+          "anchor": {
+            "range": 15000
+          },
+          "ships": [
+            {
+              "hull": "Thanatos",
+              "dna": "gca2_t1:gallentebase:gallente",
+              "radius": 1134,
+              "propMod": "10000MN Monopropellant Enduring Afterburner",
+              "fit": "thanatos"
+            },
+            {
+              "hull": "Nidhoggur",
+              "dna": "mca2_t1:minmatarbase:minmatar",
+              "radius": 1000,
+              "propMod": "10000MN Monopropellant Enduring Afterburner",
+              "fit": "nidhoggur"
+            },
+            {
+              "hull": "Archon",
+              "dna": "aca2_t1:amarrbase:amarr",
+              "radius": 1643,
+              "propMod": "10000MN Monopropellant Enduring Afterburner",
+              "fit": "archon"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "fits": {
+    "tfi": "[Tempest Fleet Issue, [FL33T] Tempest Fleet Issue]\n\nDamage Control II\nImperial Navy 1600mm Steel Plates\nImperial Navy 1600mm Steel Plates\nImperial Navy Multispectrum Energized Membrane\nCentum C-Type Kinetic Energized Membrane\nCorelum C-Type Thermal Energized Membrane\nCorpum C-Type Explosive Energized Membrane\n\n500MN Cold-Gas Enduring Microwarpdrive\nHeavy F-RX Compact Capacitor Booster\nDDO Scoped Tracking Disruptor I\nDDO Scoped Tracking Disruptor I\nWarp Disruptor II\n\n800mm Repeating Cannon II\n800mm Repeating Cannon II\nHeavy Energy Neutralizer II\n800mm Repeating Cannon II\n800mm Repeating Cannon II\nHeavy Energy Neutralizer II\n800mm Repeating Cannon II\n800mm Repeating Cannon II\n\nLarge Trimark Armor Pump I\nLarge Trimark Armor Pump I\nLarge Trimark Armor Pump I\n\n\nWarrior II x5\nRepublic Fleet Bouncer x2\nHornet EC-300 x5\n\n\nBarrage L x1800\nHail L x2000\nNavy Cap Booster 800 x18\nMissile Precision Disruption Script x2\nMissile Range Disruption Script x2\nNanite Repair Paste x250\nRepublic Fleet EMP L x1000\nRepublic Fleet Fusion L x1000\nRepublic Fleet Phased Plasma L x1000\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nOptimal Range Disruption Script x2\nTracking Speed Disruption Script x2\nMobile Depot x1\nThermal Armor Hardener II x1\nTrue Sansha EM Armor Hardener x1\nBZ-5 Scoped Gravimetric ECM x2\nEnfeebling Scoped Ladar ECM x2\nHypnos Scoped Magnetometric ECM x2\nUmbra Scoped Radar ECM x2\n100MN Afterburner II x1\nSensor Booster II x1\nSignature Radius Suppressor I x1\nStasis Webifier II x1\nWarp Scrambler II x1\nHighstroke Scoped Guidance Disruptor x2",
+    "zarmazd": "[Zarmazd, [FL33T] 50mn Zarmazd]\n\nDamage Control II\nImperial Navy 1600mm Steel Plates\nImperial Navy Multispectrum Energized Membrane\nMultispectrum Energized Membrane II\nCentum B-Type Thermal Energized Membrane\nCentum A-Type EM Energized Membrane\n\n50MN Cold-Gas Enduring Microwarpdrive\nSmall Capacitor Booster II\nThukker Medium Cap Battery\nSensor Booster II\n\nPerun Heavy Mutadaptive Remote Armor Repairer\n125mm Gatling AutoCannon II\nDrone Link Augmentor I\nAuto Targeting System I\n\nMedium Trimark Armor Pump II\nMedium Trimark Armor Pump II\n\n\nWarrior II x5\nValkyrie II x5\nMedium Armor Maintenance Bot II x5\n\n\nHail S x1000\nNavy Cap Booster 400 x33\nMissile Precision Disruption Script x2\nMissile Range Disruption Script x2\nNanite Repair Paste x100\nECCM Script x2\nScan Resolution Script x2\nTargeting Range Script x2\nOptimal Range Disruption Script x2\nTracking Speed Disruption Script x2\nStandard Mindflood Booster x2\n10MN Afterburner II x1\n10MN Monopropellant Enduring Afterburner x1\nSensor Booster II x1\nWarp Scrambler II x1\nGuidance Disruptor II x2\nTracking Disruptor II x2",
+    "guardian": "[Guardian, [FL33T] Guardian]\n\nDamage Control II\nImperial Navy 1600mm Steel Plates\nImperial Navy Multispectrum Energized Membrane\nCoreli A-Type EM Coating\nDomination Thermal Armor Hardener\n\n10MN Afterburner II\nSensor Booster II\n\nLarge Remote Armor Repairer II\nLarge Inductive Compact Remote Capacitor Transmitter\nMedium Remote Armor Repairer II\nMedium Remote Armor Repairer II\nLarge Inductive Compact Remote Capacitor Transmitter\nLarge Remote Armor Repairer II\n\nMedium Trimark Armor Pump II\nMedium Ancillary Current Router I\n\n\nWarrior II x5\n\n\nNanite Repair Paste x100\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nAgency 'Overclocker' SB3 Dose I x2\nSynth X-Instinct Booster x2\nLarge Inductive Compact Remote Capacitor Transmitter x3",
+    "revelation": "[Revelation, [FL33T] Revelation]\n\nDamage Control II\n25000mm Crystalline Carbonide Restrained Plates\n25000mm Crystalline Carbonide Restrained Plates\n25000mm Crystalline Carbonide Restrained Plates\nImperial Navy Multispectrum Energized Membrane\nHeat Sink II\nCoreli A-Type Multispectrum Coating\nHeat Sink II\n\nHeavy Capacitor Booster II\nTracking Computer II\nHeavy Capacitor Booster II\nTracking Computer II\n\nDual Giga Pulse Laser II\nCapital Gremlin Compact Energy Neutralizer\nDual Giga Pulse Laser II\nSiege Module II\nDual Giga Pulse Laser II\n\nCapital Trimark Armor Pump I\nCapital Trimark Armor Pump I\nCapital Trimark Armor Pump I\n\n\nConflagration XL x6\nScorch XL x6\nNavy Cap Booster 3200 x20\nSanshas Multifrequency XL x6\nSanshas Radio XL x6\nSanshas Standard XL x6\nNanite Repair Paste x250\nOptimal Range Script x2\nTracking Speed Script x2\nMobile Depot x1\nAgency 'Pyrolancea' DB5 Dose II x2\nSynth Drop Booster x2\nPrototype Cloaking Device I x1",
+    "damnation": "[Damnation, [FL33T] 3X/4X Damnation]\n\nDamage Control II\nImperial Navy 1600mm Steel Plates\nMultispectrum Energized Membrane II\nTrue Sansha Multispectrum Energized Membrane\nCentum B-Type EM Energized Membrane\nCentum C-Type Thermal Energized Membrane\n\n50MN Quad LiF Restrained Microwarpdrive\nMedium Micro Jump Drive\nLarge Compact Pb-Acid Cap Battery\nSensor Booster II\n\nArmor Command Burst II /offline\nArmor Command Burst II /offline\nArmor Command Burst II /offline\nSkirmish Command Burst II /offline\nSkirmish Command Burst II\nInformation Command Burst II\nInformation Command Burst II\n\nMedium Trimark Armor Pump II\nMedium Command Processor I\n\n\nAcolyte II x5\nValkyrie II x5\nHornet EC-300 x5\n\n\nArmor Energizing Charge x1000\nArmor Reinforcement Charge x1000\nRapid Repair Charge x1000\nElectronic Hardening Charge x1000\nElectronic Superiority Charge x1000\nSensor Optimization Charge x1000\nNanite Repair Paste x250\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nEvasive Maneuvers Charge x1000\nInterdiction Maneuvers Charge x1000\nRapid Deployment Charge x1000\nStandard Mindflood Booster x2\nInformation Command Burst II x1\nSkirmish Command Burst II x1\n10MN Afterburner II x1\nMedium Command Processor I x1\nTarget Painter II x1",
+    "eos": "[Eos, [FL33T] 3X/4X Eos]\n\nDamage Control II\nFederation Navy 1600mm Steel Plates\nMultispectrum Energized Membrane II\nImperial Navy Multispectrum Energized Membrane\nCorpum C-Type EM Energized Membrane\nCentum B-Type Explosive Energized Membrane\nCentum B-Type Explosive Energized Membrane\n\n50MN Quad LiF Restrained Microwarpdrive\nMedium Micro Jump Drive\nThukker Large Cap Battery\nSensor Booster II\n\nArmor Command Burst II /offline\nArmor Command Burst II /offline\nSkirmish Command Burst II\nSkirmish Command Burst II\nSkirmish Command Burst II\n\nMedium Command Processor I\nMedium Trimark Armor Pump II\n\n\nAcolyte II x5\nRepublic Fleet Berserker x10\nHornet EC-300 x5\n\n\nArmor Energizing Charge x1000\nArmor Reinforcement Charge x1000\nRapid Repair Charge x1000\nElectronic Hardening Charge x1000\nElectronic Superiority Charge x1000\nSensor Optimization Charge x1000\nNanite Repair Paste x250\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nEvasive Maneuvers Charge x1000\nInterdiction Maneuvers Charge x1000\nRapid Deployment Charge x1000\nStandard Mindflood Booster x2\nArmor Command Burst II x1\nInformation Command Burst II x3\n10MN Afterburner II x1\nTarget Painter II x1",
+    "bhaalgorn": "[Bhaalgorn, [FL33T] Bhaalgorn]\n\nImperial Navy 1600mm Steel Plates\nImperial Navy 1600mm Steel Plates\nImperial Navy Multispectrum Energized Membrane\nImperial Navy Multispectrum Energized Membrane\nCorpum B-Type Thermal Energized Membrane\nCorpum B-Type Explosive Energized Membrane\nCorpum A-Type Kinetic Energized Membrane\n\n500MN Quad LiF Restrained Microwarpdrive\nRepublic Fleet Large Cap Battery\nSensor Booster II\nSignature Radius Suppressor I\nFederation Navy Stasis Webifier\n\nDark Blood Heavy Energy Neutralizer\nDark Blood Heavy Energy Neutralizer\nDark Blood Heavy Energy Neutralizer\nCorpus X-Type Heavy Energy Nosferatu\nCorpus X-Type Heavy Energy Nosferatu\nCorpus X-Type Heavy Energy Nosferatu\nCorpus X-Type Heavy Energy Nosferatu\n\nLarge Trimark Armor Pump II\nLarge Trimark Armor Pump II\nLarge Trimark Armor Pump II\n\n\nWarrior II x5\nImperial Navy Curator x4\nHornet EC-300 x5\n\n\nNanite Repair Paste x500\nECCM Script x2\nScan Resolution Script x2\nTargeting Range Script x2\nAgency 'Overclocker' SB5 Dose II x2\nStandard Mindflood Booster x2\n100MN Afterburner II x1\nSensor Booster II x1\nShip Scanner II x1\nStasis Webifier II x1",
+    "vindicator": "[Vindicator, [FL33T] Vindicator]\n\nImperial Navy 1600mm Steel Plates\nImperial Navy 1600mm Steel Plates\nCentum C-Type Multispectrum Energized Membrane\nImperial Navy Multispectrum Energized Membrane\nCentum C-Type Thermal Energized Membrane\nCentum C-Type Kinetic Energized Membrane\nCorelum C-Type Explosive Energized Membrane\n\n500MN Quad LiF Restrained Microwarpdrive\nHeavy F-RX Compact Capacitor Booster\nSignature Radius Suppressor I\nFederation Navy Stasis Webifier\nFederation Navy Stasis Webifier\n\nDark Blood Heavy Energy Nosferatu\nDark Blood Heavy Energy Nosferatu\nDark Blood Heavy Energy Nosferatu\nCorpum A-Type Medium Energy Nosferatu\nCorpum A-Type Medium Energy Nosferatu\nFederation Navy Large Plasma Smartbomb\nFederation Navy Large Plasma Smartbomb\nFederation Navy Large Plasma Smartbomb\n\nLarge Trimark Armor Pump II\nLarge Trimark Armor Pump II\nLarge Trimark Armor Pump II\n\n\nRepublic Fleet Berserker x5\n\n\nNavy Cap Booster 800 x34\nNanite Repair Paste x500\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nStandard Mindflood Booster x2\n100MN Afterburner II x1\nSensor Booster II x1",
+    "devoter": "[Devoter, [FL33T] Devoter]\n\nImperial Navy 1600mm Steel Plates\nImperial Navy 1600mm Steel Plates\nMultispectrum Energized Membrane II\nCentum C-Type Thermal Energized Membrane\nCoreli A-Type Thermal Coating\nCorelum C-Type Kinetic Energized Membrane\nCentum B-Type EM Energized Membrane\n\n50MN Quad LiF Restrained Microwarpdrive\nSmall F-RX Compact Capacitor Booster\nSensor Booster II\n\nCynosural Field Generator I\n125mm Gatling AutoCannon I\n[Empty High slot]\nM-36 Enduring Warp Disruption Field Generator\nM-36 Enduring Warp Disruption Field Generator\nM-36 Enduring Warp Disruption Field Generator\n\nMedium Trimark Armor Pump II\nMedium Trimark Armor Pump II\n\n\nWarrior II x5\nHornet EC-300 x5\n\n\nNavy Cap Booster 400 x21\nNanite Repair Paste x300\nEMP S x1000\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nFocused Warp Disruption Script x3\nFocused Warp Scrambling Script x3\nLiquid Ozone x250\n10MN Afterburner II x1",
+    "apostle-active": "[Apostle, [FL33T] Active Apostle]\n\nCapital ACM Compact Armor Repairer\nCorpum A-Type Kinetic Energized Membrane\nCorpum A-Type Explosive Energized Membrane\nCore A-Type Thermal Armor Hardener\nCorpus X-Type EM Armor Hardener\nCoreli A-Type Multispectrum Coating\nCapital I-a Enduring Armor Repairer\n\nCapital Compact Pb-Acid Cap Battery\nRepublic Fleet Small Cap Battery\nRepublic Fleet Small Cap Battery\nCapital Capacitor Booster II\n\nCapital I-ax Enduring Remote Armor Repairer\nArmor Command Burst II\nCapital I-ax Enduring Remote Armor Repairer\nTriage Module II\nArmor Command Burst II\nCapital Coaxial Compact Remote Armor Repairer\n\nCapital Auxiliary Nano Pump I\nCapital Auxiliary Nano Pump I\nCapital Remote Repair Augmentor I\n\n\nAcolyte II x10\nHornet EC-300 x10\nHeavy Armor Maintenance Bot II x15\nHeavy Hull Maintenance Bot II x5\n\n\nArmor Energizing Charge x1000\nArmor Reinforcement Charge x1000\nRapid Repair Charge x1000\nNavy Cap Booster 3200 x20\nNanite Repair Paste x500\nMobile Depot x1\nAgency 'Hardshell' TB7 Dose III x4\nImproved Exile Booster x4\nPrototype Cloaking Device I x1",
+    "thanatos": "[Thanatos, [FL33T] Buffer Thanatos]\n\n25000mm Rolled Tungsten Compact Plates\n25000mm Rolled Tungsten Compact Plates\nImperial Navy Multispectrum Energized Membrane\nCentum B-Type Explosive Energized Membrane\nCentum B-Type Kinetic Energized Membrane\nCorpum B-Type Thermal Energized Membrane\n\nCapital Capacitor Booster II\n10000MN Monopropellant Enduring Afterburner\nDrone Navigation Computer II\nCapital Micro Jump Field Generator\nCapital Capacitor Booster II\n\nIntegrated Sensor Array\nFighter Support Unit I\nFighter Support Unit I\nFighter Support Unit I\nImproved Cloaking Device II\n\nCapital EM Armor Reinforcer I\nCapital Trimark Armor Pump I\nCapital Trimark Armor Pump I\n\n\nEinherji I x6\nEinherji I x6\nEinherji I x6\nEinherji I x6\nDromi I x3\nDromi I x3\nSiren I x3\nSiren I x3\n\n\nArmor Energizing Charge x600\nArmor Reinforcement Charge x600\nRapid Repair Charge x600\nNavy Cap Booster 3200 x27\nNanite Repair Paste x500\nECCM Script x1\nScan Resolution Script x1\nTargeting Range Script x1\nStandard Mindflood Booster x2\nArmor Command Burst II x2\nSensor Booster II x1",
+    "nidhoggur": "[Nidhoggur, [FL33T] Buffer Nidhoggur]\n\nDamage Control II\nImperial Navy Multispectrum Energized Membrane\nCentum B-Type Explosive Energized Membrane\nCentum B-Type Kinetic Energized Membrane\nCentum B-Type Thermal Energized Membrane\n\n10000MN Monopropellant Enduring Afterburner\nCapital Micro Jump Field Generator\nDrone Navigation Computer II\nCapital F-RX Compact Capacitor Booster\nDrone Navigation Computer II\nCapital F-RX Compact Capacitor Booster\n\nIntegrated Sensor Array\nFighter Support Unit I\nFighter Support Unit I\nFighter Support Unit I\nImproved Cloaking Device II\n\nCapital Explosive Armor Reinforcer I\nCapital Trimark Armor Pump I\nCapital Trimark Armor Pump I\n\n\nEinherji I x6\nEinherji I x6\nEinherji I x6\nEinherji I x6\nDromi I x3\nDromi I x3\nSiren I x3\nSiren I x3\n\n\nArmor Energizing Charge x600\nArmor Reinforcement Charge x600\nRapid Repair Charge x600\nNavy Cap Booster 3200 x29\nNanite Repair Paste x500\nECCM Script x2\nScan Resolution Script x2\nTargeting Range Script x2\nStandard Mindflood Booster x2\nArmor Command Burst II x2\nSensor Booster II x2",
+    "archon": "[Archon, [FL33T] Buffer Archon]\n\n25000mm Crystalline Carbonide Restrained Plates\n25000mm Crystalline Carbonide Restrained Plates\nImperial Navy Multispectrum Energized Membrane\nImperial Navy Multispectrum Energized Membrane\nCentum B-Type Explosive Energized Membrane\nCorpum B-Type Kinetic Energized Membrane\nCentii A-Type Thermal Coating\n\nCapital F-RX Compact Capacitor Booster\n10000MN Monopropellant Enduring Afterburner\nCapital Micro Jump Field Generator\nCapital F-RX Compact Capacitor Booster\n\nIntegrated Sensor Array\nFighter Support Unit I\nFighter Support Unit I\nFighter Support Unit I\nPrototype Cloaking Device I\n\nCapital Trimark Armor Pump I\nCapital Trimark Armor Pump I\nCapital Trimark Armor Pump I\n\n\nEinherji I x6\nEinherji I x6\nEinherji I x6\nEinherji I x6\nCenobite I x3\nCenobite I x3\nSiren I x3\nSiren I x3\n\n\nArmor Energizing Charge x600\nArmor Reinforcement Charge x600\nRapid Repair Charge x600\nNavy Cap Booster 3200 x21\nNanite Repair Paste x500\nStandard Mindflood Booster x2\nArmor Command Burst II x2"
+  }
+}

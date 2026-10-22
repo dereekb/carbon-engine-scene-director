@@ -24,6 +24,8 @@ Thumbs.db
 
 # saved scene files (user data; --scenes ./scenes)
 /scenes/
+# saved fleet compositions (user data; --fleets ./fleets). Anchored: packages/scene/src/lib/fleets is source.
+/fleets/
 
 # Claude
 /.claude/settings.local.json

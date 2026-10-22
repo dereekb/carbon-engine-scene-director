@@ -23,6 +23,7 @@ describe('mcp server', () => {
       const { tools } = await client.listTools();
       expect(tools.map((tool) => tool.name).sort()).toEqual(TOOLS.map((tool) => tool.name).sort());
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/move_to_squad/u);
+      expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
 
       const status = (await client.callTool({ name: 'viewer_status', arguments: {} })) as { content: { text: string }[] };
       const body = JSON.parse(status.content[0].text) as { connectedTabs: number; toolsCore: { reachable: boolean } };
