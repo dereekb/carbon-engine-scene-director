@@ -342,7 +342,7 @@ type FleetMode = { readonly mode: 'free' } | { readonly mode: 'new'; readonly sp
 /**
  * Applies `{ op: "add_ships", dna, hull?, radius?, count?, formation?, spacing?, position? | near?, heading? | facing?,
  * team?, name?, prefix?, stats?, propMod?, fleet?, radii? }`: `count` ships of one hull, free in a formation, as a new
- * fleet, into a fleet's squad, or as a new squad of a fleet (the README's Building scenes). Pure and synchronous: the
+ * fleet, into a fleet's squad, or as a new squad of a fleet (the sd-staging ref). Pure and synchronous: the
  * add_ships tool resolves hull names, celestials and radii first.
  *
  * @param operation - The operation.

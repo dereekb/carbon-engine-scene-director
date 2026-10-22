@@ -5,7 +5,7 @@ export const TFI = 'mb2_t1:minmatarnavy:minmatar';
 export const GUARDIAN = 'ac3_t2:carthum:amarr';
 
 /**
- * The README's fleets example: an FC, a DPS squad of three on the FC at 1 km, and a logi squad of two on its own
+ * The sd-fleets ref's fleet example: an FC, a DPS squad of three on the FC at 1 km, and a logi squad of two on its own
  * logi anchor at 30 km.
  */
 export const TFI_FLEET_SCENE = {

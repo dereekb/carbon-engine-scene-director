@@ -6,7 +6,7 @@ import { toFleetMemberships, toFleetReports } from './membership';
 const fleetOf = (squads: unknown[], extra: Record<string, unknown> = {}) => ({ id: 'f', commander: 'fc', wings: [{ id: 'w', squads }], ...extra });
 
 describe('fleets in the scene document', () => {
-  it('the README example normalizes as written', () => {
+  it('the sd-fleets example normalizes as written', () => {
     const { scene, warnings } = normalizeScene(TFI_FLEET_SCENE);
     expect(warnings).toEqual([]);
     expect(JSON.stringify(scene.fleets)).toBe(JSON.stringify(TFI_FLEET_SCENE.fleets));
@@ -268,7 +268,7 @@ describe('fleets in the scene document', () => {
   });
 
   describe('resolution', () => {
-    it('resolves the README example', () => {
+    it('resolves the sd-fleets example', () => {
       const memberships = toFleetMemberships(normalizeScene(TFI_FLEET_SCENE).scene);
       const dps = { fleet: 'tfi', wing: 'wing-1', squad: 'dps', role: 'dps', commands: [], anchor: { ship: 'fc', range: 1000 } };
       expect(Object.fromEntries(memberships)).toEqual({

@@ -1,16 +1,428 @@
 {
   "version": 1,
   "kind": "nx-workspace",
-  "capabilities": ["audit", "dbx-claude", "dbx-ts"],
+  "capabilities": [
+    "audit",
+    "dbx-claude",
+    "dbx-ts"
+  ],
   "commit": {
     "autoCommit": {
       "enabled": true,
-      "branches": ["develop"]
+      "branches": [
+        "develop"
+      ]
     },
     "test": {
       "enabled": true,
       "scope": "affected",
       "mode": "block"
     }
+  },
+  "refImpact": {
+    "commitTypes": [
+      "feat",
+      "fix"
+    ]
+  },
+  "references": {
+    "project": [
+      {
+        "name": "sd-workspace",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "RemoteHub",
+              "runtimePin",
+              "serverPin",
+              "install-links",
+              "house style",
+              "hub tool",
+              "page tool",
+              "scene-director mcp",
+              "tool list",
+              "README",
+              "CLAUDE.md"
+            ]
+          },
+          {
+            "pathContains": [
+              "apps/scene-director/src/lib/hub/hub.ts",
+              "apps/scene-director/src/lib/mcp/",
+              "apps/scene-director/src/main.ts",
+              "remote-hub",
+              "tool-call",
+              "packages/scene/src/lib/tools.ts",
+              "bin/scene-director",
+              "scene-director/package.json",
+              "eslint.config"
+            ],
+            "every": 12
+          },
+          {
+            "pathContains": [
+              "scene-director/README.md",
+              "scene-director/CLAUDE.md"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-dev-env",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "tools-core",
+              "verify-page",
+              "verify:page",
+              "real GPU",
+              "Windows Chrome",
+              "headless",
+              "5520",
+              "cjs-sde-prepare",
+              "SDE",
+              "map index",
+              "gpuErrors"
+            ]
+          },
+          {
+            "pathContains": [
+              "verify-page",
+              "map-data.testing",
+              "ship-data.testing",
+              "hub/tools-core",
+              ".claude/skills/windows-chrome"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__viewer_status",
+              "mcp__scene-director__page_log",
+              "mcp__scene-director__screenshot",
+              "mcp__chrome-devtools__*"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-runtime",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "CarbonEngineJS",
+              "runtime-dist",
+              "sideEffects",
+              "ignoreAnnotations",
+              "Black type",
+              "EveShip2",
+              "EveSpaceScene",
+              "SOF",
+              "CjsAudioMan",
+              "Destruct",
+              "FindAllReferences",
+              "post process",
+              "dynamic exposure",
+              "tonemapping",
+              "uncapturederror"
+            ]
+          },
+          {
+            "pathContains": [
+              "apps/viewer/src/lib/runtime",
+              "carbonenginejs-runtime.d.ts",
+              "apps/viewer/esbuild.config",
+              "apps/viewer/src/lib/engine.ts",
+              "apps/viewer/src/lib/ships.ts",
+              "apps/viewer/src/lib/environment.ts",
+              "apps/viewer/src/lib/resources.ts",
+              "apps/viewer/src/lib/audio.ts",
+              "carbon-engine-runtime/",
+              "carbonenginejs/runtime/"
+            ],
+            "every": 12
+          }
+        ]
+      },
+      {
+        "name": "sd-scene-document",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "cjs-scene",
+              "scene document",
+              "patch op",
+              "patch ops",
+              "diffScenes",
+              "applySceneOperations",
+              "normalizeScene",
+              "ReframesAfterEdit",
+              "saved scene",
+              "saved scenes",
+              "SceneFileStore",
+              "camera follow",
+              "chase mode"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/scene.ts",
+              "packages/scene/src/lib/json.ts",
+              "apps/viewer/src/lib/director.ts",
+              "apps/viewer/src/lib/camera.ts",
+              "apps/viewer/src/lib/store.ts",
+              "hub/saved-scenes",
+              "store/scene-files",
+              "store/document-files"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__*_scene",
+              "mcp__scene-director__list_scenes",
+              "mcp__scene-director__frame_camera",
+              "mcp__scene-director__get_state"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-destiny",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "Destiny",
+              "DestinyWorld",
+              "ClientBall",
+              "ballpark",
+              "GotoPoint",
+              "FollowBall",
+              "WarpTo",
+              "order_ship",
+              "keep-at-range",
+              "tick boundary",
+              "teleport",
+              "RestartInterval",
+              "BallRotation",
+              "align time",
+              "booster",
+              "boosters",
+              "warp"
+            ],
+            "fuzzyWords": [
+              "warp",
+              "booster"
+            ]
+          },
+          {
+            "pathContains": [
+              "apps/viewer/src/lib/destiny",
+              "apps/viewer/src/lib/clock",
+              "apps/viewer/src/lib/warp",
+              "apps/viewer/src/lib/boosters",
+              "apps/viewer/src/lib/flight",
+              "apps/viewer/src/main.ts",
+              "packages/scene/src/lib/orders",
+              "carbonenginejs-server.d.ts",
+              "carbon-engine-server/",
+              "carbonenginejs/server/"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__order_ship"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-fleets",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "Follow the FC",
+              "fleet",
+              "fleets",
+              "squad",
+              "squads",
+              "wing",
+              "wings",
+              "anchor",
+              "anchors",
+              "FC",
+              "formation",
+              "fleet composition",
+              "cjs-fleet",
+              "TFIs",
+              "TFI",
+              "logi",
+              "rejoin",
+              "detached",
+              "toFleetMemberships",
+              "FormationRadius"
+            ],
+            "fuzzyWords": [
+              "fleet composition"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/fleets/",
+              "packages/scene/src/lib/compositions/",
+              "apps/viewer/src/lib/following",
+              "apps/viewer/src/lib/steering",
+              "hub/fleet-compositions",
+              "store/composition-files"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__*fleet_composition*"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-staging",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "add_ships",
+              "stage_engagement",
+              "engagement",
+              "staging",
+              "wedge",
+              "sphere formation",
+              "opposing fleets"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/staging/",
+              "hub/staging"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__add_ships",
+              "mcp__scene-director__stage_engagement"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-ship-stats",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "ship_stats",
+              "ship stats",
+              "prop mod",
+              "prop mods",
+              "propMod",
+              "MWD",
+              "microwarpdrive",
+              "afterburner",
+              "switch_prop_mods",
+              "set_prop_mods",
+              "skills",
+              "pilot",
+              "agility",
+              "max velocity",
+              "dogma",
+              "computeShipStats",
+              "rigSize",
+              "engine sound",
+              "typeDogma"
+            ],
+            "fuzzyWords": [
+              "prop mod"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/stats/",
+              "packages/scene/src/lib/prop-mods/",
+              "apps/viewer/src/lib/prop-mod",
+              "apps/viewer/src/lib/flight",
+              "apps/viewer/src/lib/audio",
+              "hub/ship-data",
+              "hub/ship-stats-tool"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__ship_stats",
+              "mcp__scene-director__switch_prop_mods",
+              "mcp__scene-director__search_hulls"
+            ]
+          }
+        ]
+      },
+      {
+        "name": "sd-locations",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "location",
+              "set_location",
+              "search_map",
+              "get_system",
+              "celestial",
+              "celestials",
+              "nebula",
+              "dressing",
+              "planet pass",
+              "stargate",
+              "stargates",
+              "solar system",
+              "lens flare",
+              "map data",
+              "Jita"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/location/",
+              "hub/locations",
+              "hub/map-data",
+              "apps/viewer/src/lib/location",
+              "apps/viewer/src/lib/celestials"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__set_location",
+              "mcp__scene-director__search_map",
+              "mcp__scene-director__get_system"
+            ]
+          }
+        ]
+      }
+    ]
   }
 }

@@ -1,0 +1,65 @@
+# Warp (sd-destiny sub-doc)
+
+`{ "type": "warp", "point": [x, y, z], "range"? }` or `{ "type": "warp", "target": "<ship id>", "range"? }` (`range`
+default 0; no `speed`: a warp always aligns at full speed). Code: `DestinyWorld` (`ApplyOrder`, `TrackWarps`,
+`MarkAligning`, `InProperWarp`, `WarpReport`, `OnWarp`) in `apps/viewer/src/lib/destiny.ts`; math in `warp.ts`.
+
+## How it runs
+
+- Destiny's `WarpTo` on both parks at the ship's warp speed, **factor = round(AU/s × 1000)** (`WarpFactor`), and
+  **speed fraction 1**: Destiny enters proper warp only at 75 % of max velocity on its heading; below it, it can only
+  time out after 180 ticks.
+- **`WarpTo` throws a RangeError for a non-int32 warp factor**, which inside `Both` would leave the replica unchanged
+  (parks diverge). So `WarpFactor` runs first, and `RequireValidPhysics` refuses a warp speed it cannot convert.
+- Phases are read from the master after each evolved tick:
+  - `aligning`: warp mode, `effectStamp < 0`. Flies at full speed toward the destination until within ~8° at 75 % max
+    velocity (Destiny warps anyway after 180 ticks).
+  - `warping`: Destiny's accelerate and cruise phases (`SetupWarpConstants`).
+  - `exiting`: deceleration. Destiny drops the ball out of warp on the first tick its speed is under
+    min(max velocity / 2, 100 m/s); it coasts to a halt a few hundred metres past the landing (`landed`, mode `stop`).
+- Warp speed (`warpSpeedMultiplier` AU/s from the SDE through Ship stats); class values without it: frigate 5,
+  destroyer 4.5, cruiser 4, battlecruiser 3.5, battleship 3, capitals 1.5.
+- Example timings: a 162 m/s battleship at 3 AU/s goes 300 km in 12 ticks of align + 12 in warp; a frigate at 5 AU/s
+  spends 20 ticks in warp over 10 AU.
+
+## Landing
+
+- Point: `range` metres short of it, back toward where warp begins.
+- Ship: `range` surface to surface from **where the target was when the order applied** (not tracked during warp).
+
+## Rules that cost debugging
+
+- **Nothing may stop a ball in proper warp but a placement.** `Stop` / `GotoPoint` / `FollowBall` / `Orbit` / `WarpTo`
+  only switch its mode, and it coasts on at warp speed (km/s, measured). So: `OrderRefusal` refuses every order in
+  warp (`is in warp; it takes orders again once it lands, in about N s`), `Halt` leaves a warping ship alone (note
+  only), `Steer` skips it, and `ApplyOrder` drops a pending order that finds it there.
+- **Destiny's warp exit makes the ball massive** (and its sensor active) whatever it was before.
+  `DestinyWorld.TrackWarps` sets every landed ship non-massive again on both parks.
+- In warp the drawn ship runs up to a tick ahead of the master; both reach the exit point at the tick `OnWarp` reports.
+
+## Refusals and edits
+
+- Refused: a landing under 150 km away (EVE's minimum; use `goto`), a ship with max velocity 0, a warp to a ship in
+  warp.
+- While aligning, any order cancels the warp (a new warp replaces it).
+- Removing the target of an applied warp leaves the warp flying; a pending warp to it stops the ship.
+- A new position or rotation ends a warp at once, at rest at the placement.
+- Entering warp switches a running prop mod off (`note` `off: entered warp`); it stays off after landing.
+
+## Fleets
+
+While the FC (or a member's anchor) is in proper warp, members hold, stopped (`following.state` `holding`, with
+`warping` naming the ship), as Destiny's `StopAllFollowers` does. After it lands they fly to their slots at their own
+speed. **There is no fleet warp yet.**
+
+## Reporting and hooks
+
+- `get_state` per warping ship: `warp` = `phase`, `landing`, `warpSpeed` (AU/s), `alignTicks` (aligning), `distance`
+  (from warp start), `remaining`, `progress` (0..1), `landsIn` (s, in warp). `order` stays the warp order through
+  landing; `mode` is `warp` until it lands.
+- `DestinyWorld.OnWarp(listener)` reports `enter` / `exit` after the tick they happen in (where warp began or the exit
+  point, the direction, the landing, the warp speed), for warp-in effects to come. The client's effects are
+  `res:/fisfx/jump/warp/warp_out_start.black`, `warp_out.black` (leaving), `warp_in_glow.black` /
+  `warp_in_noglow.black` (arriving); playing them needs a real-GPU check.
+- **Far away**: Destiny simulates any distance in float64, but the page draws relative to the scene origin in float32:
+  beyond ~100,000 km a ship jitters on screen if the camera goes there.

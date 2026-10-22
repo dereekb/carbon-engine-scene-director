@@ -36,7 +36,7 @@ describe('toFleetFollowPlans', () => {
     expect(plans.has(fleet.commander)).toBe(false);
   });
 
-  it('flies the README example: the logi lead on the FC at 30 km, guardian-2 on the lead at 1 km', () => {
+  it('flies the sd-fleets example: the logi lead on the FC at 30 km, guardian-2 on the lead at 1 km', () => {
     const scene = normalizeScene(TFI_FLEET_SCENE).scene;
     const plans = plansOf(scene);
     expectPlansFollowTheMemberships(scene, plans, scene.fleets![0]);

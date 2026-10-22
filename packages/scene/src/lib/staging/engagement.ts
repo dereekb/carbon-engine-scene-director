@@ -50,7 +50,7 @@ interface EngagementSide {
 
 /**
  * Applies `{ op: "stage_engagement", sides: [A, B], range?, center? | near?, heading?, radii? }`: two sides facing each
- * other with their front lines `range` metres apart, centred on the point (the README's Building scenes). Side A
+ * other with their front lines `range` metres apart, centred on the point (the sd-staging ref). Side A
  * faces `heading`, side B faces back. Each side is a composition or a ship list (a fleet), or free ships in a
  * formation (`fleet: false`), on its own team. Pure and synchronous: the stage_engagement tool resolves composition
  * names, hull names and celestials first.

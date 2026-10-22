@@ -1,238 +1,79 @@
 # carbon-engine-scene-director
 
 Drives CarbonEngineJS (the open-source JS port of EVE Online's engine) space scenes from JSON scene documents
-over MCP tools, rendered live in a browser tab. README.md documents the architecture, the tools and the scene format.
+over MCP tools, rendered live in a browser tab. README.md is the overview: what works, the architecture, how to run
+it, the tools at a glance.
+
+**Do not grow this file or the README.** This file is loaded into every session, so subsystem detail belongs in a
+project reference (below); a rule goes here only when it spans every subsystem or must be known before any ref would
+fire. The README is for people landing on the repo: a new feature gets a line in its "What works today" list and its
+tools table, and nothing more. Behavior, rules, gotchas, measurements and real-GPU findings go in the area's ref.
 
 ## Layout (nx workspace)
 
-- `packages/scene` (`@scene-director/scene`, `@nx/js:tsc`): the `cjs-scene/1` document schema (validation, patch
-  operations, diff), the shared tool list, `src/lib/stats/` (ship stats math, skills, prop mods, the pilot
-  context), `src/lib/fleets/` (fleets, wings and squads: validation, edits, and the anchor rules, resolved only in
-  `toFleetMemberships`; Follow the FC must fly those, not re-derive them; `formation.ts` is the at-rest formation
-  Follow the FC flies (`toFleetFormationSlots`), and `following.ts` turns the anchors and the formation into follow
-  plans, flown by the viewer's `following.ts` / `steering.ts` / `destiny.ts`), `src/lib/compositions/` (the
-  `cjs-fleet/1` fleet composition, its expansion, the `add_fleet_composition` op, and the TFIs example in
-  `examples/tfis.json`) and `src/lib/location/` (the document's `location`, the placement math that puts an origin
-  off a celestial, the `/map/system` answer and get_state report the hub and the page share, and `dressing.ts`: what a
-  location draws, the plan and its get_state report) and `src/lib/staging/` (the `add_ships` and `stage_engagement`
-  ops: ship formations, placement off a ship, ship ids, the engagement layout; the hub resolves names first). No
-  runtime imports;
-  the hub, the page and the tests all use it.
-- `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
-  and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. `hub/map-data.ts` is the tools-core map client and
-  `hub/locations.ts` answers `search_map`, `get_system`, `set_location` and `/map/system`. `hub/staging.ts` answers
-  `add_ships` and `stage_engagement` (hull lines, celestials of the location, existing ships' radii, compositions by
-  name). Building it builds the
-  viewer too (implicit dependency).
-- `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
-  `src/lib/carbonenginejs-runtime.d.ts` types those imports (the runtime ships no `.d.ts`). Add a member to the
-  declarations file when the page starts using it; do not reach for `any`. `src/lib/runtime-sim.ts` is its light half
-  (math, Blue curve bases, the Destiny server, typed by `carbonenginejs-server.d.ts`), re-exported by `runtime.ts`.
-  `clock.ts` (the scene clock), `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship, and the
-  movement orders, warp (phases, `OnWarp`) and fleet following), `flight.ts` (each ship's Ship-stats flight numbers
-  from the hub's `/ship-stats`), `warp.ts` (warp factor, landing and Destiny's warp profile math), `boosters.ts` (the
-  per-frame booster drive), `steering.ts` (Follow the FC's steering math), `camera.ts` (`CameraFollow`: the camera following its
-  target in orbit or chase mode, and alt-click picking), `following.ts` (`FleetFollowing`: the
-  document's fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the
-  location's system from the hub's `/map/system`, and get_state's report), `celestials.ts` (the location dressing's
-  pure half: height map patch, `?dress=`, the slot reconcile, the report), `prop-mods.ts` (which module a ship fits,
-  its numbers and the `/prop-mod` lookups) and `prop-mod-audio.ts` (the engine stems a switch posts) have node specs:
-  the viewer has a `test` target (`project: viewer`). `location-dressing.ts` (runtime) draws a location from them, and
-  `audio.ts` (runtime, `PageAudio`) plays the stems through `CjsAudioMan`.
+- `packages/scene` (`@scene-director/scene`, `@nx/js:tsc`, camelCase): the `cjs-scene/1` document (validation, patch
+  ops, diff), the shared tool list, stats, prop mods, fleets, compositions, location, staging, orders. **No runtime
+  imports**: the hub, the page and the tests all use it.
+- `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server, the
+  CLI (`serve`, `mcp`, `call`) and `verify-page.ts`. Building it builds the viewer too.
+- `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point.
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
+
+## Project references
+
+Subsystem rules, gotchas and file maps live in project refs under `.dbx-claude/refs/<name>/REF.md`. Fetch one by name
+with the `dbx-claude-ref` tool (sub-docs with `doc`); `reference-hint` suggests the right one from your prompt, the
+files you touch and the scene-director tools you call. Fetch before designing or changing anything in that area:
+
+- `sd-workspace`: hub vs page (`where`), layout, naming house style, dependency pins and boundaries
+- `sd-dev-env`: tools-core and the SDE, the hub on 5520, verify-page, real-GPU checks, setting up a second machine
+- `sd-runtime`: the runtime import point, `.d.ts` typing, esbuild guards, runtime API drift, the client's dressing
+- `sd-scene-document`: `cjs-scene/1`, patch ops, the diff and what the page does with it, camera, saved scenes
+- `sd-destiny`: the two Destiny parks, the clock and loop, orders, placement, physics (docs: `warp`, `boosters`)
+- `sd-fleets`: fleets, anchors, the formation, Follow the FC (doc: `compositions`, the `cjs-fleet/1` format and TFIs)
+- `sd-staging`: `add_ships` and `stage_engagement`
+- `sd-ship-stats`: stats math, skills, the pilot, prop mods, engine audio
+- `sd-locations`: the document's location, tools-core map quirks, name resolution (doc: `dressing`)
+
+When a change alters behavior a ref describes, update the ref in the same commit (a new area gets a new `sd-*` ref,
+declared with its triggers in `.dbx-claude/dbx-claude.json` `references.project`, and a row in the README's
+Documentation table). `refImpact` is on: a
+`feat` or `fix` commit waits until the session declares its ref impact (`dbx-claude-log` `refImpact`, `[]` if none).
 
 ## Commands
 
-- Build: `npx nx build scene-director` (scene, viewer and the CLI). Serve the hub by hand: `npx nx run scene-director:serve`.
-- Tests: the `dbx-claude-test` tool (`project: scene` / `viewer` / `scene-director`). The MCP spec spawns the built CLI, so
-  `test` depends on `build`.
-- Real-page check: `npx nx run scene-director:verify-page` against a running tools-core. It checks everything but
-  drawing (see below).
-- Commit through `dbx-claude-commit`: it gates lint, build, typecheck and the affected projects' tests.
-- Format: `npx oxfmt --write .`. Lint config is the dbx library config (`eslint.config.library.mjs`); warnings are
-  allowed, errors block.
+- Build: `dbx-claude-build` `project: scene-director` (scene, viewer and the CLI). Serve the hub by hand:
+  `npx nx run scene-director:serve`.
+- Tests: `dbx-claude-test` (`project: scene` / `viewer` / `scene-director`). Offline; the MCP spec spawns the built CLI.
+- Real-page check: `npx nx run scene-director:verify-page` against a running tools-core (everything but drawing).
+- Commit through `dbx-claude-commit`. Format: `npx oxfmt --write .`. Lint errors block, warnings don't.
 
 ## Naming
 
-- The apps (`apps/scene-director`, `apps/viewer`) keep the CarbonEngineJS runtime's house style on purpose: PascalCase
-  functions and methods (`Hub.Start`, `DestinyWorld.Order`, `ReadNumber`, `MakeFakeShipData`), with the dbx verb
-  prefixes in that case (`IsShipResource`); camelCase properties, parameters and locals; PascalCase types; UPPER_SNAKE
-  exported constants. `packages/scene` is camelCase. Match the file you are in. Ignore dbx tooling that asks for
-  camelCase app functions: a camelCase sweep of the apps was planned and stowed on 2026-10-21 as not worth the churn
-  (queue note `naming-camelcase-for-our-code-carbon-names-only-where-the-runtime-calls-them`).
-- Never rename a name the runtime calls: `override`s of runtime members (`BallRotation.Update__Ticks`) and members of
-  object literals typed by a `carbonenginejs-*.d.ts` interface (`BlueResourceSource.Read`, `BatchCollector.Collect`).
-  A runtime-called method we implement either extends a runtime class or implements an interface declared in the
-  `.d.ts` first, so a wrong rename fails to compile.
+The apps keep the CarbonEngineJS runtime's house style on purpose: PascalCase functions and methods (`Hub.Start`,
+`DestinyWorld.Order`), camelCase properties and locals, PascalCase types, UPPER_SNAKE exported constants.
+`packages/scene` is camelCase. Match the file you are in, and ignore dbx tooling that asks for camelCase app functions.
+Never rename a name the runtime calls (overrides of runtime members, members of objects typed by a
+`carbonenginejs-*.d.ts` interface). Details: `sd-workspace`.
 
-## Must-keep gotchas (each one cost real debugging)
+## Rules that span everything
 
-- The viewer bundle MUST ignore the runtime's package.json `sideEffects` list (`ignoreAnnotations: true` in
-  `apps/viewer/esbuild.config.mjs`). Many listed files register classes on import; without them Black reading fails
-  with "No source shape registered for Black type ...".
-- `runtime-dist/<file>` must resolve to `node_modules/@carbonenginejs/runtime/dist/<file>` (the esbuild plugin in
-  `apps/viewer/esbuild.config.mjs`). It reaches the WebGPU internals (`trinityal/webgpu/internal.js`), which the
-  package does not export by design, and `global/blue/children.js`. It must resolve to the same files the public
-  subpaths load, so classes are never duplicated.
-- Runtime HEAD removed `Traverse`; `ships.ts` walks a graph with `blue.FindAllReferences(root).keys()` plus the root.
-- Runtime ca8b32652 renamed `Destroy()` to `Destruct()`; `ships.ts` `Teardown` calls whichever exists.
-- `ITriVectorFunction`'s base `Update__Ticks` passes arguments in the opposite order from its own docs, so
-  `destiny.ts`'s `BallRotation` overrides every `*__Ticks` method it serves directly.
-- The Destiny master and replica parks must stay in lockstep (replication is unported): only `DestinyWorld` touches
-  them, every change goes to both in one call, and movement orders apply to both right before the `OnTick` that
-  evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` →
-  `director.TrackCamera(now)` → `director.DriveAudio(now)` → `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer
-  `now`; the clock caps a frame at 1 s so the master's 6-tick backlog drop never fires.
-- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`,
-  `location.ts`, `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
-  renderer and the `runtime-dist/` alias, which vitest does not have.
-- Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a
-  tick is due, so it relies on one evolve per `Tick` call (the clock's 1 s frame cap). FollowBall cannot hold a
-  bearing (it aims at the nearest point of the range sphere, so followers stack at the trailing pole), and Destiny's
-  native formations reserve 16 slots per leader and bank with it.
-- Settling a follower: aim its goto point along its *current* heading before `SetBallVelocity(0, 0, 0)` (zero
-  velocity snaps the legacy heading to the goto point), then along the fleet heading. Legacy heading faces the goto
-  point only at exactly zero velocity. A fresh park's first ~3 ticks freeze a ClientBall's drawn rotation (no
-  two-tick history yet), then jump: specs that measure drawn smoothness skip them.
-- Formation slots wait for settled radii (`Director.FormationRadius`: an SDE radius, or a finished SOF build) and are
-  laid out at the FC's *document* placement. With the 100 m interim radius a composition-added fleet would be pulled
-  about 300 m inward and scramble.
-- Ships joining a fleet (`add_ships` fleet modes, new fleets, engagement fleet sides) are placed at their
-  Follow-the-FC slots (`layoutFleetFormation` at the FC's document placement, with the hub-filled `radii`), never in a
-  shape formation, which Follow the FC would scramble. Joining a squad re-plans the fleet, so later squads on the same
-  shell move (TFIs `dps-a` + 2: 14 members up to 3.5 km); a new squad goes in the last wing and moves nobody.
-- Destiny's `FollowBall` / `Orbit` / `GotoPoint` return without a word, keeping the old order, for a missing, self,
-  moribund or cloaked target, a target in another bubble (a master only) or a non-finite value. `DestinyWorld`
-  resolves the target itself and checks that both parks reached the order's mode, or stops the ship on both.
-- Destiny's warp exit makes the ball massive (and its sensor active) whatever it was before; `DestinyWorld.TrackWarps`
-  sets every landed ship non-massive again on both parks.
-- Nothing may stop a ball in proper warp but a placement: `Stop` / `GotoPoint` / `FollowBall` / `Orbit` / `WarpTo` only
-  switch its mode and it coasts on at warp speed (km/s, measured). `OrderRefusal` refuses every order in warp, `Halt`
-  leaves a warping ship alone (note only), `Steer` skips it, and `ApplyOrder` drops a pending order that finds it there.
-- `WarpTo` throws a RangeError for a non-int32 warp factor, which inside `Both` would leave the replica unchanged:
-  `WarpFactor` (round(AU/s × 1000)) runs first, and `RequireValidPhysics` refuses a warp speed it cannot convert. A
-  warp only enters proper warp at 75 % of max velocity on its heading, so `ApplyOrder` sets speed fraction 1 (below it
-  Destiny can only time out after 180 ticks).
-- EveShip2 derives `speed` from the translation curve itself; booster intensity is speed / `boosters.maxVel`, which the
-  runtime defaults to 250 m/s for every hull and nothing in it drives `warpIntensity`, so `Director.DriveBoosters`
-  sets both per ship every frame. `boosters.maxVel` stays the prop-mod-off max velocity (`ShipFlight.maxVelocity`; only
-  get_state's `physics` swaps in the running numbers), so a running MWD drives the flames to the cap of 2.
-- No booster shader reads `shipSpeed`, so an AU/s warp is safe. `BoosterVolumetric` reads the warp half of its colour
-  gradient for any `warpIntensity` > 0 while its tints still lerp (a low blend draws a Minmatar flame violet), so
-  `WARP_GLOW_FROM` / `WARP_GLOW_FULL` stay a short ramp. Booster LOD goes by the booster sphere's pixel size (a
-  Slasher's flames vanish beyond ~600 m on a 900 px canvas): dark boosters in a far shot are LOD, not the drive
-  (distances in the windows-chrome skill).
-- Destiny's `RemoveBall` sends an interactive orbiter straight on along its velocity and stops other followers.
-  `DestinyWorld.RemoveShip` stops every follower of the removed ship first, so all of them stop and the parks stay
-  identical. Formation followers (Follow the FC) are the exception: `FleetFollowing.Reconcile` re-anchors them in the
-  same edit, and `Steer` halts any whose anchor or FC ball is gone.
-- A ball's radius is the hull's SDE `radius` when the hub knows it; order ranges and `targetDistance` are surface to
-  surface on it. The SOF bounding sphere is only for framing and `get_state`'s `radius` and `distances`.
-- `flight.ts` runs class values (no SDE, unknown DNA) through the max-skills pilot too, so `stats` means the same with
-  or without the SDE.
-- Destiny's heading snap (`SetBallVelocity`) keeps the ClientBall's banking roll, so a teleported ship's roll levels out
-  over a few seconds. A placement must also restart the ball's tick interval (`destiny.ts` `RestartInterval`): between
-  ticks a ClientBall integrates from the interval's start with the ball's last forces (`mLastG` + `mLastC`) and turns
-  from the interval's old heading, which the snap keeps (`mOldYaw`). Without it a ship placed mid-tick at full speed
-  slid on along its old thrust, popped back at the next tick and swung back toward its old heading; the old spec placed
-  right after a tick boundary and missed it. A ClientBall caches its sample per time: a teleport shows from the next
-  frame.
-- Every edit used to frame the document's camera again, dropping a `frame_camera` follow (rarely persisted) for a
-  re-fit, or gliding a persisted one across a teleport. `camera.ts` `ReframesAfterEdit` decides: a load, a camera change,
-  removing the followed ship, or no ship followed. `Director.Apply` calls it before its `appliedCamera` check.
-- `apps/viewer/esbuild.config.mjs` fails the build if any `@carbonenginejs/runtime` import resolves outside the page's
-  runtime copy (a nested copy under the server would duplicate every class).
-- The runtime's `package-lock.json` entry MUST keep `"resolved": "file:../carbonenginejs/runtime/npm"`. Without it npm
-  installs the published `@carbonenginejs/runtime@0.1.0-alpha.11` from the registry, an older build without the
-  `modelledOn` retirement (CjsSchema.js md5 240e178d… instead of runtime/npm's ed288d32…); that is how the page ran on a
-  stale runtime after the repo move. Check the md5 after any reinstall.
-- The scene needs the EVE client's dressing (`environment.ts`): a sun template post process with the client's
-  tonemapping and dynamic exposure, plus the lens flare. Without dynamic exposure the nebula (median ~0.01 linear)
-  renders at about the clear colour's level, which is why it looked like no background (real-GPU A/B, 2026-10-21:
-  the default draws a nebula field, `?post=off` a near-black one with only the sun and flare). Whether the exposed
-  nebula looks like the client's is still open: it rendered as a flat brown wash that day, possibly the output
-  device. `?post=off` / `?flare=off` / `?aa=off` A/B it.
-- WebGPU validation errors reach `page_log` (and `get_state.renderer.gpuErrors`) only through `engine.ts`'s
-  `uncapturederror` listener; Chrome otherwise prints them to DevTools alone.
-- `runtime.ts`'s `@carbonenginejs/runtime/audio` import (it re-exports `CjsAudioMan`) also registers the audio classes
-  SOF hull values carry; keep it if audio ever goes.
-  `resources.ts` registers `CjsPngFormat` with `ImageIO`: the post process reads PNGs.
-- Prop mods are live module state in `DestinyWorld` (`ShipEntry.prop`), not motion: `SwitchPropMod` (the
-  `switch_prop_mods` tool) follows EVE's cycle (on at the next tick boundary, off at the end of the running cycle);
-  `SetPropModActive` (the document's `propMod.active`) applies at once; entering warp switches a running module off.
-  Every change sets mass and max velocity on both parks (`ApplyPropModNumbers`) at the due boundary, before the
-  orders and `Steer`. `PlaceShip` keeps the state; a live switch is never written to the document.
-- tools-core's `dna/resolve` answers 500 for module names (modules have no graphic). The hub resolves prop mod names
-  from the group 46 listing (`sde/types?field=groupID&value=46&limit=1000`, once per hub, `ShipData.PropModByName`).
-- The audio proxy (`/audio/library`, `/audio/path/<encoded res:/ path>`) must stream and forward `Range`: the engine
-  stems' media sit inside the 32 MB `boosters.bnk` and are read by range. `CjsAudioMan` starts only after a user
-  gesture (or with autoplay allowed: verify-page launches Chromium with `--autoplay-policy=no-user-gesture-required`).
-- Prop mod effects 6730/6731 carry no dogma modifiers (the game applies them in code), so the MWD/AB formula lives in
-  `stats/ship-stats.ts`: add the mass first, then `speedFactor × thrust / mass`, as Pyfa does. The skill table in
-  `stats/skills.ts` is hard-coded and was checked against the SDE (ESI, 2026-10-21); re-check it when CCP rebalances.
-- `ship_stats` and `/ship-stats` need a prepared SDE. tools-core runs with `--no-sde-auto-prepare` and answers only
-  for the exact `builds.sde` it reports; prepare it with `node bin/cjs-sde-prepare.js --build <n> --cache <its cache>`
-  (Node 22, about a minute). `dna/resolve` sends `typeID` as a string.
-- The MCP process must never write to stdout except MCP protocol messages; the hub logs to stderr.
-- The saved-scene tools are `where: 'hub'` (`apps/scene-director/src/lib/hub/saved-scenes.ts`): disk files by default,
-  forwarded to the page's IndexedDB handlers for `store: "browser"`. Tests and verify-page pass a temp
-  `SceneFileStore`; never let a test write to the default per-user scenes directory. The fleet composition tools
-  (`hub/fleet-compositions.ts`) are `where: 'hub'` too; tests and verify-page pass a temp `FleetCompositionFileStore`.
-- Map positions are float64 system metres with the star at the origin; a system's galactic `position` is ~1e17 m. The
-  page only ever sees origin-relative values from `/map/system` (the hub subtracts). Never hand system or galactic
-  coordinates to the renderer.
-- tools-core's map rows carry `radius: null` for stations and stargates, so `MapData` reads the type's SDE radius. The
-  generic star, planet and moon types carry a 10 km placeholder radius, so the map row's radius wins when it has one.
-- tools-core's map search does not index moons or asteroid belts. `set_location` finds them through their system's
-  celestial list, taking the system as the longest leading words of the name that are a system name; system names
-  contain spaces (`New Caldari`), so never split on the first word.
-- Stargates are named after their destination: `Stargate (Perimeter)` sits in Jita and in four other systems.
-- A degraded map index (`GET map` → `index.degraded`, no `mapIndex` derivation) finds systems but names stations on
-  moons after their planet. Run `node bin/cjs-sde-prepare.js --build <n> --refresh` in tools-core.
-- `applySceneOperations` stays synchronous and pure (it runs in the page): the `add_fleet_composition` op needs `dna`
-  on every ship line, and the hub tool of the same name fills `dna` and `radius` from tools-core before forwarding.
-- tools-core needs Node 22 (its better-sqlite3 binding; Node 24 is the default here). Start it with:
-  `cd /mnt/a/github/carbonenginejs/tools-core && /root/.nvm/versions/node/v22.23.4/bin/node bin/cjs-tools-service.js --cache "$PWD/.cache/tool-core" --data "$PWD/data.local" --no-audio-auto-prepare --no-sde-auto-prepare`
-  The clones moved to `/root/github/carbonenginejs` on 2026-10-21 (the old path is a symlink) without their
-  `node_modules`, so that fails with "Cannot find package '@carbonenginejs/runtime'" until they are reinstalled. Until
-  then, run the same command from `/mnt/a/github/_pre-wsl-move/carbonenginejs/tools-core` (same commit, deps intact)
-  with `--cache`/`--data` pointing at `/root/github/carbonenginejs/tools-core/...`. Startup takes ~20 s.
-- Location dressing: the planet pass draws `scene.planets` at 1 / 1e6 and clips at 1e4..1e11 m, so
-  `toPlanetPassDistance` pulls far bodies in and scales the radius. The sun core mesh has radius 0.5 and
-  `planetsphere.gr2` radius 1, so sun `scaling = 2r` and planet `scaling = r`. The sun disc's translation curve must
-  *be* `scene.sunBall` (Carbon picks the sun by identity); the flare gets its own true-distance curve. Stations and
-  gates are `BuildShipValues` + `HydrateSofObject` on fixed `Tr2TranslationAdapter` / `Tr2RotationAdapter` curves,
-  retired with every live ship root retained. Retire a replaced `EveLensflare` with `Destruct()`.
-- `Engine.universe` is the document's universe (a change still reloads: the reload trick). `Engine.nebula` is what is
-  drawn; a location's region nebula swaps in live (`SetNebula`) by resetting the fields every universe file sets,
-  hydrating a fresh background `Tr2Effect` and reloading the env maps through `OnModified`. `set_location` no longer
-  writes `environment.universe`.
-- A planet template's `HeightMap = res:/texture/global/black.dds` is the client's bake target: the page binds
-  heightMap1 only there (gas giants author their own, moons have none).
-- Headless Chromium in this WSL has no WebGPU adapter (Dawn finds SwiftShader but cannot create its context
-  provider), so verify-page checks everything except drawing. Do not sink time into headless GPU. To see drawing,
-  open the viewer in Windows Chrome yourself with the `chrome-devtools` MCP (the `windows-chrome` skill: it runs on
-  the Windows side through interop, since WSL is in NAT mode; `setup.sh --check` diagnoses it), or ask the user to
-  open http://127.0.0.1:5520/ in Windows Chrome or Edge; then use the `screenshot` and `page_log` tools.
-- This is WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
-- The hub on 5520 is often owned by a Claude Code session's MCP server (`bin/scene-director.js mcp`). It streams the
-  built viewer from disk on every request, so a page-only change needs a rebuild plus a tab reload (changing
-  `environment.universe` makes a connected tab reload itself). Hub code changes need the owning session to reconnect
-  its MCP server (`/mcp`). Page tools go to the newest connected tab, so a running verify-page takes them from the
-  user's tab.
+- The MCP process writes nothing to stdout but MCP protocol messages; the hub logs to stderr.
+- Node-tested viewer modules import `./runtime-sim`, never `./runtime` (type-only imports are fine).
+- Only `DestinyWorld` touches the Destiny parks, and every change goes to both in one call (`sd-destiny`).
+- `applySceneOperations` stays synchronous and pure (it runs in the page); hub tools resolve tools-core data first.
+- Never hand system or galactic coordinates to the renderer: the page sees only origin-relative metres.
+- Tests and verify-page use temp file stores; never write to the default per-user scenes or fleets directories.
+- The runtime's `package-lock.json` entry keeps `"resolved": "file:../carbonenginejs/runtime/npm"` (`sd-workspace`).
+- Headless Chromium here has no WebGPU adapter: verify-page checks everything but drawing. Do not sink time into
+  headless GPU; check drawing in a real Chrome tab (`sd-dev-env`, the `windows-chrome` skill).
 
 ## Boundaries
 
-- Upstream clones in `/mnt/a/github/carbonenginejs/` (runtime, tools-core, tools-blender, format-gr2) are read-only
-  references. DO NOT EDIT THEM.
-- `server` is the exception: it tracks the user's fork (`origin` = github.com/dereekb/carbon-engine-server, over SSH;
-  `upstream` = carbonenginejs/server). Server changes this project needs go on its `scene-director` branch, pass its
-  `npm test`, and are pushed to `origin`, never `upstream`. `dist/` is gitignored, so run `npm run build` there after
-  a checkout, then `npm install` here (it is an install-links copy; see `serverPin` in package.json, pinned at
-  `eadbdd1`). Fork `eadbdd1` moved the 29 `modelledOn` defines to `Modelled on:` JSDoc lines; upstream main still
-  throws "Class donors and modelledOn are retired" against runtime f77ed790c.
-- The runtime dependency is a copy of `../carbonenginejs/runtime/npm` (install-links, pinned at runtime commit
-  f77ed790c; see `runtimePin` in package.json). Rebuild that checkout at the pinned commit before reinstalling.
-- The viewer UI is a plain DOM overlay. dbx-web / dbx-components and Angular are acceptable when a feature
-  genuinely needs them, but keep the viewer simple.
+- Upstream clones in `../carbonenginejs/` (runtime, tools-core, tools-blender, format-gr2) are read-only references.
+  DO NOT EDIT THEM.
+- `server` is the exception: the user's fork (`origin` = github.com/dereekb/carbon-engine-server; `upstream` =
+  carbonenginejs/server). Changes go on its `scene-director` branch, pass its `npm test`, and are pushed to `origin`,
+  never `upstream`. Pins and reinstall steps: `sd-workspace`, `sd-dev-env`.
+- The viewer UI is a plain DOM overlay; dbx-web / Angular only when a feature genuinely needs them.
 - EVE content is CCP's (see README); the code is MIT.

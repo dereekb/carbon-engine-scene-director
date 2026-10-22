@@ -221,7 +221,7 @@ function toSceneFleet(input: { readonly composition: FleetComposition; readonly 
 }
 
 /**
- * The scene anchor a composition squad's anchor maps to; see the README's Fleet compositions anchors.
+ * The scene anchor a composition squad's anchor maps to; see the anchors in the sd-fleets ref's compositions doc.
  *
  * @param squad - A squad with ships.
  * @param leads - Each squad's first ship id.
