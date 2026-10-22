@@ -185,6 +185,25 @@ interface AddedFleetResult extends Omit<SceneResult, 'scene'> {
   readonly scene: { readonly name: string; readonly ships: { readonly id: string; readonly type?: string; readonly position: SceneVector }[] };
 }
 
+interface StagedLead {
+  readonly id: string;
+  readonly position: SceneVector;
+  readonly heading: number;
+}
+
+interface AddShipsResult extends Omit<SceneResult, 'scene'> {
+  readonly added: { readonly ships: string[]; readonly lead: Maybe<StagedLead>; readonly fleet?: Maybe<{ readonly id: string; readonly squad: Maybe<string>; readonly commander: string; readonly created: Maybe<string> }> };
+  readonly hull: { readonly dna: string; readonly radius: number; readonly dnaFrom: string; readonly radiusFrom: string };
+  readonly scene: { readonly ships: { readonly id: string; readonly position: SceneVector; readonly rotation: SceneVector }[] };
+  readonly warnings?: string[];
+}
+
+interface StageEngagementResult extends Omit<SceneResult, 'scene'> {
+  readonly engagement: { readonly center: SceneVector; readonly heading: number; readonly sides: { readonly team: string; readonly fleet?: string; readonly commander?: string; readonly ships: string[]; readonly lead: Maybe<StagedLead> }[] };
+  readonly scene: { readonly ships: { readonly id: string; readonly position: SceneVector }[]; readonly fleets?: unknown[] };
+  readonly loaded?: boolean;
+}
+
 interface LogEntry {
   readonly message: string;
 }
@@ -1233,6 +1252,144 @@ try {
     const set = await call<SetLocationResult>('set_location', { system: 'Jita', celestial: 'star', scene: { name: 'nebula' } }).catch(SkipWithoutSde);
     Expect(set.loaded === false && set.scene?.environment.universe === DEFAULT_UNIVERSE && set.nebula === FORGE_NEBULA, JSON.stringify({ loaded: set.loaded, environment: set.scene?.environment, nebula: set.nebula }));
     Expect(set.location.anchor?.kind === 'star', JSON.stringify(set.location.anchor));
+  });
+
+  await Check('add_ships adds Rifters in a wedge off a ship, facing it', async () => {
+    await call('load_scene', { scene: { name: 'verify-staging', ships: [{ id: 'anchor', dna: TFI_DNA, type: 'Tempest Fleet Issue' }] } });
+    const result = await call<AddShipsResult>('add_ships', { hull: 'Rifter', count: 5, formation: 'wedge', near: { ship: 'anchor', range: 10000 }, facing: 'anchor', team: 'red' }).catch(SkipWithoutSde);
+    Expect(JSON.stringify(result.added.ships) === JSON.stringify(['rifter-01', 'rifter-02', 'rifter-03', 'rifter-04', 'rifter-05']), JSON.stringify(result.added));
+    Expect(result.hull.dna === 'mf4_t1:minmatarbase:minmatar' && result.hull.radius === 31 && result.hull.radiusFrom === 'sde', JSON.stringify(result.hull));
+    const lead = result.added.lead?.position ?? [NaN, NaN, NaN];
+    Expect(Math.hypot(lead[0], lead[1], lead[2] - 10281) <= 1, `rifter-01 at ${JSON.stringify(lead)}`);
+    const rifters = result.scene.ships.filter((ship) => ship.id.startsWith('rifter-'));
+    Expect(
+      rifters.every((ship) => Math.abs(Math.abs(ship.rotation[0]) - 180) <= 0.01),
+      JSON.stringify(rifters.map((ship) => ship.rotation))
+    );
+    let least = Infinity;
+    for (const a of rifters) for (const b of rifters) if (a !== b) least = Math.min(least, Math.hypot(a.position[0] - b.position[0], a.position[1] - b.position[1], a.position[2] - b.position[2]));
+    Expect(least >= 191, `closest pair ${least.toFixed(1)} m`);
+    const good = rendering ? 'ready' : 'validated';
+    const bad = result.ships.filter((ship) => ship.id.startsWith('rifter-') && ship.status !== good);
+    Expect(!bad.length, `not ${good}: ${JSON.stringify(bad.slice(0, 3))}`);
+    return `closest pair ${least.toFixed(0)} m`;
+  });
+
+  await Check('add_ships joins a squad at its formation slots', async () => {
+    const composition = {
+      id: 'jn',
+      commander: { hull: 'Tempest Fleet Issue' },
+      wings: [
+        {
+          id: 'w',
+          squads: [
+            { id: 'dps', role: 'dps', ships: [{ hull: 'Tempest Fleet Issue', count: 2 }] },
+            { id: 'logi', role: 'logi', ships: [{ hull: 'Guardian', count: 2 }] }
+          ]
+        }
+      ]
+    };
+    await call('add_fleet_composition', { composition, position: [0, 0, -60000] }).catch(SkipWithoutSde);
+    const result = await call<AddShipsResult>('add_ships', { hull: 'Tempest Fleet Issue', count: 2, fleet: { id: 'jn', squad: 'dps' } }).catch(SkipWithoutSde);
+    Expect(JSON.stringify(result.added.ships) === JSON.stringify(['jn-dps-03', 'jn-dps-04']), JSON.stringify(result.added));
+    const state = await WaitFor('the jn formation is ready', 60, (polled) => (polled.fleets.find((fleet) => fleet.id === 'jn')?.formation?.ready ? null : JSON.stringify(polled.fleets.find((fleet) => fleet.id === 'jn')?.formation)));
+    const differs = result.added.ships.find((id) => ShipIn(state, id).physics?.radius !== 250);
+    if (differs) throw new Skipped(`the page's radius for ${differs} is ${ShipIn(state, differs).physics?.radius} m, not the SDE's 250 m`);
+    const before = new Map(result.added.ships.map((id) => [id, ShipIn(state, id).position ?? [0, 0, 0]]));
+    await Delay(5000);
+    const after = await call<ViewerState>('get_state');
+    let worst = 0;
+    for (const id of result.added.ships) {
+      const ship = ShipIn(after, id);
+      const [x, y, z] = before.get(id) ?? [0, 0, 0];
+      const [ax, ay, az] = ship.position ?? [0, 0, 0];
+      const moved = Math.hypot(ax - x, ay - y, az - z);
+      worst = Math.max(worst, moved);
+      Expect(ship.following?.state === 'in-formation' && (ship.following.slotError ?? Infinity) <= 5 && moved <= 2, `${id}: moved ${moved.toFixed(1)} m, ${JSON.stringify(ship.following)}`);
+    }
+    return `the joiners moved at most ${worst.toFixed(2)} m`;
+  });
+
+  await Check('add_ships adds a logi squad with its role from the EVE group', async () => {
+    const result = await call<AddShipsResult>('add_ships', { hull: 'Scimitar', count: 2, fleet: { id: 'jn', squad: { id: 'logi-2' } } }).catch(SkipWithoutSde);
+    Expect(result.added.fleet?.created === 'squad' && result.added.fleet.squad === 'logi-2', JSON.stringify(result.added.fleet));
+    Expect(!(result.warnings ?? []).some((warning) => warning.includes('formation slots')), JSON.stringify(result.warnings));
+    const state = await call<ViewerState>('get_state');
+    const lead = ShipIn(state, 'jn-logi-2-01');
+    const second = ShipIn(state, 'jn-logi-2-02');
+    Expect(lead.role === 'logi' && lead.anchor?.ship === 'jn-fc' && lead.anchor.range === 30000, JSON.stringify({ role: lead.role, anchor: lead.anchor }));
+    Expect(second.anchor?.ship === 'jn-logi-2-01' && second.anchor.range === 1000, JSON.stringify(second.anchor));
+  });
+
+  await Check('stage_engagement sets the TFIs and a Ferox fleet 20 km apart off the CNAP', async () => {
+    await call('load_scene', { scene: { name: 'verify-engagement' } });
+    const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
+    const result = await call<StageEngagementResult>('stage_engagement', {
+      sides: [
+        { composition: 'tfis' },
+        {
+          ships: [
+            { hull: 'Ferox', count: 8 },
+            { hull: 'Scimitar', count: 2 }
+          ]
+        }
+      ],
+      range: 20000,
+      near: { celestial: CNAP, range: 40000 }
+    }).catch(SkipWithoutSde);
+    const [blue, red] = result.engagement.sides;
+    Expect(blue.team === 'blue' && blue.fleet === 'tfis' && blue.ships.length === 44, JSON.stringify({ ...blue, ships: blue.ships.length }));
+    Expect(red.team === 'red' && red.fleet === 'red' && red.ships.length === 10, JSON.stringify({ ...red, ships: red.ships.length }));
+    const a = blue.lead?.position ?? [0, 0, 0];
+    const b = red.lead?.position ?? [0, 0, 0];
+    Expect(Math.abs(Math.abs((blue.lead?.heading ?? 0) - (red.lead?.heading ?? 0)) - 180) <= 0.01, `headings ${blue.lead?.heading} / ${red.lead?.heading}`);
+    const gap = Math.hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]);
+    Expect(Math.abs(gap - 20465) <= 2, `FCs ${gap.toFixed(1)} m apart`);
+    const offset = set.location.anchor?.offset ?? [0, 0, 0];
+    const center = result.engagement.center;
+    const fromStation = Math.hypot(center[0] + offset[0], center[1] + offset[1], center[2] + offset[2]);
+    Expect(Math.abs(fromStation - 140000) <= 2, `centre ${fromStation.toFixed(1)} m from the CNAP's centre`);
+    const state = await WaitFor('both formations ready', 90, (polled) => {
+      const pending = ['tfis', 'red'].find((id) => !polled.fleets.find((fleet) => fleet.id === id)?.formation?.ready);
+      return pending ? `${pending} ${JSON.stringify(polled.fleets.find((fleet) => fleet.id === pending)?.formation)}` : null;
+    });
+    const squads = state.fleets.find((fleet) => fleet.id === 'red')?.wings.flatMap((wing) => wing.squads) ?? [];
+    Expect(
+      JSON.stringify(squads.map((squad) => [squad.id, squad.role, squad.members.length])) ===
+        JSON.stringify([
+          ['dps', 'dps', 7],
+          ['logi', 'logi', 2]
+        ]),
+      JSON.stringify(squads.map((squad) => [squad.id, squad.role, squad.members.length]))
+    );
+    const settled = await WaitFor('every member in formation', 30, (polled) =>
+      NotInFormation(
+        polled,
+        [...blue.ships, ...red.ships].filter((id) => id !== blue.commander && id !== red.commander)
+      )
+    );
+    const scrambled = [...blue.ships, ...red.ships].filter((id) => (ShipIn(settled, id).following?.slotError ?? 0) > 5);
+    Expect(!scrambled.length, `off their slots: ${scrambled.slice(0, 3).join(', ')}`);
+    return `FCs ${gap.toFixed(0)} m apart, centre ${fromStation.toFixed(0)} m from the CNAP`;
+  });
+
+  await Check('stage_engagement on a passed scene with free sides', async () => {
+    const result = await call<StageEngagementResult>('stage_engagement', {
+      scene: { name: 'free' },
+      sides: [
+        { ships: [{ hull: 'Rifter', count: 6 }], fleet: false, formation: 'line' },
+        { ships: [{ hull: 'Rifter', count: 6 }], fleet: false, formation: 'wall', team: 'green' }
+      ],
+      range: 5000
+    }).catch(SkipWithoutSde);
+    const ids = result.scene.ships.map((ship) => ship.id);
+    const expected = [1, 2, 3, 4, 5, 6].flatMap((n) => [`blue-0${n}`]).concat([1, 2, 3, 4, 5, 6].map((n) => `green-0${n}`));
+    Expect(result.loaded === false && JSON.stringify(ids) === JSON.stringify(expected) && !(result.scene.fleets ?? []).length, JSON.stringify({ loaded: result.loaded, ids, fleets: result.scene.fleets }));
+    const blue = result.scene.ships.filter((ship) => ship.id.startsWith('blue-'));
+    Expect(
+      blue.every((ship) => ship.position[1] === 0 && ship.position[2] === blue[0].position[2]),
+      `the line is not along x: ${JSON.stringify(blue.map((ship) => ship.position))}`
+    );
   });
 
   if (rendering) {

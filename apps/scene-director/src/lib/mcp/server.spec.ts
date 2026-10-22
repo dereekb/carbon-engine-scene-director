@@ -24,6 +24,8 @@ describe('mcp server', () => {
       expect(tools.map((tool) => tool.name).sort()).toEqual(TOOLS.map((tool) => tool.name).sort());
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/move_to_squad/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
+      expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);
+      expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/stage_engagement/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/set_location/u);
 
       const status = (await client.callTool({ name: 'viewer_status', arguments: {} })) as { content: { text: string }[] };

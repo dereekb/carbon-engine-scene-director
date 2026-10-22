@@ -20,7 +20,8 @@ fleet structure (fleet commander, wings, squads with a role and an anchor), and
 fleets fly: every member keeps range on its anchor in formation behind the FC
 (Follow the FC). **Locations**: a scene can sit at a real EVE place (a solar
 system and a point near one of its celestials, from CCP's static data); it is
-recorded and reported, not drawn yet.
+recorded and reported, not drawn yet. **Scene building**: `add_ships` and
+`stage_engagement` add N ships, or two opposing fleets, in one call.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -59,7 +60,7 @@ An nx workspace:
 
 | Project | Path | Builds | Holds |
 |---|---|---|---|
-| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema, fleets and their formation, fleet compositions (`cjs-fleet/1`) with the TFIs example, the tool list, and the ship stats math and its pilot context, shared by the hub and the page |
+| `scene` | `packages/scene` | `@nx/js:tsc` | the scene document schema, fleets and their formation, fleet compositions (`cjs-fleet/1`) with the TFIs example, the scene-building ops (`add_ships`, `stage_engagement`), the tool list, and the ship stats math and its pilot context, shared by the hub and the page |
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI and `verify-page` |
 | `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, the Destiny world and its clock, storage, hub link; node specs for the clock and the Destiny wiring |
 
@@ -109,6 +110,8 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
+| `add_ships` | hub | adds N ships of an EVE type in a formation at a place (a position, or off a ship or celestial), facing a heading or a target, on a team; free, as a new fleet, or into a fleet's squad (see Building scenes) |
+| `stage_engagement` | hub | two sides (compositions or ship lists) facing each other at a range around a point or a celestial, each on its own team; returns the ids per side (see Building scenes) |
 | `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, each ship's `propMod`, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation` and `propMods` counts, the page's `audio`, and the scene's `location` with the nearest celestials and what the location dressed |
 | `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, warp to a point or a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
 | `switch_prop_mods` | page | switches prop mods (MWDs and ABs) on or off, live, for ships, a fleet, a wing or a squad, on EVE's cycle timing (see Prop mods) |
@@ -931,6 +934,112 @@ parts for A/B checks.
 **Not drawn.** Asteroid belts and authored objects (their own entries),
 player-built structures, and celestials too small to see. The data is CCP's
 static data (tools-core's map routes over the public SDE; no ESI, no API key).
+
+## Building scenes: add_ships and stage_engagement
+
+Two hub tools build a battle in a few calls. The hub resolves every name first: hull names to SOF DNA and the
+hull's EVE radius (tools-core's SDE, as `add_fleet_composition` does), compositions by name, celestials of the
+scene's location to scene points, and the EVE radii of a fleet the ships join. Then it sends **one pure patch
+operation** of the same name to the tab (`patch_scene`), or applies it to a passed `scene` with no tab. The ops live
+in `packages/scene/src/lib/staging/` and take every ship line with its `dna`.
+
+```bash
+node bin/scene-director.js call add_ships '{"hull":"Rifter","count":10,"formation":"wedge","near":{"ship":"tfis-fc","range":20000},"facing":"tfis-fc","team":"red"}'
+node bin/scene-director.js call stage_engagement '{"sides":[{"composition":"tfis"},{"ships":[{"hull":"Ferox","count":20},{"hull":"Scimitar","count":4}]}],"range":20000,"near":{"celestial":"Jita IV - Moon 4 - Caldari Navy Assembly Plant","range":40000}}'
+```
+
+**Templates.** `add_ships` is a shortcut for a one-line fleet template: its result's `template` is the `cjs-fleet/1`
+composition of what it added (the first ship the FC, the rest one squad). `save_fleet_composition` stores it under a
+name, and `add_fleet_composition` and `stage_engagement` sides spawn it by that name.
+
+### Formations
+
+Ships outside fleets stand in a shape laid out in the heading frame (x right, y up, z forward), the **lead** (the first
+ship, number 01) at the place. `s` is the spacing; `centreOut` is 0, +1, −1, +2, −2, ...
+
+| Formation | Ship k | The place is |
+|---|---|---|
+| `sphere` (default; `blob`) | shells at `i·s` around the lead, `ceil(40·i²)` Fibonacci candidates each, trailing pole first; a candidate is kept when it is at least `s` from every kept ship (256 ships fit in 4 shells) | the centre |
+| `line` (abreast) | `(s·centreOut(k), 0, 0)` | the line's centre |
+| `column` (astern) | `(0, 0, −k·s)` | the head |
+| `wedge` (a V) | arm `a = ceil(k/2)`, right for odd k: `(±a·s·sin45°, 0, −a·s·cos45°)` | the tip |
+| `grid` (block) | `w = ceil(√N)` abreast per rank, ranks behind: `(s·centreOut(k mod w), 0, −floor(k/w)·s)` | the front rank's centre |
+| `wall` (upright) | `w = ceil(√N)` per row, rows up and down: `(s·centreOut(k mod w), s·centreOut(floor(k/w)), 0)` | the centre |
+
+Positions are rounded to the metre; every ship faces the heading (yaw only). The default spacing is fleets' rule for
+two of the hull, `ceil(1.5 × 2r + 100)` (Rifter 193 m, TFI 850 m); an unknown radius counts as 500 m with a warning, and
+a `spacing` under `2r` warns that the ships overlap. A mixed ship list uses the largest radius.
+
+### Places and headings
+
+- `position` [x, y, z] is the lead's place, or `near { ship | celestial, range?, direction? }`:
+  - off a **ship**, `range` (default 5,000 m) is surface to surface on both EVE radii. `direction` is `ahead` (the
+    default), `behind`, `left`, `right` (the ship's own heading), `above`, `below`, `sun`, `away` (need a location),
+    `origin` or `[x, y, z]`. A ship is used at its **document placement**, not where it has flown since.
+  - off a **celestial** of the scene location's system (named as `set_location` names them inside a system, or by id),
+    `range` is off its surface with `set_location`'s defaults by kind, and `direction` is `sun` (the default), `away`,
+    `origin` or `[x, y, z]`. A scene with no location is refused.
+- `heading` is yaw degrees (0 faces +Z, 90 faces +X), or `facing`: a point, a ship id or `{ celestial }` (a target
+  straight above or below is refused). Default: the near ship's heading, else 0.
+
+### Fleets
+
+| `fleet` | Does | Placement |
+|---|---|---|
+| `{ "new": true, "id"?, "name"?, "squad"? }` | a new fleet from an inline composition: the first ship is the FC ("FC"), the rest one squad (id its role) in `wing-1`; fleet id `id` (refused when taken), else the prefix, numbered when taken | the FC at the place, facing the heading; the rest at their slots |
+| `{ "id": "<fleet>", "squad": "<squad id>" }` | joins a squad (`move_to_squad`) | at their Follow-the-FC slots around the FC's document placement |
+| `{ "id": "<fleet>", "squad": { "id"?, "role"?, "anchor"?, "name"? }, "wing"? }` | a new squad (id its role, numbered `logi-2` when taken) in the fleet's **last** wing (`wing-1` is made for a wingless fleet) | at their slots |
+
+- The squad role defaults from the hull's EVE group: Logistics, Logistics Frigate and Force Auxiliary are logi;
+  Interdictor, Heavy Interdiction Cruiser and Interceptor tackle; Electronic Attack Ship and the Recons ewar; Command
+  Ship and Command Destroyer boost; Carrier and Supercarrier support; the rest dps (raw ops default to dps). Anchors
+  take the composition form `{ on?: "fc" | "lead" | "<squad id>", range? }` with the composition defaults.
+- Fleet members never stand in a shape: Follow the FC would fly them straight to their slots. So joins refuse
+  `formation`, `spacing`, `position`, `near`, `heading` and `facing`, and a new fleet refuses `formation` and `spacing`.
+- **Joining a squad re-plans the fleet**: slots go in wing, squad and member order, so later squads on the same shell
+  move (TFIs `dps-a` + 2 moves 14 members by up to 3.5 km). The op warns with the count; a new squad in the last wing
+  moves nobody. A fleet holds at most 256 ships.
+
+### Ids and names
+
+Free ships and joins take `<prefix>-<nn>` ids after the highest number already used with the prefix (at least two
+digits). The prefix is `prefix`, else the slug of the name or hull (`tempest-fleet-issue`), or `<fleet>-<squad>` when
+joining. Names are `<name or hull> <n>`. `type` is the canonical SDE name; `team`, `stats` and `propMod` go on every
+ship. New fleets take the composition ids (`<fleet>-fc`, `<fleet>-<squad>-<nn>`).
+
+### Engagements
+
+- Exactly two sides; side A faces `heading`, side B faces back. Each side's **front** is how far its ships reach ahead
+  of its reference (FC or lead), laid out at the origin. Side A's reference sits at `C − f·(range/2 + front_A)` and side
+  B's at `C + f·(range/2 + front_B)` (`f` forward along the heading), so the fronts are exactly `range` apart around
+  `C` (TFIs against 8 Ferox + 2 Scimitar at 20 km: FCs 20,465 m apart).
+- A side is a `composition` (inline, saved or built-in; always a fleet) or `ships: [{ hull, count?, role?, name?,
+  propMod?, dna?, radius? }]`: a fleet whose FC is the first ship and whose lines are squads in `wing-1` (ids their
+  roles, `dps`, `dps-2`), or with `fleet: false` free ships in `formation` (`spacing` and `prefix` too; ids
+  `<team>-01`, ...). Fleet ids: the side's `fleet`, else the composition's id, else the team.
+- The result's `engagement` lists per side its team, fleet, commander, ships and lead.
+
+### Defaults
+
+| Argument | Default |
+|---|---|
+| `count` | 1 (at most 256 per call or side) |
+| `formation` | `sphere` (ships outside fleets) |
+| `spacing` | `ceil(1.5 × 2r + 100)` m (r the hull's EVE radius; 500 m when unknown) |
+| place | `[0, 0, 0]` |
+| `near.range` | 5,000 m off a ship; off a celestial as `set_location` (station 5 km, gate 2.5 km, star/planet/moon one radius, belt 0) |
+| `near.direction` | `ahead` off a ship, `sun` off a celestial |
+| heading | the near ship's yaw, else 0 |
+| team | none (`add_ships`); `blue` / `red` (`stage_engagement`) |
+| role | from the hull's EVE group, else `dps` |
+| engagement `range` / centre / heading | 20,000 m between fronts / `[0, 0, 0]` / across the line from `near`, else 0 |
+| prefix | the hull name's slug; `<fleet>-<squad>` when joining; the team for free engagement sides |
+
+The raw ops (`patch_scene`): `{ "op": "add_ships", "dna", ..., "radii"?: { "<ship id>": metres } }` and `{ "op":
+"stage_engagement", "sides": [...], ... }` take the same fields with every line's `dna` filled; they accept
+`near.ship` and a ship id for `facing` against the draft (so one patch can stage off a ship it just added), and refuse
+celestials and hull names without dna. **Limits**: placements read document positions, not live ones; 256 ships per
+call or side; yaw only.
 
 ## Development
 

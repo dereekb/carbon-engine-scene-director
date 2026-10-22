@@ -14,6 +14,7 @@ import { APPROACH_RANGE, MAX_ORDER_RANGE, MIN_WARP_DISTANCE, SHIP_ORDER_REQUEST_
 import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 import { PROP_MOD_MODULE_AB, PROP_MOD_MODULE_MWD, PROP_MOD_MODULE_NONE } from './stats';
 import { CELESTIAL_KINDS, DEFAULT_STARGATE_LOCATION_RANGE, DEFAULT_STATION_LOCATION_RANGE, LOCATION_NEARBY_LIMIT, MAP_SEARCH_KINDS } from './location';
+import { DEFAULT_ENGAGEMENT_RANGE, DEFAULT_NEAR_SHIP_RANGE, ENGAGEMENT_TEAMS, NEAR_DIRECTIONS, SHIP_FORMATION_ALIASES, SHIP_FORMATIONS } from './staging';
 
 /**
  * Who answers a tool call.
@@ -211,6 +212,8 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "move_to_squad", "ships": ["<id>"], "fleet", "squad" }   { "op": "remove_from_fleet", "ships": ["<id>"] }
 { "op": "set_anchor", "fleet", "squad", "anchor": { "ship"?, "range"? } }   (merged; null resets ship to the FC and range to the role default)
 { "op": "add_fleet_composition", "composition": { ...${FLEET_COMPOSITION_SCHEMA} }, "position": [x, y, z], "heading"?: <yaw degrees> | "facing"?: [x, y, z], "fleet"?: "<fleet id>", "team"? }   (needs dna on every ship line; the add_fleet_composition tool resolves hull names and saved names first)
+{ "op": "add_ships", "dna", "hull"?, "radius"?, "count"?, "formation"?, "spacing"?, "position"? | "near"?: { "ship", "range"?, "direction"? }, "heading"? | "facing"?: [x, y, z] | "<ship id>", "team"?, "name"?, "prefix"?, "stats"?, "propMod"?, "fleet"?, "radii"?: { "<ship id>": metres } }   (the add_ships tool resolves hull names, celestials and radii first)
+{ "op": "stage_engagement", "sides": [{ "composition": { ... } | "ships": [{ "dna", ... }], "team"?, "fleet"?, ... }, { ... }], "range"?, "center"? | "near"?: { "ship", ... }, "heading"? }   (every ship line needs its dna; the stage_engagement tool resolves names first)
 { "op": "set_prop_mods", "ships": ["<id>"] | "fleet": "<id>" [, "wing" | "squad": "<id>"], "active"?: true | false, "module"?: "<module>" | null }   (merged into each selected ship's propMod; module null is the hull-sized default)
 { "op": "set_location", "location": { ...location } }   (replaces the location whole; the set_location tool resolves names)
 { "op": "clear_location" }
@@ -304,6 +307,101 @@ ${FLEET_COMPOSITION_FORMAT}`,
     where: 'hub',
     description: 'Deletes a saved fleet composition by name. Built-in examples are read-only.',
     inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+  },
+  {
+    name: 'add_ships',
+    where: 'hub',
+    description: `Adds ships of one EVE type to the viewer's live scene in one call: count ships of hull (an EVE type name or id, resolved to SOF DNA and the hull's EVE radius through tools-core), in a formation at a place, facing a heading or a target, on a team, optionally as a new fleet or into a fleet's squad. A shortcut for a one-line fleet template: the result's template is that ${FLEET_COMPOSITION_SCHEMA} composition, ready for save_fleet_composition, add_fleet_composition and stage_engagement.
+- formation: ${SHIP_FORMATIONS.map((formation) => `"${formation}"`).join(', ')} (${Object.entries(SHIP_FORMATION_ALIASES)
+      .map(([alias, formation]) => `"${alias}" is ${formation}`)
+      .join(', ')}). sphere is the default blob; line is abreast; column is astern; wedge is a V behind the lead; grid is ranks of lines behind the lead; wall is rows abreast stacked up and down.
+- spacing: metres between neighbours, centre to centre (default ${FORMATION_SPACING} × two radii + ${FORMATION_GAP} m).
+- The first ship (the lead) sits at the place: position [x, y, z], or near { ship | celestial, range?, direction? }. range is metres off its surface (default ${DEFAULT_NEAR_SHIP_RANGE} off a ship; off a celestial of the scene's location as set_location's defaults). direction is from it: ${NEAR_DIRECTIONS.join(', ')} or [x, y, z]; ahead, behind, left, right, above and below follow the ship's own heading. Default: ahead off a ship, sun off a celestial. Ships are placed off a ship's document placement, not where it has flown since.
+- heading is yaw degrees (0 faces +Z, 90 faces +X; default the near ship's heading, else 0), or facing (a point, a ship id or { celestial }).
+- fleet: { new: true, id?, name?, squad?: { id?, role?, anchor? } } makes a new fleet (the first ship is the FC, the rest one squad; the role defaults from the hull's EVE group: logistics are logi, interdictors and interceptors tackle, recons and EAFs ewar, command ships boost, carriers support, the rest dps). { id, squad: "<squad id>" } joins a squad. { id, squad: { id?, role?, anchor? }, wing? } makes a new squad (in the fleet's last wing by default). Fleet members are placed at their formation slots around the FC instead of a formation; joining a squad can move members of later squads, a new squad moves nobody.
+- Ids are "<prefix>-01", "-02", ... after the highest number already used (prefix: the hull name; "<fleet>-<squad>" when joining). stats, propMod and team go on every ship.
+- Pass scene to add to that document with no tab (returned, not shown). Returns added (ships, lead, fleet), hull (dna, radius and where they came from), template and the patch_scene result. Needs a prepared SDE in tools-core for names, celestials and radii; with dna and radius it needs none.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        hull: { type: ['string', 'integer'], description: 'An EVE type name ("Rifter", "Tempest Fleet Issue") or type id.' },
+        dna: { type: 'string', description: "SOF DNA (hull:faction:race), instead of or to override the hull's." },
+        radius: { type: 'number', description: "The hull's EVE radius in metres. Default from the EVE data." },
+        count: { type: 'integer', minimum: 1, maximum: MAX_FLEET_SHIPS, description: 'How many ships. Default 1.' },
+        formation: { type: 'string', enum: [...SHIP_FORMATIONS, ...Object.keys(SHIP_FORMATION_ALIASES)], description: 'The shape, for ships outside fleets. Default sphere.' },
+        spacing: { type: 'number', description: 'Metres between neighbours, centre to centre.' },
+        position: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: "The lead's [x, y, z] in metres. Default [0, 0, 0]." },
+        near: {
+          type: 'object',
+          description: 'Where the lead goes instead of position: off a ship or a celestial of the scene location.',
+          properties: {
+            ship: { type: 'string' },
+            celestial: { type: ['string', 'integer'], description: "A celestial name or id in the scene location's system." },
+            range: { type: 'number', minimum: 0, description: 'Metres off its surface.' },
+            direction: {
+              anyOf: [
+                { type: 'string', enum: [...NEAR_DIRECTIONS] },
+                { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 }
+              ]
+            }
+          }
+        },
+        heading: { type: 'number', description: 'Yaw degrees.' },
+        facing: {
+          anyOf: [
+            { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+            { type: 'string', description: 'A ship id.' },
+            { type: 'object', properties: { celestial: { type: ['string', 'integer'] } } }
+          ],
+          description: 'What the ships face, instead of heading.'
+        },
+        team: { type: 'string' },
+        name: { type: 'string', description: 'The ship name base (default the hull name); ships are "<name> <n>".' },
+        prefix: { type: 'string', description: 'The ship id prefix.' },
+        stats: { type: 'object', description: "Hull stat overrides for every ship (as a scene ship's stats)." },
+        propMod: { description: "Every ship's prop mod: a module, or { module?, active? } (as a scene ship's propMod)." },
+        fleet: { type: 'object', description: 'A new fleet { new: true, ... }, a squad to join { id, squad: "<id>" }, or a new squad { id, squad: { ... }, wing? }.' },
+        scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
+      }
+    }
+  },
+  {
+    name: 'stage_engagement',
+    where: 'hub',
+    description: `Stages a fight in the viewer's live scene in one call: two sides facing each other range metres apart (between their front lines; default ${DEFAULT_ENGAGEMENT_RANGE}), centred on center [x, y, z] (default [0, 0, 0]) or near { ship | celestial, range?, direction? } (as add_ships), each on its own team (default "${ENGAGEMENT_TEAMS[0]}" and "${ENGAGEMENT_TEAMS[1]}").
+- A side is a composition (a saved or built-in name such as "tfis", or an inline ${FLEET_COMPOSITION_SCHEMA}), or ships: [{ hull, count?, role?, name?, propMod?, dna?, radius? }]. A ship list is a fleet (fleet id: the side's fleet, else the team; the first ship is the FC; each line a squad, its role from the hull's EVE group unless given); with fleet: false it is free ships in a formation (formation, spacing and prefix as add_ships; ids "<team>-01", ...).
+- heading is the yaw side A faces; side B faces back. Default 0, or across the line from the near ship or celestial, so both sides stand beside it.
+- Hull and composition names resolve through tools-core. Pass scene to stage on that document with no tab.
+- Returns engagement (center, heading, range, and per side its team, fleet, commander, ships and lead), hulls and the patch_scene result.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        sides: {
+          type: 'array',
+          minItems: 2,
+          maxItems: 2,
+          items: {
+            type: 'object',
+            properties: {
+              composition: { type: ['string', 'object'], description: `A saved or built-in composition name, or an inline ${FLEET_COMPOSITION_SCHEMA}.` },
+              ships: { type: 'array', items: { type: 'object' }, description: 'Ship lines { hull, count?, role?, name?, propMod?, dna?, radius? }.' },
+              team: { type: 'string' },
+              fleet: { type: ['string', 'boolean'], description: 'The fleet id, or false for free ships (ship lists only).' },
+              name: { type: 'string', description: 'The fleet name.' },
+              formation: { type: 'string', enum: [...SHIP_FORMATIONS, ...Object.keys(SHIP_FORMATION_ALIASES)] },
+              spacing: { type: 'number' },
+              prefix: { type: 'string' }
+            }
+          }
+        },
+        range: { type: 'number', minimum: 0, description: `Metres between the front lines. Default ${DEFAULT_ENGAGEMENT_RANGE}.` },
+        center: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        near: { type: 'object', description: 'Centre off a ship or a celestial of the scene location: { ship | celestial, range?, direction? }.' },
+        heading: { type: 'number', description: 'The yaw side A faces.' },
+        scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to stage on instead of the viewer's (no tab needed; returned, not shown).` }
+      },
+      required: ['sides']
+    }
   },
   {
     name: 'get_state',

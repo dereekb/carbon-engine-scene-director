@@ -6,6 +6,7 @@ import { applyFleetCompositionOperation, FLEET_COMPOSITION_OPERATIONS } from './
 import { normalizeSceneLocation, type SceneLocation } from './location/location';
 import { normalizeShipPropMod, type SceneShipPropMod } from './prop-mods/prop-mod';
 import { applyPropModOperation, PROP_MOD_OPERATIONS } from './prop-mods/operation';
+import { applyStagingOperation, STAGING_OPERATIONS } from './staging/operation';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -294,6 +295,13 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_prop_mods", ships | fleet [, wing | squad], active?, module? }
  *                                       merged into each selected ship's propMod: active false and module null remove
  *                                       the key (see prop-mods/operation.ts)
+ *   { op: "add_ships", dna, hull?, radius?, count?, formation?, spacing?, position? | near?, heading? | facing?, team?,
+ *     name?, prefix?, stats?, propMod?, fleet?, radii? }
+ *                                       count ships of one hull, free in a formation, as a new fleet, or into a fleet's
+ *                                       squad at their formation slots (see staging/add-ships.ts)
+ *   { op: "stage_engagement", sides: [A, B], range?, center? | near?, heading?, radii? }
+ *                                       two sides (compositions or ship lists) facing each other, fronts range apart;
+ *                                       every ship line needs its dna (see staging/engagement.ts)
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -372,6 +380,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       if (FLEET_OPERATIONS.has(String(operation['op']))) applyFleetOperation(operation, context);
       else if (FLEET_COMPOSITION_OPERATIONS.has(String(operation['op']))) applyFleetCompositionOperation(operation, context);
       else if (PROP_MOD_OPERATIONS.has(String(operation['op']))) applyPropModOperation(operation, context);
+      else if (STAGING_OPERATIONS.has(String(operation['op']))) applyStagingOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }

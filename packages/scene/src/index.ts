@@ -6,3 +6,4 @@ export * from './lib/orders';
 export * from './lib/compositions';
 export * from './lib/location';
 export * from './lib/prop-mods';
+export * from './lib/staging';

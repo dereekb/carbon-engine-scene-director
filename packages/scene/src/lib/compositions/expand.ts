@@ -227,7 +227,7 @@ function toSceneFleet(input: { readonly composition: FleetComposition; readonly 
  * @param leads - Each squad's first ship id.
  * @returns The scene anchor, or null when the defaults say it all (on the FC at the role's range).
  */
-function toSceneAnchor(squad: CompositionSquad, leads: ReadonlyMap<string, string>): Maybe<SceneSquadAnchor> {
+export function toSceneAnchor(squad: CompositionSquad, leads: ReadonlyMap<string, string>): Maybe<SceneSquadAnchor> {
   const on = squad.anchor?.on ?? (squad.role === 'logi' ? COMPOSITION_ANCHOR_LEAD : COMPOSITION_ANCHOR_FC);
   const range = squad.anchor?.range;
   const ship = on === COMPOSITION_ANCHOR_FC ? undefined : leads.get(on === COMPOSITION_ANCHOR_LEAD ? squad.id : on);

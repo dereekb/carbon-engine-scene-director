@@ -35,6 +35,7 @@ import { FleetCompositionFileStore } from '../store/composition-files';
 import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
 import { Locations } from './locations';
+import { Staging } from './staging';
 import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
@@ -139,6 +140,7 @@ export class Hub implements ToolCaller {
   readonly shipData: ShipDataApi;
   readonly mapData: MapDataApi;
   readonly locations: Locations;
+  readonly staging: Staging;
   private readonly log: (line: string) => void;
   private readonly pages: WebSocket[] = [];
   private readonly pending = new Map<number, PendingCall>();
@@ -162,6 +164,7 @@ export class Hub implements ToolCaller {
     this.savedScenes = new SavedScenes({ files: scenes, page });
     this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, page });
     this.locations = new Locations({ mapData: this.mapData, page });
+    this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, page });
     this.log = log;
   }
 
@@ -261,7 +264,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'viewer_status':

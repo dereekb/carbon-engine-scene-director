@@ -14,11 +14,15 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `cjs-fleet/1` fleet composition, its expansion, the `add_fleet_composition` op, and the TFIs example in
   `examples/tfis.json`) and `src/lib/location/` (the document's `location`, the placement math that puts an origin
   off a celestial, the `/map/system` answer and get_state report the hub and the page share, and `dressing.ts`: what a
-  location draws, the plan and its get_state report). No runtime imports;
+  location draws, the plan and its get_state report) and `src/lib/staging/` (the `add_ships` and `stage_engagement`
+  ops: ship formations, placement off a ship, ship ids, the engagement layout; the hub resolves names first). No
+  runtime imports;
   the hub, the page and the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. `hub/map-data.ts` is the tools-core map client and
-  `hub/locations.ts` answers `search_map`, `get_system`, `set_location` and `/map/system`. Building it builds the
+  `hub/locations.ts` answers `search_map`, `get_system`, `set_location` and `/map/system`. `hub/staging.ts` answers
+  `add_ships` and `stage_engagement` (hull lines, celestials of the location, existing ships' radii, compositions by
+  name). Building it builds the
   viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
   `src/lib/carbonenginejs-runtime.d.ts` types those imports (the runtime ships no `.d.ts`). Add a member to the
@@ -93,6 +97,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - Formation slots wait for settled radii (`Director.FormationRadius`: an SDE radius, or a finished SOF build) and are
   laid out at the FC's *document* placement. With the 100 m interim radius a composition-added fleet would be pulled
   about 300 m inward and scramble.
+- Ships joining a fleet (`add_ships` fleet modes, new fleets, engagement fleet sides) are placed at their
+  Follow-the-FC slots (`layoutFleetFormation` at the FC's document placement, with the hub-filled `radii`), never in a
+  shape formation, which Follow the FC would scramble. Joining a squad re-plans the fleet, so later squads on the same
+  shell move (TFIs `dps-a` + 2: 14 members up to 3.5 km); a new squad goes in the last wing and moves nobody.
 - Destiny's `FollowBall` / `Orbit` / `GotoPoint` return without a word, keeping the old order, for a missing, self,
   moribund or cloaked target, a target in another bubble (a master only) or a non-finite value. `DestinyWorld`
   resolves the target itself and checks that both parks reached the order's mode, or stops the ship on both.
