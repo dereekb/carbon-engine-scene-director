@@ -7,15 +7,11 @@ import { normalizeFleetComposition } from '../compositions/normalize';
 import { type HullStatOverrides, normalizeHullStatOverrides } from '../stats';
 import { normalizeShipPropMod, type SceneShipPropMod } from '../prop-mods/prop-mod';
 import type { SceneShip, SceneVector } from '../scene';
-import { readStagingDraft, type StagingDraft, toExpandExisting } from './draft';
+import { readStagingDraft, type StagingDraft, stagingTakenIds, toExpandExisting } from './draft';
+import { largeSceneWarning } from '../extent';
 import { DEFAULT_SHIP_FORMATION, defaultShipSpacing, layoutShipFormation, readShipFormation, type ShipFormation, toFormationWorld } from './formations';
 import { headingToward, type NearDirection, normalizeHeading, readNearDirection, toNearShipPoint } from './placement';
 import { MAX_SHIP_ID_PREFIX_LENGTH, numberShipIds, readPositiveMetres, readStagingShipLine, shipLabel, type StagingShipLine, STAGING_WING_ID, toIdSlug, toShipListComposition } from './ships';
-
-/**
- * Beyond this distance (metres) from the scene origin the page draws ships with float32 jitter.
- */
-export const STAGING_FAR_DISTANCE = 1e8;
 
 /**
  * How many examples an overlap warning names.
@@ -28,7 +24,7 @@ const OVERLAP_EXAMPLES = 3;
 const SLOT_MOVE_TOLERANCE = 1;
 
 const ADD_SHIPS_KEYS = new Set<string>(['op', 'dna', 'hull', 'radius', 'count', 'formation', 'spacing', 'position', 'near', 'heading', 'facing', 'team', 'name', 'prefix', 'stats', 'propMod', 'fleet', 'radii']);
-const NEAR_KEYS = new Set<string>(['ship', 'celestial', 'range', 'direction']);
+const NEAR_KEYS = new Set<string>(['ship', 'object', 'celestial', 'range', 'direction']);
 const NEW_FLEET_KEYS = new Set<string>(['new', 'id', 'name', 'squad']);
 const JOIN_KEYS = new Set<string>(['id', 'squad', 'wing']);
 const SQUAD_SPEC_KEYS = new Set<string>(['id', 'name', 'role', 'anchor']);
@@ -43,10 +39,14 @@ export interface StagingShipTemplate {
 }
 
 /**
- * A `near` reference to a ship of the draft.
+ * A `near` reference to a ship or an object of the draft.
  */
 export interface StagingNear {
-  readonly ship: string;
+  readonly kind: 'ship' | 'object';
+  /**
+   * The ship or object id.
+   */
+  readonly id: string;
   readonly range: Maybe<number>;
   readonly direction: Maybe<NearDirection>;
 }
@@ -63,7 +63,7 @@ export interface StagingReadContext {
 }
 
 /**
- * Reads `near: { ship, range?, direction? }`. A celestial is refused: the tool resolves it to a position first.
+ * Reads `near: { ship | object, range?, direction? }`. A celestial is refused: the tool resolves it to a position first.
  *
  * @param value - The candidate.
  * @param context - Where it sits, the tool, the draft and where problems go.
@@ -73,17 +73,20 @@ export function readStagingNear(value: unknown, context: StagingReadContext): Ma
   const { where, tool, draft, problems, warnings } = context;
   let near: Maybe<StagingNear> = null;
   if (!isPlainObject(value)) {
-    problems.push(`${where} must be an object { ship, range?, direction? }`);
+    problems.push(`${where} must be an object { ship | object, range?, direction? }`);
   } else if (value['celestial'] != null) {
-    problems.push(`${where}.celestial: the ${tool} tool resolves a celestial of the scene's location to a position; patch_scene takes near.ship or a position`);
+    problems.push(`${where}.celestial: the ${tool} tool resolves a celestial of the scene's location to a position; patch_scene takes near.ship, near.object or a position`);
+  } else if (value['ship'] != null && value['object'] != null) {
+    problems.push(`${where}: give ship or object, not both`);
   } else {
     reportUnknownKeys(value, NEAR_KEYS, where, warnings);
     const before = problems.length;
-    const ship = readId(value['ship'], `${where}.ship`, problems);
-    if (ship && !draft.ships.has(ship)) problems.push(`${where}.ship: no ship "${ship}" in the scene`);
+    const kind = value['object'] == null ? 'ship' : 'object';
+    const id = readId(value[kind], `${where}.${kind}`, problems);
+    if (id && !(kind === 'ship' ? draft.ships : draft.objects).has(id)) problems.push(`${where}.${kind}: no ${kind} "${id}" in the scene`);
     const range = value['range'] == null ? null : readNumber(value['range'], `${where}.range`, problems, { min: 0 });
     const direction = value['direction'] == null ? null : readNearDirection(value['direction'], `${where}.direction`, problems);
-    if (problems.length === before) near = { ship, range, direction };
+    if (problems.length === before) near = { kind, id, range, direction };
   }
   return near;
 }
@@ -109,22 +112,35 @@ export function readStagingRadii(value: unknown, where: string, problems: string
 }
 
 /**
- * The lead's centre off a near ship.
+ * The lead's centre off a near ship or object: a ship's radius comes from `radii`, an object's from its document
+ * radius (0 when it has none).
  *
  * @param near - The reference.
  * @param context - The draft, the radii, the lead's radius and where problems go.
- * @returns The point and the ship's heading, or null on a problem.
+ * @returns The point and the reference's heading, or null on a problem.
  */
 export function resolveStagingNear(near: StagingNear, context: { readonly draft: StagingDraft; readonly radii: ReadonlyMap<string, number>; readonly leadRadius: number; readonly where: string; readonly problems: string[] }): Maybe<{ readonly point: SceneVector; readonly heading: number }> {
   const { draft, radii, leadRadius, where, problems } = context;
-  const ship = draft.ships.get(near.ship);
+  const reference = stagingNearReference(near, draft);
   let resolved: Maybe<{ readonly point: SceneVector; readonly heading: number }> = null;
-  if (ship) {
-    const placed = toNearShipPoint({ ship, shipRadius: radii.get(near.ship) ?? 0, leadRadius, range: near.range, direction: near.direction, locationOrigin: draft.locationOrigin, where });
+  if (reference) {
+    const shipRadius = near.kind === 'ship' ? (radii.get(near.id) ?? 0) : (draft.objects.get(near.id)?.radius ?? 0);
+    const placed = toNearShipPoint({ ship: reference, shipRadius, leadRadius, range: near.range, direction: near.direction, locationOrigin: draft.locationOrigin, where });
     problems.push(...placed.problems);
     if (placed.point) resolved = { point: placed.point, heading: placed.heading };
   }
   return resolved;
+}
+
+/**
+ * The near reference's document placement.
+ *
+ * @param near - The reference.
+ * @param draft - What the draft holds.
+ * @returns The ship's or object's placement, or null when it is gone.
+ */
+export function stagingNearReference(near: StagingNear, draft: StagingDraft): Maybe<{ readonly position: SceneVector; readonly rotation: SceneVector }> {
+  return (near.kind === 'ship' ? draft.ships.get(near.id) : draft.objects.get(near.id)) ?? null;
 }
 
 export interface PlaceFreeShipsInput {
@@ -204,7 +220,7 @@ export function freeShipsFront(plan: FreeShipsPlan): number {
 export function placeFreeShips(input: PlaceFreeShipsInput): SceneShip[] {
   const { position, heading, prefix, template, draft, where, problems, warnings } = input;
   const plan = planFreeShips(input);
-  const numbered = numberShipIds({ prefix, count: plan.lines.length, ids: draft.ships.keys(), where, problems });
+  const numbered = numberShipIds({ prefix, count: plan.lines.length, ids: stagingTakenIds(draft), where, problems });
   if (!numbered.ids.length) return [];
   const world = toFormationWorld({ offsets: plan.offsets, position, heading });
   const yaw = normalizeHeading(heading);
@@ -232,7 +248,7 @@ export function placeFreeShips(input: PlaceFreeShipsInput): SceneShip[] {
 
 /**
  * Warns about new ships landing within DEFAULT_FORMATION_RADIUS of ships already in the scene, and about ships
- * placed beyond STAGING_FAR_DISTANCE.
+ * placed beyond LARGE_SCENE_DISTANCE.
  *
  * @param input - The new ships, their radii, the draft and where warnings go.
  * @param input.ships - The new ships.
@@ -262,7 +278,8 @@ export function warnLanding(input: { readonly ships: readonly SceneShip[]; reado
 }
 
 /**
- * Warns about ships placed beyond STAGING_FAR_DISTANCE from the scene origin.
+ * Warns about ships placed beyond LARGE_SCENE_DISTANCE from the scene origin (normalizeScene refuses them past
+ * MAX_SCENE_DISTANCE).
  *
  * @param input - The new ships and where warnings go.
  * @param input.ships - The new ships.
@@ -271,9 +288,8 @@ export function warnLanding(input: { readonly ships: readonly SceneShip[]; reado
  */
 export function warnFar(input: { readonly ships: readonly Pick<SceneShip, 'position'>[]; readonly where: string; readonly warnings: string[] }): void {
   const { ships, where, warnings } = input;
-  const far = ships.filter((ship) => Math.hypot(...ship.position) > STAGING_FAR_DISTANCE).length;
-  const count = far === 1 ? '1 ship is' : String(far) + ' ships are';
-  if (far) warnings.push(`${where}: ${count} more than 100,000 km from the scene origin; beyond about 100,000 km the page draws them with float32 jitter`);
+  const warning = largeSceneWarning({ positions: ships.map((ship) => ship.position), noun: 'ship', where });
+  if (warning) warnings.push(warning);
 }
 
 /**
@@ -424,7 +440,8 @@ interface ReadPlaceInput {
 }
 
 /**
- * The lead's place and heading: `position` or `near`, then `heading` or `facing`, else the near ship's heading, else 0.
+ * The lead's place and heading: `position` or `near`, then `heading` or `facing`, else the near reference's heading,
+ * else 0.
  *
  * @param operation - The operation.
  * @param input - The read context, the radii and the lead's radius.
@@ -459,7 +476,7 @@ function readPlace(operation: JsonObject, input: ReadPlaceInput): Maybe<{ readon
 }
 
 /**
- * Reads `facing`: a point, or a ship id (its document position).
+ * Reads `facing`: a point, or a ship or object id (its document position).
  *
  * @param value - The candidate.
  * @param context - Where it sits, the draft, where problems go and the tool.
@@ -469,10 +486,10 @@ export function readFacing(value: unknown, context: Pick<StagingReadContext, 'wh
   const { where, draft, problems, tool } = context;
   let target: Maybe<SceneVector> = null;
   if (typeof value === 'string') {
-    target = draft.ships.get(value)?.position ?? null;
-    if (!target) problems.push(`${where}: no ship "${value}" in the scene`);
+    target = (draft.ships.get(value) ?? draft.objects.get(value))?.position ?? null;
+    if (!target) problems.push(`${where}: no ship or object "${value}" in the scene`);
   } else if (isPlainObject(value)) {
-    problems.push(`${where}: the ${tool} tool resolves { celestial } to a point; patch_scene takes a point or a ship id`);
+    problems.push(`${where}: the ${tool} tool resolves { celestial } to a point; patch_scene takes a point, or a ship or object id`);
   } else {
     target = readVector(value, where, problems);
   }
@@ -593,6 +610,7 @@ function joinFleet(input: JoinFleetInput): void {
     return;
   }
   const shipIds = new Set(draft.ships.keys());
+  const takenIds = stagingTakenIds(draft);
   const original = normalizeFleets({ input: [fleetObject], shipIds });
   const fleet = original.fleets?.[0];
   if (!fleet) {
@@ -620,7 +638,7 @@ function joinFleet(input: JoinFleetInput): void {
     if (!fleet.wings.length) wingOp = { op: 'add_wing', fleet: fleetId, wing: { id: wingId, squads: [] } };
     squadId = chooseSquadId(squad, { squads: squads.map((candidate) => candidate.id), at, problems, fleetId });
     const prefixed = prefix ?? `${fleetId}-${squadId}`;
-    numbered = numberShipIds({ prefix: prefixed, count, ids: shipIds, where, problems });
+    numbered = numberShipIds({ prefix: prefixed, count, ids: takenIds, where, problems });
     const leads = new Map(squads.flatMap((candidate) => (candidate.members.length ? [[candidate.id, candidate.members[0]] as const] : [])));
     if (numbered.ids.length) leads.set(squadId, numbered.ids[0]);
     const on = squad.anchor?.on;
@@ -628,7 +646,7 @@ function joinFleet(input: JoinFleetInput): void {
     const anchor = toSceneAnchor({ id: squadId, role: squad.role, ...(squad.anchor ? { anchor: squad.anchor } : {}), ships: [] }, leads);
     squadOp = { op: 'add_squad', fleet: fleetId, wing: wingId, squad: { id: squadId, ...(squad.name ? { name: squad.name } : {}), role: squad.role, members: [], ...(anchor ? { anchor } : {}) } };
   }
-  if (!newSquad) numbered = numberShipIds({ prefix: prefix ?? `${fleetId}-${squadId}`, count, ids: shipIds, where, problems });
+  if (!newSquad) numbered = numberShipIds({ prefix: prefix ?? `${fleetId}-${squadId}`, count, ids: takenIds, where, problems });
   if (problems.length > before || !commander || !numbered.ids.length) return;
 
   const fcYaw = normalizeHeading(commander.rotation[0]);

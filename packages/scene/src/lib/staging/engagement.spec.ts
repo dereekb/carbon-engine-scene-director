@@ -72,6 +72,14 @@ describe('stage_engagement', () => {
     expect(Math.round((a.position[0] + byId(after.ships, 'mini-2-fc').position[0]) / 2)).toBe(30000);
   });
 
+  it('centres off an object on its radius, the heading across the line from it', () => {
+    const before = scene({ objects: [{ id: 'astra', dna: 'cm1_t1:upwell:generic', radius: 45000 }] });
+    const { scene: after } = apply(before, { op: 'stage_engagement', near: { object: 'astra', range: 30000, direction: 'right' }, sides: [{ composition: makeMiniComposition() }, { composition: makeMiniComposition() }] });
+    const a = byId(after.ships, 'mini-fc');
+    expect(a.rotation[0]).toBe(180);
+    expect(Math.round((a.position[0] + byId(after.ships, 'mini-2-fc').position[0]) / 2)).toBe(75000);
+  });
+
   it('refuses malformed engagements', () => {
     const problems = (operation: Record<string, unknown>) => catchSceneError(() => apply(scene(), { op: 'stage_engagement', ...operation })).problems.join('\n');
     const side = { composition: makeMiniComposition() };

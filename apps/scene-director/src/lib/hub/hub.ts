@@ -36,6 +36,8 @@ import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
 import { Locations } from './locations';
 import { Staging } from './staging';
+import { ObjectData, type ObjectDataApi } from './object-data';
+import { ObjectTools } from './objects';
 import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
@@ -96,6 +98,11 @@ export interface HubOptions {
    */
   readonly mapData?: MapDataApi;
   /**
+   * EVE object types, for the objects tools (add_objects, search_objects); read from `toolsCore.url` on ShipData's
+   * pinned SDE build when omitted.
+   */
+  readonly objectData?: ObjectDataApi;
+  /**
    * Diagnostics sink; stderr by default, never stdout (MCP owns stdout).
    */
   readonly log?: (line: string) => void;
@@ -142,6 +149,8 @@ export class Hub implements ToolCaller {
   readonly mapData: MapDataApi;
   readonly locations: Locations;
   readonly staging: Staging;
+  readonly objectData: ObjectDataApi;
+  readonly objects: ObjectTools;
   private readonly log: (line: string) => void;
   private readonly pages: WebSocket[] = [];
   private readonly pending = new Map<number, PendingCall>();
@@ -150,12 +159,13 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, mapData, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, mapData, objectData, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
     this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
     this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
+    this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild() });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
     const page = {
       Connected: () => this.pages.length > 0,
@@ -166,6 +176,7 @@ export class Hub implements ToolCaller {
     this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, page });
     this.locations = new Locations({ mapData: this.mapData, page });
     this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, page });
+    this.objects = new ObjectTools({ objectData: this.objectData, shipData: this.shipData, mapData: this.mapData, page });
     this.log = log;
   }
 
@@ -265,7 +276,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'viewer_status':

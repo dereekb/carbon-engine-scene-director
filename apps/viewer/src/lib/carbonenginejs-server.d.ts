@@ -47,6 +47,11 @@ declare module '@carbonenginejs/server/destiny' {
     readonly speedFraction: number;
     readonly isFree: boolean;
     /**
+     * The master's bubble: connected top-level partition cells (7,864 km wide). A replica keeps -1. FollowBall and
+     * Orbit refuse a target in another bubble on the master only.
+     */
+    readonly mNewBubble: number;
+    /**
      * The ball a follow or orbit order flies relative to.
      */
     readonly followId: bigint;

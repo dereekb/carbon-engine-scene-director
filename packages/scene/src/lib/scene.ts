@@ -7,6 +7,9 @@ import { normalizeSceneLocation, type SceneLocation } from './location/location'
 import { normalizeShipPropMod, type SceneShipPropMod } from './prop-mods/prop-mod';
 import { applyPropModOperation, PROP_MOD_OPERATIONS } from './prop-mods/operation';
 import { applyStagingOperation, STAGING_OPERATIONS } from './staging/operation';
+import { applyObjectOperation, OBJECT_OPERATIONS } from './objects/operations';
+import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneObjectsDiff } from './objects/object';
+import { readScenePosition } from './extent';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -73,7 +76,7 @@ export type SceneCameraMode = (typeof SCENE_CAMERA_MODES)[number];
 
 export interface SceneCamera {
   /**
-   * Ship id to frame and follow, or null to frame every ship.
+   * Ship or object id to frame and follow, or null to frame every ship.
    */
   target: Maybe<string>;
   /**
@@ -112,6 +115,11 @@ export interface SceneDocument {
    * them: members keep range on their anchors in formation behind the FC. Omitted when there are none.
    */
   fleets?: SceneFleet[];
+  /**
+   * Static EVE objects: stations, gates, structures, large collidable objects and wrecks (see objects/object.ts).
+   * Ids are unique across ships and objects. Omitted when there are none.
+   */
+  objects?: SceneObject[];
   /**
    * Reserved for the timeline phase: stored, not played yet.
    */
@@ -156,6 +164,10 @@ export interface SceneDiff {
    * Whether the location changed (system, origin or anchor): the page re-fetches its system data.
    */
   readonly location: boolean;
+  /**
+   * What changed in the objects.
+   */
+  readonly objects: SceneObjectsDiff;
 }
 
 /**
@@ -169,7 +181,7 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
 const RESERVED_SCENE_KEYS = ['timeline'] as const;
 const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', ...RESERVED_SCENE_KEYS]);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', ...RESERVED_SCENE_KEYS]);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -246,14 +258,18 @@ export function normalizeScene(input: unknown): NormalizedScene {
     scene.ships.push(normalized);
   }
 
+  const objects = normalizeSceneObjects({ input: input['objects'], shipIds: ids });
+  problems.push(...objects.problems);
+  warnings.push(...objects.warnings);
   const target = scene.camera.target;
-  if (target != null && !ids.has(target)) {
-    problems.push(`camera.target "${target}" is not a ship id`);
+  if (target != null && !ids.has(target) && !objects.ids.has(target)) {
+    problems.push(`camera.target "${target}" is not a ship or object id`);
   }
   const fleets = normalizeFleets({ input: input['fleets'], shipIds: ids });
   problems.push(...fleets.problems);
   warnings.push(...fleets.warnings);
   if (fleets.fleets) scene.fleets = fleets.fleets;
+  if (objects.objects) scene.objects = objects.objects;
   for (const key of RESERVED_SCENE_KEYS) {
     if (input[key] === undefined) continue;
     scene[key] = structuredClone(input[key]);
@@ -302,6 +318,10 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "stage_engagement", sides: [A, B], range?, center? | near?, heading?, radii? }
  *                                       two sides (compositions or ship lists) facing each other, fronts range apart;
  *                                       every ship line needs its dna (see staging/engagement.ts)
+ *   { op: "add_object", object }   { op: "add_objects", dna, type?, radius?, count?, position? | near?, ... }
+ *   { op: "update_object", id, set }   { op: "move_object", id, position? | near?, heading? | facing? | rotation? }
+ *   { op: "remove_object", id }   static objects (see objects/operations.ts); add_objects needs dna, which the
+ *                                       add_objects tool resolves from a type
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -381,6 +401,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (FLEET_COMPOSITION_OPERATIONS.has(String(operation['op']))) applyFleetCompositionOperation(operation, context);
       else if (PROP_MOD_OPERATIONS.has(String(operation['op']))) applyPropModOperation(operation, context);
       else if (STAGING_OPERATIONS.has(String(operation['op']))) applyStagingOperation(operation, context);
+      else if (OBJECT_OPERATIONS.has(String(operation['op']))) applyObjectOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
@@ -390,8 +411,8 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move, relabel, retune, switch and regroup, and whether the environment, camera,
- *   fleets or location changed.
+ * @returns The ships to add, remove, rebuild, move, relabel, retune, switch and regroup, whether the environment, camera,
+ *   fleets or location changed, and what changed in the objects.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
   const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
@@ -408,7 +429,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     switched: [],
     fleets: !sameJson(before?.fleets ?? [], after.fleets ?? []),
     regrouped: [],
-    location: !sameJson(before?.location ?? null, after.location ?? null)
+    location: !sameJson(before?.location ?? null, after.location ?? null),
+    objects: diffSceneObjects(before?.objects ?? [], after.objects ?? [])
   };
   const membershipsBefore = toFleetMemberships(before ?? {});
   const membershipsAfter = toFleetMemberships(after);
@@ -477,7 +499,7 @@ function normalizeShip(input: unknown, where: string, problems: string[], warnin
   const ship: SceneShip = {
     id: readString(input['id'], `${where}.id`, problems),
     dna: readString(input['dna'], `${where}.dna`, problems),
-    position: input['position'] === undefined ? [0, 0, 0] : readVector(input['position'], `${where}.position`, problems),
+    position: input['position'] === undefined ? [0, 0, 0] : readScenePosition(input['position'], `${where}.position`, problems),
     rotation: input['rotation'] === undefined ? [0, 0, 0] : readVector(input['rotation'], `${where}.rotation`, problems)
   };
   if (ship.id && !ID_PATTERN.test(ship.id)) problems.push(`${where}.id must be 1-64 letters, digits, "_", "-" or "."`);

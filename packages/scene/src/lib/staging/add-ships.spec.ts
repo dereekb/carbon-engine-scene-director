@@ -41,10 +41,10 @@ describe('add_ships: free ships', () => {
   });
 
   it('warns about overlaps, far placements, missing radii and tight spacing', () => {
-    const { warnings } = apply(scene(ANCHOR_SCENE), { ...RIFTERS, count: 2, position: [100, 0, 0], spacing: 50 }, { op: 'add_ships', dna: RIFTER, position: [2e8, 0, 0] });
+    const { warnings } = apply(scene(ANCHOR_SCENE), { ...RIFTERS, count: 2, position: [100, 0, 0], spacing: 50 }, { op: 'add_ships', dna: RIFTER, position: [3e6, 0, 0] });
     expect(warnings.join('\n')).toMatch(/within 500 m of ships already in the scene \(rifter-01 near "anchor"/u);
     expect(warnings.join('\n')).toMatch(/under two radii/u);
-    expect(warnings.join('\n')).toMatch(/float32 jitter/u);
+    expect(warnings.join('\n')).toMatch(/1 ship is more than 2,000 km from the scene origin; scenes rarely use more than 2,000 km \(the limit is 10,000 km\)/u);
     expect(warnings.join('\n')).toMatch(/no radius for mf4_t1/u);
   });
 
@@ -57,6 +57,24 @@ describe('add_ships: free ships', () => {
     expect(problems({ ...RIFTERS, near: { celestial: 'Jita IV' } })[0]).toMatch(/add_ships tool resolves a celestial/u);
     expect(problems({ ...RIFTERS, near: { ship: 'nobody' } })[0]).toMatch(/no ship "nobody"/u);
     expect(problems({ ...RIFTERS, facing: [0, 1000, 0] })[0]).toMatch(/straight above or below/u);
+    expect(problems({ ...RIFTERS, position: [2e7, 0, 0] })[0]).toMatch(/is 20,000 km from the scene origin; a scene spans at most 10,000 km/u);
+    expect(problems({ ...RIFTERS, near: { ship: 'anchor', object: 'astra' } })[0]).toMatch(/give ship or object, not both/u);
+    expect(problems({ ...RIFTERS, near: { object: 'nothing' } })[0]).toMatch(/near.object: no object "nothing"/u);
+    expect(problems({ ...RIFTERS, facing: 'nothing' })[0]).toMatch(/no ship or object "nothing"/u);
+  });
+
+  it('places off an object on its radius, faces one, and skips object ids', () => {
+    const before = scene({
+      ...ANCHOR_SCENE,
+      objects: [
+        { id: 'astra', dna: 'cm1_t1:upwell:generic', position: [0, 0, 100000], rotation: [90, 0, 0], radius: 45000 },
+        { id: 'rifter-01', dna: 'wreck_s:genericbase:generic', position: [0, 0, -50000] }
+      ]
+    });
+    const ships = newShips(before, apply(before, { ...RIFTERS, count: 2, near: { object: 'astra', range: 1000 } }, { ...RIFTERS, facing: 'astra' }).scene);
+    expect(ships.map((ship) => ship.id)).toEqual(['rifter-02', 'rifter-03', 'rifter-04']);
+    expect(ships[0]).toMatchObject({ position: [46031, 0, 100000], rotation: [90, 0, 0] });
+    expect(ships[2].rotation[0]).toBe(0);
   });
 });
 

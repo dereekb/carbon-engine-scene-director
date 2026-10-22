@@ -13,7 +13,22 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { DEFAULT_UNIVERSE, formationSpacing, toFollowTolerance, type FleetGroupCommandReport, type FleetReport, type LocationDressingReport, type LocationReport, type MapSystemAnswer, type SceneLocation, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
+import {
+  DEFAULT_UNIVERSE,
+  formationSpacing,
+  toFollowTolerance,
+  type FleetGroupCommandReport,
+  type FleetReport,
+  type LocationDressingReport,
+  type LocationReport,
+  type LocationTargetReport,
+  type MapSystemAnswer,
+  type SceneDocument,
+  type SceneLocation,
+  type SceneObjectStateReport,
+  type SceneVector,
+  type ShipFleetMembership
+} from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -158,8 +173,16 @@ interface ViewerState {
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
   readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
-  readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport> }>;
+  readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
+  readonly objects?: SceneObjectStateReport[];
+}
+
+interface AddObjectsResult {
+  readonly added: { readonly id: string; readonly position: SceneVector; readonly radius?: number }[];
+  readonly types: { readonly typeID: number; readonly radius: number; readonly radiusFrom: string }[];
+  readonly scene: SceneDocument;
+  readonly warnings: string[];
 }
 
 interface MapSearchResult {
@@ -327,6 +350,11 @@ function Delay(ms: number): Promise<void> {
 }
 
 const toolsCore = new ToolsCore({ url: Option('--tools-core', DEFAULT_TOOLS_CORE) });
+/**
+ * `--only <text>` runs only the checks whose label contains the text (any case), after the tab connects.
+ */
+const ONLY = Option('--only', '').toLowerCase();
+const CONNECT_CHECK = 'the tab connects to the hub';
 const status = await toolsCore.Status();
 if (!status.reachable) {
   console.error(status.error);
@@ -387,6 +415,7 @@ function NotInFormation(state: ViewerState, ids: readonly string[]): Maybe<strin
  * @param action - The check; its string result is reported as detail.
  */
 async function Check(label: string, action: () => Promise<string | void>): Promise<void> {
+  if (ONLY && label !== CONNECT_CHECK && !label.toLowerCase().includes(ONLY)) return;
   try {
     const detail = await action();
     results.push(detail ? `ok    ${label} - ${detail}` : `ok    ${label}`);
@@ -403,7 +432,7 @@ async function Check(label: string, action: () => Promise<string | void>): Promi
 try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   await page.goto(hub.url);
-  await Check('the tab connects to the hub', async () => {
+  await Check(CONNECT_CHECK, async () => {
     for (let attempt = 0; attempt < 100 && (await call<ViewerStatus>('viewer_status')).connectedTabs === 0; attempt++) await Delay(200);
     Expect((await call<ViewerStatus>('viewer_status')).connectedTabs === 1, 'no tab after 20 s');
   });
@@ -1629,6 +1658,134 @@ try {
       `the line is not along x: ${JSON.stringify(blue.map((ship) => ship.position))}`
     );
   });
+
+  await Check('search_objects finds structures, wrecks and LCOs', async () => {
+    const astrahus = await call<{ items: { typeID: number; dna?: string }[] }>('search_objects', { query: 'Astrahus' }).catch(SkipWithoutSde);
+    Expect(astrahus.items[0]?.typeID === 35832 && astrahus.items[0]?.dna === 'cm1_t1:upwell:generic', JSON.stringify(astrahus.items[0]));
+    const wrecks = await call<{ items: { typeID: number; dna?: string }[] }>('search_objects', { query: 'Frigate Wreck', group: 'wreck' });
+    Expect(
+      wrecks.items.some((item) => item.typeID === 26550 && item.dna === 'wreck_s:genericbase:generic'),
+      JSON.stringify(wrecks.items.slice(0, 5))
+    );
+    const ruin = await call<{ items: { typeID: number }[] }>('search_objects', { query: 'Ruined Stargate' });
+    Expect(
+      ruin.items.some((item) => item.typeID === 16737),
+      JSON.stringify(ruin.items.slice(0, 5))
+    );
+    return `${astrahus.items.length} Astrahus, ${wrecks.items.length} frigate wrecks`;
+  });
+
+  const OBJECT_SCENE = { name: 'verify-objects', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', stats: { maxVelocity: 2000, agility: 1 } }] };
+  let objectsPlaced = false;
+  await Check('add_objects places an Astrahus off a ship and a wreck field off it, in one patch', async () => {
+    await call('load_scene', { scene: OBJECT_SCENE });
+    const result = await call<AddObjectsResult>('add_objects', {
+      objects: [
+        { type: 'Astrahus', id: 'astra', near: { ship: 'rifter', range: 30000 } },
+        { type: 'Minmatar Frigate Wreck', count: 5, spacing: 1000, near: { object: 'astra', range: 3000, direction: 'behind' } }
+      ]
+    }).catch(SkipWithoutSde);
+    const ids = result.added.map((added) => added.id);
+    Expect(JSON.stringify(ids) === JSON.stringify(['astra', 'minmatar-frigate-wreck-01', 'minmatar-frigate-wreck-02', 'minmatar-frigate-wreck-03', 'minmatar-frigate-wreck-04', 'minmatar-frigate-wreck-05']), JSON.stringify(ids));
+    Expect(result.types[0]?.radius === 45000 && result.types[1]?.radius === 14 && result.types.every((type) => type.radiusFrom === 'sde'), JSON.stringify(result.types));
+    const astra = result.added[0];
+    Expect(Math.abs(Math.hypot(...astra.position) - (31 + 30000 + 45000)) <= 1, `astra at ${JSON.stringify(astra.position)}`);
+    const state = await WaitFor('the objects to validate', 90, (polled) => ((polled.objects ?? []).length === 6 && (polled.objects ?? []).every((object) => ['validated', 'ready'].includes(object.status)) ? null : JSON.stringify((polled.objects ?? []).map((object) => object.status))));
+    const row = (state.objects ?? [])[0];
+    Expect(row?.nearestShips[0]?.id === 'rifter' && Math.abs((row?.nearestShips[0]?.distance ?? 0) - 30000) <= 2, JSON.stringify(row?.nearestShips));
+    objectsPlaced = true;
+    return `astra sofRadius ${row?.sofRadius} m, radius ${row?.radius} m`;
+  });
+
+  await Check('add_objects refuses a type with no graphic and changes nothing', async () => {
+    const before = await call<SceneDocument>('get_scene');
+    const error = await call('add_objects', { type: 'Tritanium' }).then(
+      () => null,
+      (failure: unknown) => failure
+    );
+    if (error instanceof ShipDataError && error.failure === 'unavailable') SkipWithoutSde(error);
+    Expect(error && /has no graphic/u.test((ErrorProblems(error) ?? []).join(' ') + ErrorMessage(error)), `refusal: ${error ? ErrorMessage(error) : 'none'}`);
+    const after = await call<SceneDocument>('get_scene');
+    Expect(JSON.stringify(after.objects) === JSON.stringify(before.objects), 'the objects changed');
+  });
+
+  if (objectsPlaced) {
+    await Check('ships orbit, keep at range on and approach an object', async () => {
+      const distanceTo = (polled: ViewerState): number => ShipIn(polled, 'rifter').targetDistance ?? Infinity;
+      await call('order_ship', { id: 'rifter', order: { type: 'orbit', target: 'astra', range: 5000 } });
+      await WaitFor('the orbit to settle', 240, (polled) => (distanceTo(polled) >= 4000 && distanceTo(polled) <= 7000 ? null : `targetDistance ${distanceTo(polled)}`), 3);
+      await call('order_ship', { id: 'rifter', order: { type: 'keep-at-range', target: 'astra', range: 10000 } });
+      await WaitFor('the range to settle', 240, (polled) => (Math.abs(distanceTo(polled) - 10000) <= 1500 ? null : `targetDistance ${distanceTo(polled)}`), 3);
+      await call('order_ship', { id: 'rifter', order: { type: 'approach', target: 'astra' } });
+      const state = await WaitFor('the approach', 240, (polled) => (distanceTo(polled) < 1000 ? null : `targetDistance ${distanceTo(polled)}`));
+      Expect((state.objects ?? [])[0]?.targetedBy?.includes('rifter'), JSON.stringify((state.objects ?? [])[0]?.targetedBy));
+      return `approached to ${Math.round(distanceTo(state))} m`;
+    });
+
+    await Check('moving an object makes its followers chase it; removing it stops them', async () => {
+      await call('patch_scene', { operations: [{ op: 'move_object', id: 'astra', position: [0, 0, 200000] }] });
+      const moved = await WaitFor('the chase', 20, (polled) => ((ShipIn(polled, 'rifter').targetDistance ?? 0) > 50000 ? null : `targetDistance ${ShipIn(polled, 'rifter').targetDistance}`));
+      Expect((moved.objects ?? [])[0]?.targetedBy?.includes('rifter'), 'no longer targeted');
+      const removed = await call<{ changes: { stopped: number } }>('patch_scene', { operations: [{ op: 'remove_object', id: 'astra' }] });
+      Expect(removed.changes.stopped === 1, JSON.stringify(removed.changes));
+      const state = await call<ViewerState>('get_state');
+      Expect(ShipIn(state, 'rifter').orderNote === 'stopped: target "astra" was removed', ShipIn(state, 'rifter').orderNote ?? 'no note');
+    });
+
+    await Check('objects round-trip through scene files and frame_camera frames one', async () => {
+      const before = await call<SceneDocument>('get_scene');
+      await call('save_scene', { name: 'verify-objects', store: 'disk' });
+      await call('open_scene', { name: 'verify-objects', store: 'disk' });
+      const after = await call<SceneDocument>('get_scene');
+      Expect(JSON.stringify(after.objects) === JSON.stringify(before.objects), 'the objects changed');
+      await call('frame_camera', { target: 'minmatar-frigate-wreck-01' });
+      const wreck = after.objects?.find((object) => object.id === 'minmatar-frigate-wreck-01');
+      Expect(wreck, 'no wreck');
+      return `${after.objects?.length} objects`;
+    });
+
+    await Check('the scene extent refuses objects and ships past 10,000 km and warns past 2,000 km', async () => {
+      const far = await call('add_objects', { type: 'Minmatar Frigate Wreck', position: [0, 0, 12e6] }).then(
+        () => null,
+        (failure: unknown) => (ErrorProblems(failure) ?? []).join(' ') + ErrorMessage(failure)
+      );
+      Expect(far && /10,000 km/u.test(far), `far: ${far}`);
+      const large = await call<AddObjectsResult>('add_objects', { type: 'Minmatar Frigate Wreck', id: 'far-wreck', position: [0, 0, 3e6] });
+      Expect(
+        large.warnings.some((warning) => /2,000 km/u.test(warning)),
+        JSON.stringify(large.warnings)
+      );
+      const ship = await call('patch_scene', { operations: [{ op: 'update_ship', id: 'rifter', set: { position: [2e7, 0, 0] } }] }).then(
+        () => null,
+        (failure: unknown) => (ErrorProblems(failure) ?? []).join(' ')
+      );
+      Expect(ship && /10,000 km/u.test(ship), `ship: ${ship}`);
+      await call('patch_scene', { operations: [{ op: 'remove_object', id: 'far-wreck' }] });
+    });
+
+    await Check('add_ships stages Rifters 5 km off an object', async () => {
+      await call('add_objects', { type: 'Astrahus', id: 'astra', position: [0, 0, 100000] });
+      const result = await call<{ added: { ships: string[]; lead: { position: SceneVector } } }>('add_ships', { hull: 'Rifter', count: 3, near: { object: 'astra' } });
+      const lead = result.added.lead.position;
+      Expect(result.added.ships.length === 3 && Math.abs(Math.hypot(lead[0], lead[1], lead[2] - 100000) - (45000 + 5000 + 31)) <= 2, JSON.stringify(lead));
+    });
+
+    await Check('add_objects places a Ruined Stargate off the CNAP, and the CNAP is an order target', async () => {
+      await call('load_scene', { scene: OBJECT_SCENE });
+      const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 });
+      const result = await call<AddObjectsResult>('add_objects', { type: 'Ruined Stargate', id: 'ruin', near: { celestial: CNAP, range: 20000 } });
+      const offset = set.location.anchor?.offset ?? [0, 0, 0];
+      const ruin = result.added[0].position;
+      const fromCnap = Math.hypot(ruin[0] + offset[0], ruin[1] + offset[1], ruin[2] + offset[2]);
+      Expect(Math.abs(fromCnap - (100000 + 20000 + 5991)) <= 2, `ruin ${fromCnap} m from the CNAP`);
+      const state = await WaitFor('the celestial targets', 30, (polled) => (polled.location?.targets?.some((target) => target.target === 'celestial:60003760') ? null : JSON.stringify(polled.location?.targets ?? null)));
+      await call('order_ship', { id: 'rifter', order: { type: 'approach', target: 'celestial:60003760' } });
+      const first = await WaitFor('the approach to start', 10, (polled) => (ShipIn(polled, 'rifter').targetDistance != null ? null : 'no targetDistance'));
+      const start = ShipIn(first, 'rifter').targetDistance ?? 0;
+      const later = await WaitFor('the CNAP approach', 30, (polled) => ((ShipIn(polled, 'rifter').targetDistance ?? Infinity) < start - 2000 ? null : `targetDistance ${ShipIn(polled, 'rifter').targetDistance}`));
+      return `${state.location?.targets?.length} targets; CNAP ${Math.round(start)} -> ${Math.round(ShipIn(later, 'rifter').targetDistance ?? 0)} m`;
+    });
+  }
 
   if (rendering) {
     await Check('screenshot returns a PNG', async () => {

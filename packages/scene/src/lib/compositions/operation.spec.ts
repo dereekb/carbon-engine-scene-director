@@ -36,6 +36,12 @@ describe('add_fleet_composition', () => {
     expect(scene.camera.target).toBe('tfis-2-fc');
   });
 
+  it('skips a composition id an object holds', () => {
+    const before = normalizeScene({ objects: [{ id: 'tfis-fc', dna: 'cm1_t1:upwell:generic' }] }).scene;
+    expect(addTfis(before).scene.fleets?.map((fleet) => fleet.id)).toEqual(['tfis-2']);
+    expect(catchSceneError(() => addTfis(before, { fleet: 'tfis' })).problems[0]).toMatch(/object "tfis-fc" already exists/u);
+  });
+
   it('faces a point', () => {
     const { scene } = applySceneOperations(createEmptyScene(), [{ op: 'add_fleet_composition', composition: makeMiniComposition(), position: [0, 0, 0], facing: [0, 0, -10] }]);
     expect(scene.ships.every((ship) => ship.rotation.join() === '180,0,0')).toBe(true);

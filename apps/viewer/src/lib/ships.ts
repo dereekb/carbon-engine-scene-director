@@ -23,9 +23,17 @@ import {
   Tr2RuntimeInstanceData,
   TriDevice,
   TriFloat,
+  Tr2RotationAdapter,
+  Tr2TranslationAdapter,
+  quat,
+  vec3,
   type CjsModelValues,
-  type EveShip2
+  type EveShip2,
+  type EveSpaceObject2,
+  type Quat
 } from './runtime';
+import type { SceneVector } from '@scene-director/scene';
+import { PatchDynamicResources } from './celestials';
 import type { ShipHull } from './destiny';
 
 /**
@@ -162,6 +170,88 @@ export function HydrateShip(values: CjsModelValues): EveShip2 {
  * @param prepare - Binds what must exist before the controllers start.
  * @returns The object.
  */
+/**
+ * The fixed curves a static SOF object sits on: the location dressing's stations and gates, and the scene's objects.
+ */
+export interface StaticCurves {
+  readonly translation: Tr2TranslationAdapter;
+  readonly rotation: Tr2RotationAdapter;
+}
+
+/**
+ * New fixed curves at the origin, unrotated.
+ *
+ * @returns The curves.
+ */
+export function CreateStaticCurves(): StaticCurves {
+  return { translation: new Tr2TranslationAdapter(), rotation: new Tr2RotationAdapter() };
+}
+
+/**
+ * Places fixed curves: a move needs no rebuild.
+ *
+ * @param curves - The curves.
+ * @param position - Scene metres.
+ * @param rotation - The orientation.
+ */
+export function PlaceStatic(curves: StaticCurves, position: ArrayLike<number>, rotation: Quat): void {
+  vec3.set(curves.translation.value, position[0], position[1], position[2]);
+  quat.copy(curves.rotation.value, rotation);
+}
+
+export interface StaticObjectBuild {
+  /**
+   * The hydrated object on its curves, or null when it was built to values only.
+   */
+  readonly object: Maybe<EveSpaceObject2>;
+  /**
+   * The SOF hull's bounding radius, else the values' bounding sphere.
+   */
+  readonly sofRadius: Maybe<number>;
+  /**
+   * The bounding sphere's centre in the object's frame, when the values give one.
+   */
+  readonly sofCentre: Maybe<SceneVector>;
+  /**
+   * The `dynamic:/` resources drawn as a stand-in.
+   */
+  readonly dynamic: string[];
+  readonly diagnostics: unknown[];
+}
+
+/**
+ * The one static SOF path: builds an object's values from its DNA (queued with the ship builds), blanks its
+ * `dynamic:/` video screens, and hydrates it on fixed curves when `hydrate()` (asked after the build) says so.
+ *
+ * @param input - The DNA, the curves, and whether to hydrate.
+ * @param input.dna - SOF DNA.
+ * @param input.curves - The fixed curves to bind.
+ * @param input.hydrate - Asked once the values are built: false builds to values only (no renderer, or retired).
+ * @returns The build.
+ */
+export async function BuildStaticObject(input: { readonly dna: string; readonly curves: StaticCurves; readonly hydrate: () => boolean }): Promise<StaticObjectBuild> {
+  const { dna, curves, hydrate } = input;
+  const build = await BuildShipValues(dna);
+  const dynamic = PatchDynamicResources(build.values);
+  const sphere = build.values['boundingSphereRadius'];
+  const centre = build.values['boundingSphereCenter'];
+  const sofRadius = build.hull?.radius ?? (typeof sphere === 'number' ? sphere : null);
+  const sofCentre = ArrayLike3(centre);
+  let object: Maybe<EveSpaceObject2> = null;
+  if (hydrate()) {
+    object = HydrateSofObject<EveSpaceObject2>(build.values, (built) => {
+      built.translationCurve = curves.translation;
+      built.rotationCurve = curves.rotation;
+    });
+  }
+  return { object, sofRadius, sofCentre, dynamic, diagnostics: build.diagnostics };
+}
+
+function ArrayLike3(value: unknown): Maybe<SceneVector> {
+  const list = value as ArrayLike<unknown> | null;
+  return list && typeof list === 'object' && list.length === 3 && [0, 1, 2].every((index) => typeof list[index] === 'number') ? [Number(list[0]), Number(list[1]), Number(list[2])] : null;
+}
+
 export function HydrateSofObject<T extends { StartControllers(): void }>(values: CjsModelValues, prepare?: (object: T) => void): T {
   const before = new Set(TriDevice.GetResourcesRegistered());
   try {

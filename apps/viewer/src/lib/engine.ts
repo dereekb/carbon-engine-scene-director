@@ -149,7 +149,13 @@ interface FramePump {
   Render(): void;
 }
 
+/**
+ * What asks the camera's back clip to reach far: the location dressing, or the scene's objects.
+ */
+export type DrawReachSource = 'dressing' | 'objects';
+
 export class Engine {
+  private readonly reaches = new Map<DrawReachSource, number>();
   readonly canvas: HTMLCanvasElement;
   readonly adapterInfo: string;
   readonly device: GPUDevice;
@@ -302,10 +308,15 @@ export class Engine {
   }
 
   /**
-   * Metres from the origin the camera's back clip must reach (the farthest dressed object); 0 for none.
+   * Metres from the origin the camera's back clip must reach for one source (the farthest dressed object, or the
+   * farthest scene object); 0 for none. The camera reaches the largest of the sources.
+   *
+   * @param metres - The reach.
+   * @param source - What it is for; default the location dressing.
    */
-  SetDrawReach(metres: number): void {
-    this.Parts().camera.reach = Math.max(0, metres);
+  SetDrawReach(metres: number, source: DrawReachSource = 'dressing'): void {
+    this.reaches.set(source, Math.max(0, metres));
+    this.Parts().camera.reach = Math.max(0, ...this.reaches.values());
   }
 
   /**

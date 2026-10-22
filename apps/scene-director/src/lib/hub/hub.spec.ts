@@ -15,6 +15,7 @@ import { ToolError } from './tool-call';
 import { MakeFakeShipData, SDE, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
 import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
 import type { ToolsCoreApi } from './tools-core';
+import { MakeFakeObjectData } from './object-data.testing';
 
 /** Where the fake tools-core's audio URLs point: a local server a spec starts. */
 let audioUpstream = 'http://127.0.0.1:9';
@@ -190,6 +191,20 @@ describe('hub', () => {
     expect(content.content[0]).toMatchObject({ type: 'image', data: 'iVBORw0KGgo=' });
     expect(JSON.parse((content.content[1] as { text: string }).text)).toEqual({ width: 2, height: 1 });
     expect(ToContent({ a: 1 }).content[0].type).toBe('text');
+  });
+});
+
+describe('objects', () => {
+  it('search_objects and add_objects are hub tools over the injected object data', async () => {
+    const objectsHub = await StartHub({ objectData: MakeFakeObjectData().objectData });
+    try {
+      const answer = (await objectsHub.Call('search_objects', { query: 'Astrahus', limit: 1 })) as { items: { name: string }[] };
+      expect(answer.items.map((item) => item.name)).toEqual(['Astrahus']);
+      const added = (await objectsHub.Call('add_objects', { scene: { name: 'x' }, type: 'Astrahus', id: 'astra' })) as { added: { id: string; radius: number }[]; loaded: boolean };
+      expect(added).toMatchObject({ added: [{ id: 'astra', radius: 45000 }], loaded: false });
+    } finally {
+      await objectsHub.Stop();
+    }
   });
 });
 

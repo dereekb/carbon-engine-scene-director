@@ -77,15 +77,19 @@ function readHeading(operation: JsonObject, context: { readonly where: string; r
  * @param draft - The document mid-edit.
  * @returns What the scene already holds.
  */
-function readExisting(draft: JsonObject): { readonly ships: Map<string, SceneVector>; readonly fleets: Set<string> } {
+function readExisting(draft: JsonObject): { readonly ships: Map<string, SceneVector>; readonly objects: Set<string>; readonly fleets: Set<string> } {
   const ships = new Map<string, SceneVector>();
   for (const ship of Array.isArray(draft['ships']) ? draft['ships'] : []) {
     if (!isPlainObject(ship) || typeof ship['id'] !== 'string') continue;
     ships.set(ship['id'], ship['position'] === undefined ? [0, 0, 0] : readVector(ship['position'], 'position', []));
   }
+  const objects = new Set<string>();
+  for (const object of Array.isArray(draft['objects']) ? draft['objects'] : []) {
+    if (isPlainObject(object) && typeof object['id'] === 'string') objects.add(object['id']);
+  }
   const fleets = new Set<string>();
   for (const fleet of Array.isArray(draft['fleets']) ? draft['fleets'] : []) {
     if (isPlainObject(fleet) && typeof fleet['id'] === 'string') fleets.add(fleet['id']);
   }
-  return { ships, fleets };
+  return { ships, objects, fleets };
 }

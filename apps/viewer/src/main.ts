@@ -19,6 +19,7 @@ import { Director } from './lib/director';
 import { Engine } from './lib/engine';
 import { HubLink } from './lib/link';
 import { LocationText } from './lib/location';
+import { ObjectsText } from './lib/objects';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
 
@@ -75,13 +76,15 @@ class Overlay {
     const rows: [string, string][] = [
       ['hub', this.state.hub ? 'connected' : 'connecting...'],
       ['renderer', this.RendererText(director)],
-      ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` : 'none']
+      ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` + (scene.objects?.length ? ` · ${scene.objects.length} object(s)` : '') : 'none']
     ];
     if (director) rows.push(['audio', director.audio.Text()]);
     const located = director?.location.Report();
     if (located) rows.push(['location', LocationText(located)]);
     const dressed = DressingText(director?.dressing.Report());
     if (dressed) rows.push(['dressing', dressed]);
+    const objectsText = ObjectsText((scene?.objects ?? []).map((doc) => ({ status: director?.objects.Entry(doc.id)?.status ?? 'queued' })));
+    if (objectsText) rows.push(['objects', objectsText]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
@@ -94,13 +97,20 @@ class Overlay {
       const button = `<button class="follow${following ? ' on' : ''}" data-follow="${Escape(doc.id)}" title="${following ? 'Stop following' : 'Follow with the camera'}">${following ? 'following' : 'follow'}</button>`;
       return `<li class="${entry?.status ?? ''}">${button} ${Escape(doc.id)} <span>${Escape(entry?.status ?? '?')}</span>${error}</li>`;
     });
+    for (const doc of scene?.objects ?? []) {
+      const entry = director?.objects.Entry(doc.id);
+      const error = entry?.error ? `<div class="error">${Escape(entry.error)}</div>` : '';
+      const following = doc.id === followed;
+      const button = `<button class="follow${following ? ' on' : ''}" data-follow="${Escape(doc.id)}" title="${following ? 'Stop following' : 'Follow with the camera'}">${following ? 'following' : 'follow'}</button>`;
+      ships.push(`<li class="${entry?.status ?? ''}">${button} ${Escape(doc.id)} <span>${Escape(doc.name ?? String(doc.type ?? 'object'))} · ${Escape(entry?.status ?? '?')}</span>${error}</li>`);
+    }
     const list = ships.length ? `<ul>${ships.join('')}</ul>` : '';
     const scrolled = this.element.querySelector('ul')?.scrollTop ?? 0;
     this.element.innerHTML = `
       <h1>scene-director</h1>
       <dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${Escape(value)}</dd>`).join('')}</dl>
       ${list}
-      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship to follow it · C chase camera · H hides this</p>`;
+      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · H hides this</p>`;
     const shipList = this.element.querySelector('ul');
     if (shipList) shipList.scrollTop = scrolled;
   }

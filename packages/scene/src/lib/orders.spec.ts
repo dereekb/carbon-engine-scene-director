@@ -75,6 +75,14 @@ describe('normalizeShipOrder', () => {
     expect(isTargetShipOrder({ type: 'warp', target: 'd', range: 0 })).toBe(false);
   });
 
+  it('takes an object or celestial target when the context lists them', () => {
+    const context: ShipOrderContext = { ships: new Set(['rifter']), objects: new Set(['astra', 'celestial:60003760']), self: 'rifter' };
+    expect(normalizeShipOrder({ type: 'orbit', target: 'astra', range: 5000 }, context)).toMatchObject({ target: 'astra' });
+    expect(normalizeShipOrder({ type: 'approach', target: 'celestial:60003760' }, context)).toMatchObject({ target: 'celestial:60003760' });
+    expect(Problems({ type: 'approach', target: 'nobody' }, context)).toEqual(['order.target "nobody" is not a ship, object or celestial target in the scene']);
+    expect(Problems({ type: 'approach', target: 'astra' }, { ships: new Set(['rifter']) })).toEqual(['order.target "astra" is not a ship in the scene']);
+  });
+
   it('is a page tool whose schema lists the order request types', () => {
     const tool = findTool('order_ship');
     expect(tool?.where).toBe('page');

@@ -46,6 +46,10 @@
 import type { Maybe } from '@dereekb/util';
 import {
   applySceneOperations,
+  type CelestialTarget,
+  type SceneObject,
+  toCelestialTargets,
+  toLocationTargetReports,
   createEmptyScene,
   DEFAULT_PROP_MOD_MODULE,
   diffScenes,
@@ -85,7 +89,9 @@ import { FleetFollowing, type ShipFollowingReport } from './following';
 import { EncodePng, type CameraEye, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ReadDressParts } from './celestials';
-import { LocationLookup } from './location';
+import { LocationKey, LocationLookup } from './location';
+import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrders } from './objects';
+import { ObjectForward, SceneObjects } from './scene-objects';
 import { LocationDressing } from './location-dressing';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource } from './prop-mods';
@@ -328,6 +334,16 @@ export class Director {
    */
   readonly dressing: LocationDressing;
   /**
+   * The scene's static objects as drawn (scene-objects.ts); their balls are the world's.
+   */
+  readonly objects: SceneObjects;
+  /**
+   * The location's stations and gates as order targets (`celestial:<id>`), each a static ball, and the location key
+   * they were made for.
+   */
+  private readonly celestialTargets = new Map<string, CelestialTarget>();
+  private celestialKey: Maybe<string> = null;
+  /**
    * The engine sounds (audio.ts).
    */
   readonly audio: PageAudio;
@@ -363,9 +379,10 @@ export class Director {
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
-      retained: () => [...this.live.values()].map((entry) => entry.ship).filter((ship): ship is EveShip2 => ship !== null),
+      retained: () => [...this.ShipRoots(), ...this.objects.Roots()],
       onChange: () => this.onChange()
     });
+    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id) });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -419,7 +436,7 @@ export class Director {
   OrderShip(id: unknown, order: unknown): OrderShipResult {
     const ships = new Set((this.scene?.ships ?? []).map((doc) => doc.id));
     if (typeof id !== 'string' || !ships.has(id)) throw new Error(`no ship "${String(id)}"`);
-    const normalized = normalizeShipOrderRequest(order, { ships, self: id });
+    const normalized = normalizeShipOrderRequest(order, { ships, objects: this.TargetIds(), self: id });
     if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
     const refusal = this.world.OrderRefusal(id, normalized);
     if (refusal !== null || !this.world.Order(id, normalized)) throw new Error(refusal ?? `ship "${id}" or its target has no Destiny ball`);
@@ -439,7 +456,7 @@ export class Director {
    * @throws {Error} When the leader refuses the order, or the fleet is not planned yet for a wing or squad move or a warp.
    */
   OrderFleet(input: unknown): Promise<object> {
-    const request = normalizeFleetOrderRequest(input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)) });
+    const request = normalizeFleetOrderRequest(input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
     if (!isFleetStructureOrder(request.order)) return Promise.resolve(this.orders.Fly(this.orders.Resolve(request)));
     return this.Serialize(async () => {
       // Resolved against the document current at its turn in the queue.
@@ -578,13 +595,14 @@ export class Director {
     const renderer: ({ available: true } & EngineStats) | { available: false; reason: string } = this.engine ? { available: true, ...this.engine.Stats() } : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
-      scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0 } : null,
+      scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0 } : null,
       location: this.LocationState(),
       camera: this.engine?.camera.Get() ?? null,
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
       distances,
+      objects: this.ObjectRows(),
       fleets: this.scene
         ? toFleetReports(this.scene).map((report) => ({
             ...report,
@@ -621,7 +639,7 @@ export class Director {
     if (mode != null && !SCENE_CAMERA_MODES.includes(mode)) throw new Error(`mode must be one of ${SCENE_CAMERA_MODES.join(', ')}`);
     if (mode) camera.mode = mode;
     if (persist) return this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera }])));
-    if (camera.target && !this.live.has(camera.target)) throw new Error(`no ship "${camera.target}"`);
+    if (camera.target && !this.live.has(camera.target) && !this.objects.Has(camera.target)) throw new Error(`no ship or object "${camera.target}"`);
     this.ApplyCamera(camera);
     return { camera: this.engine?.camera.Get() ?? null };
   }
@@ -660,12 +678,15 @@ export class Director {
     const retried = scene.ships.filter((doc) => !changed.has(doc.id) && (this.live.get(doc.id)?.status ?? 'failed') === 'failed');
     const builds = [...diff.rebuilt, ...diff.added, ...retried];
     for (const doc of [...diff.removed, ...diff.rebuilt]) this.Retire(doc.id);
+    // Removed and rebuilt objects retire with the ships; added, rebuilt and failed ones queue.
+    const objectBuilds = this.objects.Apply(diff.objects, scene);
     const stopped: string[] = [];
     for (const doc of diff.removed) {
       stopped.push(...this.world.RemoveShip(doc.id));
       this.flights.delete(doc.id);
       this.audio.Release(doc.id);
     }
+    for (const doc of diff.objects.removed) stopped.push(...this.world.RemoveObject(doc.id));
     this.scene = scene;
     if (restart || diff.location) {
       this.location.Update(scene.location ?? null, { retry: restart });
@@ -686,6 +707,13 @@ export class Director {
         if (flight) this.flights.set(doc.id, flight);
       } else if (restart || !before || !SamePlacement(before, doc)) this.world.PlaceShip(doc);
     }
+    const moved = new Set(diff.objects.moved.map((doc) => doc.id));
+    const resized = new Set([...diff.objects.resized, ...diff.objects.rebuilt].map((doc) => doc.id));
+    for (const doc of scene.objects ?? []) {
+      const radius = ObjectBallRadius({ radius: doc.radius, sofRadius: this.objects.Entry(doc.id)?.sofRadius }).radius;
+      if (!this.world.HasObject(doc.id)) this.world.AddObject(doc, radius);
+      else if (moved.has(doc.id) || resized.has(doc.id)) this.world.AddObject(doc, radius);
+    }
     const retuned = restart ? scene.ships : [...diff.added, ...diff.rebuilt, ...diff.retuned];
     for (const id of new Set(retuned.map((doc) => doc.id))) this.Retune(id);
     // The document's prop mod state applies at once, like a placement: on a load, for added ships, for ships whose
@@ -699,10 +727,13 @@ export class Director {
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
     this.onChange();
 
-    // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order.
+    // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order. Objects build
+    // after the ships, so a heavy structure never holds a ship back.
     for (const doc of builds) await this.Build(doc);
+    for (const entry of objectBuilds) await this.objects.Build(entry);
+    this.engine?.SetDrawReach(this.objects.Reach(scene), 'objects');
 
-    const reframe = ReframesAfterEdit({ restart, cameraChanged: diff.camera, following: this.cameraFollow.following, removed: diff.removed.map((doc) => doc.id) });
+    const reframe = ReframesAfterEdit({ restart, cameraChanged: diff.camera, following: this.cameraFollow.following, removed: [...diff.removed, ...diff.objects.removed].map((doc) => doc.id) });
     if (reframe && JSON.stringify(scene.camera) !== this.appliedCamera) this.ApplyCamera(scene.camera);
     this.appliedCamera = null;
     this.onChange();
@@ -710,7 +741,18 @@ export class Director {
       scene,
       warnings,
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
-      changes: { added: diff.added.length, rebuilt: diff.rebuilt.length, retried: retried.length, moved: diff.moved.length, removed: diff.removed.length, regrouped: diff.regrouped.length, switched: diff.switched.length, stopped: stopped.length }
+      ...(scene.objects?.length || diff.objects.removed.length ? { objects: (scene.objects ?? []).map((doc) => this.ObjectReport(doc.id)) } : {}),
+      changes: {
+        added: diff.added.length,
+        rebuilt: diff.rebuilt.length,
+        retried: retried.length,
+        moved: diff.moved.length,
+        removed: diff.removed.length,
+        regrouped: diff.regrouped.length,
+        switched: diff.switched.length,
+        stopped: stopped.length,
+        ...(scene.objects?.length || diff.objects.removed.length ? { objects: { added: diff.objects.added.length, rebuilt: diff.objects.rebuilt.length, moved: diff.objects.moved.length, removed: diff.objects.removed.length } } : {})
+      }
     };
   }
 
@@ -862,8 +904,73 @@ export class Director {
     this.live.delete(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
-    const retained = [...this.live.values()].map((other) => other.ship).filter((ship): ship is EveShip2 => ship !== null);
-    RetireShips([entry.ship], [...retained, ...this.dressing.Roots()]);
+    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots()]);
+  }
+
+  /**
+   * The built ships' roots, for every retire's retained set.
+   */
+  private ShipRoots(): EveShip2[] {
+    return [...this.live.values()].map((entry) => entry.ship).filter((ship): ship is EveShip2 => ship !== null);
+  }
+
+  /**
+   * Every non-ship id order_ship takes as a target: the document's objects and the location's celestial targets.
+   */
+  private TargetIds(): Set<string> {
+    return new Set([...(this.scene?.objects ?? []).map((doc) => doc.id), ...this.celestialTargets.keys()]);
+  }
+
+  /**
+   * An object's build settled: without a document radius its ball takes the SOF radius, and the back clip re-reaches.
+   */
+  private ObjectBuilt(id: string): void {
+    const doc = this.scene?.objects?.find((candidate) => candidate.id === id);
+    if (!doc) return;
+    if (doc.radius == null && this.world.HasObject(id)) this.world.SetObjectRadius(id, ObjectBallRadius({ sofRadius: this.objects.Entry(id)?.sofRadius }).radius);
+    if (this.scene) this.engine?.SetDrawReach(this.objects.Reach(this.scene), 'objects');
+  }
+
+  private ObjectReport(id: string): object {
+    const entry = this.objects.Entry(id);
+    const doc = this.scene?.objects?.find((candidate) => candidate.id === id);
+    return { id, dna: doc?.dna ?? entry?.dna ?? null, status: entry?.status ?? 'queued', ...(entry?.error ? { error: entry.error } : {}) };
+  }
+
+  /**
+   * get_state.objects: one row per document object, with ship distances on the master balls.
+   */
+  private ObjectRows(): object[] {
+    const ships = (this.scene?.ships ?? []).flatMap((doc) => {
+      const motion = this.world.Motion(doc.id);
+      return motion ? [{ id: doc.id, position: motion.position, radius: motion.physics.radius }] : [];
+    });
+    const orders = new Map<string, ShipOrders>(
+      (this.scene?.ships ?? []).flatMap((doc) => {
+        const motion = this.world.Motion(doc.id);
+        return motion ? [[doc.id, { order: motion.order, pendingOrder: motion.pendingOrder ?? null }] as const] : [];
+      })
+    );
+    return (this.scene?.objects ?? []).map((object) => ObjectStateRow({ object, entry: this.objects.Entry(object.id), ball: this.world.ObjectBall(object.id), ships, orders }));
+  }
+
+  /**
+   * Keeps the celestial target balls in step with the location: a new location (or its answer) replaces them all, and
+   * a cleared or failed one removes them, halting what flew at them.
+   */
+  private SyncCelestialTargets(location: Maybe<SceneLocation>): void {
+    const answer = this.location.Answer();
+    const nextKey = location && answer ? LocationKey(location) : null;
+    const plan = PlanCelestialTargetSync({ currentKey: this.celestialKey, current: [...this.celestialTargets.keys()], nextKey, targets: answer ? toCelestialTargets(answer) : [] });
+    for (const id of plan.remove) {
+      this.world.RemoveObject(id);
+      this.celestialTargets.delete(id);
+    }
+    for (const target of plan.add) {
+      this.world.AddObject({ id: target.target, position: target.position }, target.radius);
+      this.celestialTargets.set(target.target, target);
+    }
+    this.celestialKey = nextKey;
   }
 
   private ApplyCamera(camera: SceneCamera): void {
@@ -873,8 +980,12 @@ export class Director {
     const previous = this.cameraFollow.following ? Array.from(view.focus) : null;
     view.Set({ yaw: camera.yaw, pitch: camera.pitch, fov: camera.fov });
     const ships = this.scene?.ships ?? [];
+    const objects = this.scene?.objects ?? [];
     const docs = camera.target ? ships.filter((doc) => doc.id === camera.target) : ships;
-    const spheres = docs.map((doc) => this.WorldSphere(doc));
+    const object = camera.target && !docs.length ? (objects.find((doc) => doc.id === camera.target) ?? null) : null;
+    let spheres: WorldSphere[] = docs.map((doc) => this.WorldSphere(doc));
+    if (object) spheres = [this.ObjectSphere(object)];
+    else if (!camera.target && !ships.length) spheres = objects.map((doc) => this.ObjectSphere(doc));
     if (spheres.length) {
       const centre = vec3.create();
       for (const sphere of spheres) vec3.add(centre, centre, sphere.centre);
@@ -886,7 +997,7 @@ export class Director {
       view.Set({ focus: [0, 0, 0], distance: camera.distance ?? 1000 });
     }
     // Framing placed the focus off the master ball; TrackCamera moves it on from there.
-    const target = camera.target ? docs[0] : null;
+    const target = camera.target ? (docs[0] ?? object) : null;
     this.cameraFollow.mode = camera.mode;
     this.cameraFollow.Follow(target ? { id: target.id, position: this.world.Motion(target.id)?.position ?? target.position } : null, previous ? previous.map((value, axis) => value - view.focus[axis]) : null, this.clock.now);
   }
@@ -937,12 +1048,24 @@ export class Director {
    */
   private DrawnShip(id: string, now: number): Maybe<FollowedShip> {
     const curves = this.world.Curves(id);
+    const object = curves ? null : (this.scene?.objects?.find((doc) => doc.id === id) ?? null);
     let drawn: Maybe<FollowedShip> = null;
     if (curves) {
       const rotation = curves.rotation.GetValueAt__Ticks(now, CAMERA_TARGET_ROTATION);
       drawn = { position: curves.translation.GetValueAt__Ticks(now, CAMERA_TARGET_POSITION), forward: vec3.transformQuat(CAMERA_TARGET_FORWARD, SHIP_FORWARD, rotation) };
+    } else if (object) {
+      // A static object: following it changes nothing per frame, and chase sits behind its forward axis.
+      drawn = { position: vec3.set(CAMERA_TARGET_POSITION, ...object.position), forward: vec3.set(CAMERA_TARGET_FORWARD, ...ObjectForward(object.rotation)) };
     }
     return drawn;
+  }
+
+  /**
+   * An object's world sphere: its drawn bounding sphere, else its ball radius at its position.
+   */
+  private ObjectSphere(doc: SceneObject): WorldSphere {
+    const sphere = this.objects.Sphere(doc);
+    return { centre: vec3.fromValues(...sphere.centre), radius: sphere.radius };
   }
 
   /**
@@ -986,6 +1109,7 @@ export class Director {
           spheres.push({ id: live.id, centre, radius: live.ship.boundingSphereRadius || UNBUILT_RADIUS });
         }
       }
+      for (const doc of this.scene?.objects ?? []) if (this.objects.Entry(doc.id)?.object) spheres.push({ id: doc.id, ...this.ObjectSphere(doc) });
       const id = PickShip({ view: view.eve.GetViewMatrix().transform, projection: view.eve.GetProjection().transform, width: box.width, height: box.height }, event.clientX - box.left, event.clientY - box.top, spheres);
       if (id) this.FollowShip(id);
     }
@@ -1012,6 +1136,7 @@ export class Director {
   private Redress(location: Maybe<SceneLocation> = this.scene?.location ?? null): void {
     const report = this.location.Report();
     this.dressing.Update({ location, answer: this.location.Answer(), status: report?.status ?? 'loading', error: report?.error });
+    this.SyncCelestialTargets(report?.status === 'ready' ? location : null);
   }
 
   /**
@@ -1019,7 +1144,7 @@ export class Director {
    */
   private LocationState(): Maybe<object> {
     const located = this.location.Report();
-    return located ? { ...located, dressing: this.dressing.Report() } : null;
+    return located ? { ...located, dressing: this.dressing.Report(), targets: toLocationTargetReports([...this.celestialTargets.values()]) } : null;
   }
 
   /**

@@ -12,11 +12,11 @@
 
 import type { Maybe } from '@dereekb/util';
 import { LOCATION_DRESSING_PARTS, toLocationDressingPlan, type DressedKind, type DressedState, type LocationDressingNebulaReport, type LocationDressingParts, type LocationDressingPlan, type LocationDressingReport, type LocationStatus, type MapSystemAnswer, type SceneLocation } from '@scene-director/scene';
-import { DressingReport, DressingSlot, DYNAMIC_RESOURCE_STANDIN, PatchDynamicResources, PatchHeightMap, PlanDressingChanges, type DressingEntryState, type WantedDressing } from './celestials';
+import { DressingReport, DressingSlot, DYNAMIC_RESOURCE_STANDIN, PatchHeightMap, PlanDressingChanges, type DressingEntryState, type WantedDressing } from './celestials';
 import type { Engine } from './engine';
 import { ErrorText, ResourceValues } from './resources';
 import { CjsSchema, quat, Tr2RotationAdapter, Tr2TranslationAdapter, vec3, type EvePlanet, type EveSpaceObject2 } from './runtime';
-import { BuildShipValues, HydrateSofObject, RetireShips } from './ships';
+import { BuildStaticObject, RetireShips } from './ships';
 
 export interface LocationDressingOptions {
   readonly engine: Maybe<Engine>;
@@ -238,19 +238,13 @@ export class LocationDressing {
    */
   private async LoadObject(entry: DressingEntry, dna: string): Promise<void> {
     await this.Settle(entry, async () => {
-      const build = await BuildShipValues(dna);
-      const dynamic = PatchDynamicResources(build.values);
-      if (dynamic.length > 0) console.info(`location dressing: ${entry.name} (${entry.id}): dynamic resources ${dynamic.join(', ')} drawn as ${DYNAMIC_RESOURCE_STANDIN}`);
-      const sphere = build.values['boundingSphereRadius'];
-      entry.sofRadius = build.hull?.radius ?? (typeof sphere === 'number' ? sphere : null);
+      const build = await BuildStaticObject({ dna, curves: { translation: entry.curve, rotation: entry.rotation }, hydrate: () => Boolean(this.engine) && this.entries.get(entry.slot) === entry });
+      if (build.dynamic.length > 0) console.info(`location dressing: ${entry.name} (${entry.id}): dynamic resources ${build.dynamic.join(', ')} drawn as ${DYNAMIC_RESOURCE_STANDIN}`);
+      entry.sofRadius = build.sofRadius;
       let state: DressedState = 'validated';
-      if (this.engine && this.entries.get(entry.slot) === entry) {
-        const object = HydrateSofObject<EveSpaceObject2>(build.values, (built) => {
-          built.translationCurve = entry.curve;
-          built.rotationCurve = entry.rotation;
-        });
-        entry.object = object;
-        if (this.entries.get(entry.slot) === entry) this.engine.AddObject(object);
+      if (build.object) {
+        entry.object = build.object;
+        if (this.entries.get(entry.slot) === entry) this.engine?.AddObject(build.object);
         state = 'drawn';
       }
       return state;

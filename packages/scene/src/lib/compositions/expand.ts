@@ -26,6 +26,10 @@ export interface ExpandFleetCompositionExisting {
    */
   readonly ships: ReadonlyMap<string, SceneVector>;
   /**
+   * The scene's object ids: ship ids are unique across ships and objects, so new ship ids skip them.
+   */
+  readonly objects?: ReadonlySet<string>;
+  /**
    * The scene's fleet ids.
    */
   readonly fleets: ReadonlySet<string>;
@@ -161,12 +165,12 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
  */
 function chooseFleetId(input: ExpandFleetCompositionInput, problems: string[]): Maybe<string> {
   const { composition, fleet, existing, where = 'composition' } = input;
-  const taken = (id: string): Maybe<string> => toSlots(composition, id).all.find((slot) => existing.ships.has(slot.id))?.id ?? null;
+  const taken = (id: string): Maybe<string> => toSlots(composition, id).all.find((slot) => existing.ships.has(slot.id) || existing.objects?.has(slot.id))?.id ?? null;
   let chosen: Maybe<string> = null;
   if (fleet) {
     const ship = taken(fleet);
     if (existing.fleets.has(fleet)) problems.push(`${where}: fleet "${fleet}" already exists in the scene; give another fleet id or omit it`);
-    else if (ship) problems.push(`${where}: ship "${ship}" already exists in the scene; give another fleet id or omit it`);
+    else if (ship) problems.push(`${where}: ${existing.ships.has(ship) ? 'ship' : 'object'} "${ship}" already exists in the scene; give another fleet id or omit it`);
     else chosen = fleet;
   } else {
     for (let suffix = 1; suffix <= MAX_FLEET_ID_SUFFIX && !chosen; suffix += 1) {

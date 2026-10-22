@@ -3,9 +3,10 @@ import { SceneError, type SceneVector } from './scene';
 
 /**
  * Live movement orders for a ship's Destiny ball (the `order_ship` tool): fly a direction, fly to a world point
- * (`goto`), approach a target ship, keep at range on it, orbit it, warp (align, warp and land, to a point or at a range
- * from a ship), or stop. Ranges are metres surface to surface
- * between the two ships' Destiny balls (EVE's radii), exactly what Destiny takes. `order_ship` also takes the fleet
+ * (`goto`), approach a target, keep at range on it, orbit it, warp (align, warp and land, to a point or at a range
+ * from a target), or stop. A target is a ship, a static object of the scene, or a celestial target of its location
+ * (`celestial:<id>`). Ranges are metres surface to surface
+ * between the two Destiny balls (EVE's radii), exactly what Destiny takes. `order_ship` also takes the fleet
  * order `rejoin` (a fleet member that left its formation anchors up again): {@link normalizeShipOrderRequest}. The
  * orders are not part of the document yet; the reserved ship `orders` field will reuse normalizeShipOrderRequest
  * (so a script can rejoin), passing a {@link ShipOrderContext} with the scene's ship ids, the ordered ship and its own
@@ -86,7 +87,7 @@ export interface GotoShipOrder {
 export interface ApproachShipOrder {
   readonly type: 'approach';
   /**
-   * The target ship's id.
+   * The target's id: a ship, an object or a celestial target (`celestial:<id>`).
    */
   readonly target: string;
   /**
@@ -103,7 +104,7 @@ export interface ApproachShipOrder {
 export interface KeepAtRangeShipOrder {
   readonly type: 'keep-at-range';
   /**
-   * The target ship's id.
+   * The target's id: a ship, an object or a celestial target (`celestial:<id>`).
    */
   readonly target: string;
   /**
@@ -122,7 +123,7 @@ export interface KeepAtRangeShipOrder {
 export interface OrbitShipOrder {
   readonly type: 'orbit';
   /**
-   * The target ship's id.
+   * The target's id: a ship, an object or a celestial target (`celestial:<id>`).
    */
   readonly target: string;
   /**
@@ -157,7 +158,7 @@ export interface WarpToPointShipOrder {
 export interface WarpToShipShipOrder {
   readonly type: 'warp';
   /**
-   * The target ship's id.
+   * The target's id: a ship, an object or a celestial target (`celestial:<id>`).
    */
   readonly target: string;
   /**
@@ -199,6 +200,11 @@ export interface ShipOrderContext {
    * The scene's ship ids: a target must be one of them. Unchecked when absent.
    */
   readonly ships?: ReadonlySet<string>;
+  /**
+   * Targets that are not ships: the scene's object ids and the location's celestial targets (`celestial:<id>`).
+   * When given, a target may be one of them too.
+   */
+  readonly objects?: ReadonlySet<string>;
   /**
    * The ordered ship: a ship cannot target itself.
    */
@@ -272,9 +278,11 @@ function readVector(reader: OrderReader, key: 'direction' | 'point'): SceneVecto
 function readTarget(reader: OrderReader, context: ShipOrderContext): string {
   const value = reader.record['target'];
   const target = typeof value === 'string' ? value.trim() : '';
-  if (!target) reader.problems.push(`${reader.where}.target must be a ship id`);
+  const known = (context.ships?.has(target) ?? true) || context.objects?.has(target) === true;
+  if (!target) reader.problems.push(`${reader.where}.target must be a ship${context.objects ? ', object or celestial target' : ''} id`);
   else if (target === context.self) reader.problems.push(`${reader.where}.target must be another ship, not "${target}" itself`);
-  else if (context.ships && !context.ships.has(target)) reader.problems.push(`${reader.where}.target "${target}" is not a ship in the scene`);
+  else if (!known && context.objects) reader.problems.push(`${reader.where}.target "${target}" is not a ship, object or celestial target in the scene`);
+  else if (!known) reader.problems.push(`${reader.where}.target "${target}" is not a ship in the scene`);
   return target;
 }
 

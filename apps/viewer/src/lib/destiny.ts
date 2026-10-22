@@ -32,6 +32,12 @@
  *   anchor is at rest settles in its slot: it stops and turns smoothly to the fleet heading. It reports itself as
  *   keep-at-range on its anchor. An explicit order ends following; RemoveShip leaves followers to the director
  *   (FleetFollowing re-anchors them in the same edit), and Steer halts any whose anchor or FC is gone.
+ * - Objects. A scene object (a station, gate, structure or wreck) or a celestial target of the location is a static
+ *   ball on both parks: not free, not massive (nothing collides; ships are not massive either), not interactive, from
+ *   the ship ball counter, sized by its SDE radius. Approach, keep-at-range, orbit and warp take an object id as
+ *   their target; following and fleet anchors stay ships. Removing an object halts the ships flying at it, as
+ *   removing a ship does. FollowBall and Orbit refuse a target in another bubble on the master only (the replica has
+ *   no bubbles), so OrderRefusal refuses one up front rather than letting the parks diverge.
  * - Warp. A warp order is Destiny's WarpTo on both parks at the ship's warp speed (warp.ts: factor = 1000 × AU/s) and
  *   speed fraction 1 (Destiny only enters warp at 75 % of max velocity). The phases are read from the master after
  *   each evolved tick: aligning (warp mode, effectStamp < 0), in proper warp (warping, then exiting), landed (Destiny
@@ -57,7 +63,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { APPROACH_RANGE, isTargetShipOrder, MIN_WARP_DISTANCE, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
+import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
@@ -69,6 +75,10 @@ import { DEFAULT_WARP_SPEED, LandingPoint, WarpExitTime, WarpFactor, WarpLength,
  */
 export const REFERENCE_BALL_ID = 1;
 export const FIRST_SHIP_BALL_ID = 1000;
+/**
+ * A static object ball's mass: it is neither free nor massive, so Destiny never reads it.
+ */
+const OBJECT_BALL_MASS = 1;
 /**
  * How far away a heading's goto point is; Destiny's GotoDirection uses the same distance.
  */
@@ -510,6 +520,15 @@ interface WarpEntry {
   landed: Maybe<number>;
 }
 
+/**
+ * A static object's ball.
+ */
+interface ObjectEntry {
+  readonly id: string;
+  readonly ballId: number;
+  radius: number;
+}
+
 interface ShipEntry {
   readonly id: string;
   readonly ballId: number;
@@ -574,6 +593,7 @@ export class DestinyWorld {
   readonly master: CjsBallparkController;
   readonly replica: CjsBallparkController;
   private readonly ships = new Map<string, ShipEntry>();
+  private readonly objects = new Map<string, ObjectEntry>();
   /**
    * Movement orders waiting for the next tick boundary, by ship id; the latest order wins.
    */
@@ -742,6 +762,106 @@ export class DestinyWorld {
   }
 
   /**
+   * Adds a static object ball on both parks, or re-places and resizes a known one: not free, not massive (no
+   * collisions: ships are not massive either), not interactive, at rest at its position. Ships can target it.
+   *
+   * @param doc - The object's id and position (a document object, or a celestial target).
+   * @param radius - The ball's radius in metres: the SDE radius, else the SOF bounding radius, else a default.
+   * @throws {Error} For a radius that is not above 0, or an id a ship holds.
+   */
+  AddObject(doc: { readonly id: string; readonly position: SceneVector }, radius: number): void {
+    if (!(Number.isFinite(radius) && radius > 0)) throw new Error(`object "${doc.id}": radius must be a finite number above 0, got ${radius}`);
+    if (this.ships.has(doc.id)) throw new Error(`object "${doc.id}": a ship holds that id`);
+    const known = this.objects.get(doc.id);
+    if (known) {
+      this.PlaceObject(doc);
+      this.SetObjectRadius(doc.id, radius);
+      return;
+    }
+    const ballId = this.nextBallId++;
+    const [x, y, z] = doc.position;
+    this.objects.set(doc.id, { id: doc.id, ballId, radius });
+    this.Both((park) => park.AddBall(ballId, OBJECT_BALL_MASS, radius, 0, false, false, false, false, false, x, y, z, 0, 0, 0, 1, 0));
+  }
+
+  /**
+   * Moves an object's ball on both parks. Ships flying at it chase it there.
+   *
+   * @param doc - The object's id and position.
+   */
+  PlaceObject(doc: { readonly id: string; readonly position: SceneVector }): void {
+    const entry = this.objects.get(doc.id);
+    if (entry) this.Both((park) => park.SetBallPosition(entry.ballId, ...doc.position));
+  }
+
+  /**
+   * Resizes an object's ball on both parks.
+   *
+   * @param id - The object id.
+   * @param radius - Metres, above 0.
+   * @throws {Error} For a radius that is not above 0.
+   */
+  SetObjectRadius(id: string, radius: number): void {
+    if (!(Number.isFinite(radius) && radius > 0)) throw new Error(`object "${id}": radius must be a finite number above 0, got ${radius}`);
+    const entry = this.objects.get(id);
+    if (!entry || entry.radius === radius) return;
+    entry.radius = radius;
+    this.Both((park) => park.SetBallRadius(entry.ballId, radius));
+  }
+
+  /**
+   * Removes an object's ball, as RemoveShip does for a ship's targets: a pending order on it is dropped and the ship
+   * halted, an applied approach, keep-at-range or orbit on it halts, and an applied warp to it flies on.
+   *
+   * @param id - The object id.
+   * @returns The ids of the ships it stopped, in the order they were added.
+   */
+  RemoveObject(id: string): string[] {
+    const entry = this.objects.get(id);
+    if (!entry) return [];
+    this.objects.delete(id);
+    const stopped: string[] = [];
+    for (const other of this.ships.values()) {
+      const pending = this.pending.get(other.id);
+      const queued = pending !== undefined && shipOrderTarget(pending) === id;
+      if (queued) this.pending.delete(other.id);
+      if (queued || (!other.follow && TargetOf(other.order) === id)) {
+        this.Halt(other, `stopped: target "${id}" was removed`);
+        stopped.push(other.id);
+      }
+    }
+    this.Both((park) => park.RemoveBall(entry.ballId));
+    return stopped;
+  }
+
+  HasObject(id: string): boolean {
+    return this.objects.has(id);
+  }
+
+  ObjectIds(): string[] {
+    return [...this.objects.keys()];
+  }
+
+  /**
+   * An object ball as the master holds it, rounded to the centimetre.
+   *
+   * @param id - The object id.
+   * @returns Its position and radius, or null.
+   */
+  ObjectBall(id: string): Maybe<{ readonly position: SceneVector; readonly radius: number }> {
+    const entry = this.objects.get(id);
+    const ball = entry ? this.master.GetBall(entry.ballId) : null;
+    return ball ? { position: [Round(ball.x, 100), Round(ball.y, 100), Round(ball.z, 100)], radius: ball.radius } : null;
+  }
+
+  /**
+   * A target's entry: a ship's, else an object's.
+   */
+  private TargetEntry(id: string): Maybe<{ readonly ballId: number }> {
+    return this.ships.get(id) ?? this.objects.get(id) ?? null;
+  }
+
+  /**
    * Queues a movement order for the next tick boundary, or `delay` ticks later (a pilot's response to a fleet order).
    * It supersedes following: the ship leaves its formation.
    *
@@ -779,7 +899,7 @@ export class DestinyWorld {
     const entry = this.ships.get(id);
     const ball = entry ? this.master.GetBall(entry.ballId) : null;
     const target = shipOrderTarget(order);
-    const targetEntry = target && target !== id ? this.ships.get(target) : undefined;
+    const targetEntry = target && target !== id ? this.TargetEntry(target) : undefined;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
     let refusal: Maybe<string> = null;
     if (!entry || !ball || (target && !targetBall)) {
@@ -788,6 +908,9 @@ export class DestinyWorld {
       const landsIn = this.WarpReport(entry, ball)?.landsIn;
       const when = landsIn === undefined ? '' : `, in about ${landsIn} s`;
       refusal = `ship "${id}" is in warp; it takes orders again once it lands${when}`;
+    } else if (isTargetShipOrder(order) && targetBall && ball.mNewBubble !== targetBall.mNewBubble) {
+      const away = Math.hypot(ball.x - targetBall.x, ball.y - targetBall.y, ball.z - targetBall.z);
+      refusal = `target "${target}" is ${formatSceneDistance(away)} away, in another Destiny bubble; warp to it first`;
     } else if (order.type === 'warp') {
       const destination: SceneVector = 'point' in order ? order.point : [targetBall?.x ?? 0, targetBall?.y ?? 0, targetBall?.z ?? 0];
       const range = order.range + (targetBall ? ball.radius + targetBall.radius : 0);
@@ -1096,7 +1219,7 @@ export class DestinyWorld {
     const pending = this.pending.get(id) ?? (entry.follow && !entry.followApplied ? FollowOrder(entry.follow) : null);
     const pendingAt = this.pending.has(id) ? this.pendingAt.get(id) : undefined;
     const target = TargetOf(entry.order);
-    const targetEntry = target ? this.ships.get(target) : null;
+    const targetEntry = target ? this.TargetEntry(target) : null;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
     const slot = entry.follow ? this.Slot(entry, entry.follow) : null;
     const warp = this.WarpReport(entry, ball);
@@ -1423,7 +1546,7 @@ export class DestinyWorld {
       return;
     }
     const target = shipOrderTarget(order);
-    const targetEntry = target ? this.ships.get(target) : undefined;
+    const targetEntry = target ? this.TargetEntry(target) : undefined;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
     if (target && (!targetEntry || !targetBall)) {
       this.Halt(entry, `stopped: target "${target}" was removed`);

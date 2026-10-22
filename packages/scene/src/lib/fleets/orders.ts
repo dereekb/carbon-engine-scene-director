@@ -103,6 +103,11 @@ export interface FleetOrderRequestContext {
    */
   readonly ships?: ReadonlySet<string>;
   /**
+   * Targets that are not ships (the scene's objects and the location's celestial targets), for a leader's movement
+   * order. Unchecked against when absent.
+   */
+  readonly objects?: ReadonlySet<string>;
+  /**
    * Message prefix, default `order_fleet`.
    */
   readonly where?: string;
@@ -147,7 +152,7 @@ export function normalizeFleetOrderRequest(input: unknown, context: FleetOrderRe
     if (fleet == null) problems.push(`${where}.fleet is required: the fleet to order (narrow it with wing or squad)`);
     if (by != null && (typeof by !== 'string' || !ID_PATTERN.test(by))) problems.push(`${where}.by ${ID_MESSAGE}`);
     if (delay != null && (typeof delay !== 'number' || !Number.isFinite(delay) || delay < 0 || delay > 1)) problems.push(`${where}.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to ${MAX_FLEET_ORDER_DELAY} s)`);
-    const order = readFleetOrder(input['order'], { ships: context.ships, where: `${where}.order` }, problems);
+    const order = readFleetOrder(input['order'], { ships: context.ships, objects: context.objects, where: `${where}.order` }, problems);
     if (selection?.fleet && order) {
       request = {
         fleet: selection.fleet,
@@ -165,6 +170,7 @@ export function normalizeFleetOrderRequest(input: unknown, context: FleetOrderRe
 
 interface ReadOrderContext {
   readonly ships?: ReadonlySet<string>;
+  readonly objects?: ReadonlySet<string>;
   readonly where: string;
 }
 
@@ -184,7 +190,7 @@ function readFleetOrder(input: unknown, context: ReadOrderContext, problems: str
 function readShipOrder(input: JsonObject, context: ReadOrderContext, problems: string[]): Maybe<ShipOrder> {
   let order: Maybe<ShipOrder> = null;
   try {
-    order = normalizeShipOrder(input, { ships: context.ships, where: context.where });
+    order = normalizeShipOrder(input, { ships: context.ships, objects: context.objects, where: context.where });
   } catch (error) {
     if (!(error instanceof SceneError)) throw error;
     problems.push(...error.problems);

@@ -1638,3 +1638,105 @@ describe('DestinyWorld formation warp', () => {
     expect(world.WarpInFormation('m0', { leader: 'fc', offset: offsets.get('m0')! })).toBe(false);
   });
 });
+
+describe('DestinyWorld objects', () => {
+  function WithObject(radius = 20000, position: SceneVector = [0, 0, 30000 + 20000 + 31]): Harness {
+    const harness = new Harness();
+    harness.world.AddShip(Ship('rifter', [0, 0, 0]), Fly(RIFTER));
+    harness.world.AddObject({ id: 'astra', position }, radius);
+    harness.Run(1);
+    return harness;
+  }
+
+  it('adds a static, non-free ball on both parks from the ship counter, in lockstep', () => {
+    const { world } = WithObject();
+    const master = world.master.GetBall(FIRST_SHIP_BALL_ID + 1);
+    expect(master).toMatchObject({ radius: 20000, maxVelocity: 0, isFree: false });
+    expect(world.replica.GetBall(FIRST_SHIP_BALL_ID + 1)?.radius).toBe(20000);
+    expect(world.ObjectBall('astra')).toEqual({ position: [0, 0, 50031], radius: 20000 });
+    expect(world.HasObject('astra') && world.ObjectIds()).toEqual(['astra']);
+    world.AddShip(Ship('other', [0, 0, -5000]), Fly(RIFTER));
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID + 2)).not.toBeNull();
+    ExpectLockstep(world, 3);
+  });
+
+  it('is approached, kept at range on and orbited, surface to surface', () => {
+    const harness = WithObject();
+    const { world } = harness;
+    expect(world.Order('rifter', { type: 'approach', target: 'astra', speed: 1 })).toBe(true);
+    harness.Run(240);
+    expect(RequireMotion(world, 'rifter')).toMatchObject({ mode: 'follow' });
+    expect(RequireMotion(world, 'rifter').targetDistance).toBeLessThanOrEqual(150);
+    world.Order('rifter', { type: 'keep-at-range', target: 'astra', range: 10000, speed: 1 });
+    harness.Run(120);
+    expect(Math.abs((RequireMotion(world, 'rifter').targetDistance ?? 0) - 10000)).toBeLessThanOrEqual(toFollowTolerance({ slotRange: 10000, anchorSpeed: 0 }));
+    world.Order('rifter', { type: 'orbit', target: 'astra', range: 5000, speed: 1 });
+    harness.Run(240);
+    const orbit = RequireMotion(world, 'rifter');
+    expect(orbit.mode).toBe('orbit');
+    expect(orbit.targetDistance).toBeGreaterThanOrEqual(4500);
+    expect(orbit.targetDistance).toBeLessThanOrEqual(6500);
+    ExpectLockstep(world, 2);
+  });
+
+  it('is a warp target, landing about the radii short', () => {
+    const harness = WithObject(20000, [0, 0, 1_000_000]);
+    const { world } = harness;
+    expect(world.Order('rifter', { type: 'warp', target: 'astra', range: 0 })).toBe(true);
+    harness.Run(120);
+    const motion = RequireMotion(world, 'rifter');
+    const astra = world.ObjectBall('astra');
+    expect(motion.warp?.phase).toBe('landed');
+    expect(astra).not.toBeNull();
+    const centres = Math.hypot(...motion.position.map((value, axis) => value - (astra?.position[axis] ?? 0)));
+    expect(Math.abs(centres - 31 - 20000)).toBeLessThan(2000);
+  });
+
+  it('halts an orbiter and drops a pending approach when removed', () => {
+    const harness = WithObject();
+    const { world } = harness;
+    world.AddShip(Ship('second', [0, 0, -2000]), Fly(RIFTER));
+    world.Order('rifter', { type: 'orbit', target: 'astra', range: 5000, speed: 1 });
+    harness.Run(5);
+    world.Order('second', { type: 'approach', target: 'astra', speed: 1 });
+    expect(world.RemoveObject('astra')).toEqual(['rifter', 'second']);
+    const motion = RequireMotion(world, 'rifter');
+    expect(motion.orderNote).toBe('stopped: target "astra" was removed');
+    expect(motion.pendingOrder ?? motion.order).toEqual({ type: 'stop' });
+    expect(world.HasObject('astra')).toBe(false);
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID + 1)).toBeNull();
+    expect(world.RemoveObject('astra')).toEqual([]);
+  });
+
+  it('is chased when moved, and resized on both parks', () => {
+    const harness = WithObject();
+    const { world } = harness;
+    world.Order('rifter', { type: 'approach', target: 'astra', speed: 1 });
+    harness.Run(3);
+    const before = RequireMotion(world, 'rifter').targetDistance ?? 0;
+    world.SetObjectRadius('astra', 25000);
+    harness.Run(1);
+    expect((RequireMotion(world, 'rifter').targetDistance ?? 0) - before).toBeLessThan(-4000);
+    world.PlaceObject({ id: 'astra', position: [100000, 0, 0] });
+    harness.Run(60);
+    const motion = RequireMotion(world, 'rifter');
+    expect(motion.position[0]).toBeGreaterThan(1000);
+    expect(world.replica.GetBall(FIRST_SHIP_BALL_ID + 1)?.radius).toBe(25000);
+    ExpectLockstep(world, 2);
+  });
+
+  it('refuses a target in another bubble, keeping the parks identical', () => {
+    const harness = WithObject(20000, [0, 0, 20_000_000]);
+    const { world } = harness;
+    expect(world.OrderRefusal('rifter', { type: 'approach', target: 'astra', speed: 1 })).toBe('target "astra" is 20,000 km away, in another Destiny bubble; warp to it first');
+    expect(world.Order('rifter', { type: 'orbit', target: 'astra', range: 5000, speed: 1 })).toBe(false);
+    harness.Run(3);
+    ExpectLockstep(world, 2);
+  });
+
+  it('refuses a ship id and a radius of 0', () => {
+    const { world } = WithObject();
+    expect(() => world.AddObject({ id: 'rifter', position: [0, 0, 0] }, 1000)).toThrow(/a ship holds that id/u);
+    expect(() => world.AddObject({ id: 'other', position: [0, 0, 0] }, 0)).toThrow(/radius must be/u);
+  });
+});

@@ -5,7 +5,7 @@ import type { FleetComposition } from '../compositions/composition';
 import { expandFleetComposition } from '../compositions/expand';
 import { normalizeFleetComposition } from '../compositions/normalize';
 import type { SceneVector } from '../scene';
-import { freeShipsFront, placeFreeShips, planFreeShips, pushStagedFleet, pushStagedShips, readStagingNear, readStagingPrefix, readStagingRadii, resolveStagingNear, warnFar } from './add-ships';
+import { freeShipsFront, placeFreeShips, planFreeShips, pushStagedFleet, pushStagedShips, readStagingNear, readStagingPrefix, readStagingRadii, resolveStagingNear, stagingNearReference, warnFar } from './add-ships';
 import { readStagingDraft, toExpandExisting } from './draft';
 import { DEFAULT_SHIP_FORMATION, readShipFormation, type ShipFormation } from './formations';
 import { headingVectors, normalizeHeading, roundVector, tangentHeading } from './placement';
@@ -81,7 +81,7 @@ export function applyStageEngagement(operation: JsonObject, context: FleetOperat
     const resolved = near ? resolveStagingNear(near, { draft, radii, leadRadius: 0, where: `${where}.near`, problems }) : null;
     if (near && resolved) {
       center = resolved.point;
-      reference = draft.ships.get(near.ship)?.position ?? null;
+      reference = stagingNearReference(near, draft)?.position ?? null;
     }
   }
   let heading = 0;
