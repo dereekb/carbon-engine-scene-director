@@ -16,7 +16,7 @@ import { DressingReport, DressingSlot, DYNAMIC_RESOURCE_STANDIN, PatchHeightMap,
 import type { Engine } from './engine';
 import { ErrorText, ResourceValues } from './resources';
 import { CjsSchema, quat, Tr2RotationAdapter, Tr2TranslationAdapter, vec3, type EvePlanet, type EveSpaceObject2 } from './runtime';
-import { BuildStaticObject, RetireShips } from './ships';
+import { BuildStaticObject, RetireShips, type DetachAudio } from './ships';
 
 export interface LocationDressingOptions {
   readonly engine: Maybe<Engine>;
@@ -26,6 +26,10 @@ export interface LocationDressingOptions {
    */
   readonly retained: () => object[];
   readonly onChange: () => void;
+  /**
+   * Hydrates stations and gates with the audio seams detached (PageAudio.Detached).
+   */
+  readonly detachAudio: DetachAudio;
 }
 
 export interface LocationDressingInput {
@@ -58,6 +62,7 @@ export class LocationDressing {
   private readonly parts: LocationDressingParts;
   private readonly retained: () => object[];
   private readonly onChange: () => void;
+  private readonly detachAudio: DetachAudio;
   /**
    * The sun ball: scene.sunBall and the sun disc's translation curve must be this same object (Carbon picks the sun
    * disc by identity), at the drawn (pulled-in) position.
@@ -75,6 +80,7 @@ export class LocationDressing {
     this.parts = options.parts;
     this.retained = options.retained;
     this.onChange = options.onChange;
+    this.detachAudio = options.detachAudio;
   }
 
   /**
@@ -238,7 +244,7 @@ export class LocationDressing {
    */
   private async LoadObject(entry: DressingEntry, dna: string): Promise<void> {
     await this.Settle(entry, async () => {
-      const build = await BuildStaticObject({ dna, curves: { translation: entry.curve, rotation: entry.rotation }, hydrate: () => Boolean(this.engine) && this.entries.get(entry.slot) === entry });
+      const build = await BuildStaticObject({ dna, curves: { translation: entry.curve, rotation: entry.rotation }, hydrate: () => Boolean(this.engine) && this.entries.get(entry.slot) === entry, detachAudio: this.detachAudio });
       if (build.dynamic.length > 0) console.info(`location dressing: ${entry.name} (${entry.id}): dynamic resources ${build.dynamic.join(', ')} drawn as ${DYNAMIC_RESOURCE_STANDIN}`);
       entry.sofRadius = build.sofRadius;
       let state: DressedState = 'validated';

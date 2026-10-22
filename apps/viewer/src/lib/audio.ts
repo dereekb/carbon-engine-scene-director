@@ -12,10 +12,15 @@
  * - Every posted event is recorded (get_state's audio.posted), played or not, so a headless check sees what would
  *   play. `played` means the event reached the enabled audio manager; an emitter out of the listener's range is
  *   culled and plays its loops once it comes into range.
+ * - Only the page's emitters play: SOF ships, stations and gates hydrate inside Detached, so their own emitters stay
+ *   headless whatever the audio state.
+ * - The backend is guarded once on (audio-guard.ts): Chrome's AudioParam overlap throws are rescheduled or contained
+ *   and counted, so audio never aborts a render frame.
  */
 
 import type { Maybe } from '@dereekb/util';
 import type { CameraEye } from './engine';
+import { GuardWebAudioBackend, RunDetached } from './audio-guard';
 import { PROP_MOD_AUDIO_STOP_FADE_MS } from './prop-mod-audio';
 import { ErrorText } from './resources';
 import { type AudEmitter, CjsAudioMan, type CjsAudioLibraryDocument, type CjsAudioMediaProvider, type CjsAudioMediaRead, type CjsAudioMediaRecord } from './runtime';
@@ -57,10 +62,24 @@ export interface PageAudioReport {
    */
   readonly posted: readonly PostedAudioEvent[];
   /**
+   * Audio game objects registered with the runtime's manager (the page's emitters and the listener; 0 while off).
+   * More than `emitters + 1` means something else registered emitters.
+   */
+  readonly gameObjects: number;
+  /**
    * Audio frames the runtime failed (CjsAudioMan.Process threw), with the last failure.
    */
   readonly frameErrors?: number;
   readonly lastFrameError?: string;
+  /**
+   * Voice schedules the guard cleared and retried after an AudioParam overlap (audio-guard.ts).
+   */
+  readonly rescheduled?: number;
+  /**
+   * Backend calls the guard contained (they threw and were dropped), with the last failure.
+   */
+  readonly backendErrors?: number;
+  readonly lastBackendError?: string;
   /**
    * The AudioContext's state once one exists: `suspended` while audio is on means the browser holds it until a gesture.
    */
@@ -121,7 +140,7 @@ export const POSTED_AUDIO_LIMIT = 20;
  */
 const AUTOPLAY_PROBE_MS = 500;
 /**
- * How often a run of failing audio frames is logged.
+ * How often a run of failing audio frames, rescheduled voices or contained backend calls is logged.
  */
 const FRAME_ERROR_LOG_MS = 10_000;
 const TICKS_PER_SECOND = 1e7;
@@ -146,6 +165,11 @@ export class PageAudio {
   private frameErrorLoggedAt = -Infinity;
   private frameErrors = 0;
   private lastFrameError: Maybe<string> = null;
+  private rescheduledLoggedAt = -Infinity;
+  private rescheduled = 0;
+  private backendErrorLoggedAt = -Infinity;
+  private backendErrors = 0;
+  private lastBackendError: Maybe<string> = null;
   /**
    * Media reads over the hub's /audio/path route, the shape the runtime's demo provider returns.
    */
@@ -189,11 +213,12 @@ export class PageAudio {
       if (!running || context.state !== 'running' || this.state !== 'waiting-for-gesture') return;
     }
     this.SetState('loading');
+    let man: Maybe<CjsAudioMan> = null;
     try {
       const response = await fetch(LIBRARY_URL);
       if (!response.ok) throw new Error(`the hub's ${LIBRARY_URL} answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
       const library = (await response.json()) as CjsAudioLibraryDocument;
-      const man = new CjsAudioMan(library, {
+      man = new CjsAudioMan(library, {
         // Scales only the panner and listener positions, which are inaudible here (the panners are HRTF with rolloff
         // 0, so only the direction counts); the stems' distance curves and culling read raw positions, in metres,
         // the scene's unit. 1/150 (the runtime demo's) measured within 1.2 dB of 1 (Windows Chrome, 2026-10-22).
@@ -211,12 +236,15 @@ export class PageAudio {
       // Every bank, as the runtime's demo does: the engine gates PostEvent on bank status, and the catalog backend
       // reads nothing up front (media is read per event).
       if (!man.Enable(Object.keys(library.metadata.SoundBanks))) throw new Error('the audio manager could not create its AudioContext');
+      if (man.backend) GuardWebAudioBackend(man.backend, { onRescheduled: (error) => this.Rescheduled(error), onContained: (error, where) => this.BackendError(error, where) });
       void context.resume().catch(() => undefined);
       this.man = man;
       this.SetState('on');
       console.info(`audio on: ${Object.keys(library.metadata.SoundBanks).length} sound banks`);
       this.onReady();
     } catch (error) {
+      // Enable attached the seams: a failed enable leaves the runtime headless.
+      man?.Detach();
       this.error = ErrorText(error);
       console.warn(`audio failed: ${this.error}`);
       this.SetState('failed');
@@ -231,6 +259,18 @@ export class PageAudio {
   Gesture(): void {
     if (this.state !== 'off' && this.context?.state === 'suspended') void this.context.resume().catch(() => undefined);
     void this.Enable({ auto: false });
+  }
+
+  /**
+   * Runs a SOF build with the runtime's audio seams detached: SOF graphs hydrate inert; only the page's emitters play.
+   * Their own emitters (Engine_SFX, the boosters' controllers) would otherwise register with the manager when audio is
+   * on and play sounds the page never posted, which nothing releases with the ship. Not re-entrant.
+   *
+   * @param build - The synchronous hydration.
+   * @returns What the build returns.
+   */
+  Detached<T>(build: () => T): T {
+    return RunDetached(this.man, build);
   }
 
   /**
@@ -284,8 +324,9 @@ export class PageAudio {
       man.Process({ time: input.now / TICKS_PER_SECOND, realTime, deltaTime: this.lastRealTime == null ? 0 : Math.max(0, realTime - this.lastRealTime), frame: ++this.frame });
       this.lastRealTime = realTime;
     } catch (error) {
-      // The runtime's Web Audio backend can throw for a burst of frames while fades overlap (an AudioParam curve
-      // scheduled twice in one render quantum), with a different message each frame: log a burst once.
+      // What the guard does not cover in the manager's own frame (its RTPC lanes and source effects schedule
+      // AudioParams too) can throw for a burst of frames while fades overlap, with a different message each frame:
+      // log a burst once.
       const message = ErrorText(error);
       this.frameErrors += 1;
       this.lastFrameError = message;
@@ -313,8 +354,11 @@ export class PageAudio {
       state: this.state,
       ...(this.error ? { error: this.error } : {}),
       emitters: this.emitters.size,
+      gameObjects: this.man?.manager?.GetPrioritizedEmitters().length ?? 0,
       posted: [...this.posted],
       ...(this.frameErrors ? { frameErrors: this.frameErrors, ...(this.lastFrameError ? { lastFrameError: this.lastFrameError } : {}) } : {}),
+      ...(this.rescheduled ? { rescheduled: this.rescheduled } : {}),
+      ...(this.backendErrors ? { backendErrors: this.backendErrors, ...(this.lastBackendError ? { lastBackendError: this.lastBackendError } : {}) } : {}),
       ...(this.context ? { context: this.context.state } : {})
     };
   }
@@ -361,6 +405,33 @@ export class PageAudio {
       }
     }
     return emitter;
+  }
+
+  /**
+   * The guard cleared and retried a voice schedule after an AudioParam overlap.
+   */
+  private Rescheduled(error: unknown): void {
+    this.rescheduled += 1;
+    const at = performance.now();
+    if (at - this.rescheduledLoggedAt >= FRAME_ERROR_LOG_MS) {
+      console.info(`audio: rescheduled a voice after ${ErrorText(error)} (${this.rescheduled} so far, logged at most every ${FRAME_ERROR_LOG_MS / 1000} s; get_state's audio.rescheduled counts them)`);
+      this.rescheduledLoggedAt = at;
+    }
+  }
+
+  /**
+   * The guard contained a backend call that threw: the frame goes on, the next placement or refresh reschedules.
+   */
+  private BackendError(error: unknown, where: string): void {
+    const message = `${where}: ${ErrorText(error)}`;
+    this.backendErrors += 1;
+    this.lastBackendError = message;
+    const at = performance.now();
+    if (at - this.backendErrorLoggedAt >= FRAME_ERROR_LOG_MS) {
+      const stack = error instanceof Error && error.stack ? `\n${error.stack}` : '';
+      console.warn(`audio backend call contained: ${message} (${this.backendErrors} so far, logged at most every ${FRAME_ERROR_LOG_MS / 1000} s; get_state's audio.backendErrors counts them)${stack}`);
+      this.backendErrorLoggedAt = at;
+    }
   }
 
   private SetState(state: PageAudioState): void {

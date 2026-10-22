@@ -126,8 +126,14 @@ interface AudioState {
   readonly state: string;
   readonly error?: string;
   readonly emitters: number;
+  /**
+   * Audio game objects registered with the runtime's manager: the page's emitters and the listener.
+   */
+  readonly gameObjects?: number;
   readonly posted: { readonly tick: number; readonly ship: string; readonly event: string; readonly played: boolean }[];
   readonly frameErrors?: number;
+  readonly rescheduled?: number;
+  readonly backendErrors?: number;
   readonly context?: string;
 }
 
@@ -791,7 +797,7 @@ try {
     if (operations.length) await call('patch_scene', { operations });
   }
 
-  const propModHelpers = new Set(['mwd-tfi', 'ab-guardian']);
+  const propModHelpers = new Set(['mwd-tfi', 'ab-guardian', 'audio-probe-tfi']);
   try {
     await Check("switch_prop_mods runs a ship's MWD at its module's numbers", async () => {
       await call('patch_scene', {
@@ -860,7 +866,20 @@ try {
         `played with audio ${audio.state}: ${JSON.stringify(posted)}`
       );
       const played = on ? 'played' : `audio ${audio.state}, recorded unplayed`;
-      return `${posted.map((entry) => entry.event).join(', ')} (${played}); ${after.audio?.frameErrors ?? 0} audio frames failed in the runtime`;
+      return `${posted.map((entry) => entry.event).join(', ')} (${played}); ${after.audio?.frameErrors ?? 0} audio frames failed in the runtime, ${after.audio?.rescheduled ?? 0} voices rescheduled, ${after.audio?.backendErrors ?? 0} backend calls contained`;
+    });
+
+    await Check("SOF ships' own audio emitters stay inert", async () => {
+      const before = await call<ViewerState>('get_state');
+      if (before.audio?.state !== 'on') throw new Skipped(`audio ${before.audio?.state ?? 'unreported'}`);
+      if (!before.renderer.available) throw new Skipped('no renderer, so no ship hydrates');
+      // The listener and the page's own emitters are the only audio game objects the page means to register.
+      const beyond = (state: ViewerState) => (state.audio?.gameObjects ?? 0) - (state.audio?.emitters ?? 0);
+      const baseline = beyond(before);
+      await call('patch_scene', { operations: [{ op: 'add_ship', ship: { id: 'audio-probe-tfi', dna: TFI_DNA, position: [-3000, 0, -60000] } }] });
+      const built = await WaitFor('audio-probe-tfi built', 60, (state) => (ShipIn(state, 'audio-probe-tfi').status === 'ready' ? null : `${ShipIn(state, 'audio-probe-tfi').status}`));
+      Expect(beyond(built) === baseline, `audio game objects beyond the page's emitters went ${baseline} -> ${beyond(built)} with a TFI build: ${JSON.stringify(built.audio)}`);
+      return `${built.audio?.gameObjects} audio game objects for ${built.audio?.emitters} page emitter(s), unchanged by a TFI build`;
     });
   } finally {
     const { ships } = await call<{ ships: { id: string }[] }>('get_scene');

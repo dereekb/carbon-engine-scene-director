@@ -821,9 +821,75 @@ declare module '@carbonenginejs/runtime/audio' {
     readonly frame: number;
   }
 
+  /**
+   * One playing voice's Web Audio nodes (CjsWebAudioSoundEngine's voice descriptor). A node is null when the voice's
+   * route has none.
+   */
+  export interface CjsWebAudioVoice {
+    readonly gain: GainNode | null;
+    readonly busGain: GainNode | null;
+    readonly busVoiceActionGain: GainNode | null;
+    readonly busVoiceGain: GainNode | null;
+    readonly source: AudioBufferSourceNode | null;
+    readonly lowPassFilter: BiquadFilterNode | null;
+    readonly highPassFilter: BiquadFilterNode | null;
+  }
+
+  /**
+   * The runtime's Web Audio backend (CjsAudioMan.backend), which emitters reach as AudGameObjResource.backend.
+   * audio-guard.ts wraps these members on the instance: they are runtime-called names, never rename them.
+   */
+  export class CjsWebAudioSoundEngine {
+    /**
+     * @returns The playing id; 0 when nothing played.
+     */
+    PostEvent(eventID: number | string, gameObjID: number, additionalFlags?: number, emitter?: unknown, eventName?: string): number;
+    ExecuteActionOnPlayingID(action: string, playingID: number, fadeOutDuration?: number): boolean;
+    SetPosition(gameObjID: number, front: ArrayLike<number>, top: ArrayLike<number>, position: ArrayLike<number>): unknown;
+    SeekOnEventPercent(playingID: number, percentToSeek: number): unknown;
+    SeekOnEventMs(playingID: number, msToSeek: number): unknown;
+    SetListenerPosition(gameObjID: number, front: ArrayLike<number>, top: ArrayLike<number>, position: ArrayLike<number>): unknown;
+    SetScalingFactor(gameObjID: number, value: number): unknown;
+    SetRTPCValue(rtpcName: string, value: number, gameObjID?: number): unknown;
+    SetSwitch(switchGroup: string, switchState: string, gameObjID?: number): unknown;
+    /**
+     * The per-voice schedulers: each owns its AudioParams and reschedules them on every placement and RTPC refresh.
+     */
+    _ApplyVoiceGain(voice: CjsWebAudioVoice, smoothDistance?: boolean): void;
+    _ApplyVoicePlaybackRate(voice: CjsWebAudioVoice): void;
+    _ApplyVoiceFilters(voice: CjsWebAudioVoice): void;
+    _ApplyVoiceBusGain(voice: CjsWebAudioVoice): void;
+    _ApplyVoiceBusActionGain(voice: CjsWebAudioVoice): void;
+    _ApplyVoiceBusRtpcGain(voice: CjsWebAudioVoice): void;
+  }
+
+  /**
+   * Carbon's audio manager (CjsAudioMan.manager).
+   */
+  export interface AudManager {
+    /**
+     * Every registered audio game object (emitters and the listener), a copy.
+     */
+    GetPrioritizedEmitters(): readonly unknown[];
+  }
+
   export class CjsAudioMan {
     constructor(library: CjsAudioLibraryDocument, options?: CjsAudioManOptions);
     readonly listener: AudListener | null;
+    /**
+     * The Web Audio backend, once Enable realized it.
+     */
+    readonly backend: CjsWebAudioSoundEngine | null;
+    readonly manager: AudManager | null;
+    /**
+     * Wires AudGameObjResource's static seams (manager, static data, backend) to this manager: audio objects created
+     * while attached register with it. Enable attaches.
+     */
+    Attach(): unknown;
+    /**
+     * Clears those seams: audio objects created while detached stay headless.
+     */
+    Detach(): void;
     /**
      * The AudioContext, once Enable created it.
      */

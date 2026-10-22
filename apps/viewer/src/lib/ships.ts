@@ -220,6 +220,12 @@ export interface StaticObjectBuild {
 }
 
 /**
+ * Runs a SOF hydration with the runtime's audio seams detached (PageAudio.Detached), so the object's own emitters stay
+ * headless.
+ */
+export type DetachAudio = <T>(build: () => T) => T;
+
+/**
  * The one static SOF path: builds an object's values from its DNA (queued with the ship builds), blanks its
  * `dynamic:/` video screens, and hydrates it on fixed curves when `hydrate()` (asked after the build) says so.
  *
@@ -227,10 +233,11 @@ export interface StaticObjectBuild {
  * @param input.dna - SOF DNA.
  * @param input.curves - The fixed curves to bind.
  * @param input.hydrate - Asked once the values are built: false builds to values only (no renderer, or retired).
+ * @param input.detachAudio - Wraps the hydration.
  * @returns The build.
  */
-export async function BuildStaticObject(input: { readonly dna: string; readonly curves: StaticCurves; readonly hydrate: () => boolean }): Promise<StaticObjectBuild> {
-  const { dna, curves, hydrate } = input;
+export async function BuildStaticObject(input: { readonly dna: string; readonly curves: StaticCurves; readonly hydrate: () => boolean; readonly detachAudio: DetachAudio }): Promise<StaticObjectBuild> {
+  const { dna, curves, hydrate, detachAudio } = input;
   const build = await BuildShipValues(dna);
   const dynamic = PatchDynamicResources(build.values);
   const sphere = build.values['boundingSphereRadius'];
@@ -239,10 +246,12 @@ export async function BuildStaticObject(input: { readonly dna: string; readonly 
   const sofCentre = ArrayLike3(centre);
   let object: Maybe<EveSpaceObject2> = null;
   if (hydrate()) {
-    object = HydrateSofObject<EveSpaceObject2>(build.values, (built) => {
-      built.translationCurve = curves.translation;
-      built.rotationCurve = curves.rotation;
-    });
+    object = detachAudio(() =>
+      HydrateSofObject<EveSpaceObject2>(build.values, (built) => {
+        built.translationCurve = curves.translation;
+        built.rotationCurve = curves.rotation;
+      })
+    );
   }
   return { object, sofRadius, sofCentre, dynamic, diagnostics: build.diagnostics };
 }

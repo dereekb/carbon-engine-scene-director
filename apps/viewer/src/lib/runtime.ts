@@ -16,7 +16,7 @@
 // SOF hull values carry audio classes (AudEmitter and friends); hydrating them
 // needs the audio class families registered, which this import also does.
 export { CjsAudioMan } from '@carbonenginejs/runtime/audio';
-export type { AudEmitter, CjsAudioLibraryDocument, CjsAudioMediaProvider, CjsAudioMediaRead, CjsAudioMediaRecord } from '@carbonenginejs/runtime/audio';
+export type { AudEmitter, AudManager, CjsAudioLibraryDocument, CjsAudioMediaProvider, CjsAudioMediaRead, CjsAudioMediaRecord, CjsWebAudioSoundEngine, CjsWebAudioVoice } from '@carbonenginejs/runtime/audio';
 
 export * from './runtime-sim';
 export { blue, BlueResFileSystemRemote, RemoteFileCache } from '@carbonenginejs/runtime/blue';

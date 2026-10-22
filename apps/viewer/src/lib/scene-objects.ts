@@ -12,7 +12,7 @@ import type { Engine } from './engine';
 import { ObjectBallRadius, ObjectReach, type ObjectEntryState } from './objects';
 import { ErrorText } from './resources';
 import { vec3, type EveSpaceObject2 } from './runtime';
-import { BuildStaticObject, CreateStaticCurves, PlaceStatic, RetireShips, type StaticCurves } from './ships';
+import { BuildStaticObject, CreateStaticCurves, PlaceStatic, RetireShips, type DetachAudio, type StaticCurves } from './ships';
 
 export interface SceneObjectsOptions {
   readonly engine: Maybe<Engine>;
@@ -25,6 +25,10 @@ export interface SceneObjectsOptions {
    * Called once a build settles, with its SOF radius.
    */
   readonly onBuilt: (id: string, sofRadius: Maybe<number>) => void;
+  /**
+   * Hydrates objects with the audio seams detached (PageAudio.Detached).
+   */
+  readonly detachAudio: DetachAudio;
 }
 
 /**
@@ -47,6 +51,7 @@ export class SceneObjects {
   private readonly retained: () => object[];
   private readonly onChange: () => void;
   private readonly onBuilt: (id: string, sofRadius: Maybe<number>) => void;
+  private readonly detachAudio: DetachAudio;
   private readonly entries = new Map<string, SceneObjectEntry>();
 
   constructor(options: SceneObjectsOptions) {
@@ -54,6 +59,7 @@ export class SceneObjects {
     this.retained = options.retained;
     this.onChange = options.onChange;
     this.onBuilt = options.onBuilt;
+    this.detachAudio = options.detachAudio;
   }
 
   /**
@@ -102,7 +108,7 @@ export class SceneObjects {
     entry.status = 'building';
     this.onChange();
     try {
-      const build = await BuildStaticObject({ dna: entry.dna, curves: entry.curves, hydrate: () => Boolean(this.engine) && this.entries.get(entry.id) === entry });
+      const build = await BuildStaticObject({ dna: entry.dna, curves: entry.curves, hydrate: () => Boolean(this.engine) && this.entries.get(entry.id) === entry, detachAudio: this.detachAudio });
       if (build.dynamic.length > 0) console.info(`object ${entry.id}: dynamic resources ${build.dynamic.join(', ')} drawn as a stand-in`);
       entry.sofRadius = build.sofRadius;
       entry.sofCentre = build.sofCentre;

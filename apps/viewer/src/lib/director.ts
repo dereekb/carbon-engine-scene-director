@@ -380,9 +380,10 @@ export class Director {
       engine,
       parts: ReadDressParts(),
       retained: () => [...this.ShipRoots(), ...this.objects.Roots()],
-      onChange: () => this.onChange()
+      onChange: () => this.onChange(),
+      detachAudio: (build) => this.audio.Detached(build)
     });
-    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id) });
+    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -768,7 +769,8 @@ export class Director {
       entry.hull = hull;
       this.Retune(doc.id);
       if (this.engine) {
-        const ship = HydrateShip(values);
+        // Inert SOF audio: only the page's emitters play (PageAudio.Detached).
+        const ship = this.audio.Detached(() => HydrateShip(values));
         const curves = this.world.Curves(doc.id);
         if (curves) AttachShipCurves(ship, curves);
         this.engine.AddShip(ship);

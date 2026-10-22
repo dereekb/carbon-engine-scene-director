@@ -19,7 +19,7 @@
   `.d.ts` first, so a wrong rename fails to compile (see the naming rules in `sd-workspace`).
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
-  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`. The full facade drags in the renderer and the `runtime-dist/`
+  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`. The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)
@@ -89,10 +89,36 @@ is read per event with HTTP ranges into the banks (the engine stems sit inside t
 proxy must stream and forward `Range`). Emitters start culled, so a fresh emitter's first event plays when the next
 audio frame wakes it in range. `CjsAudioMan` starts only after a user gesture (or with autoplay allowed). The Web Audio
 backend does not apply an event's authored stop relationships (a `_powerdown` that should stop `_on` leaves it looping),
-so the page stops such voices itself (`sd-ship-stats`). Ships built while audio is on register their SOF emitters
-(`Engine_SFX`, `ShipDefense_Module_sfx`, ...; 29 for five battleship-to-capital hulls) with the manager, though the
-page posts nothing on them; their sounds hit a runtime throw (the hull-audio follow-up), so a listening check releases
-them after each build (`.scratch/listen/hull-off.js`, `windows-chrome` → Listening checks). Many emitters in range
-make `Process` throw for seconds (`CjsWwiseSourceEffectRtpcLane.Apply`: `setValueAtTime ... overlaps
-setValueCurveAtTime`; 41 `_on` loops: ~10 a second for 35 s); the page counts them and goes on. Which events play:
-`sd-ship-stats`.
+so the page stops such voices itself (`sd-ship-stats`). Which events play: `sd-ship-stats`.
+
+- **SOF audio stays inert: only the page's emitters play.** `AudGameObjResource` registers with whatever
+  `CjsAudioMan` attached to its static seams, so a hull hydrated while audio is on registers its own emitters
+  (`Engine_SFX`, `ShipDefense_Module_sfx`, ...; 29 for five battleship-to-capital hulls) and its controllers
+  (`Tr2ActionPlaySound`) post EVE's engine sounds (`ship_engine_M_booster_3rd_on`, 26 voices for the TFIs fleet) that
+  the page never posted and nothing releases with the ship. **Every SOF hydration runs inside `PageAudio.Detached`**
+  (`Director.Build`, and `BuildStaticObject`'s `detachAudio` for the dressing's stations and gates and the scene's
+  objects), which detaches the seams for the synchronous build. A new SOF build path must do the same; the engine hum
+  must adopt the graphs on purpose (follow-up), not by registration. A failed `Enable` detaches the seams too.
+- **The backend is guarded (`audio-guard.ts`), because Chrome throws from the runtime's AudioParam scheduling.**
+  Every per-voice scheduler (`ScheduleVoiceVolumeGain`, `ScheduleVoicePitchPlaybackRate`, `ApplyVoiceFilter`, the bus
+  gains) runs on each placement and RTPC refresh: `cancelAndHoldAtTime(now)`, `setValueAtTime(v, now)`,
+  `param.value = v`, then a `setValueCurveAtTime` per fade boundary. Chrome moves events scheduled after a quantum's
+  processing to the next quantum except value curves, so the setValues land inside the curve, `cancelAndHoldAtTime`
+  keeps it, and the next `setValueAtTime(now)` throws NotSupportedError ("overlaps setValueCurveAtTime"); a curve
+  scheduled from a stale `now` overlaps the next one too. Those throws came out of `EveSpaceScene.Update`
+  (`TriObserverLocal.Update` → emitter placement, `Tr2ActionBindRTPC.Update` → RTPC), so `engine.Frame` failed the
+  frame and rejected a pending screenshot (16 failed frames heard as a banging loop, 2026-10-22). The guard patches
+  the backend instance at enable: the six `_ApplyVoice*` appliers clear their own params
+  (`cancelScheduledValues(0)`, the runtime's own non-`cancelAndHold` branch) before scheduling, which removed every
+  `setValueAtTime` throw in a headless repro, and retry once on an overlap; the nine entry points emitters and the page
+  reach are try/caught (`PostEvent` returns 0). Curve-on-curve throws remain upstream's to fix: contained and counted.
+  **On a runtime pin bump, re-check `VOICE_APPLIER_PARAMS` and `CONTAINED_BACKEND_CALLS` against
+  `CjsWebAudioSoundEngine.js`** (the names are declared in the `.d.ts`, so a rename fails to compile); drop the
+  pre-clear once upstream schedules from a future boundary. Upstream draft: the `carbonenginejs-runtime` note.
+- `CjsAudioMan.Process` still schedules AudioParams the guard does not cover (`CjsWwiseSourceEffectRtpcLane.Apply`;
+  41 `_on` loops: ~10 throws a second for 35 s); the page counts those frames and goes on.
+- `get_state.audio`: `emitters` (the page's), `gameObjects` (registered with the runtime's manager: those plus the
+  listener; more means something else registered), `frameErrors` / `lastFrameError` (`Process`), `rescheduled`
+  (applier retries that went through), `backendErrors` / `lastBackendError` (contained calls). Each is logged at most
+  once per 10 s (`console.info` for rescheduled, `console.warn` with the stack for contained). `verify-page` checks
+  that a TFI build leaves `gameObjects − emitters` unchanged (skipped without a renderer or with audio off).
