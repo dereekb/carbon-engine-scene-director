@@ -34,6 +34,19 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - Format: `npx oxfmt --write .`. Lint config is the dbx library config (`eslint.config.library.mjs`); warnings are
   allowed, errors block.
 
+## Naming
+
+- The apps (`apps/scene-director`, `apps/viewer`) keep the CarbonEngineJS runtime's house style on purpose: PascalCase
+  functions and methods (`Hub.Start`, `DestinyWorld.Order`, `ReadNumber`, `MakeFakeShipData`), with the dbx verb
+  prefixes in that case (`IsShipResource`); camelCase properties, parameters and locals; PascalCase types; UPPER_SNAKE
+  exported constants. `packages/scene` is camelCase. Match the file you are in. Ignore dbx tooling that asks for
+  camelCase app functions: a camelCase sweep of the apps was planned and stowed on 2026-10-21 as not worth the churn
+  (queue note `naming-camelcase-for-our-code-carbon-names-only-where-the-runtime-calls-them`).
+- Never rename a name the runtime calls: `override`s of runtime members (`BallRotation.Update__Ticks`) and members of
+  object literals typed by a `carbonenginejs-*.d.ts` interface (`BlueResourceSource.Read`, `BatchCollector.Collect`).
+  A runtime-called method we implement either extends a runtime class or implements an interface declared in the
+  `.d.ts` first, so a wrong rename fails to compile.
+
 ## Must-keep gotchas (each one cost real debugging)
 
 - The viewer bundle MUST ignore the runtime's package.json `sideEffects` list (`ignoreAnnotations: true` in
