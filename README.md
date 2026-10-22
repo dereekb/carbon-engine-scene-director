@@ -26,6 +26,9 @@ What works today:
   nebula, its star, and the planets, moons, stations and stargates near it.
 - **Scene building**: `add_ships` and `stage_engagement` add N ships, or two
   opposing fleets, in one call.
+- **Objects**: stations, stargates, Upwell structures, large collidable objects and
+  wrecks placed by EVE type name, static in the scene and order targets for ships,
+  as are the location's own stations and gates. A scene spans 10,000 km at most.
 
 Combat and timelines come in later phases; the
 document's `orders` and `timeline` fields stay reserved until then.
@@ -122,12 +125,14 @@ connected tab.
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
 | `add_ships` | hub | N ships of an EVE type in a formation at a place, free, as a new fleet, or into a fleet's squad |
 | `stage_engagement` | hub | two sides facing each other at a range around a point or a celestial |
-| `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location |
-| `order_ship` | page | a live movement order, or `rejoin` for a fleet member |
+| `search_objects` | hub | EVE types to place: stations, gates, structures, LCOs, wrecks, with their SOF DNA and radius |
+| `add_objects` | hub | static objects by type name or id at a place off a ship, object or celestial, singly or in a formation |
+| `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location and its targets, objects |
+| `order_ship` | page | a live movement order on a point, ship, object or `celestial:<id>`, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup |
 | `screenshot` | page | the next frame as a PNG |
-| `frame_camera` | page | points the camera at a ship and follows it, or fits all ships |
+| `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 
 Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/tools.ts`).
 
@@ -148,7 +153,7 @@ Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/t
 
 Metres and degrees, Y up; `rotation` is `[yaw, pitch, roll]`. A ship may also
 name its EVE `type`, override `stats`, and fit a `propMod`; the document may hold
-`fleets` and a `location`. Unknown fields are reported as warnings and dropped.
+`fleets`, static `objects` and a `location`. Unknown fields are reported as warnings and dropped.
 Edits are diffed against the current document, so the page rebuilds, moves or
 retunes only the ships an edit changes. Orders and prop mod switches are live
 only: a save or reload starts from the document's placements.
@@ -167,6 +172,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Movement: Destiny, orders, placement | [`sd-destiny`](.dbx-claude/refs/sd-destiny/REF.md), with [warp](.dbx-claude/refs/sd-destiny/references/warp.md) and [boosters](.dbx-claude/refs/sd-destiny/references/boosters.md) |
 | Fleets, anchors, Follow the FC, fleet orders | [`sd-fleets`](.dbx-claude/refs/sd-fleets/REF.md), with [fleet orders and fleet warp](.dbx-claude/refs/sd-fleets/references/orders.md), [fleet compositions](.dbx-claude/refs/sd-fleets/references/compositions.md) and the TFIs example |
 | Building scenes: `add_ships`, `stage_engagement` | [`sd-staging`](.dbx-claude/refs/sd-staging/REF.md) |
+| Objects: stations, gates, structures, wrecks; `add_objects`, `search_objects` | [`sd-objects`](.dbx-claude/refs/sd-objects/REF.md) |
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |

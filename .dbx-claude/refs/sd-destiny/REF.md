@@ -10,7 +10,7 @@
 
 | File | Role |
 |---|---|
-| `apps/viewer/src/lib/destiny.ts` | `DestinyWorld`: the **only** code that touches the parks. Ships, orders, warp, following, prop mod state |
+| `apps/viewer/src/lib/destiny.ts` | `DestinyWorld`: the **only** code that touches the parks. Ships, static object balls, orders, warp, following, prop mod state |
 | `apps/viewer/src/lib/clock.ts` | the scene clock: one integer 100 ns tick count both parks and the renderer sample |
 | `apps/viewer/src/main.ts` | the single rAF loop |
 | `apps/viewer/src/lib/flight.ts` | each ship's flight numbers (Ship stats from the hub's `/ship-stats`) |
@@ -71,7 +71,12 @@
 | `rejoin` | (formation steering) | a detached fleet member flies back to its slot; refused for the FC and non-members |
 
 - `speed` is a fraction of max velocity in (0, 1], default 1. Ranges are metres **surface to surface on the balls'
-  radii**. A target must be another ship.
+  radii**. A target is another ship, an object id, or `celestial:<id>` (the location's stations and gates):
+  `TargetEntry` looks among ships, then object balls. Fleet anchors stay ships.
+- **Another bubble is refused up front.** Destiny's bubbles are connected 7,864 km top cells, and `FollowBall` / `Orbit`
+  refuse a target in another bubble **on the master only** (a replica has no bubbles), so the parks would diverge until
+  the mode check halts the ship. `OrderRefusal` compares the master balls' `mNewBubble` for approach, keep-at-range and
+  orbit (ships too) and refuses with "… in another Destiny bubble; warp to it first". Warp is never refused for it.
 - **Destiny's `FollowBall` / `Orbit` / `GotoPoint` return silently, keeping the old order**, for a missing, self,
   moribund or cloaked target, a target in another bubble (master only) or a non-finite value. `DestinyWorld` resolves
   the target itself and checks that **both** parks reached the order's mode, or stops the ship on both (`orderNote`
@@ -87,6 +92,20 @@ Destiny's `RemoveBall` sends an interactive orbiter straight on along its veloci
 `DestinyWorld.RemoveShip` **stops every follower of the removed ship first**, so all stop and the parks stay identical
 (`patch_scene`'s `changes.stopped` counts them). Formation followers are the exception: `FleetFollowing.Reconcile`
 re-anchors them in the same edit, and `Steer` halts any whose anchor or FC ball is gone.
+
+## Static object balls (`sd-objects`)
+
+`AddObject(doc, radius)` adds one ball per document object (and per celestial target) on **both** parks, from the ship
+ball counter: mass `OBJECT_BALL_MASS`, **not free, not massive, not interactive**, at rest. Nothing collides: ships are
+non-massive too (a level-3 follow-up covers collisions). Calling it again for a known id re-places (`PlaceObject`) and
+resizes (`SetObjectRadius`) the ball; an id a ship holds throws. The radius is `ObjectBallRadius` (`objects.ts`): the
+document's SDE radius, else the SOF bounding radius once built, else 1,000 m. `Director.Apply` adds missing balls and
+re-adds moved, resized and rebuilt ones before the store write, so an order arriving meanwhile always finds the ball.
+
+`RemoveObject(id)` mirrors `RemoveShip`: a pending order on the object is dropped and its ship halted, an applied
+approach, keep-at-range or orbit halts (`orderNote` "stopped: target … was removed", counted in `changes.stopped`),
+and an applied warp flies on. A moved object keeps its followers, which chase it. `ObjectBall` reports the master's
+ball for `get_state.objects`.
 
 ## Placement (teleports)
 

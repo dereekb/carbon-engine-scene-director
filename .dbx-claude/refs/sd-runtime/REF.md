@@ -19,7 +19,7 @@
   `.d.ts` first, so a wrong rename fails to compile (see the naming rules in `sd-workspace`).
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
-  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`. The full facade drags in the renderer and the `runtime-dist/`
+  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`. The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)

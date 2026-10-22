@@ -41,8 +41,9 @@ page (height map patch, `?dress=`, slot reconcile, report; node-tested); `apps/v
 
 ## Stations, gates and teardown
 
-- Built with `BuildShipValues` + `HydrateSofObject` on fixed `Tr2TranslationAdapter` / `Tr2RotationAdapter` curves,
-  and retired with every live ship root retained (so shared resources survive).
+- Built through `BuildStaticObject` (`ships.ts`: `BuildShipValues` + `HydrateSofObject` on fixed
+  `Tr2TranslationAdapter` / `Tr2RotationAdapter` curves), the same path authored objects use (`sd-objects`), and
+  retired with every live ship, dressing and object root retained (so shared resources survive).
 - **Retire a replaced `EveLensflare` with `Destruct()`.**
 
 ## Re-dressing

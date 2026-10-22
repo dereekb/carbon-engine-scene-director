@@ -13,6 +13,7 @@
 | `location/placement.ts` | origin off a celestial (`toLocationPlacement`): range off the surface along a direction, or an offset. Pure float64. Staging reuses it |
 | `location/map.ts` | the `/map/system` answer type and the `get_state` report; `MAP_SEARCH_KINDS`, `LOCATION_NEARBY_LIMIT` 10 |
 | `location/dressing.ts` | what a location draws (sub-doc `dressing`) |
+| `location/targets.ts` | the location's stations and gates as order targets: `celestial:<id>` ids, `toCelestialTargets`, the `get_state.location.targets` rows |
 | `apps/scene-director/src/lib/hub/map-data.ts` | `MapData`: tools-core's map routes (search, one system, its celestials, one celestial by id) |
 | `hub/locations.ts` | `search_map`, `get_system`, `set_location`, `/map/system` |
 | `hub/map-data.testing.ts` | tools-core stand-in: Jita, Perimeter, Niyabainen (SDE 3632936, captured 2026-10-22) |
@@ -94,6 +95,17 @@ Without `system`: exact name across the map, then that phrase, then the longest-
 ## `get_state.location`
 
 System, origin, fetch status, the anchor's actual distance and surface distance, the star's distance and direction, the
-ten celestials nearest the origin, and `dressing` (sub-doc). The overlay shows a `location` row.
+ten celestials nearest the origin, `dressing` (sub-doc) and `targets`. The overlay shows a `location` row.
+
+## Celestial targets (`celestial:<id>`)
+
+The location's **stations and stargates** within the scene extent (10,000 km of the origin, `sd-scene-document`) with
+a radius are order targets: `order_ship` approach, keep-at-range, orbit and warp take `celestial:60003760`. Each is a
+static Destiny ball (`DestinyWorld.AddObject`, `sd-destiny`) on the SDE radius, kept in step by
+`Director.SyncCelestialTargets` after every location fetch (`PlanCelestialTargetSync` in `objects.ts`): a new location
+replaces them all, a cleared or failed one removes them and halts what flew at them. They are **not camera targets**
+and never enter the document. `get_state.location.targets` lists `{ target, id, name, kind, radius, distance,
+surfaceDistance }`, nearest first. Measured: a TFI approaching the Jita CNAP (SDE 100 km) with its MWD on overshot to
+4.7 km inside the SDE sphere, which on screen sits just off the station's hull.
 
 The data is CCP's static data (tools-core's map routes over the public SDE; no ESI, no API key).

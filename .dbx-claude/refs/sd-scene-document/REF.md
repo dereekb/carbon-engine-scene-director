@@ -3,7 +3,7 @@
 > The document is the only state a saved scene keeps; the page turns it into runtime objects. Fetch before changing
 > `packages/scene/src/lib/scene.ts`, adding a patch op or a document field, touching `director.ts`'s apply path,
 > `camera.ts`, or the saved-scene stores. Subsystem fields have their own refs: `fleets` (`sd-fleets`), `location`
-> (`sd-locations`), `propMod` / `stats` / `type` (`sd-ship-stats`), staging ops (`sd-staging`).
+> (`sd-locations`), `propMod` / `stats` / `type` (`sd-ship-stats`), staging ops (`sd-staging`), `objects` (`sd-objects`).
 
 ## Shape
 
@@ -17,7 +17,7 @@
     { "id": "punisher-1", "dna": "af1_t1:amarrbase:amarr", "team": "red", "position": [0, 0, 0] },
     { "id": "rifter-1", "dna": "mf1_t1:minmatarbase:minmatar", "team": "blue", "position": [3000, 0, 0], "rotation": [180, 0, 0] }
   ],
-  "fleets": [], "location": { }
+  "fleets": [], "objects": [], "location": { }
 }
 ```
 
@@ -25,7 +25,16 @@
 - Ship fields: `id` (ship-id pattern), `dna` (SOF `hull:faction:race[:commands]`), `name?`, `team?` (the side, for
   hostility; independent of fleets), `position`, `rotation`, `type?`, `stats?`, `propMod?`, `pilot?` (reserved: stored,
   unused), `orders?` (reserved: stored, not played).
-- Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `location?`, `timeline?` (reserved).
+- Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `objects?` (omitted when empty),
+  `location?`, `timeline?` (reserved).
+- Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
+  `position`, `rotation`, `radius?` (the SDE radius order ranges use; without it the page takes the SOF bounding radius
+  once built, else 1,000 m). **Ids are unique across ships and objects**; ship-id and composition-id generators skip
+  object ids. Detail: `sd-objects`.
+- **The scene extent** (`extent.ts`, the user's rule of 2026-10-22, "just like the game"): every ship and object
+  document position is **refused past `MAX_SCENE_DISTANCE` (10,000 km)** from the origin (`readScenePosition`), and
+  placements past `LARGE_SCENE_DISTANCE` (2,000 km) warn (`largeSceneWarning`). Live orders are not bounded: a goto
+  or warp may still leave it. `formatSceneDistance` writes the distances in messages.
 - **Unknown fields are reported as warnings and dropped.** `null` on an optional field means absent.
 - `normalizeScene(input)` validates and reports **every** problem together; `SceneError` carries the problem list
   (and `ToolError` keeps it through the hub).
@@ -44,6 +53,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | compositions | `add_fleet_composition` | `compositions/operation.ts` (`sd-fleets` → `compositions`) |
 | prop mods | `set_prop_mods` | `prop-mods/operation.ts` (`sd-ship-stats`) |
 | staging | `add_ships`, `stage_engagement` | `staging/operation.ts` (`sd-staging`) |
+| objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 
 **`applySceneOperations` stays synchronous and pure: it runs in the page.** Anything that needs tools-core (hull names,
 SDE radii, celestials, saved compositions) is resolved by the **hub tool of the same name**, which fills the op's data
@@ -65,7 +75,8 @@ branch of `applyOperation` in `scene.ts`.
 | `retuned` | `type`, `stats`, `pilot` or `propMod.module` changed: new flight numbers, no rebuild |
 | `switched` | `propMod.active` changed: switch at once (no cycle wait). A ship can be in `retuned` too |
 | `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild |
-| `location` | re-fetch `/map/system`, re-dress |
+| `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |
+| `objects` (`SceneObjectsDiff`: `added` / `removed` / `rebuilt` / `moved` / `resized`) | `SceneObjects.Apply` builds, retires or re-places the models; `DestinyWorld` adds, re-adds (moved, resized, rebuilt) or `RemoveObject`s the static ball, which halts ships flying at it (`sd-destiny`) |
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 
@@ -75,13 +86,14 @@ save or reload starts from the document's placements.
 
 ## Camera
 
-- `target: null` frames every ship; `distance: null` fits the target. A ship target is followed every frame (focus
+- `target: null` frames every ship (every object when the scene has no ships); `distance: null` fits the target.
+  **A target may be an object id** (`frame_camera`, the document, alt-click, the overlay); celestial targets cannot. A ship target is followed every frame (focus
   shifts by the drawn ship's travel, keeping any orbit/pan/zoom). `mode`: `orbit` (keeps your angles) or `chase`
   (behind the ship, 12° above its heading, turns with it; a drag looks around and eases back).
 - In the page: alt-click a ship to follow it (glides over), **C** toggles orbit/chase; both write into the document.
 - **Edits keep a follow.** Every edit used to re-frame the document's camera, dropping a `frame_camera` follow (rarely
   persisted) or gliding a persisted one across a teleport. `camera.ts` `ReframesAfterEdit` decides: re-frame only on a
-  load, a camera change, removing the followed ship, or when no ship is followed. `Director.Apply` calls it before its
+  load, a camera change, removing the followed ship or object, or when nothing is followed. `Director.Apply` calls it before its
   `appliedCamera` check.
 - Picking reads EveCamera's actual projection, not the document's `fov` (its default zoom curve overrides fov every
   frame, and Carbon narrows the view above aspect 1.6).

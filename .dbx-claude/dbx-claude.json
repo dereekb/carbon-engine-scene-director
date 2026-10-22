@@ -341,6 +341,54 @@
         ]
       },
       {
+        "name": "sd-objects",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "add_objects",
+              "search_objects",
+              "authored objects",
+              "static object",
+              "static objects",
+              "Upwell",
+              "Astrahus",
+              "Fortizar",
+              "Keepstar",
+              "citadel",
+              "wreck",
+              "wrecks",
+              "wreckage",
+              "LCO",
+              "LCOs",
+              "large collidable",
+              "scene extent",
+              "MAX_SCENE_DISTANCE",
+              "ObjectData",
+              "SceneObjects"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/objects/",
+              "packages/scene/src/lib/extent",
+              "hub/object-data",
+              "hub/objects",
+              "apps/viewer/src/lib/objects",
+              "apps/viewer/src/lib/scene-objects"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__add_objects",
+              "mcp__scene-director__search_objects"
+            ]
+          }
+        ]
+      },
+      {
         "name": "sd-ship-stats",
         "delivery": "read",
         "tone": "hint",

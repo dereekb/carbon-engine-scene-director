@@ -12,8 +12,13 @@
   it to a passed `scene` with no tab.
 - The raw ops (`staging/operation.ts`: `{ "op": "add_ships", "dna", ..., "radii"?: { "<ship id>": m } }`,
   `{ "op": "stage_engagement", "sides": [...], ... }`) take the same fields with every line's `dna` filled. They
-  accept `near.ship` and a ship id for `facing` **against the draft** (`staging/draft.ts`), so one patch can stage off a
-  ship it just added. They refuse celestials and hull names without dna.
+  accept `near.ship` / `near.object` and a ship or object id for `facing` **against the draft** (`staging/draft.ts`),
+  so one patch can stage off a ship or object it just added. They refuse celestials and hull names without dna.
+- **`hub/scene-places.ts` `ScenePlaces`** holds the plumbing `Staging` and the objects tools (`sd-objects`) share,
+  moved verbatim out of `staging.ts`: `Before` (the tab's document, or a passed `scene`), `Apply` (one `patch_scene`
+  or a local apply; operation warnings split from the rest of the result), `ResolveRadii`, `ResolvePlace` (`near` off
+  a ship, object or celestial → the lead's point, the implied heading, the reference point) and `ResolveFacing`
+  (`{ celestial }` → a point). `Staging` keeps its constructor options; `staging.spec.ts` guards the extraction.
 
 | File | Role |
 |---|---|
@@ -54,15 +59,19 @@ of overlap; mixed lists use the largest radius.
 
 ## Places and headings
 
-- `position` `[x, y, z]` is the lead's place, or `near { ship | celestial, range?, direction? }`:
+- `position` `[x, y, z]` is the lead's place, or `near { ship | object | celestial, range?, direction? }`:
   - off a **ship**: `range` (default 5,000 m) surface to surface on both EVE radii; `direction` `ahead` (default),
     `behind`, `left`, `right` (the ship's own heading), `above`, `below`, `sun`, `away` (need a location), `origin`,
     or `[x, y, z]`. **The ship is used at its document placement, not where it has flown since.**
+  - off an **object** (`sd-objects`): as off a ship, on the object's document radius (else 1,000 m) and its yaw, so a
+    fleet can stage off a structure.
   - off a **celestial** of the scene location's system (named as `set_location` names them inside a system, or by id):
     `range` off its surface with `set_location`'s per-kind defaults; `direction` `sun` (default), `away`, `origin`,
     `[x, y, z]`. A scene with no location is refused.
-- `heading` yaw° (0 → +Z, 90 → +X) or `facing` (a point, a ship id, or `{ celestial }`; straight above/below refused).
-  Default: the near ship's heading, else 0.
+- `heading` yaw° (0 → +Z, 90 → +X) or `facing` (a point, a ship or object id, or `{ celestial }`; straight
+  above/below refused). Default: the near ship's or object's heading, else 0.
+- **The scene extent** (`sd-scene-document`): a ship placed past 2,000 km from the origin warns (`largeSceneWarning`,
+  replacing the old 100,000 km far warning), and the document refuses one past 10,000 km.
 
 ## Fleets
 
@@ -87,7 +96,8 @@ of overlap; mixed lists use the largest radius.
 
 Free ships and joins: `<prefix>-<nn>` after the highest number already used with the prefix (≥ 2 digits). Prefix =
 `prefix`, else the name/hull slug (`tempest-fleet-issue`), or `<fleet>-<squad>` when joining. Names `<name or hull> <n>`.
-`type` = canonical SDE name; `team`, `stats`, `propMod` go on every ship. New fleets take composition ids.
+`type` = canonical SDE name; `team`, `stats`, `propMod` go on every ship. New fleets take composition ids. **Ship ids
+skip object ids** (ids are unique across both), and a ship id an object holds is refused.
 
 ## Engagements
 
