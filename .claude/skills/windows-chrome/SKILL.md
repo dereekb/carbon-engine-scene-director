@@ -1,0 +1,75 @@
+---
+name: windows-chrome
+description: Drive Windows Chrome from this WSL2 box through the chrome-devtools MCP (mcp__chrome-devtools__* tools) to debug the viewer on the real GPU, and set up, check or repair that MCP. Use when you need to look at, click through, screenshot or profile the viewer page yourself, read the browser console or network, check WebGPU drawing, when the chrome-devtools tools are missing or fail to start, or when asked to set up Chrome / browser debugging here. Claude in Chrome does not work in WSL and headless Chromium here has no WebGPU adapter; this does both.
+---
+
+# windows-chrome
+
+The chrome-devtools MCP runs **on the Windows side**: a portable Windows Node runs `chrome-devtools-mcp`, which
+launches Windows Chrome (real GPU, WebGPU) and drives it over Windows loopback. Claude Code starts it through a WSL
+wrapper, and MCP stdio crosses WSL interop. Windows Chrome reaches the hub on `127.0.0.1:5520` through WSL's
+localhost forwarding, the same way a tab the user opens does.
+
+Why not the usual setup: WSL here uses NAT networking, so WSL cannot reach Windows' `127.0.0.1`, and Chrome binds its
+debug port to loopback only (`--remote-debugging-address` is gone). Bridges such as wsl-cdp (netsh portproxy,
+firewall rule, relay) need admin and expose the debug port to every distro and container in `172.16.0.0/12`. This
+setup needs no admin and opens no port.
+
+## Pieces
+
+| Piece | Where |
+| --- | --- |
+| Portable Node LTS + `chrome-devtools-mcp` | `C:\Users\<user>\.chrome-devtools-mcp\{node\, node_modules\}` |
+| Wrapper (`cd` to the C: dir, `--no-usage-statistics --no-performance-crux`) | `~/.local/bin/chrome-devtools-mcp-windows` |
+| MCP server `chrome-devtools`, user scope (every project on this box) | `~/.claude.json` |
+| Chrome profile, the server's own (not the user's daily one) | `C:\Users\<user>\.cache\chrome-devtools-mcp\chrome-profile` |
+
+## Set up, check, repair
+
+```bash
+.claude/skills/windows-chrome/scripts/setup.sh           # install what is missing, then check
+.claude/skills/windows-chrome/scripts/setup.sh --check   # report each piece + an MCP handshake; changes nothing
+.claude/skills/windows-chrome/scripts/setup.sh --update  # newest Node LTS + chrome-devtools-mcp
+```
+
+The check covers interop, the Windows Node, the package, the wrapper, the registration, a real `initialize`
+handshake, whether Windows can reach the hub, and any running server/Chrome processes. After a fresh install, the
+session needs `/mcp` (or a restart) before the `mcp__chrome-devtools__*` tools appear. `--update` refuses while a
+server runs (Windows locks `node.exe`): disconnect `chrome-devtools` in `/mcp` first.
+
+If the check says interop did not answer, WSL interop is wedged: the user runs `wsl --shutdown` from Windows.
+
+## Debugging the viewer
+
+1. `viewer_status`: the hub must be up. Note `connectedTabs`: if the user has a tab open, say you are about to take
+   page tools from it.
+2. `new_page` with `http://127.0.0.1:5520/`. It answers with the page list; keep the viewer's `pageId`. **Every page
+   tool needs `pageId`** (the server routes by page ID).
+3. The new tab is the hub's newest connection, so the scene-director page tools (`load_scene`, `screenshot`,
+   `get_state`, `page_log`, ...) now go to it (`hub.ts`: `this.pages.at(-1)`). `close_page` when done hands them
+   back to the user's tab.
+4. Pick the tool by what you need to see:
+   - `take_screenshot`: the viewport as Chrome shows it, overlay included. scene-director's `screenshot`: the
+     renderer's own frame.
+   - `list_console_messages` / `get_console_message`: everything the page printed. `page_log`: the hub's record,
+     including `gpuErrors` from `engine.ts`'s `uncapturederror` listener.
+   - `evaluate_script` for one-off probes, e.g. the adapter:
+     `async () => JSON.stringify((await navigator.gpu.requestAdapter())?.info)`.
+   - `take_snapshot` + `click` / `fill` / `press_key` for the DOM overlay; `list_network_requests` for loads;
+     `performance_start_trace` / `performance_stop_trace` for frame time.
+5. After a page-only change: rebuild (`npx nx build scene-director`), then `navigate_page` with `type: "reload"`.
+
+Expected noise: a 404 for `/favicon.ico`, and the warning that `powerPreference` is ignored on Windows.
+
+## Gotchas
+
+- The first load in a fresh profile once stalled until a reload (2026-10-21; cold cache plus the ~20 MB file
+  index). Reload before you debug a blank page.
+- File paths you pass to its tools (screenshot/trace `filePath`, `upload_file`) are Windows paths, and the server
+  only touches allowed directories (the Windows temp dir by default; the session's MCP roots are Linux paths, which
+  mean nothing to it). Prefer inline results.
+- It renders on the user's desktop: the Chrome window is in front of the user, and `new_page` brings its tab to the
+  front unless you pass `background: true`.
+- Ending the server (session exit, `/mcp` disconnect, SIGTERM) closes its `node.exe` and Chrome. If a start fails
+  because the profile is in use, `setup.sh --check` lists leftover processes.
+- Node and the package are pinned by what is installed: `--update` is the only thing that moves them.

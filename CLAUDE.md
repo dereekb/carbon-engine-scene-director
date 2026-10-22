@@ -7,9 +7,11 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 
 - `packages/scene` (`@scene-director/scene`, `@nx/js:tsc`): the `cjs-scene/1` document schema (validation, patch
   operations, diff), the shared tool list, `src/lib/stats/` (ship stats math, skills, prop mods, the pilot
-  context) and `src/lib/fleets/` (fleets, wings and squads: validation, edits, and the anchor rules, resolved only in
-  `toFleetMemberships`; Follow the FC must fly those, not re-derive them). No runtime imports; the hub, the page and the
-  tests all use it.
+  context), `src/lib/fleets/` (fleets, wings and squads: validation, edits, and the anchor rules, resolved only in
+  `toFleetMemberships`; Follow the FC must fly those, not re-derive them; `formation.ts` is the at-rest formation
+  Follow the FC flies) and `src/lib/compositions/` (the `cjs-fleet/1` fleet composition, its expansion, the
+  `add_fleet_composition` op, and the TFIs example in `examples/tfis.json`). No runtime imports; the hub, the page and
+  the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. Building it builds the viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
@@ -88,7 +90,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - The MCP process must never write to stdout except MCP protocol messages; the hub logs to stderr.
 - The saved-scene tools are `where: 'hub'` (`apps/scene-director/src/lib/hub/saved-scenes.ts`): disk files by default,
   forwarded to the page's IndexedDB handlers for `store: "browser"`. Tests and verify-page pass a temp
-  `SceneFileStore`; never let a test write to the default per-user scenes directory.
+  `SceneFileStore`; never let a test write to the default per-user scenes directory. The fleet composition tools
+  (`hub/fleet-compositions.ts`) are `where: 'hub'` too; tests and verify-page pass a temp `FleetCompositionFileStore`.
+- `applySceneOperations` stays synchronous and pure (it runs in the page): the `add_fleet_composition` op needs `dna`
+  on every ship line, and the hub tool of the same name fills `dna` and `radius` from tools-core before forwarding.
 - tools-core needs Node 22 (its better-sqlite3 binding; Node 24 is the default here). Start it with:
   `cd /mnt/a/github/carbonenginejs/tools-core && /root/.nvm/versions/node/v22.23.4/bin/node bin/cjs-tools-service.js --cache "$PWD/.cache/tool-core" --data "$PWD/data.local" --no-audio-auto-prepare --no-sde-auto-prepare`
   The clones moved to `/root/github/carbonenginejs` on 2026-10-21 (the old path is a symlink) without their
@@ -96,8 +101,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   then, run the same command from `/mnt/a/github/_pre-wsl-move/carbonenginejs/tools-core` (same commit, deps intact)
   with `--cache`/`--data` pointing at `/root/github/carbonenginejs/tools-core/...`. Startup takes ~20 s.
 - Headless Chromium in this WSL has no WebGPU adapter (Dawn finds SwiftShader but cannot create its context
-  provider), so verify-page checks everything except drawing. Do not sink time into headless GPU. Ask the user to
-  open http://127.0.0.1:5520/ in Windows Chrome or Edge, then use the `screenshot` and `page_log` tools.
+  provider), so verify-page checks everything except drawing. Do not sink time into headless GPU. To see drawing,
+  open the viewer in Windows Chrome yourself with the `chrome-devtools` MCP (the `windows-chrome` skill: it runs on
+  the Windows side through interop, since WSL is in NAT mode; `setup.sh --check` diagnoses it), or ask the user to
+  open http://127.0.0.1:5520/ in Windows Chrome or Edge; then use the `screenshot` and `page_log` tools.
 - This is WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
 - The hub on 5520 is often owned by a Claude Code session's MCP server (`bin/scene-director.js mcp`). It streams the
   built viewer from disk on every request, so a page-only change needs a rebuild plus a tab reload (changing
