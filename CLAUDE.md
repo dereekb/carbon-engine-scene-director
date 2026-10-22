@@ -35,6 +35,7 @@ files you touch and the scene-director tools you call. Fetch before designing or
 - `sd-staging`: `add_ships` and `stage_engagement`
 - `sd-ship-stats`: stats math, skills, the pilot, prop mods, engine audio
 - `sd-locations`: the document's location, tools-core map quirks, name resolution (doc: `dressing`)
+- `sd-cinema`: the cinematic camera: hardpoints, the shot spec and moves, waypoints, `FreeCamera`, takeover, letterbox
 
 When a change alters behavior a ref describes, update the ref in the same commit (a new area gets a new `sd-*` ref,
 declared with its triggers in `.dbx-claude/dbx-claude.json` `references.project`, and a row in the README's

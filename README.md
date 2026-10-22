@@ -29,6 +29,9 @@ What works today:
 - **Objects**: stations, stargates, Upwell structures, large collidable objects and
   wrecks placed by EVE type name, static in the scene and order targets for ships,
   as are the location's own stations and gates. A scene spans 10,000 km at most.
+- **Cinematic camera**: shots on hardpoints generated from the drawn ships, fleets
+  and engagements, timed moves and waypoint fly-throughs over moving hulls, a
+  letterbox and a clean HUD (driven in the page until its MCP tools land).
 
 Combat and timelines come in later phases; the
 document's `orders` and `timeline` fields stay reserved until then.
@@ -173,6 +176,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Fleets, anchors, Follow the FC, fleet orders | [`sd-fleets`](.dbx-claude/refs/sd-fleets/REF.md), with [fleet orders and fleet warp](.dbx-claude/refs/sd-fleets/references/orders.md), [fleet compositions](.dbx-claude/refs/sd-fleets/references/compositions.md) and the TFIs example |
 | Building scenes: `add_ships`, `stage_engagement` | [`sd-staging`](.dbx-claude/refs/sd-staging/REF.md) |
 | Objects: stations, gates, structures, wrecks; `add_objects`, `search_objects` | [`sd-objects`](.dbx-claude/refs/sd-objects/REF.md) |
+| The cinematic camera: hardpoints, shots, moves, waypoints, letterbox | [`sd-cinema`](.dbx-claude/refs/sd-cinema/REF.md) |
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |

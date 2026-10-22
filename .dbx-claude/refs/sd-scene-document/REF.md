@@ -97,6 +97,9 @@ save or reload starts from the document's placements.
   `appliedCamera` check.
 - Picking reads EveCamera's actual projection, not the document's `fov` (its default zoom curve overrides fov every
   frame, and Carbon narrows the view above aspect 1.6).
+- A cinematic shot draws over the orbit camera, which keeps updating underneath (`sd-cinema`). `frame_camera`, a
+  camera change and alt-click release the shot, a load cuts it, other edits leave it playing; get_state's
+  `camera.view` says which camera draws and `camera.drawn` what it drew.
 
 ## Saved scenes
 

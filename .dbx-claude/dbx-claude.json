@@ -389,6 +389,45 @@
         ]
       },
       {
+        "name": "sd-cinema",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "cinema",
+              "cinematic",
+              "CinemaRig",
+              "FreeCamera",
+              "PlayShot",
+              "StopShot",
+              "hardpoint",
+              "hardpoints",
+              "camera shot",
+              "camera sequence",
+              "play_shot",
+              "play_sequence",
+              "list_hardpoints",
+              "waypoint",
+              "waypoints",
+              "fly-through",
+              "flyby",
+              "letterbox",
+              "SetCinematicFrame",
+              "TakeOverCinema"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/cinema/",
+              "packages/scene/src/lib/waypoints/",
+              "apps/viewer/src/lib/cinema"
+            ],
+            "every": 12
+          }
+        ]
+      },
+      {
         "name": "sd-ship-stats",
         "delivery": "read",
         "tone": "hint",
