@@ -244,6 +244,10 @@ declare module '@carbonenginejs/runtime/trinity' {
      * Column-major 4x4; rows 0-2 of the rotation are the camera's right, up and back axes.
      */
     readonly transform: Float32Array;
+    /**
+     * Copies a view matrix in (TriView.SetTransform); the cinematic free camera writes its own.
+     */
+    SetTransform(value: ArrayLike<number>): void;
   }
 
   /**
@@ -255,6 +259,10 @@ declare module '@carbonenginejs/runtime/trinity' {
      * height, Carbon's aspect clamp and the zoom curve's field of view included.
      */
     readonly transform: Float32Array;
+    /**
+     * Makes the projection a custom one and copies the matrix into it (TriProjection.CustomProjection).
+     */
+    CustomProjection(value: ArrayLike<number>): void;
   }
 
   export class EveCamera {
@@ -268,6 +276,17 @@ declare module '@carbonenginejs/runtime/trinity' {
     Update(time: number, aspect: number, realTime: number): void;
     GetViewMatrix(): EveViewMatrix;
     GetProjection(): EveProjectionMatrix;
+    /**
+     * Builds Carbon's perspective projection into `out` (above an aspect of 1.6 both half extents shrink by aspect / 1.6)
+     * and, given a projection, makes it that custom projection.
+     *
+     * @param fieldOfView - Vertical, radians.
+     */
+    static CalculateProjectionMatrix(out: Float32Array, aspectRatio: number, fieldOfView: number, offsetX: number, offsetY: number, front: number, back: number, projection?: EveProjectionMatrix | null): Float32Array;
+    /**
+     * The vertical field of view, radians, of a projection CalculateProjectionMatrix built (the aspect clamp undone).
+     */
+    static CalculateFovFromProjection(transform: ArrayLike<number>): number;
   }
 
   export interface EveUpdateContext {

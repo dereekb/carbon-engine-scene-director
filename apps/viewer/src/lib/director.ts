@@ -38,6 +38,11 @@
  * edit the document's anchors through the edit queue, as patch_scene does,
  * before their live half. get_state reports each group's command.
  *
+ * The cinematic camera (cinema.ts): a shot or sequence plays on generated hardpoints from the drawn ships, every
+ * frame in TrackCamera, and the engine's FreeCamera draws it. A load cuts it; a camera change, a removed subject or the
+ * pointer releases it back to the orbit camera (the pointer adopting the cinematic view). get_state reports it as
+ * `cinema`, and the drawn camera as `camera.drawn`.
+ *
  * Without a renderer (no WebGPU), the director still validates documents and
  * builds each ship's SOF values, so DNA mistakes surface; it just has nothing
  * to draw into.
@@ -76,17 +81,24 @@ import {
   type SceneLocation,
   type SceneShip,
   type ShipFleetMembership,
-  type ShipOrderRequest
+  type ShipOrderRequest,
+  normalizeVec,
+  scaleVec,
+  type CinemaCelestial,
+  type CinemaScene,
+  type CinemaShip,
+  type SceneVector
 } from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
+import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayResult } from './cinema';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion } from './destiny';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { FleetFollowing, type ShipFollowingReport } from './following';
-import { EncodePng, type CameraEye, type Engine, type EngineStats } from './engine';
+import { EncodePng, type CameraEye, type DrawnCamera, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ReadDressParts } from './celestials';
 import { LocationKey, LocationLookup } from './location';
@@ -360,6 +372,14 @@ export class Director {
    */
   private readonly cameraFollow = new CameraFollow();
   /**
+   * The cinematic camera (cinema.ts).
+   */
+  readonly cinema = new CinemaRig();
+  /**
+   * The location answer's celestials as the cinema reads them, kept per answer.
+   */
+  private cinemaCelestials: Maybe<{ readonly answer: object; readonly list: CinemaCelestial[] }> = null;
+  /**
    * The camera a page change already applied, so the document write that follows does not frame it again.
    */
   private appliedCamera: Maybe<string> = null;
@@ -547,6 +567,32 @@ export class Director {
   TrackCamera(now: number): void {
     const view = this.engine?.camera;
     if (view) this.cameraFollow.Frame(now, view, (id) => this.DrawnShip(id, now));
+    // The rig runs without a renderer too, so get_state's cinema reports headless.
+    const frame = this.cinema.Frame(now, () => this.CinemaScene(now));
+    this.engine?.SetCinematicFrame(frame);
+  }
+
+  /**
+   * Plays a camera shot or sequence (cinema.ts) from now.
+   *
+   * @param input - The shot, `{ shots: [...] }` or an array of shots.
+   * @param driver - Who asked, for get_state.
+   * @returns The rig's state and any warnings.
+   * @throws {Error} When the shot is invalid.
+   */
+  PlayShot(input: unknown, driver = 'claude'): CinemaPlayResult {
+    const result = this.cinema.Play(input, this.clock.now, driver);
+    this.onChange();
+    return result;
+  }
+
+  /**
+   * Stops the shot: a short blend back to the orbit camera, or with `cut` straight back.
+   */
+  StopShot({ cut = false }: { readonly cut?: boolean } = {}): object {
+    this.cinema.Stop(this.clock.now, { cut, note: 'stopped' });
+    this.onChange();
+    return this.cinema.Report(this.clock.now);
   }
 
   /**
@@ -598,7 +644,8 @@ export class Director {
       renderer,
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0 } : null,
       location: this.LocationState(),
-      camera: this.engine?.camera.Get() ?? null,
+      camera: this.engine ? { ...this.engine.camera.Get(), view: this.cinema.active ? 'cinema' : 'orbit', drawn: DrawnCameraReport(this.engine.DrawnCamera()) } : null,
+      cinema: this.cinema.Report(this.clock.now),
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
@@ -633,6 +680,7 @@ export class Director {
    * scene edits (camera.ts's ReframesAfterEdit).
    */
   async FrameCamera({ target, yaw, pitch, distance, mode, persist = false }: FrameCameraArgs = {}): Promise<unknown> {
+    this.cinema.Release(this.clock.now, { note: 'frame_camera took the camera' });
     const camera: SceneCamera = { ...this.Current().camera, target: target ?? null };
     if (IsFiniteNumber(yaw)) camera.yaw = yaw;
     if (IsFiniteNumber(pitch)) camera.pitch = pitch;
@@ -689,6 +737,9 @@ export class Director {
     }
     for (const doc of diff.objects.removed) stopped.push(...this.world.RemoveObject(doc.id));
     this.scene = scene;
+    const cinema = CinemaReleases({ restart, cameraChanged: diff.camera, removed: [...diff.removed, ...diff.objects.removed].map((doc) => doc.id), subjects: this.cinema.Subjects() });
+    if (cinema === 'cut') this.cinema.Stop(this.clock.now, { cut: true, note: 'a scene load cut the shot' });
+    else if (cinema === 'release') this.cinema.Release(this.clock.now, { note: diff.camera ? "the document's camera changed" : 'its subject left the scene' });
     if (restart || diff.location) {
       this.location.Update(scene.location ?? null, { retry: restart });
       this.Redress(scene.location ?? null);
@@ -1063,6 +1114,73 @@ export class Director {
   }
 
   /**
+   * The scene as drawn at `now`, for the cinematic camera: each ship's ClientBall position, rotation and velocity, its
+   * SOF bounding sphere (UNBUILT_RADIUS until built), team, the fleets, the light, the location's celestials and the
+   * objects (hulls to clear, waypoint anchors). Built only while a shot plays; the ClientBall caches its samples per time, so the renderer
+   * draws the same values.
+   */
+  private CinemaScene(now: number): CinemaScene {
+    const ships: CinemaShip[] = [];
+    for (const doc of this.scene?.ships ?? []) {
+      const curves = this.world.Curves(doc.id);
+      if (!curves) continue;
+      const position = curves.translation.GetValueAt__Ticks(now, vec3.create());
+      const rotation = curves.rotation.GetValueAt__Ticks(now, quat.create());
+      const velocity = curves.translation.GetValueDotAt__Ticks(now, vec3.create());
+      const ship = this.engine ? this.live.get(doc.id)?.ship : null;
+      const centre = ship ? vec3.add(vec3.create(), vec3.transformQuat(vec3.create(), ship.boundingSphereCenter, rotation), position) : position;
+      ships.push({
+        id: doc.id,
+        position: ToVector(position),
+        rotation: [rotation[0], rotation[1], rotation[2], rotation[3]],
+        velocity: ToVector(velocity),
+        frameCentre: ToVector(centre),
+        frameRadius: ship?.boundingSphereRadius || UNBUILT_RADIUS,
+        ...(doc.team ? { team: doc.team } : {})
+      });
+    }
+    return {
+      ships,
+      fleets: this.scene?.fleets ?? [],
+      sunDirection: this.SunDirection(),
+      celestials: this.CinemaCelestials(),
+      objects: (this.scene?.objects ?? []).map((doc) => {
+        const sphere = this.ObjectSphere(doc);
+        const rotation = DocumentRotation(doc.rotation);
+        return { id: doc.id, centre: ToVector(sphere.centre), radius: sphere.radius, rotation: [rotation[0], rotation[1], rotation[2], rotation[3]] };
+      }),
+      aspect: this.engine?.Aspect() ?? CINEMA_DEFAULT_ASPECT,
+      reach: this.engine?.camera.reach ?? 0,
+      camera: this.engine?.DrawnCamera() ?? null
+    };
+  }
+
+  /**
+   * The light's travel direction: the scene's, else away from the location's star, else straight down.
+   */
+  private SunDirection(): SceneVector {
+    const live = this.engine?.scene.sunDirection;
+    const star = live ? null : this.location.Answer()?.celestials.find((celestial) => celestial.kind === 'star');
+    const toStar = star ? normalizeVec(star.position) : null;
+    let direction: SceneVector = [0, -1, 0];
+    if (live) direction = ToVector(live);
+    else if (toStar) direction = scaleVec(toStar, -1);
+    return direction;
+  }
+
+  /**
+   * The location answer's celestials, origin-relative.
+   */
+  private CinemaCelestials(): CinemaCelestial[] {
+    const answer = this.location.Answer();
+    if (!answer) return [];
+    if (this.cinemaCelestials?.answer !== answer) {
+      this.cinemaCelestials = { answer, list: answer.celestials.map((celestial) => ({ id: celestial.id, name: celestial.name, kind: celestial.kind, position: celestial.position, radius: celestial.radius ?? 0 })) };
+    }
+    return this.cinemaCelestials.list;
+  }
+
+  /**
    * An object's world sphere: its drawn bounding sphere, else its ball radius at its position.
    */
   private ObjectSphere(doc: SceneObject): WorldSphere {
@@ -1075,6 +1193,17 @@ export class Director {
    * between orbit and chase, and a held drag keeps chase's look-around offset.
    */
   private AttachCameraControls(canvas: HTMLCanvasElement): void {
+    // Capture listeners on the canvas run before OrbitCamera's own, so the orbit adopts the cinematic view first and the
+    // drag or zoom continues from the image. Only the buttons that drag the view take it: a right-click (the context
+    // menu) leaves the shot playing, and alt-click picks.
+    canvas.addEventListener(
+      'pointerdown',
+      (event) => {
+        if (!event.altKey && (event.button === 0 || event.button === 1)) this.TakeOverCinema();
+      },
+      { capture: true }
+    );
+    canvas.addEventListener('wheel', () => this.TakeOverCinema(), { capture: true, passive: true });
     canvas.addEventListener('pointerdown', (event) => {
       if (event.altKey && event.button === 0) {
         event.preventDefault();
@@ -1091,6 +1220,24 @@ export class Director {
     addEventListener('keydown', (event) => {
       if (event.key.toLowerCase() === 'c' && !event.ctrlKey && !event.metaKey && !event.altKey) this.ChangeCamera({ mode: this.cameraFollow.mode === 'chase' ? 'orbit' : 'chase' });
     });
+  }
+
+  /**
+   * The pointer takes the camera from a playing shot: the orbit camera adopts the cinematic eye and look (the roll and
+   * lens ease back over the release blend), following the shot's ship when it framed one.
+   */
+  private TakeOverCinema(): void {
+    const orbit = this.engine?.camera;
+    if (!this.cinema.playing || !orbit) return;
+    const now = this.clock.now;
+    const subjects = this.cinema.Subjects();
+    const view = this.cinema.Release(now, { adopt: true, note: 'the pointer took the camera' });
+    if (view) {
+      orbit.Set({ focus: view.focus, distance: view.distance, yaw: view.yaw, pitch: view.pitch });
+      const drawn = subjects.length === 1 ? this.DrawnShip(subjects[0], now) : null;
+      this.cameraFollow.Follow(drawn ? { id: subjects[0], position: drawn.position } : null, null, now);
+    }
+    this.onChange();
   }
 
   /**
@@ -1123,6 +1270,7 @@ export class Director {
    * queue, which may be busy building ships, and that apply skips re-framing the same camera.
    */
   private ChangeCamera(change: Partial<SceneCamera>): void {
+    this.cinema.Release(this.clock.now, { note: 'a camera change took the camera' });
     const view = this.engine?.camera;
     const live = view ? { yaw: Math.round((((view.yaw % 360) + 360) % 360) * 10) / 10, pitch: Math.round(view.pitch * 10) / 10, distance: Math.max(1, Math.round(view.distance)) } : {};
     const camera: SceneCamera = { ...this.Current().camera, ...live, ...change };
@@ -1261,6 +1409,21 @@ function SamePlacement(a: SceneShip, b: SceneShip): boolean {
 function RequireName(name: unknown): string {
   if (typeof name !== 'string' || !name.trim()) throw new SceneError(['a scene name is required']);
   return name.trim();
+}
+
+/**
+ * A vector off a runtime sample.
+ */
+function ToVector(value: ArrayLike<number>): SceneVector {
+  return [value[0], value[1], value[2]];
+}
+
+/**
+ * Get_state's `camera.drawn`: the pose and clip planes the last frame drew with, rounded.
+ */
+function DrawnCameraReport(drawn: Maybe<DrawnCamera>): Maybe<object> {
+  const round = (value: number, scale: number): number => Math.round(value * scale) / scale;
+  return drawn ? { eye: drawn.eye.map((value) => round(value, 100)), look: drawn.look.map((value) => round(value, 100)), up: drawn.up.map((value) => round(value, 1000)), fov: round(drawn.fov, 100), near: round(drawn.near, 1000), far: Math.round(drawn.far) } : null;
 }
 
 /**

@@ -8,7 +8,8 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { DressedSun } from '@scene-director/scene';
+import { blendPoses, poseFromViewMatrix, poseViewMatrix, type CameraPose, type DressedSun } from '@scene-director/scene';
+import type { CinemaFrame } from './cinema';
 import { CountBackgroundQuads, EnvironmentReport, ReadRenderOptions, SceneDresser, type SceneDressing, type SceneEnvironmentReport } from './environment';
 import { ErrorText, ResourceValues } from './resources';
 import {
@@ -127,6 +128,14 @@ export interface CameraEye {
   readonly up: number[];
 }
 
+/**
+ * The camera the last frame drew with: its pose and clip planes.
+ */
+export interface DrawnCamera extends CameraPose {
+  readonly near: number;
+  readonly far: number;
+}
+
 export interface EngineCreateOptions {
   readonly canvas: HTMLCanvasElement;
   /**
@@ -186,6 +195,12 @@ export class Engine {
    * The scene clock of the frame being drawn.
    */
   private frameNow = 0;
+  /**
+   * The cinematic camera for the next frame (cinema.ts), or null for the orbit camera.
+   */
+  private cinematic: Maybe<CinemaFrame> = null;
+  private readonly free = new FreeCamera();
+  private drawn: Maybe<DrawnCamera> = null;
 
   /**
    * Creates the device and an initialized, empty scene. The page's animation loop draws it through Frame.
@@ -232,6 +247,28 @@ export class Engine {
 
   get camera(): OrbitCamera {
     return this.Parts().camera;
+  }
+
+  /**
+   * Draws the next frames from the cinematic camera (the director sets it every frame, before Frame), or from the orbit
+   * camera with null.
+   */
+  SetCinematicFrame(frame: Maybe<CinemaFrame>): void {
+    this.cinematic = frame;
+  }
+
+  /**
+   * The canvas's width / height.
+   */
+  Aspect(): number {
+    return this.canvas.width / Math.max(1, this.canvas.height);
+  }
+
+  /**
+   * The camera the last frame drew with, or null before the first frame.
+   */
+  DrawnCamera(): Maybe<DrawnCamera> {
+    return this.drawn;
   }
 
   get scene(): EveSpaceScene {
@@ -519,7 +556,9 @@ export class Engine {
     const { camera, renderTarget, pump, al, format } = this.Parts();
     try {
       if (FitCanvasSize(this.canvas)) renderTarget.Configure({ width: this.canvas.width, height: this.canvas.height });
-      camera.Update(timestamp / 1000, this.canvas.width / this.canvas.height);
+      camera.Update(timestamp / 1000, this.Aspect());
+      // The orbit camera updates underneath a cinematic shot, so its release blend has a live target.
+      this.drawn = this.cinematic ? this.free.Apply(camera, this.cinematic, this.Aspect()) : camera.Drawn();
       pump.Render();
       this.capture.AfterFrame(this.presented, this.canvas.width, this.canvas.height, format);
       al.DrainTransitions?.();
@@ -600,6 +639,16 @@ export class OrbitCamera {
     return { position, front: back.map((value) => -value), up };
   }
 
+  /**
+   * The pose and clip planes EveCamera built last Update: the eye off its view matrix, the look at the focus, the field
+   * of view off its projection (the zoom curve's and the aspect clamp's, not `fov`).
+   */
+  Drawn(): DrawnCamera {
+    const fov = EveCamera.CalculateFovFromProjection(this.eve.GetProjection().transform) / DEGREES;
+    const pose = poseFromViewMatrix(this.eve.GetViewMatrix().transform, this.distance, fov);
+    return { ...pose, look: [this.focus[0], this.focus[1], this.focus[2]], near: this.eve.frontClip, far: this.eve.backClip };
+  }
+
   Update(seconds: number, aspect: number): void {
     const camera = this.eve;
     vec3.copy(camera.extraTranslation, this.focus);
@@ -654,6 +703,37 @@ export class OrbitCamera {
     const right = [view[0], view[4], view[8]];
     const up = [view[1], view[5], view[9]];
     for (let axis = 0; axis < 3; axis++) this.focus[axis] += (-dx * right[axis] + dy * up[axis]) * metresPerPixel;
+  }
+}
+
+/**
+ * The cinematic camera's drawing half: it writes a pose straight into EveCamera's view and projection (the TriView and
+ * TriProjection the render driver reads), after the orbit's Update, so the zoom curve, the ±1.4 rad pitch clamp and
+ * the float32 orbit math never touch it. Picking, the audio listener and the planet pass read the same matrices.
+ */
+export class FreeCamera {
+  /**
+   * Draws a cinematic frame.
+   *
+   * @param orbit - The orbit camera, just updated (the release blend's target).
+   * @param frame - The cinematic pose, its clip planes and how far to blend toward the orbit.
+   * @param aspect - The canvas's width / height.
+   * @returns What was drawn.
+   */
+  Apply(orbit: OrbitCamera, frame: CinemaFrame, aspect: number): DrawnCamera {
+    let pose: CameraPose = frame.pose;
+    let { near, far } = frame;
+    if (frame.toOrbit > 0) {
+      const target = orbit.Drawn();
+      pose = blendPoses(pose, target, frame.toOrbit);
+      near = Math.min(near, target.near);
+      far = Math.max(far, target.far);
+    }
+    const eve = orbit.eve;
+    eve.GetViewMatrix().SetTransform(poseViewMatrix(pose));
+    const projection = eve.GetProjection();
+    EveCamera.CalculateProjectionMatrix(projection.transform, aspect, pose.fov * DEGREES, 0, 0, near, far, projection);
+    return { ...pose, near, far };
   }
 }
 

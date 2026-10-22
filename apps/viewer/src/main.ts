@@ -8,6 +8,10 @@
  *
  * Audio (the prop mods' engine sounds) turns on at startup when the tab may
  * autoplay, else on the first click or keypress; `?audio=off` keeps it off.
+ *
+ * Presentation: `?letterbox=2.39` (or `off`) letterboxes the frame and L
+ * toggles a 2.39 letterbox; `?hud=off` hides the overlay and H toggles it. A
+ * playing camera shot's `letterbox` / `hud` override them while it plays.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -20,6 +24,7 @@ import { Engine } from './lib/engine';
 import { HubLink } from './lib/link';
 import { LocationText } from './lib/location';
 import { ObjectsText } from './lib/objects';
+import { LetterboxRect } from './lib/cinema';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
 
@@ -33,6 +38,11 @@ const WELCOME_SCENE = {
 };
 
 const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' };
+
+/**
+ * The aspect L letterboxes to: anamorphic scope.
+ */
+const SCOPE_ASPECT = 2.39;
 
 interface OverlayState {
   hub: boolean;
@@ -50,9 +60,6 @@ class Overlay {
 
   constructor(element: HTMLElement) {
     this.element = element;
-    addEventListener('keydown', (event) => {
-      if (event.key === 'h' && !event.ctrlKey && !event.metaKey) this.element.hidden = !this.element.hidden;
-    });
     // pointerdown, not click: the panel re-renders every second, which can swap the button between press and release.
     this.element.addEventListener('pointerdown', (event) => {
       const button = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-follow]') : null;
@@ -110,7 +117,7 @@ class Overlay {
       <h1>scene-director</h1>
       <dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${Escape(value)}</dd>`).join('')}</dl>
       ${list}
-      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · H hides this</p>`;
+      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · L letterbox · H hides this</p>`;
     const shipList = this.element.querySelector('ul');
     if (shipList) shipList.scrollTop = scrolled;
   }
@@ -125,6 +132,54 @@ class Overlay {
       text = director?.engineError?.message ?? this.state.renderer;
     }
     return text;
+  }
+}
+
+/**
+ * The frame's presentation for clean frames: the letterbox resizes the canvas element to the aspect, centred on black
+ * bars, so the swap chain, screenshots and captures are exactly the frame; the HUD is the overlay. A playing shot's
+ * `letterbox` / `hud` win while it plays, then the page's settings come back.
+ */
+class Presentation {
+  private letterbox: Maybe<number>;
+  private hud: boolean;
+  private applied = '';
+
+  constructor(
+    private readonly canvas: HTMLCanvasElement,
+    private readonly overlay: HTMLElement,
+    search: URLSearchParams
+  ) {
+    const aspect = Number(search.get('letterbox'));
+    this.letterbox = Number.isFinite(aspect) && aspect >= 0.5 && aspect <= 4 ? aspect : null;
+    this.hud = search.get('hud') !== 'off';
+    addEventListener('keydown', (event) => {
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      if (key === 'h') this.hud = !this.hud;
+      else if (key === 'l') this.letterbox = this.letterbox ? null : SCOPE_ASPECT;
+    });
+  }
+
+  /**
+   * Applies the page's settings under the shot's; cheap when nothing changed (the animation loop calls it every frame).
+   *
+   * @param shot - The playing shot's presentation (CinemaRig.Presentation).
+   */
+  Apply(shot: { readonly letterbox?: number | false; readonly hud?: boolean }): void {
+    const letterbox = shot.letterbox === undefined ? this.letterbox : shot.letterbox || null;
+    const hud = shot.hud ?? this.hud;
+    const key = `${letterbox}:${hud}:${innerWidth}x${innerHeight}`;
+    if (key === this.applied) return;
+    this.applied = key;
+    const box = LetterboxRect(innerWidth, innerHeight, letterbox);
+    const style = this.canvas.style;
+    style.left = `${box.left}px`;
+    style.top = `${box.top}px`;
+    style.width = `${box.width}px`;
+    style.height = `${box.height}px`;
+    document.body.style.background = letterbox ? '#000' : '';
+    this.overlay.hidden = !hud;
   }
 }
 
@@ -156,6 +211,7 @@ function RequireElement<T extends HTMLElement>(id: string): T {
  */
 async function Start(): Promise<void> {
   const overlay = new Overlay(RequireElement('overlay'));
+  const presentation = new Presentation(RequireElement<HTMLCanvasElement>('view'), RequireElement('overlay'), new URLSearchParams(location.search));
   const link = new HubLink({ onStatus: (connected) => overlay.Set({ hub: connected }) });
   link.CaptureConsole();
   ConfigureResources();
@@ -188,6 +244,7 @@ async function Start(): Promise<void> {
     }
     liveDirector?.DriveBoosters(now);
     liveDirector?.TrackCamera(now);
+    presentation.Apply(liveDirector?.cinema.Presentation() ?? {});
     liveDirector?.DriveAudio(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);

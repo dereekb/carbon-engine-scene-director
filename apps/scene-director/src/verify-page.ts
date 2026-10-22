@@ -182,6 +182,19 @@ interface ViewerState {
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
+  readonly cinema?: CinemaStateReport;
+}
+
+/**
+ * get_state's `cinema` (the viewer's cinema.ts CinemaRig.Report).
+ */
+interface CinemaStateReport {
+  readonly state: 'idle' | 'playing' | 'releasing';
+  readonly shot: Maybe<{ readonly hardpoint?: { readonly name: string }; readonly elapsed: number; readonly duration: Maybe<number>; readonly progress: Maybe<number> }>;
+  readonly sequence: Maybe<{ readonly index: number; readonly count: number }>;
+  readonly pose: Maybe<{ readonly eye: number[]; readonly look: number[] }>;
+  readonly near: Maybe<number>;
+  readonly note: Maybe<string>;
 }
 
 interface AddObjectsResult {
@@ -1805,6 +1818,70 @@ try {
       return `${state.location?.targets?.length} targets; CNAP ${Math.round(start)} -> ${Math.round(ShipIn(later, 'rifter').targetDistance ?? 0)} m`;
     });
   }
+
+  // The cinematic camera has no MCP tool yet: the checks play shots through the page's director.
+  const playShot = (shot: unknown): Promise<unknown> => page.evaluate((input) => (globalThis as unknown as { sceneDirector: { director: { PlayShot(value: unknown, driver: string): unknown } } }).sceneDirector.director.PlayShot(input, 'verify-page'), shot);
+  const cinemaOf = (state: ViewerState): CinemaStateReport => {
+    if (!state.cinema) throw new Error('get_state has no cinema');
+    return state.cinema;
+  };
+  const CINEMA_SCENE = {
+    name: 'verify-cinema',
+    ships: [
+      { id: 'hero', dna: 'af1_t1:amarrbase:amarr', position: [0, 0, 0], team: 'blue' },
+      { id: 'wing', dna: 'af1_t1:amarrbase:amarr', position: [800, 0, -600], team: 'blue' },
+      { id: 'red', dna: 'mf1_t1:minmatarbase:minmatar', position: [0, 0, 40000], team: 'red' }
+    ]
+  };
+
+  await Check('a cinema shot plays on the scene clock', async () => {
+    await call('load_scene', { scene: CINEMA_SCENE });
+    await playShot({ hardpoint: { name: 'chase', ship: 'hero' }, duration: 60 });
+    const first = await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
+    await Delay(2000);
+    const later = await call<ViewerState>('get_state');
+    const shot = (state: ViewerState) => cinemaOf(state).shot;
+    const advanced = (shot(later)?.elapsed ?? 0) - (shot(first)?.elapsed ?? 0);
+    const scene = later.simulation.seconds - first.simulation.seconds;
+    Expect(cinemaOf(later).state === 'playing' && Math.abs(advanced - scene) < 0.3 && (shot(later)?.progress ?? 0) > 0, `elapsed +${advanced} s over ${scene} scene s: ${JSON.stringify(later.cinema)}`);
+    const eye = cinemaOf(later).pose?.eye ?? [0, 0, 0];
+    Expect(eye[2] < 0, `the chase eye sits behind the hull: ${JSON.stringify(eye)}`);
+    return `elapsed +${advanced.toFixed(2)} s over ${scene.toFixed(2)} scene s; near ${cinemaOf(later).near} m`;
+  });
+
+  await Check('the cinema flyby eye holds while the ship flies past', async () => {
+    await call('order_ship', { id: 'hero', order: { type: 'direction', direction: [0, 0, 1] } });
+    await WaitFor('the hero to get going', 15, (polled) => ((ShipIn(polled, 'hero').speed ?? 0) > 50 ? null : `speed ${ShipIn(polled, 'hero').speed}`));
+    await playShot({ hardpoint: { name: 'flyby', ship: 'hero' } });
+    const first = await WaitFor('the flyby', 10, (polled) => (cinemaOf(polled).shot?.hardpoint?.name === 'flyby' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)), 2);
+    await Delay(1500);
+    const later = cinemaOf(await call<ViewerState>('get_state'));
+    const before = cinemaOf(first).pose;
+    Expect(JSON.stringify(later.pose?.eye) === JSON.stringify(before?.eye), `the eye moved: ${JSON.stringify(before?.eye)} -> ${JSON.stringify(later.pose?.eye)}`);
+    Expect((later.pose?.look[2] ?? 0) > (before?.look[2] ?? 0), `the look stayed: ${JSON.stringify(before?.look)} -> ${JSON.stringify(later.pose?.look)}`);
+    await call('order_ship', { id: 'hero', order: { type: 'stop' } });
+    return `eye ${JSON.stringify(later.pose?.eye)}; look z ${before?.look[2]} -> ${later.pose?.look[2]}`;
+  });
+
+  await Check('a cinema sequence advances on its durations', async () => {
+    await playShot({ shots: [{ hardpoint: { name: 'chase', ship: 'hero' }, duration: 1 }, { hardpoint: { name: 'behind-fc', ships: ['hero', 'wing'] }, transition: { type: 'blend', duration: 1 }, duration: 1 }, { hardpoint: { name: 'overlook' } }] });
+    const state = await WaitFor('the third shot', 10, (polled) => (cinemaOf(polled).sequence?.index === 2 ? null : JSON.stringify(polled.cinema?.sequence ?? polled.cinema?.state)));
+    return `shot ${cinemaOf(state).sequence?.index} of ${cinemaOf(state).sequence?.count}`;
+  });
+
+  await Check('removing the subject releases the cinema shot, and a load cuts it', async () => {
+    await playShot({ hardpoint: { name: 'hero-port', ship: 'wing' } });
+    await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' ? null : JSON.stringify(polled.cinema)));
+    await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'wing' }] });
+    const released = cinemaOf(await call<ViewerState>('get_state'));
+    Expect(released.state !== 'playing' && /subject|no ship/u.test(released.note ?? ''), JSON.stringify(released));
+    await playShot({ hardpoint: { name: 'top-down', ship: 'hero' } });
+    await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' ? null : JSON.stringify(polled.cinema)));
+    await call('load_scene', { scene: CINEMA_SCENE });
+    const cut = cinemaOf(await call<ViewerState>('get_state'));
+    Expect(cut.state === 'idle', JSON.stringify(cut));
+    return `released: ${released.note}; load: ${cut.note}`;
+  });
 
   if (rendering) {
     await Check('screenshot returns a PNG', async () => {
