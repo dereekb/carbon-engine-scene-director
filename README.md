@@ -19,12 +19,15 @@ What works today:
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.
+- **Fleet commands**: `order_fleet` moves or warps a fleet, wing or squad on its
+  leader (the FC warps the fleet in formation, each hull at its own warp speed),
+  breaks a squad off and regroups it, with an optional pilot response delay.
 - **Locations**: a scene can sit at a real EVE place, dressed with its region's
   nebula, its star, and the planets, moons, stations and stargates near it.
 - **Scene building**: `add_ships` and `stage_engagement` add N ships, or two
   opposing fleets, in one call.
 
-Fleet commands, fleet warp, combat and timelines come in later phases; the
+Combat and timelines come in later phases; the
 document's `orders` and `timeline` fields stay reserved until then.
 
 ```text
@@ -122,6 +125,7 @@ connected tab.
 | `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location |
 | `order_ship` | page | a live movement order, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
+| `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship and follows it, or fits all ships |
 
@@ -161,7 +165,7 @@ behavior, the rules, the files and the gotchas of one area:
 | tools-core, the SDE, the hub, checking the page on a real GPU | [`sd-dev-env`](.dbx-claude/refs/sd-dev-env/REF.md) |
 | The scene document, patch ops, the camera, saved scenes | [`sd-scene-document`](.dbx-claude/refs/sd-scene-document/REF.md) |
 | Movement: Destiny, orders, placement | [`sd-destiny`](.dbx-claude/refs/sd-destiny/REF.md), with [warp](.dbx-claude/refs/sd-destiny/references/warp.md) and [boosters](.dbx-claude/refs/sd-destiny/references/boosters.md) |
-| Fleets, anchors, Follow the FC | [`sd-fleets`](.dbx-claude/refs/sd-fleets/REF.md), with [fleet compositions](.dbx-claude/refs/sd-fleets/references/compositions.md) and the TFIs example |
+| Fleets, anchors, Follow the FC, fleet orders | [`sd-fleets`](.dbx-claude/refs/sd-fleets/REF.md), with [fleet orders and fleet warp](.dbx-claude/refs/sd-fleets/references/orders.md), [fleet compositions](.dbx-claude/refs/sd-fleets/references/compositions.md) and the TFIs example |
 | Building scenes: `add_ships`, `stage_engagement` | [`sd-staging`](.dbx-claude/refs/sd-staging/REF.md) |
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |

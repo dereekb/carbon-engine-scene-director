@@ -31,6 +31,13 @@
  * fleet. An order on a member takes it out of formation until a rejoin order,
  * a fleet edit that regroups it, or a load.
  *
+ * Fleet orders (order_fleet, fleet-orders.ts): a fleet, wing or squad order
+ * goes to the group's leader, given by a ship commanding the group. A move
+ * flies the leader (a wing or squad then flies apart on it until a regroup), a
+ * warp lands the whole group in formation, and anchor, break-off and regroup
+ * edit the document's anchors through the edit queue, as patch_scene does,
+ * before their live half. get_state reports each group's command.
+ *
  * Without a renderer (no WebGPU), the director still validates documents and
  * builds each ship's SOF values, so DNA mistakes surface; it just has nothing
  * to draw into.
@@ -43,6 +50,10 @@ import {
   DEFAULT_PROP_MOD_MODULE,
   diffScenes,
   fitsPropMod,
+  isFleetStructureOrder,
+  normalizeFleetOrderRequest,
+  toFleetOrderOperations,
+  toPilotDelays,
   normalizePropModSwitch,
   normalizeScene,
   normalizeShipOrderRequest,
@@ -69,6 +80,7 @@ import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion } from './destiny';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
+import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { FleetFollowing, type ShipFollowingReport } from './following';
 import { EncodePng, type CameraEye, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
@@ -203,6 +215,10 @@ export interface SwitchedPropMod {
    * Seconds until a stopping module stops.
    */
   readonly stopsIn?: number;
+  /**
+   * With a delay: seconds until the pilot makes the switch (state is the one before it).
+   */
+  readonly respondsIn?: number;
 }
 
 export interface SwitchPropModsResult {
@@ -268,9 +284,10 @@ export interface OrderShipResult {
    */
   readonly tick: number;
   /**
-   * `detached` when the order took a fleet member out of formation; its following report for a rejoin.
+   * `detached` when the order took a fleet member out of formation, `leading` when the ship leads a wing or squad apart
+   * from its fleet (it keeps leading); its following report for a rejoin.
    */
-  readonly following?: 'detached' | ShipFollowingReport;
+  readonly following?: 'detached' | 'leading' | ShipFollowingReport;
 }
 
 interface WorldSphere {
@@ -298,6 +315,10 @@ export class Director {
    * The fleets' following (Follow the FC).
    */
   readonly following: FleetFollowing;
+  /**
+   * order_fleet's live half and each group's command report.
+   */
+  readonly orders: FleetOrders;
   /**
    * The scene location's system data from the hub, and its get_state report.
    */
@@ -338,6 +359,7 @@ export class Director {
     this.clock = clock;
     this.onChange = onChange;
     this.following = new FleetFollowing({ world, scene: () => this.scene, radiusOf: (id) => this.FormationRadius(id) });
+    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.scene });
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
@@ -372,7 +394,8 @@ export class Director {
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
       frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
       order_ship: ({ id, order }) => this.OrderShip(id, order),
-      switch_prop_mods: (args) => this.SwitchPropMods(args)
+      switch_prop_mods: (args) => this.SwitchPropMods(args),
+      order_fleet: (args) => this.OrderFleet(args)
     };
   }
 
@@ -400,8 +423,33 @@ export class Director {
     if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
     const refusal = this.world.OrderRefusal(id, normalized);
     if (refusal !== null || !this.world.Order(id, normalized)) throw new Error(refusal ?? `ship "${id}" or its target has no Destiny ball`);
-    const detached = this.following.Detach(id);
-    return { id, order: normalized, tick: this.world.tick, ...(detached ? { following: 'detached' as const } : {}) };
+    const following = this.following.Detach(id);
+    return { id, order: normalized, tick: this.world.tick, ...(following ? { following } : {}) };
+  }
+
+  /**
+   * Orders a fleet, wing or squad (order_fleet): resolved against the document, given by a ship commanding the group.
+   * Moves and warps fly at once (live, not saved); anchor, break-off and regroup edit the document's anchors through
+   * the edit queue, as patch_scene does, then run their live half (regroup's rejoins and warps back).
+   *
+   * @param input - The order_fleet arguments: fleet, wing or squad, by, order.
+   * @returns What the order did; document orders add their operations and the patch result (its ship reports under
+   *   `builds`, so `ships` stays the ordered ships).
+   * @throws {SceneError} When the request is invalid, names an unknown group, or comes from a ship without command of it.
+   * @throws {Error} When the leader refuses the order, or the fleet is not planned yet for a wing or squad move or a warp.
+   */
+  OrderFleet(input: unknown): Promise<object> {
+    const request = normalizeFleetOrderRequest(input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)) });
+    if (!isFleetStructureOrder(request.order)) return Promise.resolve(this.orders.Fly(this.orders.Resolve(request)));
+    return this.Serialize(async () => {
+      // Resolved against the document current at its turn in the queue.
+      const resolved = this.orders.Resolve(request);
+      const operations = toFleetOrderOperations(this.Current(), resolved);
+      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
+      const { ships: builds, ...rest } = patch ?? {};
+      const result: FleetOrderResult = this.orders.Fly(resolved);
+      return { ...result, operations, ...(patch ? { ...rest, builds } : {}) };
+    });
   }
 
   /**
@@ -418,15 +466,24 @@ export class Director {
     const selected = selectFleetShips(scene, command);
     if (selected.problems.length) throw new SceneError(selected.problems);
     const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
+    const key = `prop-mods|${command.fleet ?? ''}|${command.wing ?? ''}|${command.squad ?? ''}`;
+    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay ?? 0, ships: selected.ships, issuer: '' });
     const ships: SwitchedPropMod[] = [];
     const skipped: SwitchPropModsResult['skipped'] = [];
     for (const id of selected.ships) {
       const doc = docs.get(id);
       const refusal = fitsPropMod(doc?.propMod) ? this.world.PropModRefusal(id, command.active) : `it fits no prop mod (propMod.module "${ShipPropModModule(doc)}")`;
-      const result = refusal === null ? this.world.SwitchPropMod(id, command.active) : null;
+      const result = refusal === null ? this.world.SwitchPropMod(id, command.active, { delay: delays.get(id) }) : null;
       if (result) {
         const module = this.flights.get(id)?.propMod?.name ?? String(ShipPropModModule(doc));
-        ships.push({ id, module, state: result.state, ...(result.at === undefined ? {} : { at: result.at }), ...(result.stopsIn === undefined ? {} : { stopsIn: result.stopsIn }) });
+        ships.push({
+          id,
+          module,
+          state: result.state,
+          ...(result.at === undefined ? {} : { at: result.at }),
+          ...(result.stopsIn === undefined ? {} : { stopsIn: result.stopsIn }),
+          ...(result.respondsIn === undefined ? {} : { respondsIn: result.respondsIn })
+        });
       } else {
         skipped.push({ id, reason: refusal ?? `ship "${id}" has no Destiny ball` });
       }
@@ -528,7 +585,19 @@ export class Director {
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
       distances,
-      fleets: this.scene ? toFleetReports(this.scene).map((report) => ({ ...report, formation: this.following.FleetReport(report), propMods: this.FleetPropMods(report.ships) })) : [],
+      fleets: this.scene
+        ? toFleetReports(this.scene).map((report) => ({
+            ...report,
+            formation: this.following.FleetReport(report),
+            propMods: this.FleetPropMods(report.ships),
+            command: this.orders.GroupReport({ fleet: report.id, kind: 'fleet', id: report.id }),
+            wings: report.wings.map((wing) => ({
+              ...wing,
+              command: this.orders.GroupReport({ fleet: report.id, kind: 'wing', id: wing.id }),
+              squads: wing.squads.map((squad) => ({ ...squad, command: this.orders.GroupReport({ fleet: report.id, kind: 'squad', id: squad.id }) }))
+            }))
+          }))
+        : [],
       audio: this.audio.Report()
     };
   }
@@ -624,6 +693,7 @@ export class Director {
     const switching = new Map((restart ? scene.ships : [...diff.added, ...diff.switched]).map((doc) => [doc.id, doc]));
     for (const doc of diff.retuned) if (!fitsPropMod(doc.propMod)) switching.set(doc.id, doc);
     for (const doc of switching.values()) this.world.SetPropModActive(doc.id, doc.propMod?.active === true && fitsPropMod(doc.propMod));
+    if (restart) this.orders.Reset();
     stopped.push(...this.following.Reconcile({ regrouped: diff.regrouped.map((doc) => doc.id), restart }));
     await this.store.Put(CURRENT_KEY, scene);
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });

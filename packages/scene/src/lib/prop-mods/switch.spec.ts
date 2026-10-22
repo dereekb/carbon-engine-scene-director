@@ -9,6 +9,12 @@ describe('normalizePropModSwitch', () => {
     expect(normalizePropModSwitch({ active: true, ships: ['a', 'b'] })).toEqual({ ships: ['a', 'b'], active: true });
   });
 
+  it('takes a pilot delay in [0, 1], dropping 0', () => {
+    expect(normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 0.4 })).toEqual({ fleet: 'tfis', active: true, delay: 0.4 });
+    expect(normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 0 })).toEqual({ fleet: 'tfis', active: true });
+    expect(catchSceneError(() => normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 2 })).problems).toEqual(['switch.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to 10 s)']);
+  });
+
   it('requires active and exactly one of ships and fleet', () => {
     expect(catchSceneError(() => normalizePropModSwitch({ fleet: 'tfis' })).problems).toEqual(['switch.active is required: true switches prop mods on, false off']);
     expect(catchSceneError(() => normalizePropModSwitch({ active: 'on', ships: ['a'], fleet: 'f' })).problems).toEqual(['switch.active is required: true switches prop mods on, false off', 'switch needs exactly one of ships (ship ids) and fleet (a fleet id, optionally with wing or squad)']);

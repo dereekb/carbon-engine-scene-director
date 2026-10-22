@@ -118,6 +118,28 @@ describe('hub', () => {
     }
   });
 
+  it('order_fleet goes to the tab unchanged, and an authority refusal keeps its problems', async () => {
+    const seen: Record<string, unknown>[] = [];
+    const refusal = 'order_fleet: ship "d2" has no command over fleet "f": its commanders are "fc" (fleet); a warp, like any fleet order, is given by one of them (the FC warps the fleet, a wing commander their wing, a squad commander their squad)';
+    const page = await ConnectPage({
+      order_fleet: (args) => {
+        seen.push(args);
+        if (args['by'] === 'd2') throw Object.assign(new Error(`Invalid scene document:\n- ${refusal}`), { problems: [refusal] });
+        return { fleet: args['fleet'], leader: 'd1' };
+      }
+    });
+    try {
+      const args = { fleet: 'f', squad: 'dps', by: 'd1', order: { type: 'warp', point: [0, 0, 400000] } };
+      expect(await hub.Call('order_fleet', args)).toEqual({ fleet: 'f', leader: 'd1' });
+      expect(seen[0]).toEqual(args);
+      const failure = await hub.Call('order_fleet', { fleet: 'f', by: 'd2', order: { type: 'warp', point: [0, 0, 400000] } }).catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(ToolError);
+      expect((failure as ToolError).details?.problems).toEqual([refusal]);
+    } finally {
+      page.close();
+    }
+  });
+
   it('page console lines reach page_log, filtered by level', async () => {
     const page = await ConnectPage({});
     page.send(

@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { DEFAULT_UNIVERSE, formationSpacing, toFollowTolerance, type FleetReport, type LocationDressingReport, type LocationReport, type MapSystemAnswer, type SceneLocation, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
+import { DEFAULT_UNIVERSE, formationSpacing, toFollowTolerance, type FleetGroupCommandReport, type FleetReport, type LocationDressingReport, type LocationReport, type MapSystemAnswer, type SceneLocation, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -134,6 +134,8 @@ interface ShipFollowingState {
   readonly slot?: { readonly range: number; readonly direction: SceneVector };
   readonly distance?: number;
   readonly slotError?: number;
+  readonly warping?: string;
+  readonly group?: { readonly kind: string; readonly id: string; readonly leader: string };
 }
 
 interface FleetFormationState {
@@ -143,6 +145,8 @@ interface FleetFormationState {
   readonly inFormation: number;
   readonly catchingUp: number;
   readonly holding: number;
+  readonly warping: number;
+  readonly leading: number;
   readonly detached: number;
   readonly waiting: number;
 }
@@ -153,7 +157,7 @@ interface ViewerState {
   readonly simulation: { readonly tick: number; readonly seconds: number };
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number> })[];
+  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport> }>;
   readonly audio?: AudioState;
 }
@@ -207,6 +211,29 @@ interface StageEngagementResult extends Omit<SceneResult, 'scene'> {
 
 interface LogEntry {
   readonly message: string;
+}
+
+/**
+ * get_state's fleet tree with each group's command (order_fleet).
+ */
+interface CommandTree {
+  readonly command?: FleetGroupCommandReport;
+  readonly wings: readonly { readonly id: string; readonly command?: FleetGroupCommandReport; readonly squads: readonly { readonly id: string; readonly command?: FleetGroupCommandReport }[] }[];
+}
+
+interface OrderFleetResult {
+  readonly by: string;
+  readonly leader: string;
+  readonly ships: readonly (string | { readonly id: string; readonly landing: SceneVector })[];
+  readonly skipped?: readonly { readonly id: string; readonly reason: string }[];
+  readonly landing?: SceneVector;
+  readonly warping?: readonly string[];
+  readonly operations?: readonly { readonly op: string }[];
+  readonly delays?: Readonly<Record<string, number>>;
+}
+
+interface SceneFleetsResult {
+  readonly fleets?: readonly { readonly id: string; readonly wings: readonly { readonly squads: readonly { readonly id: string; readonly anchor?: unknown; readonly home?: unknown }[] }[] }[];
 }
 
 const SCREENSHOT_FILE = '.scratch/verify.png';
@@ -1152,6 +1179,215 @@ try {
       return off ? `${off.id} ${JSON.stringify({ mode: off.mode, heading: off.heading, following: off.following, fc: yaw })}` : null;
     });
     return `settled facing ${ShipIn(state, 'flw-fc').heading?.[0]} degrees`;
+  });
+
+  // order_fleet on the Follow-the-FC scene, reloaded whole (the checks above removed its logi lead).
+  const commandOf = (state: ViewerState, kind: 'fleet' | 'wing' | 'squad', id: string, fleet = 'flw'): Maybe<FleetGroupCommandReport> => {
+    const tree = state.fleets.find((candidate) => candidate.id === fleet) as Maybe<CommandTree>;
+    if (kind === 'fleet') return tree?.command;
+    if (kind === 'wing') return tree?.wings.find((wing) => wing.id === id)?.command;
+    return tree?.wings.flatMap((wing) => wing.squads).find((squad) => squad.id === id)?.command;
+  };
+  const squadDocument = async (fleet: string, squad: string) =>
+    (await call<SceneFleetsResult>('get_scene')).fleets
+      ?.find((candidate) => candidate.id === fleet)
+      ?.wings.flatMap((wing) => wing.squads)
+      .find((candidate) => candidate.id === squad);
+  const refusalOf = (args: Record<string, unknown>): Promise<string> =>
+    call('order_fleet', args).then(
+      () => 'accepted',
+      (error: unknown) => ErrorMessage(error)
+    );
+  const gap = (a: Maybe<ArrayLike<number>>, b: Maybe<ArrayLike<number>>): number => (a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : Number.NaN);
+  const DPS = ['flw-d1', 'flw-d2', 'flw-d3', 'flw-d4'];
+
+  await Check('order_fleet moves the fleet through its FC', async () => {
+    await call('load_scene', { scene: followScene });
+    const formed = await WaitFor('the fleet in formation', 90, (state) => (fleetFormation(state)?.ready ? NotInFormation(state, FLW_MEMBERS) : 'not planned yet'));
+    const start = ShipIn(formed, 'flw-fc').position;
+    const moved = await call<OrderFleetResult>('order_fleet', { fleet: 'flw', order: { type: 'direction', direction: [0, 0, 1], speed: 0.5 } });
+    Expect(moved.leader === 'flw-fc' && moved.by === 'flw-fc', JSON.stringify(moved));
+    await WaitFor('the FC 2 km on, the fleet in formation and moving', 90, (state) => {
+      const on = gap(ShipIn(state, 'flw-fc').position, start);
+      const command = commandOf(state, 'fleet', 'flw');
+      if (!(on >= 2000) || command?.state !== 'moving') return `FC ${Math.round(on)} m on, ${JSON.stringify(command)}`;
+      return NotInFormation(state, FLW_MEMBERS);
+    });
+    await call('order_fleet', { fleet: 'flw', order: { type: 'stop' } });
+    const idle = await WaitFor('the fleet idle and settled', 120, (state) => {
+      const command = commandOf(state, 'fleet', 'flw');
+      return command?.state === 'idle' ? NotInFormation(state, FLW_MEMBERS) : JSON.stringify(command);
+    });
+    return `stopped ${Math.round(gap(ShipIn(idle, 'flw-fc').position, start))} m on, last ${commandOf(idle, 'fleet', 'flw')?.last?.order.type}`;
+  });
+
+  await Check('order_fleet moves a squad on its commander, and regroup brings it back', async () => {
+    await call('patch_scene', { operations: [{ op: 'update_squad', fleet: 'flw', squad: 'dps', set: { commander: 'flw-d1' } }] });
+    const formed = await WaitFor('the fleet in formation', 60, (state) => NotInFormation(state, FLW_MEMBERS));
+    const fc = ShipIn(formed, 'flw-fc');
+    const yaw = ((fc.heading?.[0] ?? 0) * Math.PI) / 180;
+    const at = fc.position ?? [0, 0, 0];
+    const point = [at[0] + 8000 * Math.cos(yaw), at[1], at[2] - 8000 * Math.sin(yaw)];
+    const moved = await call<OrderFleetResult>('order_fleet', { fleet: 'flw', squad: 'dps', order: { type: 'goto', point } });
+    Expect(moved.leader === 'flw-d1' && moved.by === 'flw-d1', JSON.stringify(moved));
+    let sawMoving = false;
+    await WaitFor('dps apart on flw-d1, stopped at the point', 120, (state) => {
+      const command = commandOf(state, 'squad', 'dps');
+      sawMoving ||= command?.state === 'moving';
+      if (ShipIn(state, 'flw-d1').following?.state !== 'leading') return `flw-d1 ${JSON.stringify(ShipIn(state, 'flw-d1').following)}`;
+      const off = DPS.slice(1).find((id) => {
+        const following = ShipIn(state, id).following;
+        return following?.group?.leader !== 'flw-d1' || following.anchor !== 'flw-d1' || following.state !== 'in-formation';
+      });
+      if (off) return `${off} ${JSON.stringify(ShipIn(state, off).following)}`;
+      if (ShipIn(state, 'flw-l1').following?.anchor !== 'flw-fc') return `flw-l1 ${JSON.stringify(ShipIn(state, 'flw-l1').following)}`;
+      return command?.away && command.state === 'broken-off' ? null : JSON.stringify(command);
+    });
+    Expect(sawMoving, 'the squad never reported moving');
+    await call('order_fleet', { fleet: 'flw', squad: 'dps', order: { type: 'regroup' } });
+    let sawRegrouping = false;
+    await WaitFor('dps back on flw-fc in formation, idle', 120, (state) => {
+      const command = commandOf(state, 'squad', 'dps');
+      sawRegrouping ||= command?.state === 'regrouping';
+      const off = DPS.find((id) => ShipIn(state, id).following?.anchor !== 'flw-fc');
+      if (off) return `${off} ${JSON.stringify(ShipIn(state, off).following)}`;
+      return command?.state === 'idle' ? NotInFormation(state, DPS) : JSON.stringify(command);
+    });
+    Expect(sawRegrouping, 'the squad never reported regrouping');
+    return 'moved 8 km apart on flw-d1, regrouped onto flw-fc';
+  });
+
+  await Check('order_fleet break-off and regroup write the document', async () => {
+    const broke = await call<OrderFleetResult>('order_fleet', { fleet: 'flw', squad: 'logi', order: { type: 'break-off', range: 12000 } });
+    Expect(broke.operations?.length === 1 && broke.operations[0].op === 'update_squad', JSON.stringify(broke.operations));
+    const brokenLogi = await squadDocument('flw', 'logi');
+    Expect(JSON.stringify(brokenLogi?.anchor) === JSON.stringify({ ship: 'flw-l1', range: 12000 }) && JSON.stringify(brokenLogi?.home) === JSON.stringify({ ship: 'flw-l1', range: 4000 }), JSON.stringify(brokenLogi));
+    await WaitFor('flw-l1 12 km off, logi broken off with its home', 90, (state) => {
+      const { following } = ShipIn(state, 'flw-l1');
+      const command = commandOf(state, 'squad', 'logi');
+      if (following?.range !== 12000 || following.state !== 'in-formation') return JSON.stringify(following);
+      return command?.state === 'broken-off' && command.home?.range === 4000 ? null : JSON.stringify(command);
+    });
+    await call('order_fleet', { fleet: 'flw', squad: 'logi', order: { type: 'regroup' } });
+    const back = await squadDocument('flw', 'logi');
+    Expect(JSON.stringify(back?.anchor) === JSON.stringify({ ship: 'flw-l1', range: 4000 }) && back?.home === undefined, JSON.stringify(back));
+    await WaitFor('flw-l1 back 4 km off', 90, (state) => {
+      const { following } = ShipIn(state, 'flw-l1');
+      return following?.range === 4000 && following.state === 'in-formation' ? null : JSON.stringify(following);
+    });
+    const anchored = await call<OrderFleetResult>('order_fleet', { fleet: 'flw', order: { type: 'anchor', range: 6000 } });
+    Expect(anchored.operations?.length === 2 && anchored.operations.every((operation) => operation.op === 'set_anchor'), JSON.stringify(anchored.operations));
+    await call('order_fleet', { fleet: 'flw', squad: 'dps', order: { type: 'anchor', range: null } });
+    await call('order_fleet', { fleet: 'flw', squad: 'logi', order: { type: 'anchor', range: 4000 } });
+    await WaitFor('the fleet back in formation', 90, (state) => NotInFormation(state, FLW_MEMBERS));
+    return 'logi broke off to 12 km with its home, regrouped to 4 km, fleet anchor set and undone';
+  });
+
+  await Check('order_fleet refuses a warp from a ship without command', async () => {
+    const WARP = { type: 'warp', point: [0, 0, 600000] };
+    for (const [args, pattern] of [
+      [{ fleet: 'flw', by: 'flw-d2', order: WARP }, /no command over fleet "flw"/u],
+      [{ fleet: 'flw', by: 'flw-d1', order: WARP }, /no command over fleet "flw"/u],
+      [{ fleet: 'flw', wing: 'w', by: 'flw-d1', order: WARP }, /no command over wing "w" of fleet "flw"/u],
+      [{ fleet: 'flw', squad: 'dps', by: 'flw-l1', order: WARP }, /no command over squad "dps" of fleet "flw"/u],
+      [{ fleet: 'flw', squad: 'dps', order: { type: 'approach', target: 'flw-d2' } }, /cannot target one of its own ships/u]
+    ] as const) {
+      const refusal = await refusalOf(args);
+      Expect(pattern.test(refusal), `${JSON.stringify(args)}: ${refusal}`);
+    }
+    const state = await call<ViewerState>('get_state');
+    Expect(ShipIn(state, 'flw-fc').mode !== 'warp', 'the FC warped');
+    return 'four authority refusals and a target in the group';
+  });
+
+  // Fleet warp on its own scene: stats pinned, warp speeds from the SDE or the class values (5, 3 and 4 AU/s).
+  const FW_STATS = {
+    frigate: { mass: 1_067_000, agility: 3.2, maxVelocity: 320, signatureRadius: 35 },
+    battleship: { mass: 103_300_000, agility: 0.115, maxVelocity: 130, signatureRadius: 350 },
+    logistics: { mass: 11_980_000, agility: 0.61, maxVelocity: 209, signatureRadius: 70 }
+  };
+  const FW_MEMBERS = ['fw-d1', 'fw-d2', 'fw-d3', 'fw-l1', 'fw-l2'];
+  const fleetWarpScene = {
+    name: 'verify-fwarp',
+    ships: [
+      { id: 'fw-fc', dna: 'af1_t1:amarrbase:amarr', stats: { mass: 1.2e6, agility: 3.2, maxVelocity: 160, signatureRadius: 35 } },
+      { id: 'fw-d1', dna: 'mf1_t1:minmatarbase:minmatar', stats: FW_STATS.frigate, position: [1500, 0, -1500] },
+      { id: 'fw-d2', dna: 'mf1_t1:minmatarbase:minmatar', stats: FW_STATS.frigate, position: [-1500, 0, -1500] },
+      { id: 'fw-d3', dna: TFI_DNA, stats: FW_STATS.battleship, position: [0, 0, -2500] },
+      { id: 'fw-l1', dna: GUARDIAN_DNA, stats: FW_STATS.logistics, position: [0, 0, -5500] },
+      { id: 'fw-l2', dna: GUARDIAN_DNA, stats: FW_STATS.logistics, position: [0, 0, -7000] }
+    ],
+    fleets: [
+      {
+        id: 'fw',
+        commander: 'fw-fc',
+        wings: [
+          {
+            id: 'w',
+            squads: [
+              { id: 'dps', role: 'dps', members: ['fw-d1', 'fw-d2', 'fw-d3'] },
+              { id: 'logi', role: 'logi', members: ['fw-l1', 'fw-l2'], anchor: { ship: 'fw-l1', range: 5000 } }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+
+  await Check("the FC warps the fleet and it lands in formation at the members' own warp speeds", async () => {
+    await call('load_scene', { scene: fleetWarpScene });
+    await WaitFor('the warp fleet in formation', 180, (state) => (state.fleets.find((fleet) => fleet.id === 'fw')?.formation?.ready ? NotInFormation(state, FW_MEMBERS) : 'not planned yet'));
+    const warp = await call<OrderFleetResult>('order_fleet', { fleet: 'fw', order: { type: 'warp', point: [0, 0, 400000] } });
+    Expect(warp.leader === 'fw-fc' && (warp.skipped ?? []).length === 0 && warp.ships.length === FW_MEMBERS.length, JSON.stringify(warp));
+    const speeds = new Set<number>();
+    const sawWarping = new Set<string>();
+    const landedAt = new Map<string, SceneVector>();
+    let counts = '';
+    await WaitFor('every member landed', 120, (state) => {
+      const command = commandOf(state, 'fleet', 'fw', 'fw');
+      if (command?.state === 'warping' && command.warp) counts = JSON.stringify(command.warp);
+      for (const id of FW_MEMBERS) {
+        const ship = ShipIn(state, id);
+        if (ship.following?.state === 'warping' && ship.warp?.phase) sawWarping.add(id);
+        if (ship.warp?.warpSpeed) speeds.add(ship.warp.warpSpeed);
+        if (ship.warp?.phase === 'landed' && !landedAt.has(id) && ship.position) landedAt.set(id, ship.position);
+        if (!landedAt.has(id) && sawWarping.has(id) && ship.following?.state !== 'warping' && ship.position) landedAt.set(id, ship.position);
+      }
+      return landedAt.size === FW_MEMBERS.length && ShipIn(state, 'fw-fc').warp?.phase === 'landed' ? null : `${landedAt.size} landed`;
+    });
+    Expect(sawWarping.size === FW_MEMBERS.length, `warping seen for ${[...sawWarping].join(', ')}`);
+    Expect(speeds.size >= 3, `warp speeds ${[...speeds].join(', ')}`);
+    Expect(counts !== '', 'the fleet never reported warping');
+    const settled = await WaitFor('the warp fleet in formation after landing', 60, (state) => NotInFormation(state, FW_MEMBERS));
+    for (const [id, at] of landedAt) {
+      const moved = gap(ShipIn(settled, id).position, at);
+      Expect(moved < 3000, `${id} moved ${Math.round(moved)} m after landing`);
+      Expect(gap(ShipIn(settled, id).position, [0, 0, 0]) > 390000, `${id} is back near the start`);
+    }
+    await WaitFor('the fleet idle', 60, (state) => (commandOf(state, 'fleet', 'fw', 'fw')?.state === 'idle' ? null : JSON.stringify(commandOf(state, 'fleet', 'fw', 'fw'))));
+    return `warp speeds ${[...speeds].sort().join('/')} AU/s, counts ${counts}`;
+  });
+
+  await Check('a squad warp lands it apart, and a delayed regroup warps it back', async () => {
+    const before = await call<ViewerState>('get_state');
+    const at = ShipIn(before, 'fw-fc').position ?? [0, 0, 0];
+    const warp = await call<OrderFleetResult>('order_fleet', { fleet: 'fw', squad: 'logi', order: { type: 'warp', point: [at[0] + 300000, at[1], at[2]] } });
+    Expect(warp.leader === 'fw-l1' && warp.by === 'fw-fc', JSON.stringify(warp));
+    await WaitFor('logi landed apart on fw-l1', 90, (state) => {
+      const { following } = ShipIn(state, 'fw-l2');
+      const squad = commandOf(state, 'squad', 'logi', 'fw');
+      if (following?.group?.leader !== 'fw-l1' || following.state !== 'in-formation' || ShipIn(state, 'fw-l1').warp?.phase !== 'landed') return JSON.stringify({ following, l1: ShipIn(state, 'fw-l1').warp?.phase });
+      return squad?.away && commandOf(state, 'fleet', 'fw', 'fw')?.state === 'idle' ? null : JSON.stringify(squad);
+    });
+    const back = await call<OrderFleetResult>('order_fleet', { fleet: 'fw', squad: 'logi', delay: 0.5, order: { type: 'regroup' } });
+    Expect(JSON.stringify(back.warping) === JSON.stringify(['fw-l1', 'fw-l2']), JSON.stringify(back));
+    Expect(Object.keys(back.delays ?? {}).length === 2 && Object.values(back.delays ?? {}).every((seconds) => seconds >= 0 && seconds <= 5), JSON.stringify(back.delays));
+    await WaitFor('logi back in formation on the FC, idle', 90, (state) => {
+      const squad = commandOf(state, 'squad', 'logi', 'fw');
+      if (ShipIn(state, 'fw-l1').following?.anchor !== 'fw-fc') return JSON.stringify(ShipIn(state, 'fw-l1').following);
+      return squad?.state === 'idle' ? NotInFormation(state, ['fw-l1', 'fw-l2']) : JSON.stringify(squad);
+    });
+    return `logi out 300 km and back, pilot delays ${JSON.stringify(back.delays)}`;
   });
 
   const CNAP = 'Jita IV - Moon 4 - Caldari Navy Assembly Plant';

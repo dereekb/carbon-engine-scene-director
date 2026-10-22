@@ -4,7 +4,7 @@ import { requireComposition, TFI, tfisComposition } from '../compositions/compos
 import type { FleetComposition } from '../compositions/composition';
 import type { SceneVector } from '../scene';
 import type { SceneFleet } from './fleet';
-import { formationSpacing, layoutFleetFormation, toFleetFormationSlots } from './formation';
+import { formationSpacing, layoutFleetFormation, toFleetFormationSlots, toFleetGroupOffsets } from './formation';
 import { toFleetAnchors } from './membership';
 
 interface Laid {
@@ -155,5 +155,35 @@ describe('toFleetFormationSlots', () => {
     for (const slot of toFleetFormationSlots({ fleet, origin: [0, 0, 0], heading: 0, radiusOf: (ship) => radii.get(ship)! }).values()) {
       expect(slot.range).toBeGreaterThanOrEqual(formationSpacing(250, 250) - 500);
     }
+  });
+});
+
+describe('toFleetGroupOffsets', () => {
+  it('gives each ship its laid-out offset from the FC in the heading frame, at headings 0 and 90', () => {
+    const { fleet, radii } = lay(tfisComposition());
+    const radiusOf = (ship: string): number => radii.get(ship)!;
+    for (const heading of [0, 90]) {
+      const input = { fleet, origin: [1000, 0, 80000] as SceneVector, heading, radiusOf };
+      const positions = layoutFleetFormation(input);
+      const fc = positions.get(fleet.commander)!;
+      const ships = [...positions.keys()];
+      const offsets = toFleetGroupOffsets({ ...input, leader: fleet.commander, ships });
+      expect([...offsets.keys()]).toEqual(ships);
+      expect(offsets.get(fleet.commander)).toEqual([0, 0, 0]);
+      for (const [ship, at] of positions) {
+        const [dx, dy, dz] = [at[0] - fc[0], at[1] - fc[1], at[2] - fc[2]];
+        const expected: SceneVector = heading === 0 ? [dx, dy, dz] : [-dz, dy, dx];
+        expect(distance(offsets.get(ship)!, expected), `${ship} at heading ${heading}`).toBeLessThan(1e-6);
+      }
+    }
+  });
+
+  it('gives a non-FC leader [0, 0, 0] and refuses a leader or ship outside the fleet', () => {
+    const { fleet, radii } = lay(tfisComposition());
+    const input = { fleet, origin: [0, 0, 0] as SceneVector, heading: 30, radiusOf: (ship: string): number => radii.get(ship)! };
+    const leader = fleet.wings[0].squads[0].members[0];
+    expect(toFleetGroupOffsets({ ...input, leader, ships: [leader] }).get(leader)).toEqual([0, 0, 0]);
+    expect(() => toFleetGroupOffsets({ ...input, leader: 'nobody', ships: [leader] })).toThrow(/the leader "nobody" holds no position/u);
+    expect(() => toFleetGroupOffsets({ ...input, leader, ships: ['nobody'] })).toThrow(/ship "nobody" holds no position/u);
   });
 });

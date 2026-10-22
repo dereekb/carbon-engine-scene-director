@@ -49,6 +49,45 @@ export function RotateVector(rotation: ArrayLike<number>, vector: ArrayLike<numb
 }
 
 /**
+ * The heading frame of a warp from `from` to `to`: Destiny's legacy heading facing the landing (yaw atan2(x, z), pitch
+ * -asin(y / r)), without roll; the leader faces it in warp and after landing, so it frames the landed formation.
+ * A zero vector gives yaw 0, pitch 0.
+ *
+ * @param from - Where the warp begins.
+ * @param to - The landing.
+ * @returns FleetFrame of that heading.
+ */
+export function WarpFrame(from: ArrayLike<number>, to: ArrayLike<number>): Quat {
+  const [x, y, z] = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+  const r = Math.hypot(x, y, z);
+  return r > 0 ? FleetFrame(Math.atan2(x, z), -Math.asin(Math.max(-1, Math.min(1, y / r)))) : FleetFrame(0, 0);
+}
+
+export interface FramePointInput {
+  readonly origin: ArrayLike<number>;
+  /**
+   * A heading frame (FleetFrame / WarpFrame).
+   */
+  readonly frame: ArrayLike<number>;
+  /**
+   * Metres in the frame: x right, y up, z forward.
+   */
+  readonly offset: ArrayLike<number>;
+}
+
+/**
+ * The point `offset` from `origin` in `frame`, in float64.
+ *
+ * @param input - The origin, the frame and the offset.
+ * @returns origin + RotateVector(frame, offset).
+ */
+export function FramePoint(input: FramePointInput): SteeringVector {
+  const { origin, frame, offset } = input;
+  const rotated = RotateVector(frame, offset);
+  return [origin[0] + rotated[0], origin[1] + rotated[1], origin[2] + rotated[2]];
+}
+
+/**
  * The forward vector of a legacy heading.
  *
  * @param yaw - Radians, atan2(x, z).

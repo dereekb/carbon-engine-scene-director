@@ -50,7 +50,14 @@ default 0; no `speed`: a warp always aligns at full speed). Code: `DestinyWorld`
 
 While the FC (or a member's anchor) is in proper warp, members hold, stopped (`following.state` `holding`, with
 `warping` naming the ship), as Destiny's `StopAllFollowers` does. After it lands they fly to their slots at their own
-speed. **There is no fleet warp yet.**
+speed (`order_ship` warp on the FC).
+
+**Fleet warp** is `order_fleet` warp (sd-fleets sub-doc `orders`): `DestinyWorld.WarpInFormation` gives each member an
+ordinary `ApplyOrder` warp to a point (so every rule above holds: `WarpFactor` first, speed fraction 1, both parks, the
+non-massive reset) to its slot around the leader's landing in `WarpFrame`, resolved at the boundary after the plain
+orders. The member keeps its follow, and `Steer` skips it until it, its leader, its anchor and its frame ship have all
+finished their warps. Members under 150 km from their slot, unable to move, or in warp are skipped: **Destiny's
+`WarpTo` turns a destination within 100 km of the ball into a `GotoPoint`**, which the mode check would halt.
 
 ## Reporting and hooks
 

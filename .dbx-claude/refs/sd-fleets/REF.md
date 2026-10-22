@@ -2,9 +2,10 @@
 
 > EVE fleet structure in the document (FC, wings, squads with a role and an anchor) and how the page flies it. Fetch
 > before touching `packages/scene/src/lib/fleets/`, the viewer's `following.ts` / `steering.ts`, `DestinyWorld.Steer`,
-> or `Director.FormationRadius`. Sub-doc **`compositions`** (`{ ref: "sd-fleets", doc: "compositions" }`): the
-> `cjs-fleet/1` fleet composition, its expansion, saved compositions and the TFIs example. Adding ships into fleets
-> from the staging tools is `sd-staging`.
+> or `Director.FormationRadius`. Sub-docs (`{ ref: "sd-fleets", doc: "<key>" }`): **`orders`** (`order_fleet`: fleet,
+> wing and squad orders, groups apart, fleet warp in formation, break-off / regroup, pilot delay) and
+> **`compositions`** (the `cjs-fleet/1` fleet composition, its expansion, saved compositions and the TFIs example).
+> Adding ships into fleets from the staging tools is `sd-staging`.
 
 ## Files
 
@@ -14,17 +15,19 @@
 | `fleets/normalize.ts` | validation (`normalizeFleets`) |
 | `fleets/operations.ts` | the fleet patch ops (`FLEET_OPERATIONS`, `applyFleetOperation`, `removeShipFromFleets`) |
 | `fleets/membership.ts` | **`toFleetMemberships`: the one place anchors are resolved** |
-| `fleets/selection.ts` | selecting ships by ids or fleet / wing / squad (prop mod switches now; fleet commands later) |
-| `fleets/formation.ts` | the at-rest formation: `layoutFleetFormation`, `toFleetFormationSlots`, `FORMATION_SPACING` 1.5, `FORMATION_GAP` 100, `DEFAULT_FORMATION_RADIUS` 500 |
-| `fleets/following.ts` | follow plans (`toFleetFollowPlans`), `FOLLOW_TOLERANCE*` |
-| `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin |
+| `fleets/selection.ts` | selecting ships by ids or fleet / wing / squad (prop mod switches, fleet orders) |
+| `fleets/formation.ts` | the at-rest formation: `layoutFleetFormation`, `toFleetFormationSlots`, `toFleetGroupOffsets`, `FORMATION_SPACING` 1.5, `FORMATION_GAP` 100, `DEFAULT_FORMATION_RADIUS` 500 |
+| `fleets/following.ts` | follow plans (`toFleetFollowPlans`; `toFleetGroupFollowPlans` for a group apart), `FOLLOW_TOLERANCE*` |
+| `fleets/orders.ts` | the `order_fleet` request, who may give it, the group's leader, the document ops, `toPilotDelays` (sub-doc `orders`) |
+| `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
+| `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
 | `apps/viewer/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
 | `apps/viewer/src/lib/destiny.ts` | `Steer`, `Slot`, `Settle`, `AimAlong`, `Follow` / `Unfollow` / `FollowHold` |
 | spec helpers | `fleets/fleets.spec-helper.ts` (`TFI`, `GUARDIAN` DNA, `TFI_FLEET_SCENE`) |
 
 ## The model
 
-`fleets: [{ id, name?, commander, wings: [{ id, name?, commander?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? } }] }] }]`
+`fleets: [{ id, name?, commander, wings: [{ id, name?, commander?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? } }] }] }]`
 
 - `role` is required: `dps`, `logi`, `tackle`, `ewar`, `boost`, `support` (case-insensitive). `wings` / `squads` /
   `members` default `[]`; empty is valid. `fleets: []` = no fleets.
@@ -33,6 +36,8 @@
   The FC sits in one of its fleet's squads or none; a wing commander in one of its own wing's squads or none and
   commands one wing; a squad commander is one of its members. One ship may combine commands.
 - **`team` is independent of fleets** (team = side/hostility; fleet = who commands it and where it flies).
+- `home` is written only by `order_fleet` break-off: the anchor `regroup` restores. **It is not an anchor**:
+  `toFleetAnchors` ignores it; it is validated and repaired like one (sub-doc `orders`).
 
 Example: three TFIs keep 1 km on the FC; the logi squad anchors on its own lead, guardian-1, which holds 30 km off the
 FC while guardian-2 anchors up on it at 1 km.
@@ -109,8 +114,10 @@ one). Slots go in wing, squad and member order.
   a direction from its anchor in the fleet's heading frame and a range. **Slots are laid out at the FC's *document*
   placement with the ships' ball radii**, so a fleet added in formation gets its own positions back and nothing moves.
   A chained member (logi on its lead) slots on its own anchor, in the FC's frame.
-- **The frame** is the FC's heading: Destiny's legacy heading, without its banking roll.
-- **Steering is per-tick `GotoPoint`** in `DestinyWorld.Tick`, right after the pending orders on a due tick (so it
+- **The frame** is the FC's heading: Destiny's legacy heading, without its banking roll. A wing or squad flying apart
+  (`order_fleet`) is framed by its leader instead.
+- **Steering is per-tick `GotoPoint`** in `DestinyWorld.Tick`, after the pending orders and the formation warps on a
+  due tick (so it
   relies on one evolve per `Tick` call: the clock's 1 s cap). Each member's goto point is re-aimed at its slot on both
   parks, led along its anchor's velocity by Destiny's goto lag, at the member's own max velocity. No shared scripted
   speed: faster ships close up, equal ones sit ~two ticks back, slower ones trail.
@@ -124,10 +131,12 @@ one). Slots go in wing, squad and member order.
   velocity.
 - **States**: `in-formation` while slot error ≤ 200 m + 5 % of slot range + 2.5 s of the anchor's speed
   (`FOLLOW_TOLERANCE`, `_FRACTION`, `_SECONDS`), else `catching-up`; `holding` while its anchor or the FC is in proper
-  warp; `detached` after an explicit order; `waiting` until the fleet's radii settle.
+  warp; `warping` in a formation warp until its group has landed; `leading` for the leader of a wing or squad apart;
+  `detached` after an explicit order; `waiting` until the fleet's radii settle.
 - **Detach / rejoin**: any `order_ship` movement order on a member detaches it. It rejoins on `{ "type": "rejoin" }`,
-  a fleet edit that regroups it, or a load/open; a placement edit leaves it detached. **The FC is never detached:
-  ordering it moves its fleet.**
+  a fleet edit that regroups it, `order_fleet` regroup or fleet warp, or a load/open; a placement edit leaves it
+  detached. **The FC is never detached: ordering it moves its fleet.** Nor is a group-apart leader: an order keeps it
+  leading, and `rejoin` on it is refused (regroup the group).
 - **Edits re-plan at once** (`set_anchor`, `update_squad`, `move_to_squad`, `update_fleet`, squad/wing edits,
   `remove_ship`, fallback). Ships whose following ends stop with an `orderNote`; `changes.stopped` counts them.
   `FleetFollowing.Reconcile` re-anchors formation followers of a removed ship in the same edit.
@@ -141,15 +150,16 @@ one). Slots go in wing, squad and member order.
 ## `get_state`
 
 Per member: `fleet`, `wing`, `squad`, `role`, `commands`, `anchor` (`{ ship, range }`; `null` for the FC), and
-`following` (`state`, `anchor`, `range`, `slot` `{ range, direction }`, `distance`, `slotError`); its `order` is
-`keep-at-range` on the anchor, mode `goto` while steering, `stop` once settled. Per fleet: the tree with `ships` and
-resolved anchors, `formation` (`ready`, `heading`, counts `following` / `inFormation` / `catchingUp` / `holding` /
-`detached` / `waiting`) and `propMods` counts. `changes.regrouped` counts membership changes.
+`following` (`state`, `anchor`, `range`, `slot` `{ range, direction }`, `distance`, `slotError`, `warping`, `group`);
+its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop` once settled. Per fleet: the tree with
+`ships` and resolved anchors, `formation` (`ready`, `heading`, counts `following` / `inFormation` / `catchingUp` /
+`holding` / `warping` / `leading` / `detached` / `waiting`), `propMods` counts, and `command` on the fleet and every
+wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
 
 ## Limits
 
 No collisions (ships pass through while re-forming). Slots are rigid: on an FC turn a far squad (logi at 30 km) swings
-across the fleet and takes minutes to return. No fleet-level orders or fleet warp yet.
+across the fleet and takes minutes to return. No fleet speed: an FC move does not throttle to its slowest member.
 
 ## Real-GPU evidence (TFIs fleet, 2026-10-22)
 

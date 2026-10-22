@@ -40,7 +40,13 @@
  *   Steer skips it. Destiny's exit makes the ball massive, so a landed ship is set non-massive again on both parks.
  *   In warp the drawn ship runs up to a tick ahead of the master; both reach the exit point at the tick OnWarp
  *   reports. A fleet member holds (stopped) while its anchor or FC is in proper warp, as Destiny's StopAllFollowers
- *   does, and flies to its slot after the landing.
+ *   does, and flies to its slot after the landing; a fleet member warping in formation keeps its follow.
+ * - Formation warps (WarpInFormation, order_fleet's fleet warp). A fleet member warps to its slot: its offset from its
+ *   leader's landing in the warp's heading frame (WarpFrame: the leader faces its landing in warp and after it), or
+ *   from the leader itself when the leader has no warp in force (a regroup). The slot point is resolved at the tick
+ *   boundary right after the plain pending orders, so the leader's warp has applied, and flown as an ordinary warp to a
+ *   point (ApplyOrder); Steer then leaves the ship alone until it, its leader, its anchor and its frame ship have all
+ *   finished their warps, and it follows again from where it landed.
  * - Prop mods. A running module flies the physics' `propMod` mass and max velocity on both parks (SetBallMass and
  *   SetMaxSpeed, the EVE server's own path); Destiny then accelerates or slows the ball at its agility. SwitchPropMod
  *   follows EVE's module rules: switching on applies at the next tick boundary, before the pending orders and Steer;
@@ -55,7 +61,7 @@ import { APPROACH_RANGE, isTargetShipOrder, MIN_WARP_DISTANCE, shipOrderTarget, 
 import { TICKS_PER_MS } from './clock';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
-import { FleetFrame, FormationGoto, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, type FormationGoto as FormationGotoResult } from './steering';
+import { FleetFrame, FormationGoto, FramePoint, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, WarpFrame, type FormationGoto as FormationGotoResult } from './steering';
 import { DEFAULT_WARP_SPEED, LandingPoint, WarpExitTime, WarpFactor, WarpLength, WarpPhaseAt, type WarpProfile } from './warp';
 
 /**
@@ -149,6 +155,10 @@ export interface ShipPropModReport {
    */
   readonly stopsIn?: number;
   /**
+   * A switch the pilot has yet to make (switch_prop_mods with a delay): on or off, in about respondsIn seconds.
+   */
+  readonly queued?: { readonly on: boolean; readonly respondsIn: number };
+  /**
    * Why it is off, e.g. `off: entered warp`.
    */
   readonly note?: string;
@@ -176,6 +186,10 @@ export type PropModListener = (event: PropModEvent) => void;
  */
 export interface PropModSwitchResult {
   readonly state: PropModState;
+  /**
+   * Seconds until a delayed switch is made (the pilot's response); the state is the one before it.
+   */
+  readonly respondsIn?: number;
   readonly at?: number;
   readonly stopsAt?: number;
   readonly stopsIn?: number;
@@ -331,8 +345,43 @@ export interface ShipMotion {
    * While a warp order is in force (from apply until the next order, a placement or a follow taking over).
    */
   readonly warp?: ShipWarp;
+  /**
+   * Seconds until a delayed pending order applies (a pilot responding to a fleet order).
+   */
+  readonly respondsIn?: number;
+  /**
+   * While it warps in formation (WarpInFormation): the ship it warps with, and whether the warp still waits for the
+   * tick boundary that resolves its slot.
+   */
+  readonly formationWarp?: { readonly leader: string; readonly pending: boolean; readonly respondsIn?: number };
   readonly physics: ShipPhysics;
   readonly propMod: ShipPropModReport;
+}
+
+/**
+ * A warp in formation (WarpInFormation): the ship warps to its slot, `offset` from its leader's landing (the leader's warp
+ * in force), or from the leader itself (no warp in force), in that warp's or the leader's heading frame.
+ */
+export interface FormationWarp {
+  /**
+   * The ship it warps with: a fleet's FC, or the leader of a wing or squad.
+   */
+  readonly leader: string;
+  /**
+   * Metres centre to centre in the frame (x right, y up, z forward): toFleetGroupOffsets from the leader.
+   */
+  readonly offset: SceneVector;
+  /**
+   * Whole ticks the pilot takes to respond (default 0); it also waits for its leader's own order to apply.
+   */
+  readonly delay?: number;
+}
+
+export interface OrderOptions {
+  /**
+   * Whole ticks before the order applies (a pilot's response to a fleet order); default 0, the next boundary.
+   */
+  readonly delay?: number;
 }
 
 /**
@@ -494,6 +543,10 @@ interface ShipEntry {
    * The warping ship (its anchor or FC) a following ship holds for, stopped.
    */
   held: Maybe<string>;
+  /**
+   * Its warp in formation, until its group has landed; `applied` once the boundary resolved and ordered it.
+   */
+  formationWarp: Maybe<Omit<FormationWarp, 'delay'> & { readonly at: number; applied: boolean }>;
   prop: PropModEntry;
 }
 
@@ -508,6 +561,10 @@ interface PropModEntry {
    */
   stopAt: Maybe<number>;
   note: Maybe<string>;
+  /**
+   * A switch the pilot has not made yet (SwitchPropMod with a delay): on or off, at the boundary of master tick `at`.
+   */
+  queued: Maybe<{ readonly on: boolean; readonly at: number }>;
 }
 
 /**
@@ -521,6 +578,11 @@ export class DestinyWorld {
    * Movement orders waiting for the next tick boundary, by ship id; the latest order wins.
    */
   private readonly pending = new Map<string, ShipOrder>();
+  /**
+   * For a pending order given with a delay (a fleet order's pilot response): the master tick at whose boundary it
+   * applies.
+   */
+  private readonly pendingAt = new Map<string, number>();
   private readonly warpListeners = new Set<WarpListener>();
   private readonly propModListeners = new Set<PropModListener>();
   /**
@@ -563,7 +625,21 @@ export class DestinyWorld {
       this.Both((park) => park.AddBall(ballId, physics.mass, physics.radius, physics.maxVelocity, true, false, false, true, false, x, y, z, 0, 0, 0, physics.agility, 1));
       const ball = this.replica.GetBall(ballId);
       if (!(ball instanceof CjsDestinyClientBall)) throw new Error(`the replica park did not create a ClientBall for ${doc.id}`);
-      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null, follow: null, followApplied: false, settled: false, warp: null, held: null, prop: { state: 'off', since: null, stopAt: null, note: null } });
+      this.ships.set(doc.id, {
+        id: doc.id,
+        ballId,
+        curves: { translation: ball, rotation: new BallRotation(ball) },
+        physics,
+        order: STOP_ORDER,
+        note: null,
+        follow: null,
+        followApplied: false,
+        settled: false,
+        warp: null,
+        held: null,
+        formationWarp: null,
+        prop: { state: 'off', since: null, stopAt: null, note: null, queued: null }
+      });
     }
     this.PlaceShip(doc);
   }
@@ -586,6 +662,7 @@ export class DestinyWorld {
     entry.settled = false;
     entry.warp = null;
     entry.held = null;
+    entry.formationWarp = null;
     const rotation = DocumentRotation(doc.rotation);
     const forward = vec3.transformQuat(vec3.create(), [0, 0, 1], rotation);
     const goto = this.Both((park) => {
@@ -665,20 +742,26 @@ export class DestinyWorld {
   }
 
   /**
-   * Queues a movement order for the next tick boundary. It supersedes following: the ship leaves its formation.
+   * Queues a movement order for the next tick boundary, or `delay` ticks later (a pilot's response to a fleet order).
+   * It supersedes following: the ship leaves its formation.
    *
    * @param id - The ship id.
    * @param order - A normalized order.
+   * @param options - Its delay, whole ticks (default 0).
    * @returns False when OrderRefusal refuses it.
    */
-  Order(id: string, order: ShipOrder): boolean {
+  Order(id: string, order: ShipOrder, options: OrderOptions = {}): boolean {
     const entry = this.ships.get(id);
     const valid = entry !== undefined && this.OrderRefusal(id, order) === null;
     if (valid) {
       this.pending.set(id, order);
+      const delay = Math.max(0, Math.round(options.delay ?? 0));
+      if (delay > 0) this.pendingAt.set(id, this.tick + delay);
+      else this.pendingAt.delete(id);
       entry.follow = null;
       entry.settled = false;
       entry.held = null;
+      entry.formationWarp = null;
     }
     return valid;
   }
@@ -735,13 +818,37 @@ export class DestinyWorld {
    * boundary) and stopping becomes active again (the stop is cancelled). Off: activating is cancelled, and active
    * becomes stopping, running until the end of its cycle (rounded up to a tick). Anything else is unchanged.
    *
+   * With a delay (a pilot's response to a fleet command), the switch is made that many ticks later, at a tick boundary
+   * before the activations apply, and checked again then (switching on in warp is noted and dropped). A new switch
+   * replaces a delayed one.
+   *
    * @param id - The ship id.
    * @param on - Switch on, or off.
+   * @param options - Its delay, whole ticks (default 0).
    * @returns The state after the call, or null when PropModRefusal refuses it.
    */
-  SwitchPropMod(id: string, on: boolean): Maybe<PropModSwitchResult> {
+  SwitchPropMod(id: string, on: boolean, options: OrderOptions = {}): Maybe<PropModSwitchResult> {
     const entry = this.ships.get(id);
     if (!entry || this.PropModRefusal(id, on) !== null) return null;
+    const delay = Math.max(0, Math.round(options.delay ?? 0));
+    entry.prop.queued = delay > 0 ? { on, at: this.tick + delay } : null;
+    if (delay > 0) return { state: entry.prop.state, respondsIn: delay };
+    this.Switch(entry, on);
+    const prop = entry.prop;
+    const boundary = this.master.currentTime;
+    let result: PropModSwitchResult = { state: prop.state };
+    if (prop.state === 'activating') result = { state: prop.state, at: boundary };
+    else if (prop.state === 'stopping' && prop.stopAt != null) result = { state: prop.state, stopsAt: prop.stopAt, stopsIn: this.StopsIn(prop.stopAt) };
+    return result;
+  }
+
+  /**
+   * The module rules of a switch (SwitchPropMod), made now.
+   *
+   * @param entry - The ship.
+   * @param on - Switch on, or off.
+   */
+  private Switch(entry: ShipEntry, on: boolean): void {
     const prop = entry.prop;
     const boundary = this.master.currentTime;
     if (on && prop.state === 'off') {
@@ -756,10 +863,6 @@ export class DestinyWorld {
       prop.state = 'stopping';
       prop.stopAt = CycleEnd({ since: prop.since ?? boundary, boundary, cycle: this.CycleTicks(entry) });
     }
-    let result: PropModSwitchResult = { state: prop.state };
-    if (prop.state === 'activating') result = { state: prop.state, at: boundary };
-    else if (prop.state === 'stopping' && prop.stopAt != null) result = { state: prop.state, stopsAt: prop.stopAt, stopsIn: this.StopsIn(prop.stopAt) };
-    return result;
   }
 
   /**
@@ -794,6 +897,8 @@ export class DestinyWorld {
     const entry = this.ships.get(id);
     if (!entry) return;
     const prop = entry.prop;
+    // The document's state overrides a switch the pilot has yet to make.
+    prop.queued = null;
     const running = IsRunning(prop.state);
     if (on && this.InProperWarp(entry)) {
       if (!running) {
@@ -875,9 +980,46 @@ export class DestinyWorld {
       entry.follow = null;
       entry.settled = false;
       entry.held = null;
+      entry.formationWarp = null;
       this.Halt(entry, note);
     }
     return following;
+  }
+
+  /**
+   * Warps a following ship in formation with its leader from the next tick boundary. There, after the plain pending
+   * orders (so the leader's own warp has applied), its slot point is resolved: `offset` from the leader's landing in
+   * WarpFrame(where the leader's warp begins, its landing) while the leader has a warp in force (Destiny's landing once
+   * in warp, else the LandingPoint estimate), else from the leader's position in its heading frame. The ship then warps
+   * there as an ordinary warp to a point (OrderRefusal checked again: a refused one is dropped with a note and the ship
+   * keeps following). Steer leaves it alone until it, its leader, its anchor and its frame ship have all finished their
+   * warps, then it follows again. A re-plan (Follow) keeps it; an explicit order, a placement or Unfollow ends it.
+   *
+   * @param id - The ship id.
+   * @param warp - The leader and the ship's offset from it.
+   * @returns False for an unknown ship, a ship that does not follow, a leader that is the ship itself or has no ship,
+   *   or a ship in proper warp.
+   */
+  WarpInFormation(id: string, warp: FormationWarp): boolean {
+    const entry = this.ships.get(id);
+    const valid = entry !== undefined && entry.follow !== null && warp.leader !== id && this.ships.has(warp.leader) && !this.InProperWarp(entry);
+    if (valid) {
+      entry.formationWarp = { leader: warp.leader, offset: [warp.offset[0], warp.offset[1], warp.offset[2]], at: this.tick + Math.max(0, Math.round(warp.delay ?? 0)), applied: false };
+      entry.held = null;
+      entry.settled = false;
+    }
+    return valid;
+  }
+
+  /**
+   * A ship's warp in formation, until its group has landed.
+   *
+   * @param id - The ship id.
+   * @returns Its leader and offset, or null.
+   */
+  FormationWarpOf(id: string): Maybe<FormationWarp> {
+    const warp = this.ships.get(id)?.formationWarp;
+    return warp ? { leader: warp.leader, offset: warp.offset, ...(warp.at > this.tick ? { delay: warp.at - this.tick } : {}) } : null;
   }
 
   /**
@@ -904,12 +1046,15 @@ export class DestinyWorld {
     const due = time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS);
     if (due) {
       this.ApplyPropMods();
-      const orders = [...this.pending];
-      this.pending.clear();
-      for (const [id, order] of orders) {
+      const boundary = this.master.currentTime;
+      for (const [id, order] of [...this.pending]) {
+        if ((this.pendingAt.get(id) ?? boundary) > boundary) continue;
+        this.pending.delete(id);
+        this.pendingAt.delete(id);
         const entry = this.ships.get(id);
         if (entry) this.ApplyOrder(entry, order);
       }
+      this.ApplyFormationWarps();
       this.Steer();
       this.MarkAligning();
     }
@@ -949,6 +1094,7 @@ export class DestinyWorld {
     const ball = entry ? this.master.GetBall(entry.ballId) : null;
     if (!entry || !ball) return null;
     const pending = this.pending.get(id) ?? (entry.follow && !entry.followApplied ? FollowOrder(entry.follow) : null);
+    const pendingAt = this.pending.has(id) ? this.pendingAt.get(id) : undefined;
     const target = TargetOf(entry.order);
     const targetEntry = target ? this.ships.get(target) : null;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
@@ -961,11 +1107,13 @@ export class DestinyWorld {
       mode: ModeName(ball.mode),
       order: entry.order,
       ...(pending ? { pendingOrder: pending } : {}),
+      ...(pendingAt !== undefined && pendingAt > this.tick ? { respondsIn: pendingAt - this.tick } : {}),
       ...(entry.note ? { orderNote: entry.note } : {}),
       ...(targetBall ? { targetDistance: Round(Math.hypot(ball.x - targetBall.x, ball.y - targetBall.y, ball.z - targetBall.z) - ball.radius - targetBall.radius, 1) } : {}),
       heading: [Round(Wrap(ball.mNewYaw / DEGREES, 0), 10) % 360, Round(Wrap(ball.mNewPitch / DEGREES, -180), 10)],
       ...(slot ? { slotError: Round(slot.error, 1) } : {}),
       ...(warp ? { warp } : {}),
+      ...(entry.formationWarp ? { formationWarp: { leader: entry.formationWarp.leader, pending: !entry.formationWarp.applied, ...(entry.formationWarp.at > this.tick ? { respondsIn: entry.formationWarp.at - this.tick } : {}) } } : {}),
       physics: entry.physics,
       propMod: this.PropModReport(entry)
     };
@@ -979,6 +1127,13 @@ export class DestinyWorld {
     const boundary = this.master.currentTime;
     for (const entry of this.ships.values()) {
       const prop = entry.prop;
+      if (prop.queued && prop.queued.at <= boundary) {
+        const { on } = prop.queued;
+        prop.queued = null;
+        const refusal = this.PropModRefusal(entry.id, on);
+        if (refusal) prop.note = `not switched ${on ? 'on' : 'off'}: ${refusal}`;
+        else this.Switch(entry, on);
+      }
       if (prop.state === 'activating' && this.InProperWarp(entry)) {
         prop.state = 'off';
         prop.note = 'not switched on: in warp';
@@ -1078,6 +1233,7 @@ export class DestinyWorld {
       ...(IsRunning(state) && since != null ? { since } : {}),
       ...(state === 'activating' ? { at: this.master.currentTime } : {}),
       ...(state === 'stopping' && stopAt != null ? { stopsIn: this.StopsIn(stopAt) } : {}),
+      ...(entry.prop.queued ? { queued: { on: entry.prop.queued.on, respondsIn: Math.max(0, entry.prop.queued.at - this.tick) } } : {}),
       ...(note ? { note } : {})
     };
   }
@@ -1091,6 +1247,12 @@ export class DestinyWorld {
     for (const entry of this.ships.values()) {
       const follow = entry.follow;
       if (!follow || this.InProperWarp(entry)) continue;
+      if (entry.formationWarp) {
+        if (this.FormationWarpWaits(entry, follow)) continue;
+        entry.formationWarp = null;
+        // Re-applies FollowOrder below, which clears its warp report.
+        entry.followApplied = false;
+      }
       const missing = this.ships.has(follow.frame) ? `anchor "${follow.anchor}"` : `fleet commander "${follow.frame}"`;
       const slot = this.ships.has(follow.anchor) && this.ships.has(follow.frame) ? this.Slot(entry, follow) : null;
       if (!slot) {
@@ -1134,6 +1296,53 @@ export class DestinyWorld {
         this.Halt(entry, 'stopped: Destiny refused the formation goto');
       }
     }
+  }
+
+  /**
+   * Resolves and orders every formation warp not yet applied (WarpInFormation), after the plain pending orders. All the
+   * math reads the master once, outside Both, as ApplyOrder does for warps.
+   */
+  private ApplyFormationWarps(): void {
+    for (const entry of this.ships.values()) {
+      const formation = entry.formationWarp;
+      // A delayed pilot, or a leader whose own (delayed) order has not applied yet, waits.
+      if (!formation || formation.applied || formation.at > this.master.currentTime || this.pending.has(formation.leader)) continue;
+      const leader = this.ships.get(formation.leader);
+      const leaderBall = leader ? this.master.GetBall(leader.ballId) : null;
+      if (!leader || !leaderBall) {
+        entry.note = `dropped: its formation warp's leader "${formation.leader}" was removed`;
+        entry.formationWarp = null;
+        continue;
+      }
+      const at: SceneVector = [leaderBall.x, leaderBall.y, leaderBall.z];
+      const warp = leader.warp && leader.warp.landed == null ? leader.warp : null;
+      const landing = warp ? (warp.start?.landing ?? LandingPoint(warp.destination, warp.range, at)) : at;
+      const frame = warp ? WarpFrame(warp.start?.from ?? at, landing) : FleetFrame(leaderBall.mNewYaw, leaderBall.mNewPitch);
+      const order: ShipOrder = { type: 'warp', point: RoundVector(FramePoint({ origin: landing, frame, offset: formation.offset }), 100), range: 0 };
+      const refusal = this.OrderRefusal(entry.id, order);
+      if (refusal) {
+        entry.note = `dropped: its formation warp (${refusal})`;
+        entry.formationWarp = null;
+      } else {
+        // Applied even when Destiny refuses it (ApplyOrder halts it): the wait rule then lets it follow once the group lands.
+        this.ApplyOrder(entry, order);
+        formation.applied = true;
+      }
+    }
+  }
+
+  /**
+   * Whether a formation-warp ship still waits for its group: its warp not yet applied, or it, its leader, its anchor or
+   * its frame ship not yet done with a warp.
+   *
+   * @param entry - The ship, with a formation warp.
+   * @param follow - What it follows.
+   * @returns True while Steer should leave it alone.
+   */
+  private FormationWarpWaits(entry: ShipEntry, follow: ShipFollow): boolean {
+    const formation = entry.formationWarp;
+    if (!formation?.applied || WarpUnfinished(entry)) return Boolean(formation);
+    return [formation.leader, follow.anchor, follow.frame].some((id) => WarpUnfinished(this.ships.get(id)));
   }
 
   /**
@@ -1523,6 +1732,16 @@ function IsWarpFactor(warpSpeed: number): boolean {
 
 function Distance(a: ArrayLike<number>, b: ArrayLike<number>): number {
   return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+/**
+ * Whether a ship is still busy with a warp: a formation warp not yet resolved, or a warp in force not yet landed.
+ *
+ * @param entry - The ship, if any.
+ * @returns False for no ship.
+ */
+function WarpUnfinished(entry: Maybe<ShipEntry>): boolean {
+  return entry ? Boolean(entry.formationWarp && !entry.formationWarp.applied) || (entry.warp != null && entry.warp.landed == null) : false;
 }
 
 function RoundVector(vector: ArrayLike<number>, scale: number): SceneVector {

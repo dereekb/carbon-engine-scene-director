@@ -206,3 +206,43 @@ function fits(position: SceneVector, radius: number, placed: ReadonlyMap<string,
   }
   return true;
 }
+
+export interface FleetGroupOffsetsInput extends FleetFormationInput {
+  /**
+   * The ship the offsets are from.
+   */
+  readonly leader: string;
+  /**
+   * The ships to give offsets for (the leader's is [0, 0, 0]).
+   */
+  readonly ships: readonly string[];
+}
+
+/**
+ * Each ship's offset from the leader in the at-rest formation (layoutFleetFormation, same input), in the fleet's heading
+ * frame (x right, y up, z forward), metres centre to centre: a ship flown to `leader + rotate(frame, offset)` sits where
+ * the layout put it relative to the leader. A fleet warp lands each ship at its offset from the FC's landing; a wing or
+ * squad flies apart on its leader at these offsets.
+ *
+ * @param input - The layout's input, the leader and the ships.
+ * @returns Each ship's offset, keyed by ship id, in `ships` order.
+ * @throws {Error} As layoutFleetFormation does, or when the leader or a ship holds no position in the fleet.
+ */
+export function toFleetGroupOffsets(input: FleetGroupOffsetsInput): Map<string, SceneVector> {
+  const { leader, ships, heading } = input;
+  const layout = layoutFleetFormation(input);
+  const from = layout.get(leader);
+  if (!from) throw new Error(`fleet "${input.fleet.id}": the leader "${leader}" holds no position in the fleet`);
+  const yaw = (heading * Math.PI) / 180;
+  const right: SceneVector = [Math.cos(yaw), 0, -Math.sin(yaw)];
+  const forward: SceneVector = [Math.sin(yaw), 0, Math.cos(yaw)];
+  const offsets = new Map<string, SceneVector>();
+  for (const ship of ships) {
+    const at = layout.get(ship);
+    if (!at) throw new Error(`fleet "${input.fleet.id}": ship "${ship}" holds no position in the fleet`);
+    const delta = [at[0] - from[0], at[1] - from[1], at[2] - from[2]];
+    // `|| 0` turns -0 into 0, so a leader's own offset reads [0, 0, 0].
+    offsets.set(ship, [delta[0] * right[0] + delta[2] * right[2] || 0, delta[1] || 0, delta[0] * forward[0] + delta[2] * forward[2] || 0]);
+  }
+  return offsets;
+}

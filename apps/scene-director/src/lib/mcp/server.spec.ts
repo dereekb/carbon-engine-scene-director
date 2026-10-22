@@ -23,6 +23,10 @@ describe('mcp server', () => {
       const { tools } = await client.listTools();
       expect(tools.map((tool) => tool.name).sort()).toEqual(TOOLS.map((tool) => tool.name).sort());
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/move_to_squad/u);
+      const orderFleet = tools.find((tool) => tool.name === 'order_fleet')?.description;
+      expect(orderFleet).toMatch(/break-off/u);
+      expect(orderFleet).toMatch(/regroup/u);
+      expect(orderFleet).toMatch(/by is the ship giving the order/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/stage_engagement/u);

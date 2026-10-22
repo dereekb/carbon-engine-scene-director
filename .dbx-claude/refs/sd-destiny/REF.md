@@ -49,8 +49,13 @@
 - **Add, remove, place and physics apply at once** (they teleport).
 - **Movement orders wait for the next 1 s tick boundary**, as EVE applies commands before a tick, so the interval a
   ClientBall is interpolating is never disturbed. The drawn ship trails the reported state by up to a tick.
-- At a due boundary the order is: prop mod numbers (`ApplyPropModNumbers`) → pending orders (`ApplyOrder`) → `Steer`
-  (following) → evolve.
+- At a due boundary the order is: prop mods (`ApplyPropMods`: delayed switches due now, then the numbers) → pending
+  orders (`ApplyOrder`; a delayed one waits for its boundary) → formation warps (`ApplyFormationWarps`, sd-fleets
+  sub-doc `orders`) → `Steer` (following) → evolve.
+- **Pilot delay**: `Order(id, order, { delay })`, `WarpInFormation(…, { delay })` and `SwitchPropMod(id, on, { delay })`
+  take whole ticks (a fleet order's per-pilot response, `toPilotDelays`). A delayed order stays `pendingOrder` with
+  `respondsIn` until its boundary; a new order replaces it. A formation warp also waits for its leader's own pending
+  order to apply.
 
 ## Orders (`order_ship`)
 

@@ -30,7 +30,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
 - `sd-runtime`: the runtime import point, `.d.ts` typing, esbuild guards, runtime API drift, the client's dressing
 - `sd-scene-document`: `cjs-scene/1`, patch ops, the diff and what the page does with it, camera, saved scenes
 - `sd-destiny`: the two Destiny parks, the clock and loop, orders, placement, physics (docs: `warp`, `boosters`)
-- `sd-fleets`: fleets, anchors, the formation, Follow the FC (doc: `compositions`, the `cjs-fleet/1` format and TFIs)
+- `sd-fleets`: fleets, anchors, the formation, Follow the FC (docs: `orders`, `order_fleet` and fleet warp;
+  `compositions`, the `cjs-fleet/1` format and TFIs)
 - `sd-staging`: `add_ships` and `stage_engagement`
 - `sd-ship-stats`: stats math, skills, the pilot, prop mods, engine audio
 - `sd-locations`: the document's location, tools-core map quirks, name resolution (doc: `dressing`)

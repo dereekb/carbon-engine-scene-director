@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FleetFrame, FormationGoto, HeadingForward, LeadDistance, RotateVector } from './steering';
+import { FleetFrame, FormationGoto, FramePoint, HeadingForward, LeadDistance, RotateVector, WarpFrame } from './steering';
 
 function ExpectVector(actual: ArrayLike<number>, expected: ArrayLike<number>, digits = 6): void {
   for (let axis = 0; axis < 3; axis++) expect(actual[axis]).toBeCloseTo(expected[axis], digits);
@@ -67,5 +67,31 @@ describe('FormationGoto', () => {
     const result = FormationGoto({ anchor: { position: [0, 0, 0], velocity: [0, 0, 0], radius: 0 }, member: { ...member, radius: 0 }, frame: FleetFrame(0, 0), direction: [0, 0, -1], slotRange: 0, tickSeconds: 1 });
     for (const value of [...result.point, ...result.goto, ...result.forward, result.error, result.anchorSpeed, result.memberSpeed]) expect(Number.isFinite(value)).toBe(true);
     ExpectVector(result.goto, [0, 0, 0]);
+  });
+});
+
+describe('WarpFrame and FramePoint', () => {
+  it('faces the landing: +Z, +X, 45 degrees up, and yaw 0 for a zero vector', () => {
+    ExpectVector(RotateVector(WarpFrame([0, 0, 0], [0, 0, 500000]), [0, 0, 1]), [0, 0, 1]);
+    ExpectVector(RotateVector(WarpFrame([100, 0, 0], [400100, 0, 0]), [0, 0, 1]), [1, 0, 0]);
+    ExpectVector(RotateVector(WarpFrame([0, 0, 0], [0, 300000, 300000]), [0, 0, 1]), [0, Math.SQRT1_2, Math.SQRT1_2]);
+    ExpectVector(RotateVector(WarpFrame([0, 0, 0], [0, 300000, 300000]), [0, 1, 0]), [0, Math.SQRT1_2, -Math.SQRT1_2]);
+    ExpectVector(RotateVector(WarpFrame([5, 5, 5], [5, 5, 5]), [0, 0, 1]), [0, 0, 1]);
+  });
+
+  it('agrees with FleetFrame at the legacy heading of the warp', () => {
+    const from = [1000, -2000, 3000];
+    const to = [-250000, 90000, 410000];
+    const [x, y, z] = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    const expected = FleetFrame(Math.atan2(x, z), -Math.asin(y / Math.hypot(x, y, z)));
+    const frame = WarpFrame(from, to);
+    for (let index = 0; index < 4; index++) expect(frame[index]).toBeCloseTo(expected[index], 12);
+    ExpectVector(RotateVector(frame, [0, 0, 1]), HeadingForward(Math.atan2(x, z), -Math.asin(y / Math.hypot(x, y, z))));
+  });
+
+  it('places an offset in the frame from the origin', () => {
+    // FleetFrame is a float32 quaternion: about 1e-7 of the offset.
+    ExpectVector(FramePoint({ origin: [10, 20, 30], frame: FleetFrame(Math.PI / 2, 0), offset: [0, 0, 1000] }), [1010, 20, 30], 3);
+    ExpectVector(FramePoint({ origin: [10, 20, 30], frame: FleetFrame(Math.PI / 2, 0), offset: [1000, 5, 0] }), [10, 25, -970], 3);
   });
 });

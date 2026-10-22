@@ -237,3 +237,27 @@ describe('the fleet diff', () => {
     expect(diff.regrouped).toEqual([]);
   });
 });
+
+describe("a squad's home under fleet edits", () => {
+  const withHome = (home: unknown): SceneDocument => edit([{ op: 'update_squad', fleet: 'tfi', squad: 'logi', set: { home } }]).scene;
+
+  it('re-points a home whose ship leaves, down the chain, with a regroups-onto warning', () => {
+    const { scene, warnings } = edit([{ op: 'remove_ship', id: 'guardian-2' }], withHome({ ship: 'guardian-2', range: 30000 }));
+    expect(squadOf(scene, 'logi')?.home).toEqual({ ship: 'guardian-1', range: 30000 });
+    expect(warnings).toContain('fleet "tfi": squad "logi" now regroups onto "guardian-1" (its home anchor "guardian-2" left the fleet)');
+
+    const fc = edit([{ op: 'remove_ship', id: 'guardian-1' }], withHome({ ship: 'guardian-1', range: 30000 }));
+    expect(squadOf(fc.scene, 'logi')?.home).toEqual({ range: 30000 });
+    expect(fc.warnings).toContain('fleet "tfi": squad "logi" now regroups onto the fleet commander (its home anchor "guardian-1" left the fleet)');
+
+    const empty = edit([{ op: 'remove_ship', id: 'guardian-1' }], withHome({ ship: 'guardian-1' }));
+    expect(squadOf(empty.scene, 'logi')?.home).toEqual({});
+  });
+
+  it('writes and deletes a home through update_squad', () => {
+    expect(squadOf(withHome({ range: 1000 }), 'logi')?.home).toEqual({ range: 1000 });
+    expect(squadOf(withHome({}), 'logi')?.home).toEqual({});
+    const cleared = edit([{ op: 'update_squad', fleet: 'tfi', squad: 'logi', set: { home: null } }], withHome({ range: 1000 })).scene;
+    expect('home' in (squadOf(cleared, 'logi') ?? {})).toBe(false);
+  });
+});

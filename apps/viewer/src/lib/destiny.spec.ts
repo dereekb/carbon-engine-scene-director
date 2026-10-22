@@ -7,6 +7,7 @@ import { AttachShipCurves, CycleEnd, DEFAULT_SHIP_PHYSICS, DestinyWorld, Documen
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
 import { CjsDestinyBall, CjsDestinyClientBall, quat, vec3, type Quat, type Vec3 } from './runtime-sim';
+import { FleetFrame, FramePoint, WarpFrame } from './steering';
 import { WarpExitTime } from './warp';
 
 const FRAME_TICKS = Math.round(TICKS_PER_SECOND / 60);
@@ -1150,6 +1151,29 @@ describe('DestinyWorld prop mods', () => {
     return ball;
   }
 
+  it('makes a delayed switch that many ticks late, and a new switch or the document state replaces it', () => {
+    const { harness, world, events } = Cruising();
+    const boundary = world.tick;
+    expect(world.SwitchPropMod('a', true, { delay: 3 })).toEqual({ state: 'off', respondsIn: 3 });
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'off', queued: { on: true, respondsIn: 3 } });
+    RunTicks(harness, 3);
+    expect(events).toEqual([]);
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'off', queued: { on: true, respondsIn: 0 } });
+    RunTicks(harness, 1);
+    expect(events).toEqual([{ kind: 'on', id: 'a', tick: boundary + 3, cause: 'switch' }]);
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'active', since: boundary + 3 });
+    expect(RequireMotion(world, 'a').propMod.queued).toBeUndefined();
+    expect(Ball(world, 'replica').maxVelocity).toBe(MWD_SPEED);
+
+    world.SwitchPropMod('a', false, { delay: 5 });
+    expect(world.SwitchPropMod('a', false)).toMatchObject({ state: 'stopping' });
+    expect(RequireMotion(world, 'a').propMod.queued).toBeUndefined();
+    world.SwitchPropMod('a', true, { delay: 2 });
+    world.SetPropModActive('a', false);
+    expect(RequireMotion(world, 'a').propMod.queued).toBeUndefined();
+    ExpectLockstep(world, 1);
+  });
+
   it('switches on at the next tick boundary: both parks fly the MWD numbers and the ship speeds up', () => {
     const { harness, world, events } = Cruising();
     expect(RequireMotion(world, 'a').speed).toBeGreaterThan(BASE_SPEED * 0.95);
@@ -1392,5 +1416,225 @@ describe('DestinyWorld prop mods', () => {
       expect(motion.speed, id).toBeLessThanOrEqual(BASE_SPEED + 0.1);
       expect(motion.slotError, id).toBeGreaterThan(5000);
     }
+  });
+});
+
+describe('DestinyWorld formation warp', () => {
+  const rifter = Fly(RIFTER);
+  const guardian = Fly(GUARDIAN);
+  const tfi = Fly(TFI);
+  const AWAY: SceneVector = [300_000, 0, 300_000];
+  const MEMBERS = [
+    { id: 'm0', physics: rifter, direction: [0, 0, -1] as SceneVector },
+    { id: 'm1', physics: guardian, direction: [0.6, 0, -0.8] as SceneVector }
+  ];
+
+  interface Group {
+    readonly harness: Harness;
+    readonly world: DestinyWorld;
+    readonly offsets: Map<string, SceneVector>;
+  }
+
+  function FollowOf(direction: SceneVector): ShipFollow {
+    return { anchor: 'fc', range: 1000, frame: 'fc', direction, slotRange: 1000, speed: 1 };
+  }
+
+  /**
+   * The FC (a TFI) at the origin facing +Z, a Rifter and a Guardian following it in their 1 km slots, three ticks on.
+   */
+  function MakeGroup(): Group {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('fc', [0, 0, 0]), tfi);
+    const offsets = new Map<string, SceneVector>();
+    for (const { id, physics, direction } of MEMBERS) {
+      const reach = 1000 + tfi.radius + physics.radius;
+      const offset: SceneVector = [direction[0] * reach, direction[1] * reach, direction[2] * reach];
+      world.AddShip(Ship(id, offset), physics);
+      expect(world.Follow(id, FollowOf(direction))).toBe(true);
+      offsets.set(id, offset);
+    }
+    RunTicks(harness, 3);
+    return { harness, world, offsets };
+  }
+
+  function Gap(a: ArrayLike<number>, b: ArrayLike<number>): number {
+    return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  }
+
+  function RunUntil(harness: Harness, done: () => boolean, limit: number, onTick?: () => void): void {
+    for (let tick = 0; !done(); tick++) {
+      if (tick >= limit) throw new Error(`not done after ${limit} ticks`);
+      RunTicks(harness, 1, onTick);
+    }
+  }
+
+  function Landed(world: DestinyWorld, id: string): boolean {
+    return RequireMotion(world, id).warp?.phase === 'landed';
+  }
+
+  function WarpTogether(group: Group, point: SceneVector = AWAY): void {
+    expect(group.world.Order('fc', { type: 'warp', point, range: 0 })).toBe(true);
+    for (const [id, offset] of group.offsets) expect(group.world.WarpInFormation(id, { leader: 'fc', offset })).toBe(true);
+  }
+
+  it("warps members to their slots around the leader's landing at their own warp speeds, and they follow once the group has landed", () => {
+    const group = MakeGroup();
+    const { harness, world, offsets } = group;
+    const ids = ['fc', ...offsets.keys()];
+    WarpTogether(group);
+    expect(RequireMotion(world, 'm0').formationWarp).toEqual({ leader: 'fc', pending: true });
+    RunTicks(harness, 1);
+    for (const id of ids) expect(RequireMotion(world, id).mode, id).toBe('warp');
+    ExpectLockstep(world, 3);
+    expect(ids.map((id) => RequireMotion(world, id).warp?.warpSpeed)).toEqual([3, 5, 4]);
+    expect(RequireMotion(world, 'm0').formationWarp).toEqual({ leader: 'fc', pending: false });
+    const frame = WarpFrame([0, 0, 0], AWAY);
+    const slots = new Map([...offsets].map(([id, offset]) => [id, FramePoint({ origin: AWAY, frame, offset })]));
+    for (const [id, slot] of slots) expect(Gap(RequireMotion(world, id).warp!.landing, slot), id).toBeLessThanOrEqual(1);
+
+    let rifterLanding: Maybe<SceneVector> = null;
+    let heldTicks = 0;
+    RunUntil(
+      harness,
+      () => ids.every((id) => Landed(world, id)),
+      120,
+      () => {
+        ExpectLockstep(world, 3);
+        const m0 = RequireMotion(world, 'm0');
+        if (!rifterLanding && m0.warp?.phase === 'landed') rifterLanding = m0.position;
+        if (rifterLanding && !Landed(world, 'fc')) {
+          heldTicks++;
+          expect(m0.mode).toBe('stop');
+          expect(m0.formationWarp).toEqual({ leader: 'fc', pending: false });
+          expect(Gap(m0.position, rifterLanding)).toBeLessThan(1000);
+        }
+      }
+    );
+    expect(heldTicks).toBeGreaterThan(3);
+    for (const [id, slot] of slots) expect(Gap(RequireMotion(world, id).warp!.landing, slot), id).toBeLessThanOrEqual(1);
+
+    RunTicks(harness, 2);
+    for (const id of offsets.keys()) {
+      const motion = RequireMotion(world, id);
+      expect(motion.order, id).toEqual({ type: 'keep-at-range', target: 'fc', range: 1000, speed: 1 });
+      expect(motion.warp).toBeUndefined();
+      expect(motion.formationWarp).toBeUndefined();
+    }
+    RunUntil(
+      harness,
+      () => [...offsets.keys()].every((id) => (RequireMotion(world, id).slotError ?? Infinity) <= toFollowTolerance({ slotRange: 1000, anchorSpeed: RequireMotion(world, 'fc').speed })),
+      30,
+      () => ExpectLockstep(world, 3)
+    );
+    for (let ball = FIRST_SHIP_BALL_ID; ball < FIRST_SHIP_BALL_ID + 3; ball++) {
+      expect(world.master.GetBall(ball)?.isMassive).toBe(false);
+      expect(world.replica.GetBall(ball)?.isMassive).toBe(false);
+    }
+  });
+
+  it('drops a formation warp whose slot is under 150 km away or whose leader does not warp, and the ship keeps following', () => {
+    const near = MakeGroup();
+    expect(near.world.WarpInFormation('m0', { leader: 'fc', offset: near.offsets.get('m0')! })).toBe(true);
+    RunTicks(near.harness, 1);
+    const dropped = RequireMotion(near.world, 'm0');
+    expect(dropped.orderNote).toMatch(/^dropped: its formation warp \(ship "m0" would land 0 km away; EVE warps only 150 km or more/u);
+    expect(dropped.formationWarp).toBeUndefined();
+    expect(dropped.mode).not.toBe('warp');
+    expect(near.world.Following('m0')).not.toBeNull();
+
+    const refused = MakeGroup();
+    refused.world.AddShip(Ship('t', [0, 0, 500_000]), tfi);
+    expect(refused.world.Order('fc', { type: 'warp', target: 't', range: 0 })).toBe(true);
+    for (const [id, offset] of refused.offsets) expect(refused.world.WarpInFormation(id, { leader: 'fc', offset })).toBe(true);
+    refused.world.RemoveShip('t');
+    RunTicks(refused.harness, 1);
+    expect(RequireMotion(refused.world, 'fc').orderNote).toBe('stopped: target "t" was removed');
+    for (const id of refused.offsets.keys()) {
+      const motion = RequireMotion(refused.world, id);
+      expect(motion.orderNote, id).toMatch(/^dropped: its formation warp/u);
+      expect(motion.mode, id).not.toBe('warp');
+      expect(refused.world.Following(id)).not.toBeNull();
+    }
+    ExpectLockstep(refused.world, 4);
+  });
+
+  it('keeps a formation warp through a re-plan and ends it on an explicit order or a placement', () => {
+    const group = MakeGroup();
+    const { harness, world } = group;
+    WarpTogether(group);
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'm0').warp?.phase).toBe('aligning');
+    expect(world.Follow('m1', FollowOf(MEMBERS[1].direction))).toBe(true);
+    expect(world.Order('m0', { type: 'stop' })).toBe(true);
+    expect(world.FormationWarpOf('m0')).toBeNull();
+    expect(world.Following('m0')).toBeNull();
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'm0')).toMatchObject({ mode: 'stop', order: { type: 'stop' } });
+    expect(RequireMotion(world, 'm1')).toMatchObject({ mode: 'warp', formationWarp: { leader: 'fc', pending: false } });
+
+    world.PlaceShip(Ship('m1', [5000, 0, 0]));
+    expect(world.FormationWarpOf('m1')).toBeNull();
+    RunTicks(harness, 2);
+    expect(RequireMotion(world, 'm1')).toMatchObject({ mode: 'goto', order: { type: 'keep-at-range', target: 'fc' } });
+    expect(RequireMotion(world, 'm1').warp).toBeUndefined();
+    ExpectLockstep(world, 3);
+  });
+
+  it("warps to its slot in its leader's heading frame when the leader is not warping", () => {
+    const { harness, world, offsets } = MakeGroup();
+    const offset = offsets.get('m0')!;
+    world.PlaceShip(Ship('m0', [0, 0, -300_000]));
+    expect(world.WarpInFormation('m0', { leader: 'fc', offset })).toBe(true);
+    RunTicks(harness, 1);
+    const slot = FramePoint({ origin: RequireMotion(world, 'fc').position, frame: FleetFrame(0, 0), offset });
+    expect(RequireMotion(world, 'm0').mode).toBe('warp');
+    expect(Gap(RequireMotion(world, 'm0').warp!.landing, slot)).toBeLessThanOrEqual(1);
+    RunUntil(harness, () => Landed(world, 'm0'), 60);
+    const settled = (): boolean => {
+      const motion = RequireMotion(world, 'm0');
+      return motion.order.type === 'keep-at-range' && motion.mode === 'stop' && (motion.slotError ?? Infinity) <= toFollowTolerance({ slotRange: 1000, anchorSpeed: 0 });
+    };
+    RunUntil(harness, settled, 60);
+    expect(RequireMotion(world, 'm0').warp).toBeUndefined();
+    ExpectLockstep(world, 3);
+  });
+
+  it("applies a delayed order that many ticks late, and a delayed formation warp after its own delay and its leader's order", () => {
+    const { harness, world, offsets } = MakeGroup();
+    expect(world.Order('fc', { type: 'warp', point: AWAY, range: 0 }, { delay: 3 })).toBe(true);
+    expect(world.WarpInFormation('m0', { leader: 'fc', offset: offsets.get('m0')!, delay: 1 })).toBe(true);
+    expect(world.WarpInFormation('m1', { leader: 'fc', offset: offsets.get('m1')!, delay: 5 })).toBe(true);
+    expect(world.FormationWarpOf('m1')?.delay).toBe(5);
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'fc')).toMatchObject({ mode: 'stop', respondsIn: 2, pendingOrder: { type: 'warp' } });
+    expect(RequireMotion(world, 'm0').formationWarp).toEqual({ leader: 'fc', pending: true });
+    RunTicks(harness, 3);
+    expect(RequireMotion(world, 'fc').mode).toBe('warp');
+    expect(RequireMotion(world, 'fc').respondsIn).toBeUndefined();
+    expect(RequireMotion(world, 'm0')).toMatchObject({ mode: 'warp', formationWarp: { leader: 'fc', pending: false } });
+    expect(RequireMotion(world, 'm1')).toMatchObject({ formationWarp: { leader: 'fc', pending: true, respondsIn: 1 } });
+    RunTicks(harness, 2);
+    expect(RequireMotion(world, 'm1')).toMatchObject({ mode: 'warp', formationWarp: { pending: false } });
+    RunUntil(
+      harness,
+      () => ['fc', 'm0', 'm1'].every((id) => Landed(world, id)),
+      120,
+      () => ExpectLockstep(world, 3)
+    );
+    RunTicks(harness, 2);
+    for (const id of offsets.keys()) expect(RequireMotion(world, id).order.type, id).toBe('keep-at-range');
+  });
+
+  it('refuses WarpInFormation for a ship that does not follow, a self or unknown leader, or a ship in warp', () => {
+    const group = MakeGroup();
+    const { harness, world, offsets } = group;
+    expect(world.WarpInFormation('fc', { leader: 'm0', offset: [0, 0, 0] })).toBe(false);
+    expect(world.WarpInFormation('m0', { leader: 'm0', offset: [0, 0, 0] })).toBe(false);
+    expect(world.WarpInFormation('m0', { leader: 'nobody', offset: [0, 0, 0] })).toBe(false);
+    expect(world.WarpInFormation('nobody', { leader: 'fc', offset: [0, 0, 0] })).toBe(false);
+    WarpTogether(group);
+    RunUntil(harness, () => ['warping', 'exiting'].includes(RequireMotion(world, 'm0').warp?.phase ?? ''), 20);
+    expect(world.WarpInFormation('m0', { leader: 'fc', offset: offsets.get('m0')! })).toBe(false);
   });
 });

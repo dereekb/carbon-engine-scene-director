@@ -70,6 +70,11 @@ export interface SceneSquad {
    */
   members: string[];
   anchor?: SceneSquadAnchor;
+  /**
+   * The anchor a broken-off squad regroups to: what its anchor was when order_fleet broke it off (`{}` for the
+   * defaults). Not part of the anchor rules (toFleetAnchors ignores it); order_fleet regroup restores it and clears it.
+   */
+  home?: SceneSquadAnchor;
 }
 
 export interface SceneWing {

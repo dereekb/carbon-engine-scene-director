@@ -6,7 +6,7 @@
 
 import type { SceneVector } from '../scene';
 import type { SceneFleet } from './fleet';
-import { type FleetFormationSlot, toFleetFormationSlots } from './formation';
+import { type FleetFormationSlot, toFleetFormationSlots, toFleetGroupOffsets } from './formation';
 import { type FleetAnchor, toFleetAnchors } from './membership';
 
 /**
@@ -15,7 +15,7 @@ import { type FleetAnchor, toFleetAnchors } from './membership';
 export interface FleetFollowPlan {
   readonly fleet: string;
   /**
-   * The fleet commander: its heading frames every slot.
+   * The ship whose heading frames the slot: the FC, or the leader of a group flying apart.
    */
   readonly commander: string;
   /**
@@ -59,6 +59,53 @@ export function toFleetFollowPlans(input: FleetFollowPlansInput): Map<string, Fl
   for (const [ship, membership] of toFleetAnchors(fleet)) {
     const slot = slots.get(ship);
     if (membership.anchor && slot) plans.set(ship, { fleet: fleet.id, commander: fleet.commander, anchor: membership.anchor, slot });
+  }
+  return plans;
+}
+
+export interface FleetGroupFollowPlansInput extends FleetFollowPlansInput {
+  /**
+   * The ship the group flies on; it flies its own order, so it has no plan.
+   */
+  readonly leader: string;
+  /**
+   * The group's ships (the leader among them).
+   */
+  readonly ships: readonly string[];
+}
+
+/**
+ * The follow plans of a wing or squad flying apart from its fleet on its leader (a live order_fleet move or warp): every
+ * group ship but the leader keeps its toFleetAnchors anchor and fleet slot when that anchor is in the group, and
+ * otherwise keeps range on the leader at its toFleetGroupOffsets offset (direction = the unit offset, slot range =
+ * |offset| − the two radii, anchor range = that slot range rounded to the metre). Every plan's `commander` (the ship whose
+ * heading frames the slot) is the leader. This is the one place the page flies anchors other than toFleetMemberships': the
+ * document's anchors stay as they are, and the plans end when the group regroups.
+ *
+ * @param input - The fleet plans' input, the leader and the group's ships.
+ * @returns Each group ship's plan but the leader's, keyed by ship id, in `ships` order.
+ * @throws {Error} As toFleetGroupOffsets does.
+ */
+export function toFleetGroupFollowPlans(input: FleetGroupFollowPlansInput): Map<string, FleetFollowPlan> {
+  const { fleet, leader, ships, radiusOf } = input;
+  const group = new Set(ships);
+  const anchors = toFleetAnchors(fleet);
+  const slots = toFleetFormationSlots(input);
+  const offsets = toFleetGroupOffsets(input);
+  const plans = new Map<string, FleetFollowPlan>();
+  for (const ship of ships) {
+    if (ship === leader) continue;
+    const anchor = anchors.get(ship)?.anchor;
+    const slot = slots.get(ship);
+    const offset = offsets.get(ship);
+    if (anchor && slot && group.has(anchor.ship)) {
+      plans.set(ship, { fleet: fleet.id, commander: leader, anchor, slot });
+    } else if (offset) {
+      const reach = Math.hypot(offset[0], offset[1], offset[2]);
+      const direction: SceneVector = reach > 0 ? [offset[0] / reach, offset[1] / reach, offset[2] / reach] : [0, 0, -1];
+      const range = Math.max(0, reach - radiusOf(leader) - radiusOf(ship));
+      plans.set(ship, { fleet: fleet.id, commander: leader, anchor: { ship: leader, range: Math.round(range) }, slot: { anchor: leader, direction, range } });
+    }
   }
   return plans;
 }

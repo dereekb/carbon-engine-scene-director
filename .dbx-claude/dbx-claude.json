@@ -218,7 +218,8 @@
               "align time",
               "booster",
               "boosters",
-              "warp"
+              "warp",
+              "WarpInFormation"
             ],
             "fuzzyWords": [
               "warp",
@@ -242,7 +243,8 @@
           },
           {
             "toolNames": [
-              "mcp__scene-director__order_ship"
+              "mcp__scene-director__order_ship",
+              "mcp__scene-director__order_fleet"
             ]
           }
         ]
@@ -273,7 +275,15 @@
               "rejoin",
               "detached",
               "toFleetMemberships",
-              "FormationRadius"
+              "FormationRadius",
+              "order_fleet",
+              "break-off",
+              "regroup",
+              "fleet warp",
+              "fleet order",
+              "fleet orders",
+              "FleetOrders",
+              "WarpInFormation"
             ],
             "fuzzyWords": [
               "fleet composition"
@@ -286,13 +296,15 @@
               "apps/viewer/src/lib/following",
               "apps/viewer/src/lib/steering",
               "hub/fleet-compositions",
-              "store/composition-files"
+              "store/composition-files",
+              "apps/viewer/src/lib/fleet-orders"
             ],
             "every": 12
           },
           {
             "toolNames": [
-              "mcp__scene-director__*fleet_composition*"
+              "mcp__scene-director__*fleet_composition*",
+              "mcp__scene-director__order_fleet"
             ]
           }
         ]

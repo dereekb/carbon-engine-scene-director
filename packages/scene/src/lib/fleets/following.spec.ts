@@ -4,8 +4,9 @@ import { tfisComposition } from '../compositions/compositions.spec-helper';
 import { applySceneOperations, normalizeScene, type SceneDocument } from '../scene';
 import type { SceneFleet } from './fleet';
 import { makeFleetScene, TFI_FLEET_SCENE } from './fleets.spec-helper';
-import { type FleetFollowPlan, toFleetFollowPlans, toFollowTolerance } from './following';
-import { toFleetMemberships } from './membership';
+import { type FleetFollowPlan, toFleetFollowPlans, toFleetGroupFollowPlans, toFollowTolerance } from './following';
+import { layoutFleetFormation } from './formation';
+import { toFleetAnchors, toFleetMemberships } from './membership';
 
 const RADIUS = 150;
 
@@ -77,5 +78,73 @@ describe('toFollowTolerance', () => {
     expect(toFollowTolerance({ slotRange: 1000, anchorSpeed: 0 })).toBe(250);
     expect(toFollowTolerance({ slotRange: 1000, anchorSpeed: 162 })).toBe(655);
     expect(toFollowTolerance({ slotRange: 30000, anchorSpeed: 0 })).toBe(1700);
+  });
+});
+
+describe('toFleetGroupFollowPlans', () => {
+  const HEADING = 30;
+  const tfis = (): SceneFleet => expandFleetComposition({ composition: tfisComposition(), position: [0, 0, 0], heading: 0, existing: { ships: new Map(), fleets: new Set() } }).fleet!;
+  const inputOf = (fleet: SceneFleet) => ({ fleet, origin: [0, 0, 5000] as [number, number, number], heading: HEADING, radiusOf: () => RADIUS });
+  const rotate = ([x, y, z]: readonly number[]): number[] => {
+    const yaw = (HEADING * Math.PI) / 180;
+    return [x * Math.cos(yaw) + z * Math.sin(yaw), y, -x * Math.sin(yaw) + z * Math.cos(yaw)];
+  };
+
+  /**
+   * Checks the plans of a group apart: in-group anchors keep the fleet plan; the rest re-root on the leader, landing on
+   * their laid-out positions.
+   */
+  function expectGroupPlans(fleet: SceneFleet, leader: string, ships: string[]): Map<string, FleetFollowPlan> {
+    const input = inputOf(fleet);
+    const plans = toFleetGroupFollowPlans({ ...input, leader, ships });
+    const fleetPlans = toFleetFollowPlans(input);
+    const anchors = toFleetAnchors(fleet);
+    const positions = layoutFleetFormation(input);
+    expect([...plans.keys()]).toEqual(ships.filter((ship) => ship !== leader));
+    for (const [ship, plan] of plans) {
+      expect(plan.commander, ship).toBe(leader);
+      expect(plan.fleet).toBe(fleet.id);
+      const anchor = anchors.get(ship)!.anchor!;
+      if (ships.includes(anchor.ship)) {
+        expect(plan.anchor, ship).toEqual(anchor);
+        expect(plan.slot, ship).toEqual(fleetPlans.get(ship)!.slot);
+      } else {
+        expect(plan.anchor.ship, ship).toBe(leader);
+        expect(plan.slot.anchor, ship).toBe(leader);
+        expect(plan.anchor.range).toBe(Math.round(plan.slot.range));
+        const from = positions.get(leader)!;
+        const direction = rotate(plan.slot.direction);
+        const reach = plan.slot.range + 2 * RADIUS;
+        const flown = [0, 1, 2].map((axis) => from[axis] + direction[axis] * reach);
+        const at = positions.get(ship)!;
+        expect(Math.hypot(flown[0] - at[0], flown[1] - at[1], flown[2] - at[2]), ship).toBeLessThanOrEqual(1);
+      }
+    }
+    return plans;
+  }
+
+  it('re-roots a squad anchored on the FC on its leader, at the laid-out offsets', () => {
+    const fleet = tfis();
+    const squad = fleet.wings[0].squads.find((candidate) => candidate.id === 'dps-a')!;
+    const plans = expectGroupPlans(fleet, squad.members[0], squad.members);
+    for (const plan of plans.values()) expect(plan.anchor.ship).toBe(squad.members[0]);
+  });
+
+  it('keeps every anchor and slot of the logi squad apart on its own lead', () => {
+    const fleet = tfis();
+    const squad = fleet.wings.flatMap((wing) => wing.squads).find((candidate) => candidate.id === 'logi')!;
+    const lead = squad.anchor!.ship!;
+    const plans = expectGroupPlans(fleet, lead, squad.members);
+    for (const plan of plans.values()) expect(plan.anchor.ship).toBe(lead);
+  });
+
+  it("re-roots a wing's squads anchored outside it and keeps its inner chains; the leader and outsiders get no plan", () => {
+    const fleet = tfis();
+    for (const wing of fleet.wings) {
+      const ships = wing.squads.flatMap((squad) => squad.members).filter((ship) => ship !== fleet.commander);
+      const plans = expectGroupPlans(fleet, ships[0], ships);
+      expect(plans.has(ships[0])).toBe(false);
+      expect(plans.has(fleet.commander)).toBe(false);
+    }
   });
 });

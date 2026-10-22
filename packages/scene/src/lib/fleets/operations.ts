@@ -277,36 +277,57 @@ function dropCommand(group: JsonObject, edit: ShipEdit & { readonly noun: 'wing'
 /**
  * Runs an edit that may take ships out of the fleet or out of squads, then falls each squad whose anchor left back
  * down the chain: its squad commander, then its wing commander (whichever is set, still in the fleet and not the
- * ship that left), otherwise the fleet commander. The range is kept. Each change is reported as a warning.
+ * ship that left), otherwise the fleet commander. The range is kept. A broken-off squad's home is repaired the same
+ * way. Each change is reported as a warning.
  *
  * @param edit - The fleet and the context.
  * @param change - The edit.
  */
 function repairAfter(edit: FleetEdit, change: () => void): void {
-  const { fleet, context } = edit;
+  const { fleet } = edit;
   const before = snapshotFleet(fleet);
   change();
   const now = fleetShips(fleet);
   for (const wing of wingsOf(fleet)) {
     for (const squad of squadsOf(wing)) {
-      const anchor = squad['anchor'];
-      const ship = isPlainObject(anchor) ? anchor['ship'] : undefined;
-      if (!isPlainObject(anchor) || typeof ship !== 'string') continue;
-      const leftFleet = before.ships.has(ship) && !now.has(ship);
-      const leftSquad = !leftFleet && before.squadMembers.get(squad)?.has(ship) === true && !membersOf(squad).includes(ship);
-      if (!leftFleet && !leftSquad) continue;
-      const reason = `(its anchor "${ship}" left the ${leftFleet ? 'fleet' : 'squad'})`;
-      const next = [squad['commander'], wing['commander']].find((candidate): candidate is string => typeof candidate === 'string' && candidate !== ship && now.has(candidate));
-      const prefix = `fleet "${String(fleet['id'])}": squad "${String(squad['id'])}" now anchors on`;
-      if (next) {
-        anchor['ship'] = next;
-        context.warnings.push(`${prefix} "${next}" ${reason}`);
-      } else {
-        delete anchor['ship'];
-        if (!Object.keys(anchor).length) delete squad['anchor'];
-        context.warnings.push(`${prefix} the fleet commander ${reason}`);
-      }
+      repairSquadAnchor({ edit, before, now, wing, squad, key: 'anchor', verb: 'anchors on' });
+      repairSquadAnchor({ edit, before, now, wing, squad, key: 'home', verb: 'regroups onto' });
     }
+  }
+}
+
+interface RepairSquadAnchorInput {
+  readonly edit: FleetEdit;
+  readonly before: FleetSnapshot;
+  readonly now: ReadonlySet<string>;
+  readonly wing: JsonObject;
+  readonly squad: JsonObject;
+  /**
+   * The squad's anchor, or its home (break-off's undo record, where `{}` means the defaults and is kept).
+   */
+  readonly key: 'anchor' | 'home';
+  readonly verb: string;
+}
+
+function repairSquadAnchor(input: RepairSquadAnchorInput): void {
+  const { edit, before, now, wing, squad, key, verb } = input;
+  const { fleet, context } = edit;
+  const anchor = squad[key];
+  const ship = isPlainObject(anchor) ? anchor['ship'] : undefined;
+  if (!isPlainObject(anchor) || typeof ship !== 'string') return;
+  const leftFleet = before.ships.has(ship) && !now.has(ship);
+  const leftSquad = !leftFleet && before.squadMembers.get(squad)?.has(ship) === true && !membersOf(squad).includes(ship);
+  if (!leftFleet && !leftSquad) return;
+  const reason = `(its ${key === 'home' ? 'home anchor' : 'anchor'} "${ship}" left the ${leftFleet ? 'fleet' : 'squad'})`;
+  const next = [squad['commander'], wing['commander']].find((candidate): candidate is string => typeof candidate === 'string' && candidate !== ship && now.has(candidate));
+  const prefix = `fleet "${String(fleet['id'])}": squad "${String(squad['id'])}" now ${verb}`;
+  if (next) {
+    anchor['ship'] = next;
+    context.warnings.push(`${prefix} "${next}" ${reason}`);
+  } else {
+    delete anchor['ship'];
+    if (key === 'anchor' && !Object.keys(anchor).length) delete squad[key];
+    context.warnings.push(`${prefix} the fleet commander ${reason}`);
   }
 }
 

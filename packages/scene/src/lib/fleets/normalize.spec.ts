@@ -304,3 +304,24 @@ describe('fleets in the scene document', () => {
     });
   });
 });
+
+describe("a squad's home", () => {
+  const sceneOf = (home: unknown) => makeFleetScene(['fc', 'a', 'b', 'other'], [fleetOf([{ id: 's', role: 'dps', members: ['a', 'b'], anchor: { ship: 'a', range: 9000 }, home }])]);
+  const squadOf = (home: unknown) => normalizeScene(sceneOf(home)).scene.fleets![0].wings[0].squads[0];
+
+  it('keeps a home as written, {} included, and changes no membership', () => {
+    expect(squadOf({ ship: 'a', range: 1000 }).home).toEqual({ ship: 'a', range: 1000 });
+    expect(squadOf({}).home).toEqual({});
+    expect('home' in squadOf(null)).toBe(false);
+    const withHome = normalizeScene(sceneOf({ range: 1000 })).scene;
+    const without = normalizeScene(sceneOf(null)).scene;
+    expect(toFleetMemberships(withHome)).toEqual(toFleetMemberships(without));
+  });
+
+  it('checks the home ship like an anchor ship and warns on unknown keys', () => {
+    expect(catchSceneError(() => normalizeScene(sceneOf({ ship: 'x' }))).problems.join('\n')).toMatch(/squads\[0\]\.home\.ship "x" is not a ship id/u);
+    expect(catchSceneError(() => normalizeScene(sceneOf({ ship: 'other' }))).problems.join('\n')).toMatch(/squads\[0\]\.home\.ship "other" is not in fleet "f"/u);
+    expect(catchSceneError(() => normalizeScene(sceneOf({ range: -1 }))).problems.join('\n')).toMatch(/home\.range must be a number of 0 or more/u);
+    expect(normalizeScene(sceneOf({ range: 1, bearing: 2 })).warnings.join('\n')).toMatch(/home\.bearing/u);
+  });
+});

@@ -5,7 +5,7 @@ import { toFleetAnchors } from './membership';
 
 const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'wings']);
 const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'squads']);
-const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor']);
+const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home']);
 const ANCHOR_KEYS = new Set<string>(['ship', 'range']);
 
 export interface NormalizeFleetsInput {
@@ -143,10 +143,18 @@ function normalizeSquad(input: unknown, where: string, report: Report): Maybe<Sc
   const commander = readOptionalString(input['commander'], `${where}.commander`, report.problems);
   const members = readList(input['members'], `${where}.members`, report.problems).map((member, index) => readString(member, `${where}.members[${index}]`, report.problems));
   const anchor = normalizeAnchor(input['anchor'], `${where}.anchor`, report);
-  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}) };
+  const home = normalizeAnchor(input['home'], `${where}.home`, report, { keepEmpty: true });
+  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}) };
 }
 
-function normalizeAnchor(input: unknown, where: string, report: Report): Maybe<SceneSquadAnchor> {
+interface NormalizeAnchorOptions {
+  /**
+   * Keep `{}` (a squad's home: "the defaults") instead of dropping it.
+   */
+  readonly keepEmpty?: boolean;
+}
+
+function normalizeAnchor(input: unknown, where: string, report: Report, options: NormalizeAnchorOptions = {}): Maybe<SceneSquadAnchor> {
   let anchor: Maybe<SceneSquadAnchor> = null;
   if (input != null && !isPlainObject(input)) {
     report.problems.push(`${where} must be an object of ship and range`);
@@ -157,7 +165,7 @@ function normalizeAnchor(input: unknown, where: string, report: Report): Maybe<S
     const value: SceneSquadAnchor = ship ? { ship } : {};
     if (range != null && (typeof range !== 'number' || !Number.isFinite(range) || range < 0)) report.problems.push(`${where}.range must be a number of 0 or more (metres)`);
     else if (range != null) value.range = range;
-    if (Object.keys(value).length) anchor = value;
+    if (Object.keys(value).length || options.keepEmpty) anchor = value;
   }
   return anchor;
 }
@@ -239,11 +247,13 @@ function checkAnchors(config: FleetReferencesInput & { readonly listed: Readonly
   const { fleet, where, claims, problems, listed } = config;
   for (const [wingIndex, wing] of fleet.wings.entries()) {
     for (const [squadIndex, squad] of wing.squads.entries()) {
-      const ship = squad.anchor?.ship;
-      const at = `${where}.wings[${wingIndex}].squads[${squadIndex}].anchor.ship`;
-      if (!ship) continue;
-      if (!claims.shipIds.has(ship)) problems.push(`${at} "${ship}" is not a ship id`);
-      else if (!listed.has(ship)) problems.push(`${at} "${ship}" is not in fleet "${fleet.id}"`);
+      for (const key of ['anchor', 'home'] as const) {
+        const ship = squad[key]?.ship;
+        const at = `${where}.wings[${wingIndex}].squads[${squadIndex}].${key}.ship`;
+        if (!ship) continue;
+        if (!claims.shipIds.has(ship)) problems.push(`${at} "${ship}" is not a ship id`);
+        else if (!listed.has(ship)) problems.push(`${at} "${ship}" is not in fleet "${fleet.id}"`);
+      }
     }
   }
 }
