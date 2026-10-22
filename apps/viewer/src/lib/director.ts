@@ -679,7 +679,7 @@ export class Director {
           spheres.push({ id: live.id, centre, radius: live.ship.boundingSphereRadius || UNBUILT_RADIUS });
         }
       }
-      const id = PickShip({ view: view.eve.GetViewMatrix().transform, fov: view.fov, width: box.width, height: box.height }, event.clientX - box.left, event.clientY - box.top, spheres);
+      const id = PickShip({ view: view.eve.GetViewMatrix().transform, projection: view.eve.GetProjection().transform, width: box.width, height: box.height }, event.clientX - box.left, event.clientY - box.top, spheres);
       if (id) this.FollowShip(id);
     }
   }

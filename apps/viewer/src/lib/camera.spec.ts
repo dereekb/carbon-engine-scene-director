@@ -39,13 +39,26 @@ function Normalize(a: number[]): number[] {
 }
 
 /**
- * The pixel a world point lands on, through the same pinhole the pick inverts.
+ * EveCamera's projection scale terms, as CalculateProjectionMatrix builds them: Carbon narrows the view above an
+ * aspect of 1.6.
  */
-function Project(view: number[], fov: number, width: number, height: number, point: number[]): [number, number] {
+function Projection(fov: number, width: number, height: number): number[] {
+  const aspect = width / height;
+  const clamp = aspect > 1.6 ? aspect / 1.6 : 1;
+  const halfHeight = Math.tan((fov * DEGREES) / 2) / clamp;
+  const matrix = new Array<number>(16).fill(0);
+  matrix[0] = 1 / (aspect * halfHeight);
+  matrix[5] = 1 / halfHeight;
+  return matrix;
+}
+
+/**
+ * The pixel a world point lands on, through the projection the pick inverts.
+ */
+function Project(view: number[], projection: number[], width: number, height: number, point: number[]): [number, number] {
   const camera = [0, 1, 2].map((row) => view[row] * point[0] + view[row + 4] * point[1] + view[row + 8] * point[2] + view[row + 12]);
-  const tanHalf = Math.tan((fov * DEGREES) / 2);
-  const across = camera[0] / -camera[2] / tanHalf / (width / height);
-  const down = camera[1] / -camera[2] / tanHalf;
+  const across = (camera[0] / -camera[2]) * projection[0];
+  const down = (camera[1] / -camera[2]) * projection[5];
   return [((across + 1) / 2) * width, ((1 - down) / 2) * height];
 }
 
@@ -92,27 +105,40 @@ describe('EaseAngle', () => {
 });
 
 describe('PickShip', () => {
+  // 1600 x 900 is wider than 1.6, so Carbon's aspect clamp applies.
   const width = 1600;
   const height = 900;
-  const fov = 45;
+  const projection = Projection(45, width, height);
 
-  it('picks the ship drawn under the pointer, off centre and from any angle', () => {
-    for (const [yaw, pitch] of [
-      [0, 0],
-      [200, -20],
-      [-75, 40]
-    ]) {
-      const view = ViewMatrix([100, 0, 0], 3000, yaw, pitch);
-      const spheres: PickSphere[] = [
-        { id: 'a', centre: [100, 0, 0], radius: 60 },
-        { id: 'b', centre: [700, 200, -300], radius: 60 },
-        { id: 'c', centre: [-400, -250, 300], radius: 60 }
-      ];
-      for (const sphere of spheres) {
-        const [x, y] = Project(view, fov, width, height, Array.from(sphere.centre));
-        expect(PickShip({ view, fov, width, height }, x, y, spheres)).toBe(sphere.id);
+  it('picks the ship drawn under the pointer, off centre, from any angle and at the field of view drawn', () => {
+    // 90 degrees is what EveCamera's default zoom curve leaves the view at when the page passes it seconds.
+    for (const fov of [45, 90]) {
+      for (const [yaw, pitch] of [
+        [0, 0],
+        [200, -20],
+        [-75, 40]
+      ]) {
+        const view = ViewMatrix([100, 0, 0], 3000, yaw, pitch);
+        const drawn = Projection(fov, width, height);
+        const spheres: PickSphere[] = [
+          { id: 'a', centre: [100, 0, 0], radius: 60 },
+          { id: 'b', centre: [700, 200, -300], radius: 60 },
+          { id: 'c', centre: [-400, -250, 300], radius: 60 }
+        ];
+        for (const sphere of spheres) {
+          const [x, y] = Project(view, drawn, width, height, Array.from(sphere.centre));
+          expect(PickShip({ view, projection: drawn, width, height }, x, y, spheres)).toBe(sphere.id);
+        }
       }
     }
+  });
+
+  it('misses a ship off centre when the projection assumed is not the one drawn', () => {
+    const view = ViewMatrix([0, 0, 0], 3000, 0, 0);
+    const ship = { id: 'off', centre: [1500, 0, 0], radius: 60 };
+    const [x, y] = Project(view, Projection(90, width, height), width, height, ship.centre);
+    expect(PickShip({ view, projection: Projection(90, width, height), width, height }, x, y, [ship])).toBe('off');
+    expect(PickShip({ view, projection: Projection(45, width, height), width, height }, x, y, [ship])).toBeNull();
   });
 
   it('takes the nearest of two ships on the ray, skips ships behind the eye and misses empty space', () => {
@@ -120,15 +146,15 @@ describe('PickShip', () => {
     const near = { id: 'near', centre: [0, 0, 200], radius: 50 };
     const far = { id: 'far', centre: [0, 0, -500], radius: 300 };
     const behind = { id: 'behind', centre: [0, 0, 2000], radius: 50 };
-    expect(PickShip({ view, fov, width, height }, width / 2, height / 2, [far, behind, near])).toBe('near');
-    expect(PickShip({ view, fov, width, height }, 10, 10, [far, behind, near])).toBeNull();
+    expect(PickShip({ view, projection, width, height }, width / 2, height / 2, [far, behind, near])).toBe('near');
+    expect(PickShip({ view, projection, width, height }, 10, 10, [far, behind, near])).toBeNull();
   });
 
   it('gives a distant frigate a few pixels of slack', () => {
     const view = ViewMatrix([0, 0, 0], 100_000, 0, 0);
     const frigate = { id: 'frigate', centre: [0, 0, 0], radius: 40 };
-    expect(PickShip({ view, fov, width, height }, width / 2 + 6, height / 2 - 5, [frigate])).toBe('frigate');
-    expect(PickShip({ view, fov, width, height }, width / 2 + 30, height / 2, [frigate])).toBeNull();
+    expect(PickShip({ view, projection, width, height }, width / 2 + 6, height / 2 - 5, [frigate])).toBe('frigate');
+    expect(PickShip({ view, projection, width, height }, width / 2 + 30, height / 2, [frigate])).toBeNull();
   });
 });
 

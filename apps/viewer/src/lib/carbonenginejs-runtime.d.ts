@@ -246,6 +246,17 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly transform: Float32Array;
   }
 
+  /**
+   * The camera's TriProjection.
+   */
+  export interface EveProjectionMatrix {
+    /**
+     * Column-major 4x4, as EveCamera.Update last built it: indices 0 and 5 are the near plane's inverse half width and
+     * height, Carbon's aspect clamp and the zoom curve's field of view included.
+     */
+    readonly transform: Float32Array;
+  }
+
   export class EveCamera {
     useExtraTranslation: boolean;
     readonly extraTranslation: Vec3;
@@ -256,7 +267,7 @@ declare module '@carbonenginejs/runtime/trinity' {
     SetOrbit(yaw: number, pitch: number): void;
     Update(time: number, aspect: number, realTime: number): void;
     GetViewMatrix(): EveViewMatrix;
-    GetProjection(): object;
+    GetProjection(): EveProjectionMatrix;
   }
 
   export interface EveUpdateContext {

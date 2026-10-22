@@ -9,7 +9,9 @@
  *   camera behind the ship's drawn heading, CHASE_PITCH above it; a drag looks around and eases back once released.
  * - Retargeting glides the focus from the old view onto the new ship.
  * - Picking casts the pointer's ray through the view and takes the nearest ship whose bounding sphere it passes
- *   through, with a few pixels of slack so a distant frigate can still be clicked.
+ *   through, with a few pixels of slack so a distant frigate can still be clicked. It reads the projection EveCamera
+ *   draws with, not the document's fov: EveCamera's default zoom curve overrides the field of view every frame, and
+ *   Carbon narrows the view above an aspect of 1.6.
  *
  * The angles are EveCamera's (degrees here): the eye sits at focus + distance × (sin yaw cos pitch, -sin pitch,
  * cos yaw cos pitch) and looks at the focus, so a negative pitch looks down from above.
@@ -127,9 +129,9 @@ export interface PickCamera {
    */
   readonly view: ArrayLike<number>;
   /**
-   * The vertical field of view, in degrees.
+   * EveCamera's projection matrix, column-major: indices 0 and 5 are the near plane's inverse half width and height.
    */
-  readonly fov: number;
+  readonly projection: ArrayLike<number>;
   /**
    * The view's size in CSS pixels.
    */
@@ -154,18 +156,20 @@ export interface PickSphere {
  * @returns The id of the ship hit, or null.
  */
 export function PickShip(camera: PickCamera, x: number, y: number, spheres: Iterable<PickSphere>): Maybe<string> {
-  const { view, width, height } = camera;
+  const { view, projection, width, height } = camera;
   // The view matrix rows are the camera's right, up and back axes in world space; its translation gives the eye.
   const right = [view[0], view[4], view[8]];
   const up = [view[1], view[5], view[9]];
   const back = [view[2], view[6], view[10]];
   const eye = [0, 1, 2].map((axis) => -(view[12] * right[axis] + view[13] * up[axis] + view[14] * back[axis]));
-  const tanHalf = Math.tan((camera.fov * DEGREES) / 2);
+  // The view's half extents one metre ahead of the eye.
+  const halfWidth = 1 / Math.abs(projection[0]);
+  const halfHeight = 1 / Math.abs(projection[5]);
   const across = (2 * x) / width - 1;
   const down = 1 - (2 * y) / height;
-  const ray = [0, 1, 2].map((axis) => -back[axis] + across * tanHalf * (width / height) * right[axis] + down * tanHalf * up[axis]);
+  const ray = [0, 1, 2].map((axis) => -back[axis] + across * halfWidth * right[axis] + down * halfHeight * up[axis]);
   const length = Math.hypot(ray[0], ray[1], ray[2]);
-  const metresPerPixelPerMetre = (2 * tanHalf) / height;
+  const metresPerPixelPerMetre = (2 * halfHeight) / height;
   let picked: Maybe<string> = null;
   let nearest = Infinity;
   for (const sphere of spheres) {
