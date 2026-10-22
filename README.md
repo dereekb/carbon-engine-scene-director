@@ -328,10 +328,30 @@ a booster set's intensity is speed / `boosters.maxVel` (capped at 2), and the
 runtime defaults `maxVel` to 250 m/s for every hull. So every frame, before
 drawing, the page sets each built ship's `boosters.maxVel` and `maxSpeed` to its
 Ship-stats max velocity (full speed reads the same on every hull) and ramps
-`boosters.warpIntensity` (the warp colours) in from 10× to 100× its max
+`boosters.warpIntensity` (the warp colours) in from 10× to 14× its max
 velocity, so only a warp shows them. Trails fade out in warp by the runtime's
 own rules. `get_state` reports each built ship's `boosters` (`maxVel`,
 `intensity`, `warpIntensity`) when there is a renderer.
+
+On a real GPU (Windows Chrome on NVIDIA, 2026-10-22, a Slasher and a Tempest
+Fleet Issue):
+
+- **At rest** the boosters are dark: no flame, flare, light or trail (the
+  runtime culls the flame at intensity 0).
+- **At full speed** the Minmatar flames are orange with warm flares, and trails
+  run behind the ship (about 2.1 km for the frigate, a faint 0.6 km for the
+  battleship). The intensity eases from about 0.95 to 0.8 over a few seconds as
+  the ship's acceleration fades, in steps at the 1 s ticks, and then holds.
+- **In warp** the flames run full length in the shared pale blue-white warp
+  colours with a blue stern light, and the trails go out above about 12 km/s.
+  They come back as long streaks at the end of the exit.
+- **The ramp** is short because `BoosterVolumetric` reads the warp half of its
+  colour gradient for any `warpIntensity` above 0 while its tints still blend.
+  With 10× to 100× a Minmatar flame drew violet for about half a second at the
+  end of a warp. The warp colours follow the speed, so they leave about 3 s
+  before the ship drops out of warp.
+- **An AU/s warp** leaves the ships near the origin untouched: no booster shader
+  reads `shipSpeed`.
 
 ## Ship stats and the pilot
 

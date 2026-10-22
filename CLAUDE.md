@@ -106,6 +106,11 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - EveShip2 derives `speed` from the translation curve itself; booster intensity is speed / `boosters.maxVel`, which the
   runtime defaults to 250 m/s for every hull and nothing in it drives `warpIntensity`, so `Director.DriveBoosters`
   sets both per ship every frame (max velocity, prop-mod-off once prop mods land).
+- No booster shader reads `shipSpeed`, so an AU/s warp is safe. `BoosterVolumetric` reads the warp half of its colour
+  gradient for any `warpIntensity` > 0 while its tints still lerp (a low blend draws a Minmatar flame violet), so
+  `WARP_GLOW_FROM` / `WARP_GLOW_FULL` stay a short ramp. Booster LOD goes by the booster sphere's pixel size (a
+  Slasher's flames vanish beyond ~600 m on a 900 px canvas): dark boosters in a far shot are LOD, not the drive
+  (distances in the windows-chrome skill).
 - Destiny's `RemoveBall` sends an interactive orbiter straight on along its velocity and stops other followers.
   `DestinyWorld.RemoveShip` stops every follower of the removed ship first, so all of them stop and the parks stay
   identical. Formation followers (Follow the FC) are the exception: `FleetFollowing.Reconcile` re-anchors them in the

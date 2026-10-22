@@ -19,9 +19,14 @@ export type BoosterHost = Pick<EveShip2, 'maxSpeed' | 'boosters'>;
 /**
  * Multiples of max velocity: warpIntensity is 0 at or below WARP_GLOW_FROM and 1 at or above WARP_GLOW_FULL (a
  * smoothstep between), so no sub-light speed (an MWD is about 6×) shows the warp colours.
+ *
+ * The ramp is short on purpose. BoosterVolumetric reads the warp half of its colour gradient for any warpIntensity
+ * above 0 while its tints still lerp, so a low blend draws a Minmatar flame violet. With 10× to 100× that state showed
+ * for about half a second as a frigate dropped out of warp (and 10× to 20× still showed a lilac frame); 10× to 14×
+ * keeps it to about one frame at either end. Checked on a real GPU, 2026-10-22.
  */
 export const WARP_GLOW_FROM = 10;
-export const WARP_GLOW_FULL = 100;
+export const WARP_GLOW_FULL = 14;
 
 /**
  * What one frame of the drive takes.

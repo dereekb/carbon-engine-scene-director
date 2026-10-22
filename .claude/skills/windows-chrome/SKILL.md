@@ -61,6 +61,31 @@ If the check says interop did not answer, WSL interop is wedged: the user runs `
 
 Expected noise: a 404 for `/favicon.ico`, and the warning that `powerPreference` is ignored on Windows.
 
+## Moving ships and timed captures
+
+- `frame_camera { target }` follows the target's drawn hull every frame. get_state's `position` is the Destiny master
+  ball, one to two ticks of travel ahead of what is drawn (about 1 km for a cruising frigate, hundreds of km in warp).
+- Re-framing a ship the camera already follows throws the focus back by that lag, then glides it onto the hull over
+  0.6 s. Wait at least 0.8 s after a `frame_camera` on a moving ship before a shot, and never re-frame mid-warp.
+- A new tab boots into the scene its profile saved last. Load the check's scene once before you install a probe:
+  a universe change reloads the tab and drops the probe.
+- Keep the Chrome window visible. A background tab or a minimized or fully covered window stops rAF: fps drops to 0
+  and screenshots time out. The user may resize the window during a run; `resize_page` again before the next one.
+- Per-frame probes: once the first scene has loaded, `globalThis.sceneDirector` is `{ director, engine, link, world,
+  clock }`. Wrap `engine.Frame` to sample each frame, and run the script with `evaluate_script` and
+  `waitForStableDom: false`. Pass the function inline, because `sourcePath` must be a Windows path. A big result goes
+  to `filePath` under `C:\Users\<user>\AppData\Local\Temp\`, which WSL reads at `/mnt/c/...`.
+- Sub-second sequences (a warp's entry and exit) need a hub controller driver, not agent tool calls. Connect a Node
+  WebSocket to `ws://127.0.0.1:5520/ws`, send `{ type: 'hello', role: 'controller' }`, then `{ type: 'call', id,
+  name, args }`. Burst `screenshot` + `get_state` at up to 5 a second and write the PNGs and rows to `.scratch/`.
+- Booster LOD (`EveBoosterSet2Renderable.UpdateVisibility`) goes by the booster sphere's pixel size. Let D be the
+  camera distance from the focus, R the booster sphere radius and H the canvas height in device pixels. Then flames
+  and flares draw while D < ~0.04·R·H, the high-LOD flame while D < ~0.008·R·H, and trails while D < ~0.16·R·H. On a
+  900 px canvas that is 600 m, 115 m and 2.3 km for a Slasher (R 15.9 m); a Tempest Fleet Issue (R 269 m) is
+  high-LOD at 1.5 km. The flags are not recomputed while a ship is culled, so trust them only on screen.
+- The booster check's scripts (scene, probe, readout, driver) are in `.scratch/gpu-look/` on this machine and in the
+  plan `real-gpu-look-at-the-speed-driven-boosters-and-the-warp.md`.
+
 ## Gotchas
 
 - The first load in a fresh profile once stalled until a reload (2026-10-21; cold cache plus the ~20 MB file

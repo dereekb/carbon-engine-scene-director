@@ -8,7 +8,7 @@ describe('WarpGlow', () => {
     expect(WarpGlow(300 * WARP_GLOW_FULL, 300)).toBe(1);
     expect(WarpGlow(1e9, 300)).toBe(1);
     let last = 0;
-    for (let ratio = WARP_GLOW_FROM; ratio <= WARP_GLOW_FULL; ratio += 5) {
+    for (let ratio = WARP_GLOW_FROM; ratio <= WARP_GLOW_FULL; ratio += (WARP_GLOW_FULL - WARP_GLOW_FROM) / 8) {
       const glow = WarpGlow(300 * ratio, 300);
       expect(glow).toBeGreaterThanOrEqual(last);
       last = glow;
