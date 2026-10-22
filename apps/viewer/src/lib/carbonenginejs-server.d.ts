@@ -62,6 +62,12 @@ declare module '@carbonenginejs/server/destiny' {
     readonly mNewYaw: number;
     readonly mNewPitch: number;
     /**
+     * The last tick's goal and collision accelerations (vec3d): a ClientBall integrates between ticks with their
+     * sum. Every evolve clears and recomputes them.
+     */
+    readonly mLastG: Float64Array;
+    readonly mLastC: Float64Array;
+    /**
      * The point a legacy-oriented ball heads for, and faces while it is at rest.
      */
     gotoX: number;

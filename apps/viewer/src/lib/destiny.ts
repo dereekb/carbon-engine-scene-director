@@ -594,6 +594,7 @@ export class DestinyWorld {
       const aimed = this.AimAlong(park, ballId, doc.position, forward);
       // Zero velocity snaps the legacy heading to the goto point.
       park.SetBallVelocity(ballId, 0, 0, 0);
+      RestartInterval(park, ballId);
       return aimed;
     });
     // The heading Destiny derives from the same goto offsets, then whatever the document adds to it (its roll).
@@ -1449,6 +1450,27 @@ const MODE_NAMES = new Map(Object.entries(CjsDestinyBall.DSTBALLMODE).map(([name
 function HeadingRotation(x: number, y: number, z: number): Quat {
   const length = Math.hypot(x, y, z);
   return quat.fromYawPitchRoll(quat.create(), Math.atan2(x, z), length > 0 ? -Math.asin(Math.min(1, Math.max(-1, y / length))) : 0, 0);
+}
+
+/**
+ * Starts a placed ball's current tick interval over at rest. Between ticks a ClientBall integrates from the
+ * interval's start with the ball's last forces and turns from the interval's old heading, and neither
+ * SetBallPosition nor SetBallVelocity resets them: a ship placed mid-tick at full speed slid on along its old thrust
+ * (about 56 m for a Punisher), popped back at the next tick, and swung a third of the way back toward its old
+ * heading before easing to the new one. Clearing the forces (as every evolve does first) and snapping the heading a
+ * second time (the snap keeps the previous heading as the interval's old one) holds it still. Both parks get it, so
+ * they stay identical.
+ *
+ * @param park - The park.
+ * @param ballId - The placed ball.
+ */
+function RestartInterval(park: CjsBallparkController, ballId: number): void {
+  const ball = park.GetBall(ballId);
+  if (ball) {
+    ball.mLastG.fill(0);
+    ball.mLastC.fill(0);
+    park.SetBallVelocity(ballId, 0, 0, 0);
+  }
 }
 
 function RequireValidPhysics(physics: ShipPhysics): void {

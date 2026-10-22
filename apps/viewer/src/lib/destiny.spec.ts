@@ -203,6 +203,29 @@ describe('DestinyWorld', () => {
     ExpectSameRotation(atRest().rotation, DocumentRotation(placed.rotation));
   });
 
+  it('teleports a ship mid-tick without sliding on or swinging back toward its old heading', () => {
+    const harness = new Harness();
+    harness.world.AddShip(Ship('a', [0, 0, 0]), FRIGATE);
+    harness.Sample('a');
+    harness.world.Order('a', { type: 'direction', direction: [1, 0, 0], speed: 1 });
+    // Full speed, then half way through a tick: a placement there used to slide on along the old thrust.
+    RunTicks(harness, 5);
+    harness.Run(0.5);
+    const placed = Ship('a', [-500, 25, 1000], [45, 0, 0]);
+    const forward = Forward(DocumentRotation(placed.rotation));
+    harness.world.PlaceShip(placed);
+    let slid = 0;
+    let turned = 0;
+    harness.Run(2.5, () => {
+      const sample = harness.Sample('a');
+      slid = Math.max(slid, vec3.distance(sample.position, placed.position));
+      turned = Math.max(turned, Math.acos(Math.min(1, vec3.dot(Forward(sample.rotation), forward))));
+    });
+    expect(slid).toBeLessThan(0.01);
+    expect(turned).toBeLessThan(1e-3);
+    ExpectLockstep(harness.world, 1);
+  });
+
   it('drops an order queued before a placement edit', () => {
     const harness = new Harness();
     harness.world.AddShip(Ship('a', [0, 0, 0]), FRIGATE);

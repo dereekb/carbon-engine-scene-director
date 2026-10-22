@@ -131,8 +131,15 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - `flight.ts` runs class values (no SDE, unknown DNA) through the max-skills pilot too, so `stats` means the same with
   or without the SDE.
 - Destiny's heading snap (`SetBallVelocity`) keeps the ClientBall's banking roll, so a teleported ship's roll levels out
-  over a few seconds; its forward vector is exact at once. A ClientBall caches its sample per time: a teleport shows
-  from the next frame.
+  over a few seconds. A placement must also restart the ball's tick interval (`destiny.ts` `RestartInterval`): between
+  ticks a ClientBall integrates from the interval's start with the ball's last forces (`mLastG` + `mLastC`) and turns
+  from the interval's old heading, which the snap keeps (`mOldYaw`). Without it a ship placed mid-tick at full speed
+  slid on along its old thrust, popped back at the next tick and swung back toward its old heading; the old spec placed
+  right after a tick boundary and missed it. A ClientBall caches its sample per time: a teleport shows from the next
+  frame.
+- Every edit used to frame the document's camera again, dropping a `frame_camera` follow (rarely persisted) for a
+  re-fit, or gliding a persisted one across a teleport. `camera.ts` `ReframesAfterEdit` decides: a load, a camera change,
+  removing the followed ship, or no ship followed. `Director.Apply` calls it before its `appliedCamera` check.
 - `apps/viewer/esbuild.config.mjs` fails the build if any `@carbonenginejs/runtime` import resolves outside the page's
   runtime copy (a nested copy under the server would duplicate every class).
 - The runtime's `package-lock.json` entry MUST keep `"resolved": "file:../carbonenginejs/runtime/npm"`. Without it npm

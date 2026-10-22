@@ -8,6 +8,8 @@
  * - Modes (the document's camera.mode). `orbit` keeps the angles the user or the document set. `chase` swings the
  *   camera behind the ship's drawn heading, CHASE_PITCH above it; a drag looks around and eases back once released.
  * - Retargeting glides the focus from the old view onto the new ship.
+ * - Edits (ReframesAfterEdit). A camera following a ship keeps following through scene edits; a load, a camera
+ *   change or removing that ship frames the document's camera again, and with no ship followed every edit re-fits.
  * - Picking casts the pointer's ray through the view and takes the nearest ship whose bounding sphere it passes
  *   through, with a few pixels of slack so a distant frigate can still be clicked. It reads the projection EveCamera
  *   draws with, not the document's fov: EveCamera's default zoom curve overrides the field of view every frame, and
@@ -186,6 +188,43 @@ export function PickShip(camera: PickCamera, x: number, y: number, spheres: Iter
     }
   }
   return picked;
+}
+
+/**
+ * A scene edit, as ReframesAfterEdit weighs it.
+ */
+export interface ReframeInput {
+  /**
+   * A load (load_scene / open_scene).
+   */
+  readonly restart: boolean;
+  /**
+   * Whether the edit changed the document's camera.
+   */
+  readonly cameraChanged: boolean;
+  /**
+   * The ship the camera follows, or null.
+   */
+  readonly following: Maybe<string>;
+  /**
+   * The ships the edit removed.
+   */
+  readonly removed: readonly string[];
+}
+
+/**
+ * Whether an edit frames the document's camera again. A load or a camera change does, and so does any edit while the
+ * camera follows no ship, so the view keeps fitting the ships. A camera following a ship, framed by frame_camera or by
+ * the document, keeps following through other edits (a placement, a fleet edit, added ships) unless that ship left the
+ * scene: framing again would drop a frame_camera follow for the document's camera, or glide the view across a
+ * teleport.
+ *
+ * @param input - The edit and what the camera follows.
+ * @returns True to apply the document's camera.
+ */
+export function ReframesAfterEdit(input: ReframeInput): boolean {
+  const { restart, cameraChanged, following, removed } = input;
+  return restart || cameraChanged || !following || removed.includes(following);
 }
 
 /**

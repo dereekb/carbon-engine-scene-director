@@ -85,6 +85,22 @@ Expected noise: a 404 for `/favicon.ico`, and the warning that `powerPreference`
   high-LOD at 1.5 km. The flags are not recomputed while a ship is culled, so trust them only on screen.
 - The booster check's scripts (scene, probe, readout, driver) are in `.scratch/gpu-look/` on this machine and in the
   plan `real-gpu-look-at-the-speed-driven-boosters-and-the-warp.md`.
+- The movement and fleet check (`.scratch/gpu-check/`, plan
+  `agent-run-real-gpu-check-orbit-approach-keep-at-range-a-tfis-fleet-in-formation.md`) is the fuller template:
+  - Its probe wraps `Director.TrackCamera` instead of `engine.Frame`: `main.ts` calls it every frame with the same
+    `now`, renderer or not, so the same probe runs headless. It keeps per-ship, per-scene-second buckets (turn rate,
+    tick-edge vs inner rate steps, axis reversals, bank, position error, jumps, lag, boosters, camera focus gap, target
+    distances), so a 15 min fleet run stays a few MB. Dump it with `evaluate_script` and `filePath` under the Windows
+    temp dir, then `readout.mjs <run dir>` joins it with the driver's `events.jsonl` segment marks and `rows.jsonl`.
+  - Install it with `sourcePath` pointing at a copy under `C:\Users\<user>\AppData\Local\Temp\`: a Windows path works
+    and keeps an 11 KB function out of the call. A page reload (yours, the user's, or a universe change) drops it and
+    its buckets: dump before anything reloads.
+  - `dry-run.mjs` validates the drivers headless against a private hub on 5597 (temp scenes and fleets dirs), never
+    5520. Headless, a ClientBall's rotation filter advances only when something samples it, so compare only watched
+    ships there; on the GPU every built ship is sampled each frame.
+  - `movement.mjs --only teleport` and `fleet.mjs --from <phase>` re-run one part for a fix's before/after.
+  - The user can touch the window mid-run: a drag or an alt-click in the page changes the camera under the driver
+    (its rows show yaw/pitch/target jumps it did not ask for). Re-run that segment rather than judge it.
 
 ## Gotchas
 

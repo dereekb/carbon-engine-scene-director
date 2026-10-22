@@ -66,7 +66,7 @@ import {
 import type { SceneClock } from './clock';
 import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
-import { CameraFollow, PickShip, type FollowedShip, type PickSphere } from './camera';
+import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion } from './destiny';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -540,7 +540,8 @@ export class Director {
   }
 
   /**
-   * Points the camera without editing the document unless `persist`.
+   * Points the camera without editing the document unless `persist`. A camera following a ship keeps following through
+   * scene edits (camera.ts's ReframesAfterEdit).
    */
   async FrameCamera({ target, yaw, pitch, distance, mode, persist = false }: FrameCameraArgs = {}): Promise<unknown> {
     const camera: SceneCamera = { ...this.Current().camera, target: target ?? null };
@@ -630,7 +631,8 @@ export class Director {
     // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order.
     for (const doc of builds) await this.Build(doc);
 
-    if (JSON.stringify(scene.camera) !== this.appliedCamera) this.ApplyCamera(scene.camera);
+    const reframe = ReframesAfterEdit({ restart, cameraChanged: diff.camera, following: this.cameraFollow.following, removed: diff.removed.map((doc) => doc.id) });
+    if (reframe && JSON.stringify(scene.camera) !== this.appliedCamera) this.ApplyCamera(scene.camera);
     this.appliedCamera = null;
     this.onChange();
     return {

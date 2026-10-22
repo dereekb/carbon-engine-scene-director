@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CAMERA_GLIDE_SECONDS, CameraFollow, CHASE_PITCH, ChaseAngles, EaseAngle, PickShip, type FollowedView, type PickSphere } from './camera';
+import { CAMERA_GLIDE_SECONDS, CameraFollow, CHASE_PITCH, ChaseAngles, EaseAngle, PickShip, ReframesAfterEdit, type FollowedView, type PickSphere } from './camera';
 import { TICKS_PER_SECOND } from './clock';
 import { quat, vec3 } from './runtime-sim';
 
@@ -220,5 +220,24 @@ describe('CameraFollow', () => {
     expect(view.focus[0]).toBeLessThan(0);
     follow.Frame(CAMERA_GLIDE_SECONDS * SECOND, view, () => ({ position: [0, 0, 0], forward: null }));
     expect(view.focus[0]).toBeCloseTo(0, 5);
+  });
+});
+
+describe('ReframesAfterEdit', () => {
+  const edit = { restart: false, cameraChanged: false, following: 'fc', removed: [] as string[] };
+
+  it('keeps a camera that follows a ship through edits that leave the ship and the camera alone', () => {
+    expect(ReframesAfterEdit(edit)).toBe(false);
+    expect(ReframesAfterEdit({ ...edit, removed: ['other'] })).toBe(false);
+  });
+
+  it('frames the document camera on a load, a camera change, or when the followed ship is removed', () => {
+    expect(ReframesAfterEdit({ ...edit, restart: true })).toBe(true);
+    expect(ReframesAfterEdit({ ...edit, cameraChanged: true })).toBe(true);
+    expect(ReframesAfterEdit({ ...edit, removed: ['fc'] })).toBe(true);
+  });
+
+  it('re-fits on every edit while the camera follows no ship', () => {
+    expect(ReframesAfterEdit({ ...edit, following: null })).toBe(true);
   });
 });

@@ -180,7 +180,10 @@ node bin/scene-director.js call get_scene --out current.json                   #
 Metres and degrees, Y up. `rotation` is `[yaw, pitch, roll]`. A `null` camera
 target frames every ship; a `null` distance fits the target. A ship target is
 followed: the camera moves with the drawn ship every frame, keeping any orbit,
-pan or zoom made meanwhile. `mode` is how it follows: `orbit` (the default)
+pan or zoom made meanwhile. A camera following a ship, framed by `frame_camera` or
+by the document, keeps following through scene edits (a placement, a fleet edit,
+added ships); a load, a camera change or removing that ship frames the document's
+camera again, and with no ship followed every edit re-fits the view. `mode` is how it follows: `orbit` (the default)
 keeps the angles you set; `chase` sits behind the ship, 12° above its heading,
 and turns with it (a drag looks around and eases back once released). In the
 page, alt-click a ship to follow it (the view glides over, keeping its angles
@@ -241,8 +244,11 @@ or not, and the ball drives the drawn ship's translation and rotation curves.
   document placement. `patch_scene` touches only what it changes: a new position
   or rotation puts that ship there at rest; a new DNA rebuilds the ship and it
   keeps flying. A ship at rest faces its document rotation exactly; under way it
-  faces its velocity, keeping the document's roll. After a teleport, any banking
-  from the previous turn levels out over a few seconds, as Destiny's client does.
+  faces its velocity, keeping the document's roll. A placement holds still from the
+  next frame even mid-tick: the ball's tick interval starts over at rest, so the
+  ship neither slides on along its old thrust nor swings back toward its old
+  heading. After a teleport, any banking from the previous turn levels out over a
+  few seconds, as Destiny's client does.
 - **Orders are live only.** They are not written to the document, so a save or a
   reload starts from the document's placements.
 - **Physics are Ship stats** (`apps/viewer/src/lib/flight.ts`): the hull's
@@ -290,6 +296,16 @@ stops and `orderNote` says so. A new position or rotation, `load_scene` and
 chase it. `get_state` reports each ship's `order` (what its ball is flying),
 `pendingOrder` (applying at the next tick), `orderNote` and `targetDistance`.
 Destiny's default (legacy) orbit algorithm is used.
+
+**On a real GPU** (2026-10-22, Windows Chrome, NVIDIA): turns draw smoothly. No
+frame stepped more than 3° and none reversed its turn. Hulls bank into a turn
+(Carbon's legacy roll, up to about 80° in a 22°/s frigate turn) and level after.
+Two orders whip at one tick edge, then ease off: a 180° approach from rest
+(about 150°/s) and a reversal at speed (about 120°/s). Measured ranges: orbit 5 km
+held 5245–5253 m at 98 % of max velocity, orbit 1 km 1340–1390 m,
+keep-at-range 2500 m behind a 157 m/s target 2810–2915 m, and approach parked
+160–166 m surface to surface. An orbit ordered from rest picks a steeply
+inclined plane (a 5 km orbit around a level battleship rode 3–4 km below it).
 
 ### Warp
 
@@ -662,6 +678,16 @@ Fleets fly in formation on their FC under Destiny, in the page
   Slots are rigid, so on an FC turn a far squad (logi at 30 km) swings across
   the fleet and takes minutes to get back. Fleet-level orders, fleet warp and
   prop-mod toggling are later entries.
+- **On a real GPU** (the TFIs fleet, 2026-10-22). At full speed straight ahead,
+  the 34 members as fast as the FC hold formation within 0.2° of its heading,
+  boosters lit. The nine slower hulls (Bhaalgorns, dreads, the Apostle,
+  carriers) trail at their own top speed, and the logi lead holds 30 km ± 60 m.
+  A 90° turn at full speed leaves 36 of 43 catching up: the same-hull Tempest
+  Fleet Issues plateau 1–2 km off their swung slots, because no member is faster
+  than the FC, and the logi swings about 25 km. After a stop, 42 of 43 are back
+  in formation within about 3 minutes (the Apostle last). A few members visibly
+  snap round at the tick they settle (up to about 100°). Detach and rejoin fly
+  smoothly.
 
 ## Fleet compositions
 
@@ -805,6 +831,13 @@ Apostle and the secondary (L3ARN) fits are left out.
 warp (Fleet warp-in) are stored or planned, not played: added fleets start at
 rest in formation, prop mods off, and follow their FC from there
 (`switch_prop_mods { "fleet": "tfis", "active": true }` runs every module).
+
+**On a real GPU** (2026-10-22, Windows Chrome, NVIDIA): adding `tfis` to a live
+scene built all 44 hulls in 4–5.5 s, at 38–49 fps during the build. Every hull
+draws intact and lit, and the capitals clearly dwarf the battleships. At rest
+the page draws 45 ships at about 46 fps and 25–50 fps in flight, with no GPU
+errors. No meshes intersect in formation, although 14 Tempest Fleet Issue pairs
+(850–870 m apart) overlap as drawn bounding spheres.
 
 ## Locations
 
