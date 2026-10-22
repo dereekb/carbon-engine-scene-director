@@ -16,7 +16,7 @@ describe('expandFleetComposition', () => {
     expect(problems).toEqual([]);
     expect(warnings).toEqual([]);
     expect(ships).toHaveLength(44);
-    expect(ships[0]).toEqual({ id: 'tfis-fc', dna: TFI, name: 'FC', position: [0, 0, 0], rotation: [0, 0, 0], type: 'Tempest Fleet Issue', propMod: { module: '500MN Cold-Gas Enduring Microwarpdrive' } });
+    expect(ships[0]).toEqual({ id: 'tfis-fc', dna: TFI, name: 'FC', position: [0, 0, 0], rotation: [0, 0, 0], type: 'Tempest Fleet Issue', propMod: { module: '500MN Cold-Gas Enduring Microwarpdrive' }, fit: 'tfis/tfi' });
     const byId = new Map(ships.map((ship) => [ship.id, ship]));
     expect(byId.get('tfis-dps-a-01')?.name).toBe('Tempest Fleet Issue 1');
     expect(byId.get('tfis-dps-b-10')?.name).toBe('Tempest Fleet Issue 10');

@@ -120,6 +120,18 @@ describe('add_ships', () => {
     expect(result['template']).toMatchObject({ schema: 'cjs-fleet/1', id: 'tempest-fleet-issue', commander: { hull: 'Tempest Fleet Issue', dna: TFI_DNA, radius: 250 } });
   });
 
+  it("takes the hull from a fit's header, keeps the fit once and returns it in the template", async () => {
+    const fit = '[Tempest Fleet Issue, Brawler]\nDamage Control II\n\n500MN Microwarpdrive II';
+    const result = (await MakeStaging().staging.AddShips({ scene: { name: 'x' }, fit, count: 2 })) as Record<string, any>;
+    const scene = result['scene'] as SceneDocument;
+    expect(scene.ships.map((ship) => [ship.type, ship.fit])).toEqual([
+      ['Tempest Fleet Issue', 'tempest-fleet-issue/brawler'],
+      ['Tempest Fleet Issue', 'tempest-fleet-issue/brawler']
+    ]);
+    expect(scene.fits).toEqual({ 'tempest-fleet-issue/brawler': fit });
+    expect(result['template']).toMatchObject({ commander: { hull: 'Tempest Fleet Issue', fit: 'brawler' }, fits: { brawler: fit } });
+  });
+
   it('looks nothing up with dna and radius', async () => {
     const { staging, calls } = MakeStaging();
     const result = (await staging.AddShips({ scene: { name: 'x' }, dna: TFI_DNA, radius: 250, count: 2 })) as Record<string, any>;

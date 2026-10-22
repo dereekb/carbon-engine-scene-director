@@ -1,7 +1,7 @@
 import { isPlainObject, type JsonObject, readId, readNumber, readString, readVector } from '../json';
 import type { FleetOperationContext } from '../fleets';
 import type { SceneVector } from '../scene';
-import { expandFleetComposition } from './expand';
+import { expandFleetComposition, type ExpandFleetCompositionExisting } from './expand';
 import { normalizeFleetComposition } from './normalize';
 
 /**
@@ -41,6 +41,19 @@ export function applyFleetCompositionOperation(operation: JsonObject, context: F
   if (draft['fleets'] == null) draft['fleets'] = [];
   if (Array.isArray(draft['fleets'])) draft['fleets'].push(structuredClone(expanded.fleet));
   else problems.push(`${where}: the scene's fleets are not an array`);
+  mergeDraftFits(draft, expanded.fits);
+}
+
+/**
+ * Merges fits into the draft's `fits` (created when absent; a malformed map is left for normalizeScene to report).
+ *
+ * @param draft - The document mid-edit.
+ * @param fits - The texts by scene key.
+ */
+export function mergeDraftFits(draft: JsonObject, fits: Readonly<Record<string, string>>): void {
+  if (!Object.keys(fits).length) return;
+  if (draft['fits'] == null) draft['fits'] = {};
+  if (isPlainObject(draft['fits'])) Object.assign(draft['fits'], fits);
 }
 
 /**
@@ -77,7 +90,7 @@ function readHeading(operation: JsonObject, context: { readonly where: string; r
  * @param draft - The document mid-edit.
  * @returns What the scene already holds.
  */
-function readExisting(draft: JsonObject): { readonly ships: Map<string, SceneVector>; readonly objects: Set<string>; readonly fleets: Set<string> } {
+function readExisting(draft: JsonObject): ExpandFleetCompositionExisting {
   const ships = new Map<string, SceneVector>();
   for (const ship of Array.isArray(draft['ships']) ? draft['ships'] : []) {
     if (!isPlainObject(ship) || typeof ship['id'] !== 'string') continue;
@@ -91,5 +104,17 @@ function readExisting(draft: JsonObject): { readonly ships: Map<string, SceneVec
   for (const fleet of Array.isArray(draft['fleets']) ? draft['fleets'] : []) {
     if (isPlainObject(fleet) && typeof fleet['id'] === 'string') fleets.add(fleet['id']);
   }
-  return { ships, objects, fleets };
+  return { ships, objects, fleets, fits: readDraftFits(draft) };
+}
+
+/**
+ * The draft's fits, when they are a map of strings.
+ *
+ * @param draft - The document mid-edit.
+ * @returns The fits by key.
+ */
+export function readDraftFits(draft: JsonObject): Record<string, string> {
+  const fits: Record<string, string> = {};
+  if (isPlainObject(draft['fits'])) for (const [key, text] of Object.entries(draft['fits'])) if (typeof text === 'string') fits[key] = text;
+  return fits;
 }

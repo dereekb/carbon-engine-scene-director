@@ -6,7 +6,8 @@ import type { SquadRole } from '../fleets';
  * unique-id ships in formation plus one `fleets` entry of the scene document.
  *
  * Ranges are EVE ranges: metres, surface to surface. A line's `propMod` becomes each of its ships' prop mod (else
- * its fit's module, else the hull-sized microwarpdrive); the rest of a `fit` is stored for later entries (turrets).
+ * its fit's module, else the hull-sized microwarpdrive). A line's `fit` rides on each of its ships: the scene keeps
+ * the text once in its `fits` under `<composition id>/<fit key>` (see fitting/fit.ts), and the page fits the modules.
  */
 
 export const FLEET_COMPOSITION_SCHEMA = 'cjs-fleet/1';
@@ -15,11 +16,6 @@ export const FLEET_COMPOSITION_SCHEMA = 'cjs-fleet/1';
  * EVE's fleet size cap: the FC plus every squad ship.
  */
 export const MAX_FLEET_SHIPS = 256;
-
-/**
- * The longest EFT fit text a composition keeps.
- */
-export const MAX_FIT_LENGTH = 20_000;
 
 /**
  * The anchor target naming the fleet commander.
@@ -61,8 +57,8 @@ export interface CompositionShip {
    */
   propMod?: string | number;
   /**
-   * A key of the composition's `fits`. Its prop mod is applied when the line names none; the rest is stored for the
-   * turrets entry.
+   * A key of the composition's `fits`. Each of the line's ships carries it (`fit: "<composition id>/<key>"`); its prop
+   * mod is applied when the line names none.
    */
   fit?: string;
 }

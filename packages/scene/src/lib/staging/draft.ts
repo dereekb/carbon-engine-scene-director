@@ -1,6 +1,7 @@
 import type { Maybe } from '@dereekb/util';
 import { isPlainObject, type JsonObject, readVector } from '../json';
 import type { ExpandFleetCompositionExisting } from '../compositions/expand';
+import { readDraftFits } from '../compositions/operation';
 import type { SceneVector } from '../scene';
 
 /**
@@ -35,6 +36,10 @@ export interface StagingDraft {
    * The scene location's origin (system metres), or null without a location.
    */
   readonly locationOrigin: Maybe<SceneVector>;
+  /**
+   * The scene's fits by key.
+   */
+  readonly fits: Record<string, string>;
 }
 
 /**
@@ -62,7 +67,7 @@ export function readStagingDraft(draft: JsonObject): StagingDraft {
   }
   const location = draft['location'];
   const locationOrigin = isPlainObject(location) && location['origin'] != null ? readVector(location['origin'], 'origin', []) : null;
-  return { ships, objects, fleets, locationOrigin };
+  return { ships, objects, fleets, locationOrigin, fits: readDraftFits(draft) };
 }
 
 /**
@@ -72,7 +77,7 @@ export function readStagingDraft(draft: JsonObject): StagingDraft {
  * @returns Its ship positions, object ids and fleet ids.
  */
 export function toExpandExisting(draft: StagingDraft): ExpandFleetCompositionExisting {
-  return { ships: new Map([...draft.ships].map(([id, ship]) => [id, ship.position])), objects: new Set(draft.objects.keys()), fleets: draft.fleets };
+  return { ships: new Map([...draft.ships].map(([id, ship]) => [id, ship.position])), objects: new Set(draft.objects.keys()), fleets: draft.fleets, fits: draft.fits };
 }
 
 /**

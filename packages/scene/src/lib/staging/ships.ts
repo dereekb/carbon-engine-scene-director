@@ -8,6 +8,8 @@ import { DNA_PATTERN, isPlainObject, type JsonObject, readNumber, readOptionalSt
 import { readSquadRole, type SquadRole } from '../fleets';
 import { FLEET_COMPOSITION_SCHEMA, MAX_FLEET_SHIPS } from '../compositions/composition';
 import { readPropModModule, type PropModModule } from '../stats/prop-mods';
+import { readEftHeader } from '../fitting/eft';
+import { readFitText } from '../fitting/fit';
 
 /**
  * The longest ship id prefix staging accepts (ids are `<prefix>-<nn>`, at most 64 characters).
@@ -61,9 +63,14 @@ export interface StagingShipLine {
    * The prop mod the line's ships fit: a module name, a type id, "mwd", "ab" or "none".
    */
   readonly propMod?: PropModModule;
+  /**
+   * The EFT fit the line's ships carry. Its header's hull is the line's hull when it names none; the scene keeps the
+   * text in its `fits` (`<prefix>/<fit name slug>`).
+   */
+  readonly fit?: string;
 }
 
-const LINE_KEYS = new Set<string>(['hull', 'dna', 'radius', 'count', 'name', 'role', 'propMod']);
+const LINE_KEYS = new Set<string>(['hull', 'dna', 'radius', 'count', 'name', 'role', 'propMod', 'fit']);
 
 export interface ReadStagingShipLineInput {
   readonly record: JsonObject;
@@ -76,14 +83,16 @@ export interface ReadStagingShipLineInput {
 }
 
 /**
- * Reads a line's hull, dna, radius, count, name and propMod from a record (unknown keys are the caller's).
+ * Reads a line's hull (else its fit's hull), dna, radius, count, name, propMod and fit from a record (unknown keys are
+ * the caller's).
  *
  * @param input - The record, where it sits, the resolving tool and where problems go.
  * @returns The line (fields with problems are dropped).
  */
 export function readStagingShipLine(input: ReadStagingShipLineInput): StagingShipLine {
   const { record, where, tool, problems } = input;
-  const hull = record['hull'] == null ? null : readShipType(record['hull'], `${where}.hull`, problems);
+  const fit = record['fit'] == null ? null : readFitText(record['fit'], `${where}.fit`, problems);
+  const hull = record['hull'] == null ? (fit ? (readEftHeader(fit)?.hull ?? null) : null) : readShipType(record['hull'], `${where}.hull`, problems);
   const label = hull ?? 'ship';
   let dna = '';
   if (record['dna'] == null) problems.push(`${where}: hull "${label}" has no dna. The ${tool} tool resolves hull names to DNA through tools-core; patch_scene needs every ship line's dna.`);
@@ -100,7 +109,8 @@ export function readStagingShipLine(input: ReadStagingShipLineInput): StagingShi
     ...(radius == null ? {} : { radius }),
     ...(count == null ? {} : { count }),
     ...(name ? { name } : {}),
-    ...(propMod == null ? {} : { propMod })
+    ...(propMod == null ? {} : { propMod }),
+    ...(fit ? { fit } : {})
   };
 }
 
@@ -126,7 +136,7 @@ export interface NormalizedStagingShipLines {
 }
 
 /**
- * Validates a ship list: a non-empty array of lines (hull?, dna, radius?, count?, name?, role?, propMod?), at most
+ * Validates a ship list: a non-empty array of lines (hull?, dna, radius?, count?, name?, role?, propMod?, fit?), at most
  * MAX_FLEET_SHIPS ships in all.
  *
  * @param config - The candidate, where it sits and the resolving tool.
@@ -266,29 +276,53 @@ export function toShipListComposition(input: ShipListCompositionInput): JsonObje
   const [first] = lines;
   const used = new Map<string, number>();
   const squads: JsonObject[] = [];
+  const fits = toLineFitKeys(lines);
   for (const [index, line] of lines.entries()) {
     const count = (line.count ?? 1) - (index === 0 ? 1 : 0);
     if (count < 1) continue;
     const role = line.role ?? 'dps';
     const seen = (used.get(role) ?? 0) + 1;
     used.set(role, seen);
-    squads.push({ id: seen === 1 ? role : `${role}-${seen}`, role, ships: [{ ...compositionShip(line), count }] });
+    squads.push({ id: seen === 1 ? role : `${role}-${seen}`, role, ships: [{ ...compositionShip(line, { fits }), count }] });
   }
   return {
     schema: FLEET_COMPOSITION_SCHEMA,
     id,
     ...(name ? { name } : {}),
-    commander: first ? compositionShip(first, false) : {},
-    ...(squads.length ? { wings: [{ id: STAGING_WING_ID, squads }] } : {})
+    commander: first ? compositionShip(first, { fits, named: false }) : {},
+    ...(squads.length ? { wings: [{ id: STAGING_WING_ID, squads }] } : {}),
+    ...(fits.size ? { fits: Object.fromEntries([...fits].map(([text, key]) => [key, text])) } : {})
   };
 }
 
-function compositionShip(line: StagingShipLine, named = true): JsonObject {
+/**
+ * The key a staged fit takes: a slug of its fit name, numbered when two texts share one.
+ *
+ * @param text - The EFT text.
+ * @param taken - The keys already given.
+ * @returns The key.
+ */
+export function stagedFitKey(text: string, taken: ReadonlySet<string>): string {
+  const base = toIdSlug(readEftHeader(text)?.name ?? '', 'fit');
+  let key = base;
+  for (let number = 2; taken.has(key); number += 1) key = `${base}-${number}`;
+  return key;
+}
+
+function toLineFitKeys(lines: readonly StagingShipLine[]): Map<string, string> {
+  const keys = new Map<string, string>();
+  for (const line of lines) if (line.fit && !keys.has(line.fit)) keys.set(line.fit, stagedFitKey(line.fit, new Set(keys.values())));
+  return keys;
+}
+
+function compositionShip(line: StagingShipLine, options: { readonly fits: ReadonlyMap<string, string>; readonly named?: boolean }): JsonObject {
+  const { fits, named = true } = options;
   return {
     ...(line.hull == null ? {} : { hull: line.hull }),
     dna: line.dna,
     ...(line.radius == null ? {} : { radius: line.radius }),
     ...(named && line.name ? { name: line.name } : {}),
-    ...(line.propMod == null ? {} : { propMod: line.propMod })
+    ...(line.propMod == null ? {} : { propMod: line.propMod }),
+    ...(line.fit && fits.has(line.fit) ? { fit: fits.get(line.fit) } : {})
   };
 }

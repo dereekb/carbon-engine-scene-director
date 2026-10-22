@@ -103,4 +103,22 @@ describe('the TFIs example end to end', () => {
       expect(readEftHeader(composition.fits![ship.fit!])?.hull).toBe(ship.hull);
     }
   });
+
+  it('puts the fits in the scene once under tfis/<key>, reused by a second fleet, with the fleet id on a clash', () => {
+    const { scene } = addTfis(createEmptyScene());
+    const composition = tfisComposition();
+    expect(scene.fits).toEqual(Object.fromEntries(TFIS_FIT_KEYS.map((key) => [`tfis/${key}`, composition.fits?.[key]])));
+    const byId = new Map(scene.ships.map((ship) => [ship.id, ship]));
+    expect([byId.get('tfis-fc')?.fit, byId.get('tfis-logi-01')?.fit, byId.get('tfis-carriers-03')?.fit]).toEqual(['tfis/tfi', 'tfis/guardian', 'tfis/archon']);
+
+    const twice = addTfis(scene, { position: [0, 0, 200000] }).scene;
+    expect(Object.keys(twice.fits ?? {})).toHaveLength(13);
+    expect(twice.ships.find((ship) => ship.id === 'tfis-2-fc')?.fit).toBe('tfis/tfi');
+
+    const edited = applySceneOperations(scene, [{ op: 'set_fits', fits: { 'tfis/tfi': '[Tempest Fleet Issue, Edited]\nDamage Control II' } }]).scene;
+    const clash = addTfis(edited, { position: [0, 0, 200000], fleet: 'blue' }).scene;
+    expect(clash.ships.find((ship) => ship.id === 'blue-fc')?.fit).toBe('blue/tfi');
+    expect(clash.fits?.['blue/tfi']).toBe(composition.fits?.['tfi']);
+    expect(clash.ships.find((ship) => ship.id === 'blue-logi-01')?.fit).toBe('tfis/guardian');
+  });
 });

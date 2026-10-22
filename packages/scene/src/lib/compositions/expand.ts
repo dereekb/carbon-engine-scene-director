@@ -4,6 +4,7 @@ import type { SceneShip, SceneVector } from '../scene';
 import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, type CompositionShip, type CompositionSquad, type FleetComposition } from './composition';
 import { PROP_MOD_MODULE_NONE, type PropModModule, readPropModModule } from '../stats/prop-mods';
 import { readEftHeader, readEftPropMod } from './eft';
+import { chooseSceneFitKey } from '../fitting/fit';
 
 /**
  * The longest ship id a scene accepts.
@@ -33,6 +34,10 @@ export interface ExpandFleetCompositionExisting {
    * The scene's fleet ids.
    */
   readonly fleets: ReadonlySet<string>;
+  /**
+   * The scene's fits, so a second fleet of one composition reuses its fit keys.
+   */
+  readonly fits?: Maybe<Readonly<Record<string, string>>>;
 }
 
 export interface ExpandFleetCompositionInput {
@@ -75,6 +80,11 @@ export interface ExpandedFleetComposition {
    * The new ships: the FC first, then wings, squads, lines and count in order. Empty on a problem.
    */
   readonly ships: SceneShip[];
+  /**
+   * The fits the ships use by scene key (`<composition id>/<fit key>`, or `<fleet id>/<fit key>` when the scene holds
+   * other text under the first), to merge into the scene's `fits`. Empty on a problem.
+   */
+  readonly fits: Record<string, string>;
   readonly problems: string[];
   readonly warnings: string[];
 }
@@ -128,11 +138,12 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
     reported.add(slot.where);
     problems.push(`${where}.${slot.where}: hull "${hullLabel(slot.ship, composition)}" has no dna. The add_fleet_composition tool resolves hull names to DNA through tools-core; patch_scene needs every ship line's dna.`);
   }
-  if (!slots || !fleetId || problems.length) return { fleet: null, ships: [], problems, warnings };
+  if (!slots || !fleetId || problems.length) return { fleet: null, ships: [], fits: {}, problems, warnings };
 
   const fleet = toSceneFleet({ composition, fleetId, slots });
   const radii = new Map(slots.all.map((slot) => [slot.id, slot.ship.radius ?? DEFAULT_FORMATION_RADIUS]));
   const positions = layoutFleetFormation({ fleet, origin: position, heading, radiusOf: (ship) => radii.get(ship) ?? DEFAULT_FORMATION_RADIUS });
+  const fits = toSceneFits({ composition, fleetId, slots: slots.all, existing: existing.fits });
   const ships = slots.all.map((slot): SceneShip => {
     const type = slot.ship.hull ?? fitHull(slot.ship, composition);
     return {
@@ -143,7 +154,8 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
       position: positions.get(slot.id) ?? [...position],
       rotation: [heading, 0, 0],
       ...(type == null ? {} : { type }),
-      ...shipPropMod(slot.ship, composition)
+      ...shipPropMod(slot.ship, composition),
+      ...(slot.ship.fit && fits.keys.has(slot.ship.fit) ? { fit: fits.keys.get(slot.ship.fit) as string } : {})
     };
   });
 
@@ -152,7 +164,28 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
     warnings.push(`fleet "${fleetId}": no radius for ${unsized.join(', ')}; their spacing assumes ${DEFAULT_FORMATION_RADIUS} m. Give each ship line a radius, or add the fleet with the add_fleet_composition tool, which reads it from the EVE data.`);
   }
   warnOverlaps({ fleetId, ships, radii, existing, warnings });
-  return { fleet, ships, problems, warnings };
+  return { fleet, ships, fits: fits.texts, problems, warnings };
+}
+
+/**
+ * The scene keys of the fits the slots use (chooseSceneFitKey: the composition id, then the fleet id).
+ *
+ * @param input - The composition, the fleet id, the slots and the scene's fits.
+ * @returns The scene key by composition fit key, and the texts by scene key.
+ */
+function toSceneFits(input: { readonly composition: FleetComposition; readonly fleetId: string; readonly slots: readonly ShipSlot[]; readonly existing: Maybe<Readonly<Record<string, string>>> }): { readonly keys: Map<string, string>; readonly texts: Record<string, string> } {
+  const { composition, fleetId, slots, existing } = input;
+  const keys = new Map<string, string>();
+  const texts: Record<string, string> = {};
+  for (const slot of slots) {
+    const key = slot.ship.fit;
+    const text = key ? composition.fits?.[key] : undefined;
+    if (!key || text == null || keys.has(key)) continue;
+    const sceneKey = chooseSceneFitKey({ fits: { ...existing, ...texts }, prefixes: [composition.id, fleetId], key, text });
+    keys.set(key, sceneKey);
+    texts[sceneKey] = text;
+  }
+  return { keys, texts };
 }
 
 /**

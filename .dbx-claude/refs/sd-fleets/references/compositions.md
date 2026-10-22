@@ -64,6 +64,9 @@ Exactly the anchors the fleet rules resolve; nothing re-derived.
 - **Prop mods**: a line's `propMod` → each ship's `propMod`. A line with `fit` and no `propMod` takes the first fitted
   MWD/AB in its EFT text (cargo/drone `xN` lines skipped, `/OFFLINE` and charges dropped), or `"none"` when the fit has
   neither; a line with neither flies the hull-sized MWD.
+- **Fits ride on the ships**: each line ship gets `fit: "<composition id>/<fit key>"` and the op merges the texts it
+  uses into the scene's `fits` once (a second fleet of the composition reuses them; other text under the key gets
+  `<fleet id>/<fit key>`). Rules and the parser: `sd-fittings`.
 
 ## Hub vs op
 

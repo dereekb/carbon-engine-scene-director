@@ -11,7 +11,9 @@ import { readStagingDraft, type StagingDraft, stagingTakenIds, toExpandExisting 
 import { largeSceneWarning } from '../extent';
 import { DEFAULT_SHIP_FORMATION, defaultShipSpacing, layoutShipFormation, readShipFormation, type ShipFormation, toFormationWorld } from './formations';
 import { headingToward, type NearDirection, normalizeHeading, readNearDirection, toNearShipPoint } from './placement';
-import { MAX_SHIP_ID_PREFIX_LENGTH, numberShipIds, readPositiveMetres, readStagingShipLine, shipLabel, type StagingShipLine, STAGING_WING_ID, toIdSlug, toShipListComposition } from './ships';
+import { MAX_SHIP_ID_PREFIX_LENGTH, numberShipIds, readPositiveMetres, readStagingShipLine, shipLabel, stagedFitKey, type StagingShipLine, STAGING_WING_ID, toIdSlug, toShipListComposition } from './ships';
+import { mergeDraftFits, readDraftFits } from '../compositions/operation';
+import { chooseSceneFitKey, isInlineFit } from '../fitting/fit';
 
 /**
  * How many examples an overlap warning names.
@@ -235,7 +237,8 @@ export function placeFreeShips(input: PlaceFreeShipsInput): SceneShip[] {
       rotation: [yaw, 0, 0],
       ...(line.hull == null ? {} : { type: line.hull }),
       ...(template.stats ? { stats: structuredClone(template.stats) } : {}),
-      ...(propMod ? { propMod: structuredClone(propMod) } : {})
+      ...(propMod ? { propMod: structuredClone(propMod) } : {}),
+      ...(line.fit ? { fit: line.fit } : {})
     };
   });
 
@@ -293,14 +296,30 @@ export function warnFar(input: { readonly ships: readonly Pick<SceneShip, 'posit
 }
 
 /**
- * Pushes ships onto the draft.
+ * Pushes ships onto the draft. A ship carrying inline EFT text has it moved into the scene's `fits` under
+ * `<id prefix>/<fit name slug>` (chooseSceneFitKey: reused when the scene holds the same text there), so a line of
+ * ships keeps one copy.
  *
  * @param draft - The document mid-edit.
  * @param ships - The ships.
  */
 export function pushStagedShips(draft: JsonObject, ships: readonly SceneShip[]): void {
   if (!Array.isArray(draft['ships'])) draft['ships'] = [];
-  (draft['ships'] as unknown[]).push(...structuredClone(ships));
+  const keys = new Map<string, string>();
+  const fits: Record<string, string> = {};
+  const staged = ships.map((ship) => {
+    const text = ship.fit;
+    if (!text || !isInlineFit(text)) return structuredClone(ship);
+    let key = keys.get(text);
+    if (key == null) {
+      key = chooseSceneFitKey({ fits: { ...readDraftFits(draft), ...fits }, prefixes: [ship.id.replace(/-\d+$/u, '')], key: stagedFitKey(text, new Set()), text });
+      keys.set(text, key);
+      fits[key] = text;
+    }
+    return { ...structuredClone(ship), fit: key };
+  });
+  (draft['ships'] as unknown[]).push(...staged);
+  mergeDraftFits(draft, fits);
 }
 
 /**
@@ -539,6 +558,7 @@ function addNewFleet(input: NewFleetInput): void {
   warnFar({ ships, where, warnings });
   pushStagedShips(document, ships);
   pushStagedFleet(document, expanded.fleet, context);
+  mergeDraftFits(document, expanded.fits);
 }
 
 interface SquadSpec {
@@ -659,7 +679,8 @@ function joinFleet(input: JoinFleetInput): void {
     rotation: [fcYaw, 0, 0],
     ...(line.hull == null ? {} : { type: line.hull }),
     ...(template.stats ? { stats: structuredClone(template.stats) } : {}),
-    ...(template.propMod ? { propMod: structuredClone(template.propMod) } : {})
+    ...(template.propMod ? { propMod: structuredClone(template.propMod) } : {}),
+    ...(line.fit ? { fit: line.fit } : {})
   }));
   pushStagedShips(document, ships);
   if (wingOp) applyFleetOperation(wingOp, context);

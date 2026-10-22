@@ -178,6 +178,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Objects: stations, gates, structures, wrecks; `add_objects`, `search_objects` | [`sd-objects`](.dbx-claude/refs/sd-objects/REF.md) |
 | The cinematic camera: hardpoints, shots, moves, waypoints, letterbox | [`sd-cinema`](.dbx-claude/refs/sd-cinema/REF.md) |
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
+| Fittings: EFT fits on ships, the parser, fit keys | [`sd-fittings`](.dbx-claude/refs/sd-fittings/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

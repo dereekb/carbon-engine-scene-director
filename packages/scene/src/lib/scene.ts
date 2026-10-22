@@ -10,6 +10,8 @@ import { applyStagingOperation, STAGING_OPERATIONS } from './staging/operation';
 import { applyObjectOperation, OBJECT_OPERATIONS } from './objects/operations';
 import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneObjectsDiff } from './objects/object';
 import { readScenePosition } from './extent';
+import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
+import { fitTextOf, normalizeSceneFits, normalizeShipFit } from './fitting/fit';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -57,6 +59,12 @@ export interface SceneShip {
    * A string or a type id is shorthand for `{ module }`.
    */
   propMod?: SceneShipPropMod;
+  /**
+   * The ship's EVE fit: EFT text (starting with its `[Hull, Fit name]` header), or a key of the document's `fits`.
+   * Its modules set the ship's HP, resists, capacitor, signature and speed; its first MWD / AB is the prop mod when
+   * `propMod.module` names none (see fitting/fit.ts).
+   */
+  fit?: string;
   /**
    * Reserved for the movement phase: stored, not played yet.
    */
@@ -121,6 +129,11 @@ export interface SceneDocument {
    */
   objects?: SceneObject[];
   /**
+   * EFT fit text by key, for the ships' `fit`. A fleet composition adds its fits here once, under
+   * `<composition id>/<fit key>`. Unused keys stay until set_fits deletes them. Omitted when there are none.
+   */
+  fits?: Record<string, string>;
+  /**
    * Reserved for the timeline phase: stored, not played yet.
    */
   timeline?: unknown;
@@ -143,7 +156,8 @@ export interface SceneDiff {
   readonly moved: SceneShip[];
   readonly relabelled: SceneShip[];
   /**
-   * Kept ships whose type, stats or pilot changed: their flight numbers need recomputing, not a rebuild.
+   * Kept ships whose type, stats, pilot, prop mod module or fit text changed (an inline edit, another key, or the
+   * `fits` text it names): their flight numbers and modules need recomputing, not a rebuild.
    */
   readonly retuned: SceneShip[];
   /**
@@ -181,8 +195,8 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
 const RESERVED_SCENE_KEYS = ['timeline'] as const;
 const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', ...RESERVED_SCENE_KEYS]);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', ...RESERVED_SHIP_KEYS]);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', ...RESERVED_SCENE_KEYS]);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
@@ -247,11 +261,13 @@ export function normalizeScene(input: unknown): NormalizedScene {
     ships: []
   };
 
+  const fits = normalizeSceneFits(input['fits']);
+  problems.push(...fits.problems);
   const ships = input['ships'];
   if (ships !== undefined && !Array.isArray(ships)) problems.push('ships must be an array');
   const ids = new Set<string>();
   for (const [index, ship] of (Array.isArray(ships) ? ships : []).entries()) {
-    const normalized = normalizeShip(ship, `ships[${index}]`, problems, warnings);
+    const normalized = normalizeShip(ship, `ships[${index}]`, { problems, warnings, fits: fits.fits });
     if (!normalized) continue;
     if (ids.has(normalized.id)) problems.push(`ships[${index}].id "${normalized.id}" is used more than once`);
     ids.add(normalized.id);
@@ -270,6 +286,7 @@ export function normalizeScene(input: unknown): NormalizedScene {
   warnings.push(...fleets.warnings);
   if (fleets.fleets) scene.fleets = fleets.fleets;
   if (objects.objects) scene.objects = objects.objects;
+  if (fits.fits) scene.fits = fits.fits;
   for (const key of RESERVED_SCENE_KEYS) {
     if (input[key] === undefined) continue;
     scene[key] = structuredClone(input[key]);
@@ -286,9 +303,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *
  * Operations:
  *   { op: "add_ship", ship }
- *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, orders?, pilot? } }
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot? } }
  *                                       each key replaces the ship's value (stats and propMod as a whole); null clears
- *                                       type, stats, propMod and pilot
+ *                                       type, stats, propMod, fit and pilot
  *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused)
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
@@ -318,6 +335,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "stage_engagement", sides: [A, B], range?, center? | near?, heading?, radii? }
  *                                       two sides (compositions or ship lists) facing each other, fronts range apart;
  *                                       every ship line needs its dna (see staging/engagement.ts)
+ *   { op: "set_fits", fits: { "<key>": "<EFT text>" | null } }
+ *                                       merged into the document's fits; null deletes a key no ship uses (see
+ *                                       fitting/operation.ts)
  *   { op: "add_object", object }   { op: "add_objects", dna, type?, radius?, count?, position? | near?, ... }
  *   { op: "update_object", id, set }   { op: "move_object", id, position? | near?, heading? | facing? | rotation? }
  *   { op: "remove_object", id }   static objects (see objects/operations.ts); add_objects needs dna, which the
@@ -402,6 +422,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (PROP_MOD_OPERATIONS.has(String(operation['op']))) applyPropModOperation(operation, context);
       else if (STAGING_OPERATIONS.has(String(operation['op']))) applyStagingOperation(operation, context);
       else if (OBJECT_OPERATIONS.has(String(operation['op']))) applyObjectOperation(operation, context);
+      else if (FIT_OPERATIONS.has(String(operation['op']))) applyFitOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
@@ -443,7 +464,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     } else if (old.dna === ship.dna) {
       if (!sameJson(old.position, ship.position) || !sameJson(old.rotation, ship.rotation)) diff.moved.push(ship);
       if (old.name !== ship.name || old.team !== ship.team) diff.relabelled.push(ship);
-      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(old.pilot, ship.pilot) || !sameJson(old.propMod?.module, ship.propMod?.module)) diff.retuned.push(ship);
+      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(old.pilot, ship.pilot) || !sameJson(old.propMod?.module, ship.propMod?.module) || fitTextOf(old, before) !== fitTextOf(ship, after)) diff.retuned.push(ship);
     } else {
       diff.rebuilt.push(ship);
     }
@@ -489,7 +510,17 @@ function normalizeCamera(input: unknown, problems: string[], warnings: string[])
   return camera;
 }
 
-function normalizeShip(input: unknown, where: string, problems: string[], warnings: string[]): Maybe<SceneShip> {
+interface NormalizeShipContext {
+  readonly problems: string[];
+  readonly warnings: string[];
+  /**
+   * The document's normalized fits, for the ship's fit key.
+   */
+  readonly fits: Maybe<Readonly<Record<string, string>>>;
+}
+
+function normalizeShip(input: unknown, where: string, context: NormalizeShipContext): Maybe<SceneShip> {
+  const { problems, warnings } = context;
   if (!isPlainObject(input)) {
     problems.push(`${where} must be an object`);
     return null;
@@ -517,6 +548,11 @@ function normalizeShip(input: unknown, where: string, problems: string[], warnin
   problems.push(...propMod.problems);
   warnings.push(...propMod.warnings);
   if (propMod.propMod) ship.propMod = propMod.propMod;
+
+  const fit = normalizeShipFit({ input: input['fit'], where: `${where}.fit`, fits: context.fits, type: ship.type });
+  problems.push(...fit.problems);
+  warnings.push(...fit.warnings);
+  if (fit.fit != null) ship.fit = fit.fit;
 
   if (input['orders'] !== undefined) {
     ship.orders = structuredClone(input['orders']);

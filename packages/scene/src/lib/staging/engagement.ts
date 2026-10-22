@@ -3,6 +3,7 @@ import { isPlainObject, type JsonObject, readNumber, readString, readVector, rep
 import { DEFAULT_FORMATION_RADIUS, type FleetOperationContext } from '../fleets';
 import type { FleetComposition } from '../compositions/composition';
 import { expandFleetComposition } from '../compositions/expand';
+import { mergeDraftFits } from '../compositions/operation';
 import { normalizeFleetComposition } from '../compositions/normalize';
 import type { SceneVector } from '../scene';
 import { freeShipsFront, placeFreeShips, planFreeShips, pushStagedFleet, pushStagedShips, readStagingNear, readStagingPrefix, readStagingRadii, resolveStagingNear, stagingNearReference, warnFar } from './add-ships';
@@ -211,6 +212,7 @@ function placeSide(side: EngagementSide, input: PlaceSideInput): void {
       warnFar({ ships: expanded.ships, where: side.where, warnings });
       pushStagedShips(document, expanded.ships);
       pushStagedFleet(document, expanded.fleet, context);
+      mergeDraftFits(document, expanded.fits);
     }
   }
 }

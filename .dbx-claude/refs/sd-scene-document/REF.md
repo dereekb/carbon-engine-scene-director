@@ -23,10 +23,10 @@
 
 - **Units are EVE's**: metres, degrees, **Y up**. `rotation` is `[yaw, pitch, roll]`. Yaw 0 faces +Z, 90 faces +X.
 - Ship fields: `id` (ship-id pattern), `dna` (SOF `hull:faction:race[:commands]`), `name?`, `team?` (the side, for
-  hostility; independent of fleets), `position`, `rotation`, `type?`, `stats?`, `propMod?`, `pilot?` (reserved: stored,
-  unused), `orders?` (reserved: stored, not played).
-- Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `objects?` (omitted when empty),
-  `location?`, `timeline?` (reserved).
+  hostility; independent of fleets), `position`, `rotation`, `type?`, `stats?`, `propMod?`, `fit?` (EFT text or a key
+  of `fits`: `sd-fittings`), `pilot?` (reserved: stored, unused), `orders?` (reserved: stored, not played).
+- Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `objects?`, `fits?` (EFT text by key;
+  omitted when empty), `location?`, `timeline?` (reserved).
 - Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
   `position`, `rotation`, `radius?` (the SDE radius order ranges use; without it the page takes the SOF bounding radius
   once built, else 1,000 m). **Ids are unique across ships and objects**; ship-id and composition-id generators skip
@@ -47,12 +47,13 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 
 | Op family | Ops | Where |
 |---|---|---|
-| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `pilot`; `stats` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback) | `scene.ts` |
+| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`; `stats` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback) | `scene.ts` |
 | scene | `set_camera`, `set_environment` (merged), `rename`, `set_location` (whole), `clear_location` | `scene.ts` |
 | fleets | `add_/update_/remove_fleet`, `..._wing`, `..._squad`, `move_to_squad`, `remove_from_fleet`, `set_anchor` | `fleets/operations.ts` (`sd-fleets`) |
 | compositions | `add_fleet_composition` | `compositions/operation.ts` (`sd-fleets` → `compositions`) |
 | prop mods | `set_prop_mods` | `prop-mods/operation.ts` (`sd-ship-stats`) |
 | staging | `add_ships`, `stage_engagement` | `staging/operation.ts` (`sd-staging`) |
+| fits | `set_fits { fits: { key: text \| null } }` (merged; `null` deletes a key no ship uses) | `fitting/operation.ts` (`sd-fittings`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 
 **`applySceneOperations` stays synchronous and pure: it runs in the page.** Anything that needs tools-core (hull names,
@@ -72,7 +73,7 @@ branch of `applyOperation` in `scene.ts`.
 | `rebuilt` | DNA changed: rebuild that ship; it keeps flying |
 | `moved` | placement changed: put that ship at rest there (ends its order) |
 | `relabelled` | name/team only |
-| `retuned` | `type`, `stats`, `pilot` or `propMod.module` changed: new flight numbers, no rebuild |
+| `retuned` | `type`, `stats`, `pilot`, `propMod.module` or the resolved fit text (`fitTextOf`) changed: new flight numbers, no rebuild |
 | `switched` | `propMod.active` changed: switch at once (no cycle wait). A ship can be in `retuned` too |
 | `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild |
 | `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |

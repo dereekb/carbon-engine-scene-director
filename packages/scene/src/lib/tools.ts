@@ -53,6 +53,7 @@ const SCENE_FORMAT = `Scene document (${SCENE_SCHEMA}). Metres and degrees, Y up
 dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find hull names. rotation is [yaw, pitch, roll].
 "type" (EVE type id or name) and "stats" ({ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional) set a ship's flight numbers; ship_stats shows them.
 "propMod" is the ship's propulsion module and its state at load: "<module>" or { "module"?: "<module>", "active"?: true }, where a module is an EVE type name ("50MN Microwarpdrive II"), a type id, "${PROP_MOD_MODULE_MWD}" / "${PROP_MOD_MODULE_AB}" (the Tech II module of that kind sized for the hull) or "${PROP_MOD_MODULE_NONE}". Omitted: the hull-sized Tech II microwarpdrive, off. "active": true runs it from the moment the scene loads; switch_prop_mods switches it live.
+"fit" is the ship's EVE fit: EFT text ("[Hull, Fit name]\nDamage Control II\n...", as the game or Pyfa copies it) or a key of the top-level "fits" ({ "<key>": "<EFT text>" }; keys are 1-64 letters, digits, "_", "-" or ".", optionally twice with one "/"). A fleet composition's ships carry "<composition id>/<fit key>" and the scene keeps each text once. With a fit and no propMod.module, the ship's prop mod is the fit's first microwarpdrive or afterburner ("${PROP_MOD_MODULE_NONE}" when it fits neither). A string type naming another hull than the fit's header warns.
 "orders" and "pilot" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.
 "fleets" (optional) groups ships into EVE fleets: [{ "id", "name"?, "commander": "<FC ship id>", "wings": [{ "id", "name"?, "commander"?, "squads": [{ "id", "name"?, "role": "${SQUAD_ROLES.join('|')}", "commander"?: "<a member>", "members": ["<ship id>"], "anchor"?: { "ship"?: "<ship id; default the FC>", "range"?: <metres, surface to surface; default logi ${DEFAULT_ANCHOR_RANGES.logi}, others ${DEFAULT_ANCHOR_UP_RANGE}> }, "home"?: { "ship"?, "range"? } }] }] }] (home is set by order_fleet break-off: the anchor regroup restores). A squad anchored on one of its own members (a logi anchor) puts that ship at range off the FC, and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m. A ship holds positions in one fleet and sits in at most one squad. Fleet members keep range on their anchors in formation behind the FC (get_state "following"). "team" is independent of fleets.
 "location" (optional) puts the scene at a real EVE place: { "system": <solar system id>, "name"?: "<system>", "region"?: "<region>", "origin": [x, y, z] (system metres: where the scene's [0, 0, 0] sits; the star is at [0, 0, 0]), "anchor"?: { "celestial": <id>, "name"?, "kind"?: "${CELESTIAL_KINDS.join('|')}", "offset"?: [x, y, z] (metres from the celestial's centre to the origin) } }. Use the set_location tool to fill it from a name. Ships stay in scene metres around the origin. A location dresses the scene: the region's nebula replaces environment.universe (which applies only without a location), and the star, nearby planets and moons, and NPC stations and stargates are drawn around the origin.
@@ -78,7 +79,7 @@ const FLEET_COMPOSITION_FORMAT = String.raw`Fleet composition (${FLEET_COMPOSITI
 A ship line is { "hull": "<EVE type name or type id>", "count"?: 1, "dna"?: "<SOF DNA>", "radius"?: <the hull's EVE radius>, "name"?, "propMod"?, "fit"?: "<key of fits>" }; the commander is a line without count. role is ${SQUAD_ROLES.join('|')}.
 anchor is { "on"?: "${COMPOSITION_ANCHOR_FC}" | "${COMPOSITION_ANCHOR_LEAD}" | "<squad id>", "range"?: <metres, surface to surface> }. Defaults: squads keep ${DEFAULT_ANCHOR_UP_RANGE} m on the FC; logi default to "${COMPOSITION_ANCHOR_LEAD}": their first ship keeps ${DEFAULT_ANCHOR_RANGES.logi} m on the FC and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m; "on" a squad id anchors on that squad's first ship.
 Ships are placed at rest in formation: each at its anchor range on shells trailing the FC's heading, at least ${FORMATION_SPACING} x (r1 + r2) + ${FORMATION_GAP} m apart on EVE radii (${DEFAULT_FORMATION_RADIUS} m when unknown), all facing the heading. Ids: fleet "<id>" (numbered "<id>-2", ... when taken), ships "<fleet>-fc" and "<fleet>-<squad>-<nn>". At most ${MAX_FLEET_SHIPS} ships with the FC.
-A line's propMod (a module name, a type id, "${PROP_MOD_MODULE_MWD}" / "${PROP_MOD_MODULE_AB}" or "${PROP_MOD_MODULE_NONE}") becomes each of its ships' propMod; without one a line with a fit takes the fit's microwarpdrive or afterburner ("${PROP_MOD_MODULE_NONE}" when it fits neither), else the hull-sized microwarpdrive. The rest of a fit (EFT text) is stored for later entries, not applied yet.`;
+A line's propMod (a module name, a type id, "${PROP_MOD_MODULE_MWD}" / "${PROP_MOD_MODULE_AB}" or "${PROP_MOD_MODULE_NONE}") becomes each of its ships' propMod; without one a line with a fit takes the fit's microwarpdrive or afterburner ("${PROP_MOD_MODULE_NONE}" when it fits neither), else the hull-sized microwarpdrive. Each line ship carries its fit: the scene keeps the text once in its fits under "<composition id>/<fit key>" (a second fleet of the composition reuses it; other text under that key gets "<fleet id>/<fit key>").`;
 
 const OBJECT_LINE_PROPERTIES = {
   type: { type: ['string', 'integer'], description: 'An EVE type name ("Astrahus", "Ruined Stargate", "Minmatar Frigate Wreck") or type id.' },
@@ -222,7 +223,7 @@ export const TOOLS: ToolDefinition[] = [
     where: 'page',
     description: `Edits the current scene with a list of operations, applied in order, then updates the viewer to match. Operations:
 { "op": "add_ship", "ship": { ...ship } }
-{ "op": "update_ship", "id": "<id>", "set": { "dna"?, "name"?, "team"?, "position"?, "rotation"?, "type"?, "stats"?, "propMod"? } }
+{ "op": "update_ship", "id": "<id>", "set": { "dna"?, "name"?, "team"?, "position"?, "rotation"?, "type"?, "stats"?, "propMod"?, "fit"? } }   (null clears type, stats, propMod and fit)
 { "op": "remove_ship", "id": "<id>" }
 { "op": "set_camera", "camera": { ...fields to change } }
 { "op": "set_environment", "environment": { "universe": "res:/..." } }   (reloads the page)
@@ -233,9 +234,10 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "move_to_squad", "ships": ["<id>"], "fleet", "squad" }   { "op": "remove_from_fleet", "ships": ["<id>"] }
 { "op": "set_anchor", "fleet", "squad", "anchor": { "ship"?, "range"? } }   (merged; null resets ship to the FC and range to the role default)
 { "op": "add_fleet_composition", "composition": { ...${FLEET_COMPOSITION_SCHEMA} }, "position": [x, y, z], "heading"?: <yaw degrees> | "facing"?: [x, y, z], "fleet"?: "<fleet id>", "team"? }   (needs dna on every ship line; the add_fleet_composition tool resolves hull names and saved names first)
-{ "op": "add_ships", "dna", "hull"?, "radius"?, "count"?, "formation"?, "spacing"?, "position"? | "near"?: { "ship" | "object", "range"?, "direction"? }, "heading"? | "facing"?: [x, y, z] | "<ship or object id>", "team"?, "name"?, "prefix"?, "stats"?, "propMod"?, "fleet"?, "radii"?: { "<ship id>": metres } }   (the add_ships tool resolves hull names, celestials and radii first)
+{ "op": "add_ships", "dna", "hull"?, "radius"?, "count"?, "formation"?, "spacing"?, "position"? | "near"?: { "ship" | "object", "range"?, "direction"? }, "heading"? | "facing"?: [x, y, z] | "<ship or object id>", "team"?, "name"?, "prefix"?, "stats"?, "propMod"?, "fit"?: "<EFT text>", "fleet"?, "radii"?: { "<ship id>": metres } }   (the add_ships tool resolves hull names, celestials and radii first)
 { "op": "stage_engagement", "sides": [{ "composition": { ... } | "ships": [{ "dna", ... }], "team"?, "fleet"?, ... }, { ... }], "range"?, "center"? | "near"?: { "ship" | "object", ... }, "heading"? }   (every ship line needs its dna; the stage_engagement tool resolves names first)
 { "op": "set_prop_mods", "ships": ["<id>"] | "fleet": "<id>" [, "wing" | "squad": "<id>"], "active"?: true | false, "module"?: "<module>" | null }   (merged into each selected ship's propMod; module null is the hull-sized default)
+{ "op": "set_fits", "fits": { "<key>": "<EFT text>" | null } }   (merged into the scene's fits; null deletes a key no ship uses)
 { "op": "set_location", "location": { ...location } }   (replaces the location whole; the set_location tool resolves names)
 { "op": "clear_location" }
 { "op": "add_object", "object": { ...object } }
@@ -244,7 +246,7 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "move_object", "id", "position"? | "near"?, "heading"? | "facing"? | "rotation"? }   (what is not given is kept)
 { "op": "remove_object", "id" }
 Taking a ship out of a squad (remove_ship, remove_from_fleet, move_to_squad, remove_squad, remove_wing) falls a squad anchored on it back to its squad commander, then its wing commander, then the FC, with a warning; a fleet commander must be replaced (update_fleet) or its fleet removed first. Removing a fleet, wing or squad keeps its ships in the scene, unless remove_fleet has "withShips": true.
-Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it. Changing a ship's propMod.module retunes it; changing propMod.active switches its prop mod at once, with no cycle wait (changes.switched counts them); switch_prop_mods is the live, EVE-timed switch.
+Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type, stats or the fit text a ship uses (its fit, or the fits entry it names) retunes the ship without a rebuild; stats replaces the whole override object and null clears it. Changing a ship's propMod.module retunes it; changing propMod.active switches its prop mod at once, with no cycle wait (changes.switched counts them); switch_prop_mods is the live, EVE-timed switch.
 Removing a ship stops the ships approaching, keeping range on or orbiting it (changes.stopped counts them).
 Removing an object stops the ships approaching, keeping range on or orbiting it (changes.stopped). Moving one makes them chase it. Changing an object's dna rebuilds it.
 A location change moves the scene in its system, not the ships in the scene.
@@ -346,7 +348,8 @@ ${FLEET_COMPOSITION_FORMAT}`,
 - The first ship (the lead) sits at the place: position [x, y, z], or near { ship | object | celestial, range?, direction? }. range is metres off its surface (default ${DEFAULT_NEAR_SHIP_RANGE} off a ship or object; off a celestial of the scene's location as set_location's defaults). direction is from it: ${NEAR_DIRECTIONS.join(', ')} or [x, y, z]; ahead, behind, left, right, above and below follow the ship's or object's own heading. Default: ahead off a ship or object, sun off a celestial. Ships are placed off a ship's document placement, not where it has flown since. Placements past ${formatSceneDistance(LARGE_SCENE_DISTANCE)} from the origin warn; past ${formatSceneDistance(MAX_SCENE_DISTANCE)} they are refused.
 - heading is yaw degrees (0 faces +Z, 90 faces +X; default the near reference's heading, else 0), or facing (a point, a ship or object id, or { celestial }).
 - fleet: { new: true, id?, name?, squad?: { id?, role?, anchor? } } makes a new fleet (the first ship is the FC, the rest one squad; the role defaults from the hull's EVE group: logistics are logi, interdictors and interceptors tackle, recons and EAFs ewar, command ships boost, carriers support, the rest dps). { id, squad: "<squad id>" } joins a squad. { id, squad: { id?, role?, anchor? }, wing? } makes a new squad (in the fleet's last wing by default). Fleet members are placed at their formation slots around the FC instead of a formation; joining a squad can move members of later squads, a new squad moves nobody.
-- Ids are "<prefix>-01", "-02", ... after the highest number already used (prefix: the hull name; "<fleet>-<squad>" when joining). stats, propMod and team go on every ship.
+- Ids are "<prefix>-01", "-02", ... after the highest number already used (prefix: the hull name; "<fleet>-<squad>" when joining). stats, propMod, fit and team go on every ship.
+- fit is EFT text every ship carries (the hull defaults to its header's); the scene keeps it once in its fits, under "<prefix>/<fit name slug>" (or "<fleet id>/..." for a new fleet), and the template carries it in its fits.
 - Pass scene to add to that document with no tab (returned, not shown). Returns added (ships, lead, fleet), hull (dna, radius and where they came from), template and the patch_scene result. Needs a prepared SDE in tools-core for names, celestials and radii; with dna and radius it needs none.`,
     inputSchema: {
       type: 'object',
@@ -388,6 +391,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
         prefix: { type: 'string', description: 'The ship id prefix.' },
         stats: { type: 'object', description: "Hull stat overrides for every ship (as a scene ship's stats)." },
         propMod: { description: "Every ship's prop mod: a module, or { module?, active? } (as a scene ship's propMod)." },
+        fit: { type: 'string', description: 'EFT fit text for every ship ("[Hull, Fit name]\n..."); hull defaults to its header\'s.' },
         fleet: { type: 'object', description: 'A new fleet { new: true, ... }, a squad to join { id, squad: "<id>" }, or a new squad { id, squad: { ... }, wing? }.' },
         scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
       }
@@ -397,7 +401,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
     name: 'stage_engagement',
     where: 'hub',
     description: `Stages a fight in the viewer's live scene in one call: two sides facing each other range metres apart (between their front lines; default ${DEFAULT_ENGAGEMENT_RANGE}), centred on center [x, y, z] (default [0, 0, 0]) or near { ship | object | celestial, range?, direction? } (as add_ships), each on its own team (default "${ENGAGEMENT_TEAMS[0]}" and "${ENGAGEMENT_TEAMS[1]}").
-- A side is a composition (a saved or built-in name such as "tfis", or an inline ${FLEET_COMPOSITION_SCHEMA}), or ships: [{ hull, count?, role?, name?, propMod?, dna?, radius? }]. A ship list is a fleet (fleet id: the side's fleet, else the team; the first ship is the FC; each line a squad, its role from the hull's EVE group unless given); with fleet: false it is free ships in a formation (formation, spacing and prefix as add_ships; ids "<team>-01", ...).
+- A side is a composition (a saved or built-in name such as "tfis", or an inline ${FLEET_COMPOSITION_SCHEMA}), or ships: [{ hull, count?, role?, name?, propMod?, fit?, dna?, radius? }] (fit: EFT text for the line's ships; hull defaults to its header's). A ship list is a fleet (fleet id: the side's fleet, else the team; the first ship is the FC; each line a squad, its role from the hull's EVE group unless given); with fleet: false it is free ships in a formation (formation, spacing and prefix as add_ships; ids "<team>-01", ...).
 - heading is the yaw side A faces; side B faces back. Default 0, or across the line from the near ship, object or celestial, so both sides stand beside it.
 - Hull and composition names resolve through tools-core. Pass scene to stage on that document with no tab.
 - Returns engagement (center, heading, range, and per side its team, fleet, commander, ships and lead), hulls and the patch_scene result.`,
@@ -412,7 +416,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
             type: 'object',
             properties: {
               composition: { type: ['string', 'object'], description: `A saved or built-in composition name, or an inline ${FLEET_COMPOSITION_SCHEMA}.` },
-              ships: { type: 'array', items: { type: 'object' }, description: 'Ship lines { hull, count?, role?, name?, propMod?, dna?, radius? }.' },
+              ships: { type: 'array', items: { type: 'object' }, description: 'Ship lines { hull, count?, role?, name?, propMod?, fit? (EFT text), dna?, radius? }.' },
               team: { type: 'string' },
               fleet: { type: ['string', 'boolean'], description: 'The fleet id, or false for free ships (ship lists only).' },
               name: { type: 'string', description: 'The fleet name.' },

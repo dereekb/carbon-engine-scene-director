@@ -1,7 +1,8 @@
 import type { Maybe } from '@dereekb/util';
 import { DNA_PATTERN, ID_PATTERN, isPlainObject, type JsonObject, MAX_TYPE_NAME_LENGTH, readId, readList, readOptionalString, readShipType, readString, reportUnknownKeys } from '../json';
 import { readSquadRole } from '../fleets';
-import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, type CompositionAnchor, type CompositionShip, type CompositionShipLine, type CompositionSquad, type CompositionWing, FLEET_COMPOSITION_SCHEMA, type FleetComposition, MAX_FIT_LENGTH, MAX_FLEET_SHIPS } from './composition';
+import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, type CompositionAnchor, type CompositionShip, type CompositionShipLine, type CompositionSquad, type CompositionWing, FLEET_COMPOSITION_SCHEMA, type FleetComposition, MAX_FLEET_SHIPS } from './composition';
+import { MAX_FIT_LENGTH } from '../fitting/eft';
 import { readEftHeader } from './eft';
 
 const COMPOSITION_KEYS = new Set<string>(['schema', 'id', 'name', 'description', 'source', 'commander', 'wings', 'fits']);

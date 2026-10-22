@@ -480,6 +480,51 @@
         ]
       },
       {
+        "name": "sd-fittings",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "fit",
+              "fits",
+              "EFT",
+              "fitting",
+              "fitted",
+              "module",
+              "modules",
+              "dogma",
+              "stacking",
+              "hardener",
+              "remote rep",
+              "damage model",
+              "switch_modules"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/fitting/",
+              "hub/dogma-data",
+              "hub/sde-client",
+              "apps/viewer/src/lib/fittings",
+              "apps/viewer/src/lib/modules",
+              "apps/viewer/src/lib/module-cycle",
+              "apps/viewer/src/lib/damage",
+              "apps/viewer/src/lib/module-fx",
+              "apps/viewer/src/lib/module-audio",
+              "apps/viewer/src/lib/module-effects"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__switch_modules",
+              "mcp__scene-director__ship_stats"
+            ]
+          }
+        ]
+      },
+      {
         "name": "sd-locations",
         "delivery": "read",
         "tone": "hint",

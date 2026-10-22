@@ -13,6 +13,7 @@ import {
   type FleetComposition,
   normalizeFleetComposition,
   normalizeHeading,
+  readEftHeader,
   type SceneDocument,
   type SceneFleet,
   type SceneVector,
@@ -95,7 +96,7 @@ export interface StagingOptions {
   readonly page: SavedScenesPage;
 }
 
-const LINE_FIELDS = ['hull', 'dna', 'radius', 'name', 'role', 'propMod'] as const;
+const LINE_FIELDS = ['hull', 'dna', 'radius', 'name', 'role', 'propMod', 'fit'] as const;
 
 export class Staging {
   private readonly shipData: ShipDataApi;
@@ -219,7 +220,10 @@ export class Staging {
    * @returns The filled copies, a report per hull, problems and warnings.
    */
   private async ResolveLines(lines: readonly Record<string, unknown>[], options: { readonly roleNeeded: boolean }): Promise<ResolvedStagingLines> {
-    const filled = lines.map((line) => ({ ...line }));
+    const filled = lines.map((line): Record<string, unknown> => {
+      const fitHull = line['hull'] == null && typeof line['fit'] === 'string' ? readEftHeader(line['fit'])?.hull : null;
+      return { ...line, ...(fitHull ? { hull: fitHull } : {}) };
+    });
     const groups = new Map<string, Record<string, unknown>[]>();
     for (const line of filled) {
       const key = line['hull'] != null ? `hull:${String(line['hull']).toLowerCase()}` : `dna:${String(line['dna'] ?? '').toLowerCase()}`;

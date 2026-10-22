@@ -179,3 +179,38 @@ describe('add_ships: a new squad', () => {
     expect(after.fleets?.[0].wings).toEqual([{ id: 'wing-1', squads: [{ id: 'dps', role: 'dps', members: ['solo-dps-01'] }] }]);
   });
 });
+
+describe('add_ships: fits', () => {
+  const TACKLE = '[Rifter, Fleet Tackle]\nDamage Control II\n\n1MN Afterburner II\nWarp Scrambler II';
+
+  it('puts one copy of a line fit in the scene, the hull from its header', () => {
+    const before = scene();
+    const { scene: after } = apply(before, { op: 'add_ships', dna: RIFTER, radius: 31, count: 3, fit: TACKLE });
+    const ships = newShips(before, after);
+    expect(ships.map((ship) => [ship.id, ship.type, ship.fit])).toEqual([
+      ['rifter-01', 'Rifter', 'rifter/fleet-tackle'],
+      ['rifter-02', 'Rifter', 'rifter/fleet-tackle'],
+      ['rifter-03', 'Rifter', 'rifter/fleet-tackle']
+    ]);
+    expect(after.fits).toEqual({ 'rifter/fleet-tackle': TACKLE });
+    const again = apply(after, { op: 'add_ships', dna: RIFTER, radius: 31, fit: TACKLE, position: [0, 0, 20000] }).scene;
+    expect(again.fits).toEqual({ 'rifter/fleet-tackle': TACKLE });
+  });
+
+  it('keys a new fleet fit by the fleet id and a join by the ship prefix', () => {
+    const fleet = apply(scene(), { ...RIFTERS, count: 2, fit: TACKLE, fleet: { new: true, id: 'tackle' } }).scene;
+    expect(fleet.ships.map((ship) => ship.fit)).toEqual(['tackle/fleet-tackle', 'tackle/fleet-tackle']);
+    const joined = apply(fleet, { ...RIFTERS, fit: `${TACKLE}\nStasis Webifier II`, fleet: { id: 'tackle', squad: 'dps' } }).scene;
+    expect(joined.ships.at(-1)?.fit).toBe('tackle-dps/fleet-tackle');
+    expect(Object.keys(joined.fits ?? {})).toEqual(['tackle/fleet-tackle', 'tackle-dps/fleet-tackle']);
+  });
+
+  it('puts fits on stage_engagement ship lines, free or in a fleet', () => {
+    const { scene: after } = apply(scene(), {
+      op: 'stage_engagement',
+      sides: [{ ships: [{ dna: RIFTER, radius: 31, count: 2, fit: TACKLE }], fleet: false }, { ships: [{ dna: RIFTER, radius: 31, fit: TACKLE }] }]
+    });
+    expect(after.ships.map((ship) => ship.fit)).toEqual(['blue/fleet-tackle', 'blue/fleet-tackle', 'red/fleet-tackle']);
+    expect(Object.keys(after.fits ?? {})).toEqual(['blue/fleet-tackle', 'red/fleet-tackle']);
+  });
+});

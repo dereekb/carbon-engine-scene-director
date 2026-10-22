@@ -209,3 +209,43 @@ describe('ship flight fields', () => {
     expect(diffScenes(null, after).switched).toEqual([]);
   });
 });
+
+describe('ship fits', () => {
+  const RIFTER_FIT = '[Rifter, Tackle]\nDamage Control II\n\n1MN Afterburner II\nWarp Scrambler II';
+  const fitted = { name: 'fitted', ships: [{ id: 'r', dna: 'mf1_t1:minmatarbase:minmatar', fit: 'tackle' }], fits: { tackle: RIFTER_FIT } };
+
+  it('keeps an inline fit, a fit key and the fits map', () => {
+    const { scene } = normalizeScene({ ...fitted, ships: [...fitted.ships, { id: 's', dna: 'mf1_t1:minmatarbase:minmatar', fit: `  ${RIFTER_FIT}\n` }] });
+    expect(scene.ships.map((ship) => ship.fit)).toEqual(['tackle', RIFTER_FIT]);
+    expect(scene.fits).toEqual({ tackle: RIFTER_FIT });
+  });
+
+  it('reports a missing key, bad keys, text without a header and a hull mismatch', () => {
+    const error = catchSceneError(() => normalizeScene({ ships: [{ id: 'r', dna: 'mf1_t1:minmatarbase:minmatar', fit: 'nope' }], fits: { 'a b': RIFTER_FIT, ok: 'Damage Control II' } }));
+    expect(error.problems).toEqual(['fits key "a b" must be 1-64 letters, digits, "_", "-" or ".", optionally twice with one "/" between', 'fits["ok"] must be EFT text starting with a [Hull, Fit name] header', 'ships[0].fit "nope" is not a key of the scene\'s fits']);
+    const { warnings } = normalizeScene({ ...fitted, ships: [{ ...fitted.ships[0], type: 'Slasher' }] });
+    expect(warnings).toEqual(['ships[0].fit: the fit is for a Rifter, but the ship\'s type is "Slasher"; the ship flies as its type']);
+  });
+
+  it('update_ship sets and clears a fit; a fit change is a retune', () => {
+    const before = normalizeScene(fitted).scene;
+    const inline = applySceneOperations(before, [{ op: 'update_ship', id: 'r', set: { fit: `${RIFTER_FIT}\nStasis Webifier II` } }]).scene;
+    expect(diffScenes(before, inline).retuned.map((ship) => ship.id)).toEqual(['r']);
+    const cleared = applySceneOperations(inline, [{ op: 'update_ship', id: 'r', set: { fit: null } }]).scene;
+    expect(cleared.ships[0].fit).toBeUndefined();
+    expect(diffScenes(inline, cleared).retuned.map((ship) => ship.id)).toEqual(['r']);
+    const same = applySceneOperations(before, [{ op: 'update_ship', id: 'r', set: { fit: RIFTER_FIT } }]).scene;
+    expect(diffScenes(before, same).retuned).toEqual([]);
+  });
+
+  it('set_fits merges and deletes keys, refuses deleting a used one, and editing the text retunes its ships', () => {
+    const before = normalizeScene(fitted).scene;
+    const edited = applySceneOperations(before, [{ op: 'set_fits', fits: { tackle: `${RIFTER_FIT}\nStasis Webifier II`, spare: RIFTER_FIT } }]).scene;
+    expect(Object.keys(edited.fits ?? {})).toEqual(['tackle', 'spare']);
+    expect(diffScenes(before, edited).retuned.map((ship) => ship.id)).toEqual(['r']);
+    expect(applySceneOperations(edited, [{ op: 'set_fits', fits: { spare: null } }]).scene.fits).toEqual({ tackle: `${RIFTER_FIT}\nStasis Webifier II` });
+    expect(catchSceneError(() => applySceneOperations(edited, [{ op: 'set_fits', fits: { tackle: null } }])).problems).toEqual(['operations[0]: fit "tackle" is used by ship "r"; change or clear those ships\' fit first']);
+    const emptied = applySceneOperations(normalizeScene({ fits: { spare: RIFTER_FIT } }).scene, [{ op: 'set_fits', fits: { spare: null } }]).scene;
+    expect(emptied.fits).toBeUndefined();
+  });
+});

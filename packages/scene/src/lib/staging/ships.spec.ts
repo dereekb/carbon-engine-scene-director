@@ -73,3 +73,21 @@ describe('normalizeStagingShipLines', () => {
     expect(read([])).toHaveLength(1);
   });
 });
+
+describe('toShipListComposition fits', () => {
+  it('keys line fits by a slug of their fit name, numbered when two texts share one', () => {
+    const a = '[Rifter, Tackle]\nWarp Scrambler II';
+    const b = '[Rifter, Tackle]\nStasis Webifier II';
+    const candidate = toShipListComposition({
+      id: 'x',
+      lines: [
+        { dna: TFI, fit: a },
+        { dna: TFI, fit: b, count: 2 },
+        { dna: GUARDIAN, fit: a }
+      ]
+    });
+    expect(candidate['fits']).toEqual({ tackle: a, 'tackle-2': b });
+    const composition = normalizeFleetComposition({ input: candidate }).composition;
+    expect([composition?.commander.fit, ...(composition?.wings[0].squads.map((squad) => squad.ships[0].fit) ?? [])]).toEqual(['tackle', 'tackle-2', 'tackle']);
+  });
+});

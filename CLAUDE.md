@@ -34,6 +34,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
   `compositions`, the `cjs-fleet/1` format and TFIs)
 - `sd-staging`: `add_ships` and `stage_engagement`
 - `sd-ship-stats`: stats math, skills, the pilot, prop mods, engine audio
+- `sd-fittings`: fits (EFT) on ships and the parser; later the dogma evaluator, module activation, the damage model and
+  module effects
 - `sd-locations`: the document's location, tools-core map quirks, name resolution (doc: `dressing`)
 - `sd-cinema`: the cinematic camera: hardpoints, the shot spec and moves, waypoints, `FreeCamera`, takeover, letterbox
 
