@@ -37,3 +37,7 @@ Code: `apps/viewer/src/lib/boosters.ts` (pure, node-tested), driven by `Director
   Intensity eases ~0.95 → 0.8 over a few seconds as acceleration fades, in steps at the 1 s ticks, then holds.
 - In warp: full-length pale blue-white warp colours with a blue stern light; trails go out above ~12 km/s and come back
   as long streaks at the end of the exit.
+- Under prop mods (the TFIs fleet, same setup): cruise 0.82 with a 0.63 km trail; an MWD drives the intensity to the
+  cap (2) and the trail to 1 (4.6 km behind a TFI) with no warp colours; the Guardians' AB reaches 2 too (2.6 km
+  trail), so the flames cannot tell an AB from an MWD, only the speed and trail length do. Switching off eases the
+  intensity back to 0.8 as the ship slows, with nothing popping. GPU errors 0; 44 ships at ~32 fps.

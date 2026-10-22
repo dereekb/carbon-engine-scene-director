@@ -102,6 +102,29 @@ Expected noise: a 404 for `/favicon.ico`, and the warning that `powerPreference`
   - The user can touch the window mid-run: a drag or an alt-click in the page changes the camera under the driver
     (its rows show yaw/pitch/target jumps it did not ask for). Re-run that segment rather than judge it.
 
+## Listening checks
+
+An agent has no ears: measure the page's output and record clips the user can play. The scripts (probe, readouts, clip
+export, driver, hull-off, the library tree dump `on-tree.mjs`) are in `.scratch/listen/` on this machine and in the
+plan `real-browser-look-and-listen-prop-mod-trails-and-engine-audio.md`; copies for `sourcePath` sit under
+`C:\Users\<user>\AppData\Local\Temp\scene-director-listen\`.
+
+- Audio turns on with `press_key "x"` or a click, never a modifier alone (Chromium grants no activation for Shift,
+  Ctrl, Alt, Meta or Escape). This server's Chrome profile autoplays, even in an `isolatedContext`, and
+  `evaluate_script` runs with a user gesture (sticky activation), so a gesture repro needs a browser that does not
+  autoplay and must come before any `evaluate_script`.
+- Ships built while audio is on register their SOF hull emitters, whose sounds throw in the runtime: run `hull-off.js`
+  after every build (a `load_scene`, `add_fleet_composition` or `patch_scene` that adds ships), before measuring.
+- Tap `director.audio.man.backend.masterGain` (before the runtime's -6 dBFS limiter) with analysers for level,
+  left/right and spectral centroid; `director.audio.emitters` maps ship → emitter (`GetPlayingEvents()` names what
+  plays); wrapping `director.audio.context.createBufferSource` logs every clip started (duration, loop).
+- Clips: a MediaRecorder on a MediaStreamDestination fed through a copy of the limiter (webm/opus). Export with
+  `evaluate_script` + `filePath` under the Windows temp dir (base64 in JSON), decode in WSL (`save.sh`).
+- Frame within the event's radius (S 4.5, M 7, L 12, XL up to 25 km; `sd-ship-stats` → Audio) or it is culled.
+- The user can listen live through the speakers: play candidate events on one emitter with `director.audio.Post` and
+  ask. That is how `_activate` replaced `_on`.
+- Measured 2026-10-22: master bus RMS for one ship's loop near -20 dBFS at ~0.5 km; `outputLatency` 32–40 ms at 48 kHz.
+
 ## Gotchas
 
 - The first load in a fresh profile once stalled until a reload (2026-10-21; cold cache plus the ~20 MB file

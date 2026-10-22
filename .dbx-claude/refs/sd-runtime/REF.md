@@ -89,5 +89,10 @@ is read per event with HTTP ranges into the banks (the engine stems sit inside t
 proxy must stream and forward `Range`). Emitters start culled, so a fresh emitter's first event plays when the next
 audio frame wakes it in range. `CjsAudioMan` starts only after a user gesture (or with autoplay allowed). The Web Audio
 backend does not apply an event's authored stop relationships (a `_powerdown` that should stop `_on` leaves it looping),
-so the page stops such voices itself (`sd-ship-stats`). The SOF
-ships' own emitters (engine hum) stay inert: nothing adopts their graphs yet. Which events play: `sd-ship-stats`.
+so the page stops such voices itself (`sd-ship-stats`). Ships built while audio is on register their SOF emitters
+(`Engine_SFX`, `ShipDefense_Module_sfx`, ...; 29 for five battleship-to-capital hulls) with the manager, though the
+page posts nothing on them; their sounds hit a runtime throw (the hull-audio follow-up), so a listening check releases
+them after each build (`.scratch/listen/hull-off.js`, `windows-chrome` → Listening checks). Many emitters in range
+make `Process` throw for seconds (`CjsWwiseSourceEffectRtpcLane.Apply`: `setValueAtTime ... overlaps
+setValueCurveAtTime`; 41 `_on` loops: ~10 a second for 35 s); the page counts them and goes on. Which events play:
+`sd-ship-stats`.

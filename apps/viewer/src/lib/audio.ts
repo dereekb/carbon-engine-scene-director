@@ -4,7 +4,9 @@
  * ship, placed at the drawn ship, with the listener at the camera's eye.
  *
  * - Browsers start audio only after a user gesture. Enable({ auto: true }) at startup turns it on at once only when
- *   the tab may autoplay; otherwise the first click or keypress in the tab does (main.ts). `?audio=off` keeps it off.
+ *   the tab may autoplay; otherwise the first click or keypress in the tab does (main.ts, Gesture). `?audio=off` keeps
+ *   it off. Chromium grants no activation for a modifier key alone or Escape, so a first Shift or Alt can turn audio
+ *   on with a suspended AudioContext: every later gesture resumes it.
  * - The library is about 20 MB of JSON, fetched once, when audio turns on. Media is read per event, with HTTP ranges
  *   into the sound banks (the engine stems sit in the 32 MB boosters.bnk).
  * - Every posted event is recorded (get_state's audio.posted), played or not, so a headless check sees what would
@@ -59,6 +61,10 @@ export interface PageAudioReport {
    */
   readonly frameErrors?: number;
   readonly lastFrameError?: string;
+  /**
+   * The AudioContext's state once one exists: `suspended` while audio is on means the browser holds it until a gesture.
+   */
+  readonly context?: AudioContextState;
 }
 
 export interface PageAudioPost {
@@ -66,7 +72,7 @@ export interface PageAudioPost {
   readonly tick: number;
   readonly events: readonly string[];
   /**
-   * Playing events to stop after posting (prop-mod-audio.ts PROP_MOD_AUDIO_STOPS: the backend leaves `_on` playing).
+   * Playing events to stop after posting (prop-mod-audio.ts PROP_MOD_AUDIO_STOPS: `_powerdown` does not stop them).
    */
   readonly stops?: readonly string[];
   /**
@@ -96,7 +102,7 @@ export interface PageAudioOptions {
    */
   readonly disabled?: boolean;
   /**
-   * Called once audio is on, to post what is already running.
+   * Called once audio is on.
    */
   readonly onReady?: () => void;
   /**
@@ -188,6 +194,9 @@ export class PageAudio {
       if (!response.ok) throw new Error(`the hub's ${LIBRARY_URL} answered ${response.status}: ${(await response.text()).slice(0, 200)}`);
       const library = (await response.json()) as CjsAudioLibraryDocument;
       const man = new CjsAudioMan(library, {
+        // Scales only the panner and listener positions, which are inaudible here (the panners are HRTF with rolloff
+        // 0, so only the direction counts); the stems' distance curves and culling read raw positions, in metres,
+        // the scene's unit. 1/150 (the runtime demo's) measured within 1.2 dB of 1 (Windows Chrome, 2026-10-22).
         distanceScale: 1,
         createContext: () => context,
         mediaProvider: this.provider,
@@ -215,6 +224,16 @@ export class PageAudio {
   }
 
   /**
+   * A user gesture in the tab (main.ts: pointerdown, pointerup, keydown). Resumes a suspended context, which a
+   * gesture without activation (a modifier key alone, Escape, a touch's pointerdown) can leave behind, then turns
+   * audio on if it is still waiting.
+   */
+  Gesture(): void {
+    if (this.state !== 'off' && this.context?.state === 'suspended') void this.context.resume().catch(() => undefined);
+    void this.Enable({ auto: false });
+  }
+
+  /**
    * Posts events on a ship's emitter (created on its first event, at its placement), and records them either way.
    *
    * @param post - The ship, the tick, the events and where the ship is drawn.
@@ -236,9 +255,7 @@ export class PageAudio {
     if (emitter && post.stops?.length) {
       try {
         for (const [playingID, name] of emitter.GetPlayingEvents()) {
-          if (!post.stops.includes(name)) continue;
-          emitter.MarkPlayingIDStoppedByRequest(playingID);
-          emitter.ExecuteActionOnPlayingID(playingID, 'stop', PROP_MOD_AUDIO_STOP_FADE_MS);
+          if (post.stops.includes(name)) StopPlaying(emitter, playingID);
         }
       } catch (error) {
         console.warn(`stopping ${post.stops.join(', ')} on ship ${post.ship} failed: ${ErrorText(error)}`);
@@ -297,7 +314,8 @@ export class PageAudio {
       ...(this.error ? { error: this.error } : {}),
       emitters: this.emitters.size,
       posted: [...this.posted],
-      ...(this.frameErrors ? { frameErrors: this.frameErrors, ...(this.lastFrameError ? { lastFrameError: this.lastFrameError } : {}) } : {})
+      ...(this.frameErrors ? { frameErrors: this.frameErrors, ...(this.lastFrameError ? { lastFrameError: this.lastFrameError } : {}) } : {}),
+      ...(this.context ? { context: this.context.state } : {})
     };
   }
 
@@ -309,7 +327,7 @@ export class PageAudio {
       off: 'off (?audio=off)',
       'waiting-for-gesture': 'click the view to turn audio on',
       loading: 'loading the audio library...',
-      on: `on · ${this.emitters.size} emitter(s)`,
+      on: this.context?.state === 'suspended' ? 'on, but the browser holds it: click the view' : `on · ${this.emitters.size} emitter(s)`,
       failed: `failed: ${this.error ?? 'unknown'}`,
       unavailable: `unavailable: ${this.error ?? 'no Web Audio'}`
     };
@@ -349,6 +367,18 @@ export class PageAudio {
     this.state = state;
     this.onChange();
   }
+}
+
+/**
+ * Stops one playing event with the runtime's own stop fade, the way its metadata fallback does, and keeps a culled
+ * loop from resuming when the emitter wakes.
+ *
+ * @param emitter - The ship's emitter.
+ * @param playingID - The playing id SendEvent returned.
+ */
+function StopPlaying(emitter: AudEmitter, playingID: number): void {
+  emitter.MarkPlayingIDStoppedByRequest(playingID);
+  emitter.ExecuteActionOnPlayingID(playingID, 'stop', PROP_MOD_AUDIO_STOP_FADE_MS);
 }
 
 /**

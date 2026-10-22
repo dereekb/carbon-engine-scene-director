@@ -61,7 +61,8 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 - It streams the built viewer from disk on every request: **a page-only change needs a rebuild plus a tab reload**
   (changing `environment.universe` makes a connected tab reload itself).
 - **A hub code change needs the owning session to reconnect its MCP server** (`/mcp`).
-- Page tools go to the newest connected tab, so a running verify-page takes them from the user's tab.
+- Page tools go to the newest tab connected to that hub. verify-page starts its own hub on a free port
+  (`new Hub({ port: 0 })`), so running it never takes page tools from a tab on 5520.
 - WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
 
 ## verify-page (everything but drawing)

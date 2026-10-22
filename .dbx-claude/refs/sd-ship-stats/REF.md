@@ -102,21 +102,43 @@ that kind for the hull's size) or `"none"`. Omitted → the hull-sized T2 MWD, o
 
 ## Audio
 
-Switching on posts `ship_engine_<S|M|L|XL>_<microwarpdrive|afterburner>_3rd_on` on the ship's own emitter; switching off
-(switch, document or warp) posts `..._powerdown`, sized by the hull (`PROP_MOD_AUDIO_STAGES`). `_on` is a loop and the
-only stem with the motion RTPCs and the larger L / XL radii, so the static `_activate` / `_idle` / `_deactivate` family
-stays unused.
+Switching on posts `ship_engine_<S|M|L|XL>_<microwarpdrive|afterburner>_3rd_activate` on the ship's own emitter;
+switching off (switch, document or warp) posts `..._powerdown`, sized by the hull (`PROP_MOD_AUDIO_STAGES`). Both are
+one-shots: `_activate` is a muted swell (an L MWD's is a 37 s clip peaking ~8 s in), `_powerdown` the slowing-down
+wind-down (L: a 2 s sound plus a 27.6 s tail; S: ~13 s). Switching off also stops a swell still playing
+(`PROP_MOD_AUDIO_STOPS`). A module already running when audio turns on posts nothing.
 
-- **Switching off must also stop the `_on` loop itself.** The library says `_powerdown` stops `_on`, but the runtime's
-  Web Audio backend leaves that stop to `_powerdown`'s authored program, which does not stop the `_on` voices (still
-  -36 dBFS 12 s after powerdown; `_off` does not stop it either). `PageAudio.Post` stops the ship's `_on` playing ids
-  after posting (`PROP_MOD_AUDIO_STOPS` → the post's `stops`): `MarkPlayingIDStoppedByRequest`, then
-  `ExecuteActionOnPlayingID(id, 'stop', PROP_MOD_AUDIO_STOP_FADE_MS)` (1 s, the runtime's own stop fade), as the
-  runtime's metadata fallback does. Silent within 1.5 s in the browser.
+- **Why `_activate`, not `_on`** (the user, against the game, Windows Chrome, 2026-10-22): the client plays the MWD
+  sound once as the module activates, muted. `_on` is authored as a hold: an activation burst over 7 looping beds and a
+  random layer chaining 3–5 s variations, so it repeated every ~4 s until stopped, ~20 dB louder; its opening burst
+  sounds like undocking. `_on` alone carries the motion RTPCs (`booster_intensity`, `ship_Acceleration`,
+  `ship_Thruster_Power`, `ship_Roll`), so the page sets none. `_3rd` is the other-ships set (the camera flies no
+  ship); `_1st`, the own-ship set, has the same events. The metadata's `microwarpdrive_<class>_play` /
+  `afterburner_<class>_play` module events have no program or media in this library.
+- **Once per switch-on.** The user remembers the sound replaying as the module cycles; the page does not repeat it
+  (follow-up).
+- **The page stops what the backend leaves playing.** The library says `_powerdown` stops `_activate` and `_on`, but
+  the runtime's Web Audio backend leaves that to `_powerdown`'s authored program, which did not stop `_on` (still
+  -36 dBFS 12 s later). `PageAudio.Post` stops the post's `stops` after posting: `MarkPlayingIDStoppedByRequest`, then
+  `ExecuteActionOnPlayingID(id, 'stop', PROP_MOD_AUDIO_STOP_FADE_MS)` (1 s, the runtime's own stop fade).
 - **No delay before the sound.** A prop mod change shows on the drawn ship from the frame its event is delivered (the
   ClientBall trails by a tick and interpolates toward it; a destiny spec pins it), so the event posts at once: the
-  browser measured the drawn acceleration in the post's frame and the sound 83 ms later. Library ~20 MB fetched when audio turns on, through
-the hub's `/audio/library` + `/audio/path/<resPath>` (must **stream and forward `Range`**: the stems' media sit inside
-the 32 MB `boosters.bnk`). Listener at the camera. On only after a user gesture (or autoplay allowed); `?audio=off`.
-`get_state.audio`: state, the last 20 events with `played`, `frameErrors` / `lastFrameError` (headless Chromium logs a
-burst of `setValueCurveAtTime ... overlaps` while fades overlap; the page logs at most one line per 10 s and goes on).
+  browser measured the drawn acceleration in the post's frame and the sound 0–83 ms later.
+- **Hear it within the event's radius** (`maxRadiusAttenuation`, culled beyond): S 4.5 km, M 7, L 12, XL `_activate`
+  10 and `_powerdown` 25 km (L AB `_powerdown` 20). The curves are 0 dB to ~800 m, then fall to silence at the radius
+  (L, measured: -3.8 dB at 2 km, -14.2 at 5, -38.7 at 9, silent at 13). An `_on` loop culled and back in range resumed
+  ~20 dB down.
+- **`distanceScale` stays 1** (comment in `audio.ts`): it scales only the panner and listener positions (HRTF, rolloff
+  0), while the curves and culling read raw metres. 1/150 measured within 1.2 dB of 1 at every distance.
+- **Panning follows the drawn side**: a ship fully to the right plays 4 dB louder right; the stems are low-frequency,
+  so HRTF separates little (1.5 dB at 33°).
+- **Mass switches** (41 TFIs ships on `_on`): the master bus peaked at +9.4 dBFS (RMS -12.1) into the runtime's -6 dBFS
+  limiter, and the runtime's audio frame threw for 35 s (`sd-runtime`) while fps fell from ~30 to 15–18.
+
+Library ~20 MB fetched when audio turns on, through the hub's `/audio/library` + `/audio/path/<resPath>` (must
+**stream and forward `Range`**: the stems' media sit inside the 32 MB `boosters.bnk`). Listener at the camera. On only
+after a user gesture (or autoplay allowed); `?audio=off`. Every pointerdown, pointerup (touch activates there) and
+keydown resumes a suspended context (`PageAudio.Gesture`): Chromium grants no activation for a modifier key alone or
+Escape, so a first Shift or Alt could turn audio on with the context still suspended. `get_state.audio`: state, the
+last 20 events with `played`, `frameErrors` / `lastFrameError` (the page logs at most one line per 10 s and goes on),
+and `context` (`suspended` while on: click the view; the overlay says so).

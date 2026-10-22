@@ -113,6 +113,7 @@ interface AudioState {
   readonly emitters: number;
   readonly posted: { readonly tick: number; readonly ship: string; readonly event: string; readonly played: boolean }[];
   readonly frameErrors?: number;
+  readonly context?: string;
 }
 
 interface ShipWarpState {
@@ -789,13 +790,14 @@ try {
       const audio = ready.audio as AudioState;
       const why = audio.error ? ` (${audio.error})` : '';
       results.push(`info  audio: ${audio.state}${why}`);
+      Expect(audio.state !== 'on' || audio.context === 'running', `audio on with its AudioContext ${audio.context}`);
       await call('switch_prop_mods', { ships: ['mwd-tfi'], active: true });
       await WaitFor('the MWD active', 4, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
       await call('switch_prop_mods', { ships: ['mwd-tfi'], active: false });
       const after = await WaitFor('the MWD off', 12, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'off' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
       const posted = (after.audio?.posted ?? []).filter((entry) => entry.ship === 'mwd-tfi').slice(-2);
       const stem = 'ship_engine_L_microwarpdrive_3rd';
-      Expect(JSON.stringify(posted.map((entry) => entry.event)) === JSON.stringify([`${stem}_on`, `${stem}_powerdown`]), JSON.stringify(after.audio));
+      Expect(JSON.stringify(posted.map((entry) => entry.event)) === JSON.stringify([`${stem}_activate`, `${stem}_powerdown`]), JSON.stringify(after.audio));
       const on = audio.state === 'on';
       Expect(
         posted.every((entry) => entry.played === on),

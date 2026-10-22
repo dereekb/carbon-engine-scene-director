@@ -197,9 +197,11 @@ async function Start(): Promise<void> {
   const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), audioDisabled });
   liveDirector = director;
   // Browsers start audio only from a user gesture; at startup it goes on only when the tab may autoplay.
-  const enableAudio = (): void => void director.audio.Enable({ auto: false });
-  addEventListener('pointerdown', enableAudio, { capture: true });
-  addEventListener('keydown', enableAudio, { capture: true });
+  // A touch activates on pointerup, not pointerdown.
+  const gesture = (): void => director.audio.Gesture();
+  addEventListener('pointerdown', gesture, { capture: true });
+  addEventListener('pointerup', gesture, { capture: true });
+  addEventListener('keydown', gesture, { capture: true });
   void director.audio.Enable({ auto: true });
   overlay.Render(director);
   for (const [name, handler] of Object.entries(director.Handlers())) link.Handle(name, handler);

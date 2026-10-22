@@ -350,7 +350,8 @@ export class Director {
         this.onChange();
       }
     });
-    this.audio = new PageAudio({ disabled: audioDisabled, onReady: () => this.PostRunningPropMods(), onChange: () => this.onChange() });
+    // A module already running when audio turns on has played its one-shot activation: nothing to post.
+    this.audio = new PageAudio({ disabled: audioDisabled, onChange: () => this.onChange() });
     world.OnPropMod((event) => this.PostPropModAudio(event));
     if (engine) this.AttachCameraControls(engine.canvas);
   }
@@ -826,16 +827,6 @@ export class Director {
   private PostPropModAudio(event: PropModEvent): void {
     const propMod = this.flights.get(event.id)?.propMod;
     if (propMod) this.audio.Post({ ship: event.id, tick: event.tick, events: PropModAudioEvents(event.kind, propMod), stops: PropModAudioStops(event.kind, propMod), placement: this.AudioPlacement(event.id, this.clock.now) });
-  }
-
-  /**
-   * Once audio turns on, plays the engine sound of every prop mod already running.
-   */
-  private PostRunningPropMods(): void {
-    for (const doc of this.scene?.ships ?? []) {
-      const propMod = this.flights.get(doc.id)?.propMod;
-      if (propMod && this.world.Motion(doc.id)?.propMod.running) this.audio.Post({ ship: doc.id, tick: this.world.tick, events: PropModAudioEvents('on', propMod), placement: this.AudioPlacement(doc.id, this.clock.now) });
-    }
   }
 
   /**
