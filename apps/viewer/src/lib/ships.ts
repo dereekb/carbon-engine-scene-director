@@ -148,13 +148,27 @@ async function ReadHull(sof: EveSOF, dna: string): Promise<Maybe<ShipHull>> {
  * @returns The live ship.
  */
 export function HydrateShip(values: CjsModelValues): EveShip2 {
+  // EveShip2.UpdateSyncronous fills speed from the translation curve's velocity every frame; unset, boosters stay dark.
+  return HydrateSofObject<EveShip2>(values, (ship) => {
+    ship.speed = new TriFloat();
+  });
+}
+
+/**
+ * Hydrates SOF (or any model) values into a live object, runs `prepare`, then starts its controllers; a failed
+ * hydration tears down the resources it registered. Stations and stargates use it as is.
+ *
+ * @param values - The model values.
+ * @param prepare - Binds what must exist before the controllers start.
+ * @returns The object.
+ */
+export function HydrateSofObject<T extends { StartControllers(): void }>(values: CjsModelValues, prepare?: (object: T) => void): T {
   const before = new Set(TriDevice.GetResourcesRegistered());
   try {
-    const ship = CjsSchema.from<EveShip2>(values._type, values);
-    // EveShip2.UpdateSyncronous fills it from the translation curve's velocity every frame; unset, boosters stay dark.
-    ship.speed = new TriFloat();
-    ship.StartControllers();
-    return ship;
+    const object = CjsSchema.from<T>(values._type, values);
+    prepare?.(object);
+    object.StartControllers();
+    return object;
   } catch (error) {
     // Cleanup must never replace the hydration error, which is the one worth reading.
     const managed = new Set<unknown>(TriDevice.GetResourcesRegistered());
@@ -173,6 +187,7 @@ export function HydrateShip(values: CjsModelValues): EveShip2 {
 /**
  * Destroys the ship-owned resources of `roots` that no ship in `retained`
  * still reaches. Collect first: destroying a mesh clears shared references.
+ * It retires any SOF or planet graph, not only ships.
  *
  * @param roots - The ships being removed.
  * @param retained - The ships that stay.

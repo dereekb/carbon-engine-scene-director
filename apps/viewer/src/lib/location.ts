@@ -1,7 +1,7 @@
 /**
  * The scene location's system data, from the hub's `/map/system` (the hub subtracts the origin in float64, so every
- * position here is origin-relative and float32 holds), and the get_state report built from it. Drawing the location
- * (nebula, sun, planets, stations, gates) is the Location dressing entry's; `Answer()` holds what it needs.
+ * position here is origin-relative and float32 holds), and the get_state report built from it. `location-dressing.ts`
+ * draws the location (nebula, sun, planets, stations, gates) from `Answer()`.
  *
  * Node-tested: it imports nothing from the runtime.
  */

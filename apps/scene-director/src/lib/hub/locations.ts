@@ -29,6 +29,7 @@ const GATE_NAMED_PATTERN = /^(?:the )?(.+?) (?:star)?gate$/u;
 const IN_SYSTEM_PATTERN = /^(.*\S)\s+in\s+(\S.*)$/iu;
 const UNSEARCHABLE_HINT = 'moons and asteroid belts are found through their system: give the full name ("Jita IV - Moon 4") or pass system';
 
+export const NEBULA_ARGUMENT_WARNING = "nebula is no longer used: a located scene draws its region's nebula; environment.universe is the nebula without a location";
 export const MAP_SEARCH_NOTE = 'Moons and asteroid belts are not searchable by name: get_system lists them, and set_location takes their full names.';
 
 export interface LocationsOptions {
@@ -183,10 +184,12 @@ export class Locations {
     const placed = args['origin'] == null ? await this.LocationFromCelestial(args) : await this.LocationFromOrigin(args);
     const { location, system } = placed;
     const warnings = [...placed.warnings];
+    // The page draws the region's nebula from the location (location-dressing.ts), so environment.universe stays the
+    // nebula without a location and setting a location never reloads a tab.
     const operations: object[] = [{ op: 'set_location', location }];
-    const nebula = args['nebula'] === false ? null : system.nebula;
-    if (nebula) operations.push({ op: 'set_environment', environment: { universe: nebula } });
-    else if (args['nebula'] !== false) warnings.push(`${system.region?.name ?? system.name} has no nebula in the EVE data; environment.universe is unchanged`);
+    const nebula = system.nebula;
+    if (args['nebula'] != null) warnings.push(NEBULA_ARGUMENT_WARNING);
+    if (!nebula) warnings.push(`${system.region?.name ?? system.name} has no nebula in the EVE data; the page draws environment.universe`);
 
     const described = {
       location,

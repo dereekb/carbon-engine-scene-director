@@ -1,7 +1,7 @@
 import { DEFAULT_UNIVERSE, type MapCelestial, type SceneDocument, type SceneLocation } from '@scene-director/scene';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { Locations, MatchCelestialName } from './locations';
-import { MakeFakeMapData } from './map-data.testing';
+import { Locations, MatchCelestialName, NEBULA_ARGUMENT_WARNING } from './locations';
+import { MAP_ROUTES, MakeFakeMapData } from './map-data.testing';
 import { ToolError } from './tool-call';
 
 const NO_PAGE = {
@@ -66,7 +66,41 @@ describe('MatchCelestialName', () => {
 });
 
 describe('set_location', () => {
-  it('puts the scene 30 km off the CNAP with the region nebula', async () => {
+  it('forwards only the location to a connected tab and names the region nebula the page draws', async () => {
+    const calls: { name: string; args: { operations: object[] } }[] = [];
+    const page = {
+      Connected: () => true,
+      NotConnected: () => new ToolError('No viewer tab is connected.'),
+      Call: async (name: string, args: { operations: object[] }) => {
+        calls.push({ name, args });
+        return { warnings: [] };
+      }
+    };
+    const { mapData } = MakeFakeMapData();
+    const result = (await new Locations({ mapData, page }).SetLocation({ celestial: CNAP, range: 30000 })) as SetLocationResult & { nebula: string };
+    expect(calls).toHaveLength(1);
+    expect(calls[0].name).toBe('patch_scene');
+    expect(calls[0].args.operations).toEqual([{ op: 'set_location', location: result.location }]);
+    expect(result.nebula).toBe(NEBULA);
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('warns that the nebula argument is no longer used', async () => {
+    const result = await Set({ celestial: CNAP, range: 30000, nebula: false });
+    expect(result.scene.environment.universe).toBe(DEFAULT_UNIVERSE);
+    expect(result.warnings).toContain(NEBULA_ARGUMENT_WARNING);
+  });
+
+  it('warns when the system has no nebula in the EVE data', async () => {
+    const key = Object.keys(MAP_ROUTES).find((route) => route.includes('map/systems/30000142?expand=all')) ?? '';
+    const jita = MAP_ROUTES[key] as { json: { derived: object } };
+    const { mapData } = MakeFakeMapData({ ...MAP_ROUTES, [key]: { ...jita, json: { ...jita.json, derived: { ...jita.json.derived, nebula: null, scene: {} } } } });
+    const result = (await new Locations({ mapData, page: NO_PAGE }).SetLocation({ scene: { name: 'loc' }, celestial: CNAP })) as SetLocationResult & { nebula?: string };
+    expect(result.nebula).toBeUndefined();
+    expect(result.warnings).toContain('The Forge has no nebula in the EVE data; the page draws environment.universe');
+  });
+
+  it('puts the scene 30 km off the CNAP and leaves environment.universe alone', async () => {
     const result = await Set({ celestial: CNAP, range: 30000 });
     expect(result.loaded).toBe(false);
     expect(result.location).toMatchObject({ system: 30000142, name: 'Jita', region: 'The Forge', anchor: { celestial: 60003760, name: CNAP, kind: 'station' } });
@@ -75,9 +109,8 @@ describe('set_location', () => {
     expect(result.celestial).toMatchObject({ id: 60003760, kind: 'station', radius: 100000, radiusFrom: 'type' });
     expect(Math.abs((result.range ?? 0) - 30000)).toBeLessThanOrEqual(1e-3);
     expect(result.scene.location).toEqual(result.location);
-    expect(result.scene.environment.universe).toBe(NEBULA);
-
-    expect((await Set({ celestial: CNAP, range: 30000, nebula: false })).scene.environment.universe).toBe(DEFAULT_UNIVERSE);
+    expect(result.scene.environment.universe).toBe(DEFAULT_UNIVERSE);
+    expect((result as SetLocationResult & { nebula: string }).nebula).toBe(NEBULA);
   });
 
   it('finds the Perimeter gate in Jita, a moon by its full name, and an id', async () => {

@@ -384,7 +384,7 @@ describe('locations', () => {
     try {
       const result = (await located.Call('set_location', { celestial: 'Jita IV - Moon 4 - Caldari Navy Assembly Plant', range: 30000 })) as Record<string, unknown>;
       expect(patches).toHaveLength(1);
-      expect((patches[0]['operations'] as { op: string }[]).map((operation) => operation.op)).toEqual(['set_location', 'set_environment']);
+      expect((patches[0]['operations'] as { op: string }[]).map((operation) => operation.op)).toEqual(['set_location']);
       expect(result).toMatchObject({ location: { system: 30000142, anchor: { celestial: 60003760 } }, celestial: { id: 60003760 }, scene: { location: { system: 30000142 } } });
     } finally {
       page.close();

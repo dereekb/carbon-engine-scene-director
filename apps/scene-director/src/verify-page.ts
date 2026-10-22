@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { formationSpacing, toFollowTolerance, type FleetReport, type LocationReport, type MapSystemAnswer, type SceneLocation, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
+import { DEFAULT_UNIVERSE, formationSpacing, toFollowTolerance, type FleetReport, type LocationDressingReport, type LocationReport, type MapSystemAnswer, type SceneLocation, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -69,6 +69,7 @@ interface ShipPhysicsState {
 
 interface ShipState extends Partial<ShipFleetMembership> {
   readonly id: string;
+  readonly status?: string;
   readonly position?: [number, number, number];
   readonly velocity?: [number, number, number];
   readonly speed?: number;
@@ -123,7 +124,7 @@ interface ViewerState {
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
   readonly fleets: (FleetReport & { readonly formation?: FleetFormationState })[];
-  readonly location?: Maybe<LocationReport>;
+  readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport> }>;
 }
 
 interface MapSearchResult {
@@ -141,6 +142,9 @@ interface SetLocationResult {
   readonly celestial: Maybe<{ readonly id: number; readonly kind: string }>;
   readonly range?: number;
   readonly loaded?: boolean;
+  readonly reloading?: boolean;
+  readonly nebula?: string;
+  readonly warnings?: string[];
   readonly scene?: { readonly environment: { readonly universe: string } };
 }
 
@@ -988,7 +992,7 @@ try {
 
   await Check('set_location puts the scene 30 km off the CNAP and get_state reports it', async () => {
     await call('load_scene', { scene: { name: 'verify-location', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
-    const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000, nebula: false }).catch(SkipWithoutSde);
+    const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
     const offset = set.location.anchor?.offset ?? [0, 0, 0];
     Expect(set.location.system === 30000142 && set.location.anchor?.celestial === 60003760, JSON.stringify(set.location));
     Expect(Math.abs(Math.sqrt(offset[0] ** 2 + offset[1] ** 2 + offset[2] ** 2) - 130000) <= 0.01, `offset ${JSON.stringify(offset)}`);
@@ -1007,12 +1011,43 @@ try {
       .join(', ');
   });
 
+  await Check('set_location dresses the CNAP (validated without a renderer)', async () => {
+    await call('load_scene', { scene: { name: 'verify-dressing', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
+    const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
+    Expect(!set.reloading && set.nebula === FORGE_NEBULA, JSON.stringify({ reloading: set.reloading, nebula: set.nebula }));
+    const state = await WaitFor('the CNAP dressing', 90, (polled) => (['ready', 'partial'].includes(polled.location?.dressing?.state ?? '') ? null : DressingProgress(polled)));
+    const dressing = state.location?.dressing as LocationDressingReport;
+    const failures = dressing.objects.filter((object) => object.state === 'failed');
+    Expect(failures.length === 0 && dressing.sun?.state !== 'failed', 'failed: ' + JSON.stringify([...failures.map((object) => `${object.name}: ${object.error}`), dressing.sun?.error]));
+    Expect(dressing.nebula?.path === FORGE_NEBULA && dressing.nebula.state === 'planned', `nebula ${JSON.stringify(dressing.nebula)}`);
+    Expect(dressing.sun?.name === 'Jita - Star' && dressing.sun.template === 'env_sun_blue_sun_01a' && dressing.sun.flare === 'blue_sun' && dressing.sun.state === 'validated', `sun ${JSON.stringify(dressing.sun)}`);
+    const validated = (id: number) => dressing.objects.find((object) => object.id === id)?.state === 'validated';
+    for (const id of [60003760, 60003466, 40009082, 40009087]) Expect(validated(id), `${id}: ${JSON.stringify(dressing.objects.find((object) => object.id === id))}`);
+    return DressingSummary(dressing);
+  });
+
+  await Check('re-dressing at the Perimeter gate does not reload', async () => {
+    const before = await call<ViewerState>('get_state');
+    if (before.location?.dressing?.state !== 'ready') throw new Skipped('the CNAP was not dressed');
+    const status = ShipIn(before, 'rifter').status;
+    const set = await call<SetLocationResult>('set_location', { celestial: 'the Perimeter gate in Jita' });
+    Expect(!set.reloading, 'set_location reloaded the tab');
+    const state = await WaitFor('the Perimeter dressing', 90, (polled) => (polled.location?.anchor?.id === 50001249 && ['ready', 'partial'].includes(polled.location.dressing?.state ?? '') ? null : DressingProgress(polled)));
+    const dressing = state.location?.dressing as LocationDressingReport;
+    const ids = dressing.objects.map((object) => object.id);
+    for (const id of [50001249, 50013921, 50001250, 60015262]) Expect(ids.includes(id), `${id} not dressed: ${JSON.stringify(ids)}`);
+    Expect(!ids.includes(60003760), 'the CNAP is still dressed');
+    Expect(JSON.stringify(dressing.objects.filter((object) => object.kind === 'planet' || object.kind === 'moon').map((object) => object.id)) === JSON.stringify([40009123]), `bodies ${JSON.stringify(ids)}`);
+    Expect(state.simulation.seconds > before.simulation.seconds && ShipIn(state, 'rifter').status === status, `seconds ${before.simulation.seconds} -> ${state.simulation.seconds}, rifter ${status} -> ${ShipIn(state, 'rifter').status}`);
+    return DressingSummary(dressing);
+  });
+
   await Check('set_location finds the Perimeter gate in Jita and a moon by name', async () => {
     for (const args of [{ celestial: 'Perimeter gate', system: 'Jita' }, { celestial: 'the Perimeter gate in Jita' }]) {
-      const set = await call<SetLocationResult>('set_location', { ...args, nebula: false }).catch(SkipWithoutSde);
+      const set = await call<SetLocationResult>('set_location', args).catch(SkipWithoutSde);
       Expect(set.location.anchor?.celestial === 50001249 && Math.abs((set.range ?? 0) - 2500) <= 0.01, `${JSON.stringify(args)}: ${JSON.stringify(set.location.anchor)} range ${set.range}`);
     }
-    const moon = await call<SetLocationResult>('set_location', { celestial: 'Jita IV - Moon 4', nebula: false });
+    const moon = await call<SetLocationResult>('set_location', { celestial: 'Jita IV - Moon 4' });
     Expect(moon.location.anchor?.celestial === 40009087 && moon.location.anchor.kind === 'moon', JSON.stringify(moon.location.anchor));
     moonLocation = moon.location;
   });
@@ -1028,9 +1063,9 @@ try {
     Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-location' })).deleted, 'not deleted');
   });
 
-  await Check('set_location on a passed scene sets the region nebula', async () => {
+  await Check('set_location on a passed scene leaves environment.universe alone', async () => {
     const set = await call<SetLocationResult>('set_location', { system: 'Jita', celestial: 'star', scene: { name: 'nebula' } }).catch(SkipWithoutSde);
-    Expect(set.loaded === false && set.scene?.environment.universe === FORGE_NEBULA, JSON.stringify({ loaded: set.loaded, environment: set.scene?.environment }));
+    Expect(set.loaded === false && set.scene?.environment.universe === DEFAULT_UNIVERSE && set.nebula === FORGE_NEBULA, JSON.stringify({ loaded: set.loaded, environment: set.scene?.environment, nebula: set.nebula }));
     Expect(set.location.anchor?.kind === 'star', JSON.stringify(set.location.anchor));
   });
 
@@ -1054,3 +1089,14 @@ try {
 
 console.log(results.join('\n'));
 process.exit(failed ? 1 : 0);
+
+function DressingProgress(state: ViewerState): string {
+  const dressing = state.location?.dressing;
+  const objects = dressing?.objects.map((object) => `${object.id} ${object.state}`).join(', ');
+  return dressing ? `${dressing.state}: ${objects}` : JSON.stringify(state.location?.status ?? null);
+}
+
+function DressingSummary(dressing: LocationDressingReport): string {
+  const count = (kind: keyof LocationDressingReport['counts']) => dressing.counts[kind].validated + dressing.counts[kind].drawn;
+  return `${dressing.state}: sun ${dressing.sun?.template}/${dressing.sun?.flare}, ${count('planet')} planets, ${count('moon')} moons, ${count('station')} stations, ${count('stargate')} gates`;
+}

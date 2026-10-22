@@ -8,6 +8,8 @@ import type { Maybe } from '@dereekb/util';
 import {
   blue,
   BlueResFileSystemRemote,
+  CjsBlackFormat,
+  type CjsModelValues,
   CjsPngFormat,
   CjsWebgpuFormat,
   ImageIO,
@@ -51,6 +53,20 @@ export async function ResourceBytes(path: string): Promise<Uint8Array> {
   const response = await fetch(`/resource/${logical}`);
   if (!response.ok) throw new Error(`${logical}: ${response.status} ${response.statusText}`);
   return new Uint8Array(await response.arrayBuffer());
+}
+
+/**
+ * Reads a `.black` file as plain values (the root object), ready for `CjsSchema.from` or `setValues`.
+ *
+ * @param path - A res:/ path.
+ * @returns The file's root values.
+ * @throws {Error} When the hub answers with an error status or the file has no root object.
+ */
+export async function ResourceValues(path: string): Promise<CjsModelValues> {
+  const read = CjsBlackFormat.read(await ResourceBytes(path), { emit: 'json' });
+  const values = (read.root ?? read).object;
+  if (!values) throw new Error(`${path}: no root object`);
+  return values;
 }
 
 /**

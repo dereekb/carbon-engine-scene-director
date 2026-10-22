@@ -44,6 +44,7 @@ import {
   type SceneCamera,
   type SceneCameraMode,
   type SceneDocument,
+  type SceneLocation,
   type SceneShip,
   type ShipFleetMembership,
   type ShipOrderRequest
@@ -56,7 +57,9 @@ import { HullStatsKey, HullStatsLookup, ResolveFlight, type HullStatsAnswer, typ
 import { FleetFollowing, type ShipFollowingReport } from './following';
 import { EncodePng, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
+import { ReadDressParts } from './celestials';
 import { LocationLookup } from './location';
+import { LocationDressing } from './location-dressing';
 import { ErrorText } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
@@ -207,6 +210,10 @@ export class Director {
    * The scene location's system data from the hub, and its get_state report.
    */
   readonly location: LocationLookup;
+  /**
+   * What the location draws around the scene (location-dressing.ts): nebula, star, planets, moons, stations, gates.
+   */
+  readonly dressing: LocationDressing;
   scene: Maybe<SceneDocument> = null;
   private readonly onChange: () => void;
   private readonly hullStats: HullStatsLookup;
@@ -233,7 +240,18 @@ export class Director {
     this.clock = clock;
     this.onChange = onChange;
     this.following = new FleetFollowing({ world, scene: () => this.scene, radiusOf: (id) => this.FormationRadius(id) });
-    this.location = new LocationLookup({ onChange: () => this.onChange() });
+    this.dressing = new LocationDressing({
+      engine,
+      parts: ReadDressParts(),
+      retained: () => [...this.live.values()].map((entry) => entry.ship).filter((ship): ship is EveShip2 => ship !== null),
+      onChange: () => this.onChange()
+    });
+    this.location = new LocationLookup({
+      onChange: () => {
+        this.Redress();
+        this.onChange();
+      }
+    });
     if (engine) this.AttachCameraControls(engine.canvas);
   }
 
@@ -360,7 +378,7 @@ export class Director {
     return {
       renderer,
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0 } : null,
-      location: this.location.Report(),
+      location: this.LocationState(),
       camera: this.engine?.camera.Get() ?? null,
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
@@ -411,7 +429,9 @@ export class Director {
 
   private async Apply({ scene, warnings }: NormalizedScene, { restart = false }: ApplyOptions = {}): Promise<object> {
     // Changing the universe re-creates the scene's environment, which is
-    // initialized with the device; a reload is the reliable way to do it.
+    // initialized with the device; a reload is the reliable way to do it (and
+    // the reload trick CLAUDE.md names). A location's region nebula swaps in
+    // live instead (Engine.SetNebula, location-dressing.ts).
     if (this.engine && this.engine.universe !== scene.environment.universe) {
       await this.store.Put(CURRENT_KEY, scene);
       setTimeout(() => location.reload(), 200);
@@ -431,7 +451,10 @@ export class Director {
       this.flights.delete(doc.id);
     }
     this.scene = scene;
-    if (restart || diff.location) this.location.Update(scene.location ?? null, { retry: restart });
+    if (restart || diff.location) {
+      this.location.Update(scene.location ?? null, { retry: restart });
+      this.Redress(scene.location ?? null);
+    }
     if (restart) this.hullStats.ForgetFailures();
 
     // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place
@@ -574,7 +597,7 @@ export class Director {
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
     const retained = [...this.live.values()].map((other) => other.ship).filter((ship): ship is EveShip2 => ship !== null);
-    RetireShips([entry.ship], retained);
+    RetireShips([entry.ship], [...retained, ...this.dressing.Roots()]);
   }
 
   private ApplyCamera(camera: SceneCamera): void {
@@ -674,6 +697,22 @@ export class Director {
     this.appliedCamera = JSON.stringify(camera);
     this.onChange();
     this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera: { ...live, ...change } }]))).catch((error: unknown) => console.warn(`camera change failed: ${ErrorText(error)}`));
+  }
+
+  /**
+   * Re-dresses the scene for its location and the location's answer (idempotent; location-dressing.ts).
+   */
+  private Redress(location: Maybe<SceneLocation> = this.scene?.location ?? null): void {
+    const report = this.location.Report();
+    this.dressing.Update({ location, answer: this.location.Answer(), status: report?.status ?? 'loading', error: report?.error });
+  }
+
+  /**
+   * Get_state's location: the lookup's report plus what it dressed.
+   */
+  private LocationState(): Maybe<object> {
+    const located = this.location.Report();
+    return located ? { ...located, dressing: this.dressing.Report() } : null;
   }
 
   /**

@@ -8,13 +8,13 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { CountBackgroundQuads, CreateSceneDressing, DressScene, EnvironmentReport, ReadRenderOptions, type SceneDressing, type SceneEnvironmentReport } from './environment';
-import { ErrorText, ResourceBytes } from './resources';
+import type { DressedSun } from '@scene-director/scene';
+import { CountBackgroundQuads, EnvironmentReport, ReadRenderOptions, SceneDresser, type SceneDressing, type SceneEnvironmentReport } from './environment';
+import { ErrorText, ResourceValues } from './resources';
 import {
   addChild,
   blue,
   CjsBatchManager,
-  CjsBlackFormat,
   CjsPngFormat,
   CjsSchema,
   CjsWebgpuDevice,
@@ -37,7 +37,12 @@ import {
   TriRenderJob,
   TriStepPythonCB,
   vec3,
+  type CjsModelValues,
+  type EvePlanet,
   type EveShip2,
+  type EveSpaceObject2,
+  type Tr2Effect,
+  type TriVectorCurve,
   type Vec3
 } from './runtime';
 
@@ -84,7 +89,26 @@ export interface EngineStats {
 
 export interface EngineEnvironment extends SceneEnvironmentReport {
   readonly universe: Maybe<string>;
+  readonly nebula: EngineNebula;
 }
+
+/**
+ * The nebula drawn: the document's universe, or the location's region nebula swapped in live.
+ */
+export interface EngineNebula {
+  readonly path: Maybe<string>;
+  readonly source: 'universe' | 'location';
+  readonly state: 'applied' | 'loading' | 'failed';
+  readonly error?: string;
+}
+
+/**
+ * The EveSpaceScene fields every shipped universe file sets, besides backgroundEffect and the env map paths, with the
+ * class defaults a live nebula swap resets them to first.
+ */
+const NEBULA_FIELDS = { backgroundRenderingEnabled: false, nebulaIntensity: 1, reflectionIntensity: 1, fogStart: 0, fogEnd: 0, lowQualityNebulaResPath: '', lowQualityNebulaMixResPath: '' } as const;
+const NEBULA_ENV_MAPS = ['envMapResPath', 'envMap1ResPath', 'envMap2ResPath', 'envMap3ResPath'] as const;
+const DEFAULT_AMBIENT_COLOR = [0.25, 0.25, 0.25, 1];
 
 export interface CameraPlacement {
   readonly focus?: ArrayLike<number>;
@@ -122,13 +146,22 @@ export class Engine {
   readonly device: GPUDevice;
   readonly features: GPUFeatureName[];
   readonly ships = new Set<EveShip2>();
+  /**
+   * The document's universe the engine was created with (a change reloads the tab: CLAUDE.md's reload trick).
+   */
   universe: Maybe<string> = null;
+  /**
+   * The nebula drawn; a location's region nebula swaps in live (SetNebula).
+   */
+  nebula: EngineNebula = { path: null, source: 'universe', state: 'applied' };
   lastError: Maybe<string> = null;
   deviceLost: Maybe<string> = null;
   private readonly capture: FrameCapture;
   private readonly fps = { frames: 0, since: performance.now(), value: 0 };
   private readonly gpuErrors = { count: 0, messages: [] as string[], capped: false };
-  private dressing: Maybe<SceneDressing> = null;
+  private dresser: Maybe<SceneDresser> = null;
+  private nebulaGeneration = 0;
+  private readonly defaultSunDirection: Vec3 = vec3.fromValues(0, -1, 0);
   private parts: Maybe<EngineParts> = null;
   /**
    * The swap-chain image this frame went into.
@@ -209,6 +242,103 @@ export class Engine {
   }
 
   /**
+   * Adds a static object (a dressed station or stargate) to the live scene.
+   */
+  AddObject(object: EveSpaceObject2): void {
+    const { scene } = this.Parts();
+    addChild(scene, 'objects', object, { listNotify: scene });
+  }
+
+  RemoveObject(object: EveSpaceObject2): void {
+    const { scene } = this.Parts();
+    removeChild(scene, 'objects', object, { listNotify: scene });
+  }
+
+  /**
+   * Adds a body (a dressed planet, moon or the sun disc) to the planet pass.
+   */
+  AddPlanet(planet: EvePlanet): void {
+    const { scene } = this.Parts();
+    addChild(scene, 'planets', planet, { listNotify: scene });
+  }
+
+  RemovePlanet(planet: EvePlanet): void {
+    const { scene } = this.Parts();
+    removeChild(scene, 'planets', planet, { listNotify: scene });
+  }
+
+  /**
+   * Points the light from the location's star: the scene sets sunDirection from the curve every frame. Null restores
+   * the universe's direction.
+   */
+  SetSunBall(curve: Maybe<TriVectorCurve>): void {
+    const { scene } = this.Parts();
+    scene.sunBall = curve ?? null;
+    if (!curve) vec3.copy(scene.sunDirection, this.defaultSunDirection);
+  }
+
+  /**
+   * Re-dresses the post process and lens flare for the location's star, or the defaults without one.
+   */
+  DressSun(sun: Maybe<DressedSun>): void {
+    const { scene } = this.Parts();
+    if (this.dresser) void this.dresser.Dress(scene, sun);
+  }
+
+  /**
+   * What the scene dresser applied (the post process and lens flare), or null before the engine is up.
+   */
+  Dressing(): Maybe<SceneDressing> {
+    return this.dresser?.report ?? null;
+  }
+
+  /**
+   * Metres from the origin the camera's back clip must reach (the farthest dressed object); 0 for none.
+   */
+  SetDrawReach(metres: number): void {
+    this.Parts().camera.reach = Math.max(0, metres);
+  }
+
+  /**
+   * Swaps the drawn nebula live: reads the universe file as values, hydrates a fresh background effect, then between
+   * frames resets the fields every universe file sets, copies the file's, and reloads the env maps. On failure the old
+   * nebula stays and the error is recorded.
+   *
+   * @param path - A universe file (an EveSpaceScene).
+   * @param source - Why it is drawn.
+   */
+  async SetNebula(path: string, source: EngineNebula['source']): Promise<void> {
+    const { scene } = this.Parts();
+    if (path === this.nebula.path) {
+      this.nebula = { ...this.nebula, source };
+      return;
+    }
+    const generation = ++this.nebulaGeneration;
+    this.nebula = { path, source, state: 'loading' };
+    let effect: Maybe<Tr2Effect> = null;
+    try {
+      const values = await ResourceValues(path);
+      if (values._type !== 'EveSpaceScene') throw new Error(`it is a ${values._type}, not an EveSpaceScene`);
+      const background = values['backgroundEffect'] as Maybe<CjsModelValues>;
+      effect = background ? CjsSchema.from<Tr2Effect>(background._type || 'Tr2Effect', background) : null;
+      if (generation !== this.nebulaGeneration) {
+        effect?.Destruct();
+        return;
+      }
+      const old = scene.backgroundEffect;
+      ApplyNebulaValues(scene, values, effect);
+      if (old && old !== effect) old.Destruct();
+      this.nebula = { path, source, state: 'applied' };
+    } catch (error) {
+      if (generation === this.nebulaGeneration) {
+        const message = `nebula ${path}: ${ErrorText(error)}`;
+        console.warn(message);
+        this.nebula = { path, source, state: 'failed', error: message };
+      }
+    }
+  }
+
+  /**
    * Resolves with the next completed frame.
    */
   Capture(): Promise<CapturedFrame> {
@@ -232,8 +362,8 @@ export class Engine {
    * The scene's background and the client dressing, for get_state.
    */
   Environment(): Maybe<EngineEnvironment> {
-    const { parts, dressing } = this;
-    return parts && dressing ? { universe: this.universe, ...EnvironmentReport(parts.scene, dressing) } : null;
+    const { parts, dresser } = this;
+    return parts && dresser ? { universe: this.universe, nebula: this.nebula, ...EnvironmentReport(parts.scene, dresser.report) } : null;
   }
 
   /**
@@ -279,11 +409,13 @@ export class Engine {
     const scene = new EveSpaceScene();
     if (universe) {
       // Applied as values: loading it as an object would run Initialize before the device exists.
-      const values = CjsBlackFormat.read(await ResourceBytes(universe), { emit: 'json' }).object;
-      if (values?._type !== 'EveSpaceScene') throw new Error(`${universe} is a ${values?._type}, not an EveSpaceScene`);
+      const values = await ResourceValues(universe);
+      if (values._type !== 'EveSpaceScene') throw new Error(`${universe} is a ${values._type}, not an EveSpaceScene`);
       CjsSchema.setValues(scene, values);
       this.universe = universe;
+      this.nebula = { path: universe, source: 'universe', state: 'applied' };
     }
+    vec3.copy(this.defaultSunDirection, scene.sunDirection);
     // The client's dynamic-lights setting (off by default in Carbon); without it
     // attachment lights never reach a shader. The client also turns new bloom off.
     Tr2Renderer.getSettings().SetValue('eveSpaceSceneDynamicLighting', true);
@@ -326,13 +458,14 @@ export class Engine {
     driver.projection = camera.eve.GetProjection();
 
     // The client's post process and sun flare (environment.ts), applied to the
-    // live scene once they load; the first frames draw without them.
+    // live scene once they load; the first frames draw without them. A
+    // location's star re-dresses them (DressSun).
     const options = ReadRenderOptions();
     if (!options.antiAliasing) driver.antiAliasingQuality = EveSpaceSceneRenderDriver.AntiAliasingQuality.Disabled;
     CountBackgroundQuads();
-    const dressing = CreateSceneDressing(options);
-    this.dressing = dressing;
-    void DressScene(scene, options, dressing);
+    const dresser = new SceneDresser(options);
+    this.dresser = dresser;
+    void dresser.Dress(scene, null);
 
     const pump = CreateFramePump(gTriDev.device, () => {
       al.SetRenderTarget(0, renderTarget);
@@ -388,6 +521,10 @@ export class OrbitCamera {
   yaw = 45;
   pitch = -15;
   fov = 45;
+  /**
+   * Metres from the origin to the farthest dressed object; the back clip covers it.
+   */
+  reach = 0;
 
   constructor(canvas: HTMLCanvasElement) {
     this.eve.useExtraTranslation = true;
@@ -424,7 +561,8 @@ export class OrbitCamera {
     camera.fieldOfView = this.fov * DEGREES;
     // Reversed depth keeps precision with a far back plane.
     camera.frontClip = Math.max(0.5, this.distance * 0.0005);
-    camera.backClip = Math.max(1e5, this.distance * 1000);
+    const reach = this.reach > 0 ? (this.reach + vec3.length(this.focus) + this.distance) * 1.1 : 0;
+    camera.backClip = Math.max(1e5, this.distance * 1000, reach);
     camera.SetOrbit(this.yaw * DEGREES, this.pitch * DEGREES);
     camera.Update(seconds, aspect, seconds);
   }
@@ -716,4 +854,39 @@ function CreateFramePump(device: TriDevice, draw: () => void): FramePump {
       if (failure) throw failure;
     }
   };
+}
+
+/**
+ * Applies a universe file's nebula fields to a live scene: the class defaults first, then the file's values, the new
+ * background effect, and the env map paths through OnModified so their textures reload.
+ */
+function ApplyNebulaValues(scene: EveSpaceScene, values: CjsModelValues, effect: Maybe<Tr2Effect>): void {
+  scene.backgroundRenderingEnabled = typeof values['backgroundRenderingEnabled'] === 'boolean' ? values['backgroundRenderingEnabled'] : NEBULA_FIELDS.backgroundRenderingEnabled;
+  scene.nebulaIntensity = NumberValue(values['nebulaIntensity'], NEBULA_FIELDS.nebulaIntensity);
+  scene.reflectionIntensity = NumberValue(values['reflectionIntensity'], NEBULA_FIELDS.reflectionIntensity);
+  scene.fogStart = NumberValue(values['fogStart'], NEBULA_FIELDS.fogStart);
+  scene.fogEnd = NumberValue(values['fogEnd'], NEBULA_FIELDS.fogEnd);
+  scene.ambientColor.set(ColorValue(values['ambientColor']) ?? DEFAULT_AMBIENT_COLOR);
+  scene.lowQualityNebulaResPath = StringValue(values['lowQualityNebulaResPath'], NEBULA_FIELDS.lowQualityNebulaResPath);
+  scene.OnModified('lowQualityNebulaResPath');
+  scene.lowQualityNebulaMixResPath = StringValue(values['lowQualityNebulaMixResPath'], NEBULA_FIELDS.lowQualityNebulaMixResPath);
+  scene.OnModified('lowQualityNebulaMixResPath');
+  scene.backgroundEffect = effect ?? null;
+  for (const field of NEBULA_ENV_MAPS) {
+    scene[field] = StringValue(values[field], '');
+    scene.OnModified(field);
+  }
+}
+
+function NumberValue(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function StringValue(value: unknown, fallback: string): string {
+  return typeof value === 'string' ? value : fallback;
+}
+
+function ColorValue(value: unknown): Maybe<number[]> {
+  const list = value != null && typeof value === 'object' && 'length' in value ? Array.from(value as ArrayLike<unknown>) : null;
+  return list && list.length >= 3 && list.every((component) => typeof component === 'number') ? [...(list as number[]).slice(0, 4), ...(list.length === 3 ? [1] : [])] : null;
 }

@@ -301,6 +301,54 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly effectResource: CjsResourceState | null;
     readonly shader: object | null;
     readonly resources: Iterable<TriEffectResourceParameter>;
+    Destruct(): void;
+  }
+
+  /**
+   * A fixed translation: with no child curve it answers `value` (and zero velocity).
+   */
+  export class Tr2TranslationAdapter implements TriVectorCurve {
+    readonly value: Vec3;
+    Update__Ticks(time: number, out: Vec3): Vec3;
+    GetValueAt__Ticks(time: number, out: Vec3): Vec3;
+    GetValueDotAt__Ticks(time: number, out: Vec3): Vec3;
+    GetValueDoubleDotAt__Ticks(time: number, out: Vec3): Vec3;
+  }
+
+  /**
+   * A fixed rotation: with no child curve it answers `value`.
+   */
+  export class Tr2RotationAdapter {
+    readonly value: Quat;
+    Update__Ticks(time: number, out: Quat): Quat;
+    GetValueAt__Ticks(time: number, out: Quat): Quat;
+  }
+
+  /**
+   * A hydrated SOF object (a station or stargate's EveStation2): placed by its curves.
+   */
+  export interface EveSpaceObject2 {
+    translationCurve: TriVectorCurve | null;
+    rotationCurve: (ITriQuaternionFunction | Tr2RotationAdapter) | null;
+    readonly boundingSphereCenter: Vec3;
+    readonly boundingSphereRadius: number;
+    display: boolean;
+    StartControllers(): void;
+  }
+
+  /**
+   * A celestial body drawn in the scene's planet pass (at 1 / 1e6 scale): placed by its translation curve and
+   * scaling; `radius` (metres) drives its pixel-size LOD and the sun angle.
+   */
+  export interface EvePlanet {
+    radius: number;
+    readonly scaling: Vec3;
+    translationCurve: TriVectorCurve | null;
+    rotationCurve: (ITriQuaternionFunction | Tr2RotationAdapter) | null;
+    display: boolean;
+    readonly estimatedPixelDiameter: number;
+    SetControllerVariable(name: string, value: number): void;
+    StartControllers(): void;
   }
 
   export class Tr2PPTonemappingEffect {}
@@ -319,9 +367,14 @@ declare module '@carbonenginejs/runtime/trinity' {
 
   export class EveLensflare {
     /**
-     * Where the flare sits; its direction is the negated position.
+     * Where the flare sits; its direction is the negated position. A translation curve writes it each update.
      */
     readonly position: Vec3;
+    translationCurve: TriVectorCurve | null;
+    /**
+     * Unlinks its controllers and frees its occlusion slots.
+     */
+    Destruct(): void;
   }
 
   export class EveSpaceScene {
@@ -330,15 +383,31 @@ declare module '@carbonenginejs/runtime/trinity' {
     gpuParticleSystem: unknown;
     postprocess: Tr2PostProcess2 | null;
     readonly lensflares: EveLensflare[];
+    readonly planets: ArrayLike<EvePlanet> & Iterable<EvePlanet>;
     readonly sunDirection: Vec3;
+    /**
+     * The sun's position curve: Update sets sunDirection from it, and the planet whose translation curve is this same
+     * object is the sun disc.
+     */
+    sunBall: TriVectorCurve | null;
     backgroundRenderingEnabled: boolean;
     display: boolean;
     nebulaIntensity: number;
-    readonly backgroundEffect: Tr2Effect | null;
+    backgroundEffect: Tr2Effect | null;
+    readonly ambientColor: Float32Array;
+    fogStart: number;
+    fogEnd: number;
+    reflectionIntensity: number;
     envMapResPath: string;
     envMap1ResPath: string;
     envMap2ResPath: string;
     envMap3ResPath: string;
+    lowQualityNebulaResPath: string;
+    lowQualityNebulaMixResPath: string;
+    /**
+     * Reloads a changed env map path (and handles the other notify fields).
+     */
+    OnModified(property: string): boolean;
     Initialize(renderContext: Tr2RenderContext): void;
     UpdateQuadRenderer(frustum: object, objects: object[], renderContext: Tr2RenderContext): void;
   }

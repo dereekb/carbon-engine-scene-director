@@ -100,14 +100,14 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature, align time and warp speed, as published and as flown with every skill at V, optionally with a prop mod (see below) |
 | `search_map` | hub | searches CCP's static map by name: regions, constellations, systems, stars, planets, NPC stations and stargates (see Locations) |
 | `get_system` | hub | one solar system with its star, the region's nebula and its celestials (see Locations) |
-| `set_location` | hub | puts the scene at a real EVE place: resolves a celestial by name or id and sets the document's location, off it at a range (see Locations) |
+| `set_location` | hub | puts the scene at a real EVE place: resolves a celestial by name or id and sets the document's location, off it at a range; the page draws it (see Locations) |
 | `load_scene` | page | replaces the scene with a document |
 | `get_scene` | page | the current document |
 | `patch_scene` | page | edits by operation (ships, camera, environment, rename, fleets, location) |
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials and what the location dressed |
 | `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, warp to a point or a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship and follows it, or fits all ships |
@@ -756,10 +756,12 @@ asteroid belts. Stargates are named after their destination, so
 `"Stargate (Perimeter)"` without `system` is ambiguous (five systems have one).
 An ambiguous name lists the candidates; there is no player slang (`"Jita 4-4"`).
 
-**Nebula.** By default `set_location` also sets `environment.universe` to the
-region's nebula (The Forge's is `res:/dx9/scene/universe/c02_cube.black`); a tab
-with a renderer reloads when the universe changes. `"nebula": false` keeps the
-universe. The raw `set_location` operation never touches the environment.
+**Nebula.** A located scene draws its region's nebula (The Forge's is
+`res:/dx9/scene/universe/c02_cube.black`), swapped in live without a reload;
+`environment.universe` stays the nebula for a scene with no location, and
+clearing the location brings it back. `set_location` only sets the location
+(its result names the region nebula; a passed `nebula` argument is ignored with
+a warning). A change of `environment.universe` itself still reloads the tab.
 
 **The page.** It fetches its location's system from the hub's
 `GET /map/system?id=<system>&origin=<x>,<y>,<z>`: the system, its star (light
@@ -771,10 +773,44 @@ the anchor's actual distance and surface distance, the star's distance and
 direction, and the ten celestials nearest the origin; the overlay shows one
 `location` row.
 
-**Not drawn yet.** The page does not draw the location's sun, planets, stations
-or gates; that is the Location dressing entry. The data is CCP's static data
-(tools-core's map routes over the public SDE; no ESI, no API key): static
-celestials and NPC stations only, no player-built structures.
+**Dressing.** The page dresses the scene from the location the way the client
+dresses a system (`packages/scene/src/lib/location/dressing.ts` plans it,
+`apps/viewer/src/lib/location-dressing.ts` draws it):
+
+- The star: the light direction from the origin toward it (a sun ball), its sun
+  disc in the planet pass, its environment template as the post process
+  (`env_<sun graphic>`, else the `_01a` variant, else `env_sun_yellow_01a`) and
+  its lens flare (the graphic minus `sun_` and the variant; the Triglavian suns
+  have their own), the flare on a curve at the star's true distance.
+- Planets and moons whose radius / distance is at least 5e-4 (about 3 px across
+  a 1920 px, 45° view), biggest first, at most 12, from their shader presets at
+  their real directions and angular sizes. The planet pass clips at 1e11 m, so a
+  body beyond 5e9 m is pulled in on a log curve with its radius scaled to keep
+  its angular size. An origin inside a body skips it. A template's
+  `res:/texture/global/black.dds` HeightMap (the client's bake target) gets the
+  celestial's heightMap1.
+- NPC stations and stargates whose SDE radius / distance is at least 3e-4, at
+  most 8, as static SOF objects at their true origin-relative positions: gates
+  turned by tools-core's quaternion to face their destination, stations
+  unrotated (tools-core serves no station rotation). They are not Destiny balls
+  and not order targets. The camera's back clip grows to cover the farthest.
+- Everything is placed from `/map/system`'s origin-relative metres. Changing the
+  location re-dresses the live scene (same celestials move, new ones build, gone
+  ones retire); clearing it undresses. A body's surface under 10 km from the
+  camera is cut by the planet pass's near plane.
+
+`get_state.location.dressing` reports the state (loading, ready, partial,
+failed, off), the nebula, the sun (graphic, template, flare, true and drawn
+distance), counts per kind (drawn, validated without a renderer, loading,
+failed, skipped) and every dressed planet, moon, station and gate with its
+state and error; `get_state.environment.nebula` says which nebula is drawn and
+whether it comes from the location or `environment.universe`. The overlay shows
+a `dressing` row. `?dress=off|all|<nebula,sun,planets,objects>` switches the
+parts for A/B checks.
+
+**Not drawn.** Asteroid belts and authored objects (their own entries),
+player-built structures, and celestials too small to see. The data is CCP's
+static data (tools-core's map routes over the public SDE; no ESI, no API key).
 
 ## Development
 
@@ -796,10 +832,12 @@ Drawing is checked in a real Chrome or Edge tab through `get_state`,
 - `get_state.renderer.gpuErrors` counts WebGPU's uncaptured errors (validation,
   out-of-memory, internal), and each distinct message also goes to `page_log`.
 - Page URL switches for A/B checks: `?post=off|<template>` (the sun environment
-  template under `res:/dx9/postprocess/environmenttemplate/`, default
-  `env_sun_yellow_01a`), `?flare=off|<name>` (under `res:/fisfx/lensflare/`,
-  default `yellow`), `?aa=off` (no TAA) and `?tier=lo|hi` (the shader tier,
-  default `depth`).
+  template under `res:/dx9/postprocess/environmenttemplate/`; default the
+  location star's, else `env_sun_yellow_01a`), `?flare=off|<name>` (under
+  `res:/fisfx/lensflare/`; default the star's, else `yellow`), a named one
+  overriding the star's; `?dress=off|all|<nebula,sun,planets,objects>` (the
+  location dressing's parts, all by default), `?aa=off` (no TAA) and
+  `?tier=lo|hi` (the shader tier, default `depth`).
 
 ## Runtime notes
 
@@ -810,6 +848,10 @@ Drawing is checked in a real Chrome or Edge tab through `get_state`,
   `apps/viewer/esbuild.config.mjs` resolves.
 - The bundle ignores the runtime's `sideEffects` list: many listed files
   register classes on import, and dropping them breaks Black reading.
+- Celestials draw in the scene's planet pass (`scene.planets`, at 1 / 1e6 scale,
+  clipped to 1e4 .. 1e11 m) before the main pass. The sun disc is the planet
+  whose translation curve is the very object in `scene.sunBall`, which also
+  sets the light direction each frame.
 - The scene is dressed the way the EVE client dresses every space scene
   (`apps/viewer/src/lib/environment.ts`): a sun environment template as the
   post process, with the client's tonemapping and dynamic exposure added when

@@ -9,6 +9,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { normalizeScene, SCENE_SCHEMA } from '@scene-director/scene';
+import { DressingText } from './lib/celestials';
 import { SceneClock } from './lib/clock';
 import { DestinyWorld } from './lib/destiny';
 import { Director } from './lib/director';
@@ -75,6 +76,8 @@ class Overlay {
     ];
     const located = director?.location.Report();
     if (located) rows.push(['location', LocationText(located)]);
+    const dressed = DressingText(director?.dressing.Report());
+    if (dressed) rows.push(['dressing', dressed]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);

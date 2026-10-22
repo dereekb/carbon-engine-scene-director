@@ -13,7 +13,8 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   plans, flown by the viewer's `following.ts` / `steering.ts` / `destiny.ts`), `src/lib/compositions/` (the
   `cjs-fleet/1` fleet composition, its expansion, the `add_fleet_composition` op, and the TFIs example in
   `examples/tfis.json`) and `src/lib/location/` (the document's `location`, the placement math that puts an origin
-  off a celestial, and the `/map/system` answer and get_state report the hub and the page share). No runtime imports;
+  off a celestial, the `/map/system` answer and get_state report the hub and the page share, and `dressing.ts`: what a
+  location draws, the plan and its get_state report). No runtime imports;
   the hub, the page and the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. `hub/map-data.ts` is the tools-core map client and
@@ -29,8 +30,9 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   per-frame booster drive), `steering.ts` (Follow the FC's steering math), `camera.ts` (`CameraFollow`: the camera following its
   target in orbit or chase mode, and alt-click picking), `following.ts` (`FleetFollowing`: the
   document's fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the
-  location's system from the hub's `/map/system`, and get_state's report) have node specs: the viewer has a `test`
-  target (`project: viewer`).
+  location's system from the hub's `/map/system`, and get_state's report) and `celestials.ts` (the location dressing's
+  pure half: height map patch, `?dress=`, the slot reconcile, the report) have node specs: the viewer has a `test`
+  target (`project: viewer`). `location-dressing.ts` (runtime) draws a location from them.
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Commands
@@ -76,7 +78,7 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `director.TrackCamera(now)` → `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer
   `now`; the clock caps a frame at 1 s so the master's 6-tick backlog drop never fires.
 - Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`,
-  `location.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
+  `location.ts`, `celestials.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
   renderer and the `runtime-dist/` alias, which vitest does not have.
 - Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a
   tick is due, so it relies on one evolve per `Tick` call (the clock's 1 s frame cap). FollowBall cannot hold a
@@ -161,6 +163,18 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `node_modules`, so that fails with "Cannot find package '@carbonenginejs/runtime'" until they are reinstalled. Until
   then, run the same command from `/mnt/a/github/_pre-wsl-move/carbonenginejs/tools-core` (same commit, deps intact)
   with `--cache`/`--data` pointing at `/root/github/carbonenginejs/tools-core/...`. Startup takes ~20 s.
+- Location dressing: the planet pass draws `scene.planets` at 1 / 1e6 and clips at 1e4..1e11 m, so
+  `toPlanetPassDistance` pulls far bodies in and scales the radius. The sun core mesh has radius 0.5 and
+  `planetsphere.gr2` radius 1, so sun `scaling = 2r` and planet `scaling = r`. The sun disc's translation curve must
+  *be* `scene.sunBall` (Carbon picks the sun by identity); the flare gets its own true-distance curve. Stations and
+  gates are `BuildShipValues` + `HydrateSofObject` on fixed `Tr2TranslationAdapter` / `Tr2RotationAdapter` curves,
+  retired with every live ship root retained. Retire a replaced `EveLensflare` with `Destruct()`.
+- `Engine.universe` is the document's universe (a change still reloads: the reload trick). `Engine.nebula` is what is
+  drawn; a location's region nebula swaps in live (`SetNebula`) by resetting the fields every universe file sets,
+  hydrating a fresh background `Tr2Effect` and reloading the env maps through `OnModified`. `set_location` no longer
+  writes `environment.universe`.
+- A planet template's `HeightMap = res:/texture/global/black.dds` is the client's bake target: the page binds
+  heightMap1 only there (gas giants author their own, moons have none).
 - Headless Chromium in this WSL has no WebGPU adapter (Dawn finds SwiftShader but cannot create its context
   provider), so verify-page checks everything except drawing. Do not sink time into headless GPU. To see drawing,
   open the viewer in Windows Chrome yourself with the `chrome-devtools` MCP (the `windows-chrome` skill: it runs on
