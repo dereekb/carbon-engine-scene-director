@@ -75,7 +75,7 @@ import type { ToolHandler } from './link';
 import { ReadDressParts } from './celestials';
 import { LocationLookup } from './location';
 import { LocationDressing } from './location-dressing';
-import { PropModAudioEvents } from './prop-mod-audio';
+import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource } from './prop-mods';
 import { ErrorText } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
@@ -825,7 +825,7 @@ export class Director {
    */
   private PostPropModAudio(event: PropModEvent): void {
     const propMod = this.flights.get(event.id)?.propMod;
-    if (propMod) this.audio.Post({ ship: event.id, tick: event.tick, events: PropModAudioEvents(event.kind, propMod), placement: this.AudioPlacement(event.id, this.clock.now) });
+    if (propMod) this.audio.Post({ ship: event.id, tick: event.tick, events: PropModAudioEvents(event.kind, propMod), stops: PropModAudioStops(event.kind, propMod), placement: this.AudioPlacement(event.id, this.clock.now) });
   }
 
   /**

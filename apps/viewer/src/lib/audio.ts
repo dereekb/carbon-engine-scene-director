@@ -14,6 +14,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import type { CameraEye } from './engine';
+import { PROP_MOD_AUDIO_STOP_FADE_MS } from './prop-mod-audio';
 import { ErrorText } from './resources';
 import { type AudEmitter, CjsAudioMan, type CjsAudioLibraryDocument, type CjsAudioMediaProvider, type CjsAudioMediaRead, type CjsAudioMediaRecord } from './runtime';
 
@@ -64,6 +65,10 @@ export interface PageAudioPost {
   readonly ship: string;
   readonly tick: number;
   readonly events: readonly string[];
+  /**
+   * Playing events to stop after posting (prop-mod-audio.ts PROP_MOD_AUDIO_STOPS: the backend leaves `_on` playing).
+   */
+  readonly stops?: readonly string[];
   /**
    * Where the ship is drawn now; a new emitter is placed there before its first event.
    */
@@ -227,6 +232,17 @@ export class PageAudio {
         }
       }
       this.posted.push({ tick: post.tick, ship: post.ship, event, played });
+    }
+    if (emitter && post.stops?.length) {
+      try {
+        for (const [playingID, name] of emitter.GetPlayingEvents()) {
+          if (!post.stops.includes(name)) continue;
+          emitter.MarkPlayingIDStoppedByRequest(playingID);
+          emitter.ExecuteActionOnPlayingID(playingID, 'stop', PROP_MOD_AUDIO_STOP_FADE_MS);
+        }
+      } catch (error) {
+        console.warn(`stopping ${post.stops.join(', ')} on ship ${post.ship} failed: ${ErrorText(error)}`);
+      }
     }
     this.posted.splice(0, Math.max(0, this.posted.length - POSTED_AUDIO_LIMIT));
   }

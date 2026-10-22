@@ -788,6 +788,20 @@ declare module '@carbonenginejs/runtime/audio' {
      */
     SendEvent(name: string, bypassPrefix?: boolean): number;
     SetPlacement(front: ArrayLike<number>, top: ArrayLike<number>, position: ArrayLike<number>): number;
+    /**
+     * A copy of the playing events: playing id to full event name.
+     */
+    GetPlayingEvents(): Map<number, string>;
+    /**
+     * Keeps a stopped loop from resuming when the emitter wakes (AudGameObjResource.MarkPlayingIDStoppedByRequest).
+     */
+    MarkPlayingIDStoppedByRequest(playingID: number): void;
+    /**
+     * Stops ("stop") or breaks ("break") a playing event, fading out over `fadeOutDuration` ms (default 1000).
+     *
+     * @returns False when the id is not playing or audio is off.
+     */
+    ExecuteActionOnPlayingID(playingID: number, action: 'stop' | 'break', fadeOutDuration?: number): boolean;
   }
 
   /**

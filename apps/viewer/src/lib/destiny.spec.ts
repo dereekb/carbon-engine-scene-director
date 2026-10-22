@@ -1172,6 +1172,27 @@ describe('DestinyWorld prop mods', () => {
     ExpectLockstep(world, 1);
   });
 
+  it('a prop mod change shows on the drawn ship from the frame its event is delivered, so its sound needs no wait', () => {
+    const { harness, world, events } = Cruising();
+    world.SwitchPropMod('a', true);
+    let delivered = Number.NaN;
+    let deliveredTick = Number.NaN;
+    let drawn = Number.NaN;
+    for (let frame = 0; frame < 60 * 10 && Number.isNaN(drawn); frame++) {
+      harness.Run(1 / 60);
+      if (Number.isNaN(delivered) && events.length) {
+        delivered = harness.now;
+        deliveredTick = world.tick;
+      }
+      const velocity = harness.Sample('a').velocity;
+      // The drawn ClientBall trails the master by one tick, interpolating toward it: it leaves cruise at once.
+      if (Math.hypot(velocity[0], velocity[1], velocity[2]) > BASE_SPEED * 1.005 + 0.5) drawn = harness.now;
+    }
+    expect(deliveredTick - (events[0]?.tick ?? Number.NaN)).toBe(1);
+    expect((drawn - delivered) / TICKS_PER_SECOND).toBeGreaterThanOrEqual(0);
+    expect((drawn - delivered) / TICKS_PER_SECOND).toBeLessThan(0.1);
+  });
+
   it('switches off at the end of the running cycle, rounded up to a tick, and slows to base speed', () => {
     const { harness, world, events } = Cruising();
     world.SwitchPropMod('a', true);
