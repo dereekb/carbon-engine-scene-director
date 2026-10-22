@@ -16,7 +16,12 @@ declare module '@carbonenginejs/server/destiny' {
     /**
      * Ball modes by name (DSTBALL_GOTO, DSTBALL_STOP, ...).
      */
-    static readonly DSTBALLMODE: Readonly<Record<string, number>>;
+    static readonly DSTBALLMODE: Readonly<Record<string, number>> & {
+      readonly DSTBALL_GOTO: number;
+      readonly DSTBALL_FOLLOW: number;
+      readonly DSTBALL_STOP: number;
+      readonly DSTBALL_ORBIT: number;
+    };
     readonly id: bigint;
     /**
      * The authoritative position, in metres.
@@ -40,6 +45,14 @@ declare module '@carbonenginejs/server/destiny' {
     readonly agility: number;
     readonly speedFraction: number;
     readonly isFree: boolean;
+    /**
+     * The ball a follow or orbit order flies relative to.
+     */
+    readonly followId: bigint;
+    /**
+     * A follow or orbit range in metres (f32), surface to surface.
+     */
+    readonly followRange: number;
     /**
      * The point a legacy-oriented ball heads for, and faces while it is at rest.
      */
@@ -88,6 +101,22 @@ declare module '@carbonenginejs/server/destiny' {
      */
     OnTick(realTime: DestinyInt64, simTime: DestinyInt64, cookie: unknown): void;
     GotoDirection(id: DestinyInt64, x: number, y: number, z: number): void;
+    /**
+     * Flies to a world point (mode GOTO), slowing within one tick's travel of it. Returns without a word, keeping the
+     * old order, for a non-finite point.
+     */
+    GotoPoint(id: DestinyInt64, x: number, y: number, z: number): void;
+    /**
+     * Follows another ball at `range` metres surface to surface (mode FOLLOW). Returns without a word, keeping the old
+     * order, for a non-finite range, a self target, a missing, moribund or cloaked target, or a target in another
+     * bubble (a master only).
+     */
+    FollowBall(id: DestinyInt64, targetId: DestinyInt64, range?: number): void;
+    /**
+     * Orbits another ball at `range` metres surface to surface (mode ORBIT). Refuses silently in the same cases as
+     * FollowBall.
+     */
+    Orbit(id: DestinyInt64, targetId: DestinyInt64, range?: number): void;
     Stop(id: DestinyInt64): void;
     SetBallPosition(id: DestinyInt64, x: number, y: number, z: number): void;
     /**

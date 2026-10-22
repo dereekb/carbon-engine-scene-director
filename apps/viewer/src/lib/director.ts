@@ -8,7 +8,10 @@
  * Every document ship also has a Destiny ball (destiny.ts), whether or not it is
  * built: the ball drives the built ship's curves, and get_state reports its
  * motion. Loading a document restarts every ship at rest at its placement; a
- * patch places only the ships whose placement it changes.
+ * patch places only the ships whose placement it changes. Every ship flies at
+ * its Ship-stats numbers (flight.ts): the hub's published values for its hull,
+ * its `stats` and the max-skills pilot, retuned when the hub answers. Removing
+ * a ship stops its followers.
  *
  * Without a renderer (no WebGPU), the director still validates documents and
  * builds each ship's SOF values, so DNA mistakes surface; it just has nothing
@@ -18,7 +21,8 @@
 import type { Maybe } from '@dereekb/util';
 import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrder, SceneError, toFleetMemberships, toFleetReports, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipFleetMembership, type ShipOrder } from '@scene-director/scene';
 import type { SceneClock } from './clock';
-import { AttachShipCurves, DocumentRotation, ShipPhysicsFromHull, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
+import { HullStatsKey, HullStatsLookup, ResolveFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { EncodePng, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ErrorText } from './resources';
@@ -31,6 +35,10 @@ import { CURRENT_KEY, type SceneStore } from './store';
  */
 const UNBUILT_RADIUS = 100;
 const DEFAULT_SCREENSHOT_WIDTH = 1280;
+/**
+ * The class-values note while a ship's /ship-stats lookup is in flight.
+ */
+const LOOKUP_PENDING_NOTE = "waiting for the hub's /ship-stats answer";
 
 export type ShipStatus = 'queued' | 'building' | 'validated' | 'ready' | 'failed';
 
@@ -77,6 +85,10 @@ export interface DirectorOptions {
    * Called after any visible change.
    */
   readonly onChange?: () => void;
+  /**
+   * The hub's /ship-stats lookups; a fresh one by default.
+   */
+  readonly hullStats?: HullStatsLookup;
 }
 
 interface ApplyOptions {
@@ -117,9 +129,15 @@ export class Director {
   readonly live = new Map<string, LiveShip>();
   scene: Maybe<SceneDocument> = null;
   private readonly onChange: () => void;
+  private readonly hullStats: HullStatsLookup;
+  /**
+   * What each ship flies with, as get_state reports it.
+   */
+  private readonly flights = new Map<string, ShipFlight>();
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor({ engine, engineError, store, world, clock, onChange = () => undefined }: DirectorOptions) {
+  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup() }: DirectorOptions) {
+    this.hullStats = hullStats;
     this.engine = engine;
     this.engineError = engineError;
     this.store = store;
@@ -156,11 +174,17 @@ export class Director {
 
   /**
    * Gives a ship a live movement order; it applies at the next Destiny tick and is not saved.
+   *
+   * @param id - The ship id.
+   * @param order - The order as JSON; a target must be another ship in the scene.
+   * @returns The normalized order and the tick it was given at.
+   * @throws {Error} When no ship has the id, or the order is invalid (a SceneError with every problem).
    */
   OrderShip(id: unknown, order: unknown): OrderShipResult {
-    if (typeof id !== 'string' || !this.scene?.ships.some((doc) => doc.id === id)) throw new Error(`no ship "${String(id)}"`);
-    const normalized = normalizeShipOrder(order);
-    if (!this.world.Order(id, normalized)) throw new Error(`ship "${id}" has no Destiny ball`);
+    const ships = new Set((this.scene?.ships ?? []).map((doc) => doc.id));
+    if (typeof id !== 'string' || !ships.has(id)) throw new Error(`no ship "${String(id)}"`);
+    const normalized = normalizeShipOrder(order, { ships, self: id });
+    if (!this.world.Order(id, normalized)) throw new Error(`ship "${id}" or its target has no Destiny ball`);
     return { id, order: normalized, tick: this.world.tick };
   }
 
@@ -259,17 +283,27 @@ export class Director {
     const retried = scene.ships.filter((doc) => !changed.has(doc.id) && (this.live.get(doc.id)?.status ?? 'failed') === 'failed');
     const builds = [...diff.rebuilt, ...diff.added, ...retried];
     for (const doc of [...diff.removed, ...diff.rebuilt]) this.Retire(doc.id);
-    for (const doc of diff.removed) this.world.RemoveShip(doc.id);
+    const stopped: string[] = [];
+    for (const doc of diff.removed) {
+      stopped.push(...this.world.RemoveShip(doc.id));
+      this.flights.delete(doc.id);
+    }
     this.scene = scene;
-    await this.store.Put(CURRENT_KEY, scene);
+    if (restart) this.hullStats.ForgetFailures();
 
-    // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying.
+    // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place
+    // before the store write, so an order arriving meanwhile always finds a ball for every document ship.
     for (const doc of scene.ships) {
       const before = previous.get(doc.id);
-      if (!this.world.Curves(doc.id)) this.world.AddShip(doc, ShipPhysicsFromHull(null, doc.stats));
-      else if (restart || !before || !SamePlacement(before, doc)) this.world.PlaceShip(doc);
+      if (!this.world.Curves(doc.id)) {
+        const flight = this.Flight(doc, this.hullStats.Cached(doc));
+        this.world.AddShip(doc, flight ?? DEFAULT_SHIP_PHYSICS);
+        if (flight) this.flights.set(doc.id, flight);
+      } else if (restart || !before || !SamePlacement(before, doc)) this.world.PlaceShip(doc);
     }
-    for (const doc of diff.retuned) this.world.SetPhysics(doc.id, ShipPhysicsFromHull(this.live.get(doc.id)?.hull, doc.stats));
+    const retuned = restart ? scene.ships : [...diff.added, ...diff.rebuilt, ...diff.retuned];
+    for (const id of new Set(retuned.map((doc) => doc.id))) this.Retune(id);
+    await this.store.Put(CURRENT_KEY, scene);
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
     this.onChange();
 
@@ -282,7 +316,7 @@ export class Director {
       scene,
       warnings,
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
-      changes: { added: diff.added.length, rebuilt: diff.rebuilt.length, retried: retried.length, moved: diff.moved.length, removed: diff.removed.length, regrouped: diff.regrouped.length }
+      changes: { added: diff.added.length, rebuilt: diff.rebuilt.length, retried: retried.length, moved: diff.moved.length, removed: diff.removed.length, regrouped: diff.regrouped.length, stopped: stopped.length }
     };
   }
 
@@ -296,7 +330,7 @@ export class Director {
       entry.diagnostics = diagnostics.slice(0, 10).map((item) => (typeof item === 'string' ? item : JSON.stringify(item)));
       if (this.live.get(doc.id) !== entry) return;
       entry.hull = hull;
-      this.world.SetPhysics(doc.id, ShipPhysicsFromHull(hull, doc.stats));
+      this.Retune(doc.id);
       if (this.engine) {
         const ship = HydrateShip(values);
         const curves = this.world.Curves(doc.id);
@@ -314,6 +348,61 @@ export class Director {
     } finally {
       this.onChange();
     }
+  }
+
+  /**
+   * Re-resolves a ship's flight numbers from what is known now, then once more when its /ship-stats lookup lands
+   * (if the ship still names the same hull by then).
+   *
+   * @param id - The ship id.
+   */
+  private Retune(id: string): void {
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    if (!doc) return;
+    const cached = this.hullStats.Cached(doc);
+    this.SetFlight(doc, cached);
+    if (cached) return;
+    const key = HullStatsKey(doc);
+    void this.hullStats.Lookup(doc).then((answer) => {
+      const current = this.scene?.ships.find((ship) => ship.id === id);
+      if (!current || HullStatsKey(current) !== key) return;
+      this.SetFlight(current, answer);
+      this.onChange();
+    });
+  }
+
+  /**
+   * Flies a ship with the numbers its lookup answer gives; on a resolution error it keeps its previous physics.
+   *
+   * @param doc - The current document ship.
+   * @param answer - Its /ship-stats answer; null while the lookup is in flight.
+   */
+  private SetFlight(doc: SceneShip, answer: Maybe<HullStatsAnswer>): void {
+    const flight = this.Flight(doc, answer);
+    if (!flight) return;
+    try {
+      this.world.SetPhysics(doc.id, flight);
+      this.flights.set(doc.id, flight);
+    } catch (error) {
+      console.error(`ship ${doc.id}: cannot fly ${JSON.stringify(flight)} (${ErrorText(error)}); it keeps its previous physics`);
+    }
+  }
+
+  /**
+   * A ship's flight numbers: its lookup answer, its SOF hull and its `stats`, through the max-skills pilot.
+   *
+   * @param doc - The document ship.
+   * @param answer - Its /ship-stats answer; null while the lookup is in flight.
+   * @returns The numbers; null when they cannot be resolved (logged).
+   */
+  private Flight(doc: SceneShip, answer: Maybe<HullStatsAnswer>): Maybe<ShipFlight> {
+    let flight: Maybe<ShipFlight> = null;
+    try {
+      flight = ResolveFlight({ published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull: this.live.get(doc.id)?.hull, overrides: doc.stats });
+    } catch (error) {
+      console.error(`ship ${doc.id}: no flight numbers (${ErrorText(error)}); it keeps its previous physics`);
+    }
+    return flight;
   }
 
   private Retire(id: string): void {
@@ -363,7 +452,7 @@ export class Director {
   private ShipState(doc: SceneShip, membership: Maybe<ShipFleetMembership>): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number } & Partial<ShipFleetMembership> & Partial<ShipMotion> {
     const sphere = this.WorldSphere(doc);
     const motion = this.world.Motion(doc.id);
-    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion };
+    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion, physics: this.flights.get(doc.id) ?? motion?.physics };
   }
 
   private ShipReport(id: string): ShipReport {

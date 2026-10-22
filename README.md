@@ -9,9 +9,10 @@ ship and environment data come from a local
 **Phase 1**: scene documents, ships placed from SOF DNA, camera, screenshots,
 saved scenes. **Movement** (in progress): every ship flies as a Destiny ball
 from [`@carbonenginejs/server`](https://github.com/dereekb/carbon-engine-server),
-and `order_ship` gives live direction and stop orders. Orbit, approach, warp,
-combat and timelines come in later phases; the document's `orders` and
-`timeline` fields stay reserved until then. **Fleets**: the document holds EVE
+and `order_ship` gives live direction, goto, approach, keep-at-range, orbit and
+stop orders at each ship's in-game speed and agility. Warp, prop mods, fleet
+following, combat and timelines come in later phases; the document's `orders`
+and `timeline` fields stay reserved until then. **Fleets**: the document holds EVE
 fleet structure (fleet commander, wings, squads with a role and an anchor),
 stored and reported but not flown yet.
 
@@ -97,8 +98,8 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `get_scene` | page | the current document |
 | `patch_scene` | page | edits by operation (ships, camera, environment, rename, fleets) |
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), distances, the simulation tick, fleet membership and the fleet tree |
-| `order_ship` | page | a live movement order for a ship: fly along a direction at a speed fraction, or stop (see Movement) |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), orders, distances, the simulation tick, fleet membership and the fleet tree |
+| `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, or stop (see Movement) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
 
@@ -213,11 +214,49 @@ or not, and the ball drives the drawn ship's translation and rotation curves.
   from the previous turn levels out over a few seconds, as Destiny's client does.
 - **Orders are live only.** They are not written to the document, so a save or a
   reload starts from the document's placements.
-- **Physics are class defaults**, not dogma: mass, agility and max velocity by
-  the SOF hull category (frigate, cruiser, battleship, ...), or by its bounding
-  radius when the category is unknown, with the radius from the hull. The
-  document's `stats` (mass, agility, maxVelocity) override them. Until a ship's
-  build reads its hull, it flies with cruiser defaults.
+- **Physics are Ship stats** (`apps/viewer/src/lib/flight.ts`): the hull's
+  published values from the hub's `GET /ship-stats`, then the document's
+  `stats`, then the max-skills pilot, through the shared `computeShipStats`, so
+  a ship flies at the numbers `ship_stats` reports. `get_state`'s
+  `physics.source` says which applied: `sde` (the hull's EVE values), `stats`
+  (the document gives all four) or `class` (class values by SOF hull category or
+  bounding radius when the EVE data cannot name the hull, such as no SDE or an
+  unknown DNA; `physics.note` says why). Class values go through the same pilot,
+  so `stats` means the same with or without the SDE.
+- **The ball radius is the hull's EVE radius** (SDE `radius`) when the hub
+  knows it, else the SOF bounding radius, else 100 m. Order ranges and
+  `targetDistance` are measured on it, surface to surface, as EVE's overview
+  does; the SOF bounding sphere stays for framing, `get_state`'s `radius` and
+  `distances`.
+- **Lookups** are cached per page session, one per EVE type or DNA
+  `hull:faction:race`. A ship flies class values until its lookup lands (a
+  fraction of a second; the first DNA search may build tools-core's index), then
+  retunes mid-flight. A failed lookup is logged once and retried on the next
+  `load_scene` / `open_scene` or a tab reload, so preparing the SDE and reloading
+  picks it up.
+
+### Orders
+
+| Order | Destiny call | What you see (max-skills frigate, about) |
+|---|---|---|
+| `direction` | `GotoDirection` | flies along the direction; reaches 75 % of max velocity after `ceil(alignTime)` whole ticks |
+| `goto` | `GotoPoint` | flies to the point and creeps to a halt tens of metres short of it (mode stays `goto`) |
+| `approach` | `FollowBall` at 50 m | closes on the target's hull; the balls may overlap slightly, as there are no collisions |
+| `keep-at-range` | `FollowBall` at the range | holds the range within about ±3 % on a stationary target; trails a moving one (about +33 % at 1 km behind a 130 m/s ship), matching its speed |
+| `orbit` | `Orbit` | settles about 5 % wide at 5 km; tight orbits on fast ships run much wider (500 m gives about 890 m), as in EVE |
+| `stop` | `Stop` | decelerates to a halt |
+
+Every movement order takes `speed`, a fraction of max velocity in (0, 1]
+(default 1). Ranges are metres, surface to surface on the balls' radii. A target
+must be another ship in the scene. Removing a ship stops every ship approaching,
+keeping range on or orbiting it (`patch_scene`'s `changes.stopped` counts them);
+Destiny alone would send an orbiter straight on along its velocity, which carries
+it out of a directed scene. When Destiny refuses an order silently, the ship
+stops and `orderNote` says so. A new position or rotation, `load_scene` and
+`open_scene` end a ship's order; a re-placed target keeps its followers, which
+chase it. `get_state` reports each ship's `order` (what its ball is flying),
+`pendingOrder` (applying at the next tick), `orderNote` and `targetDistance`.
+Destiny's default (legacy) orbit algorithm is used.
 
 ## Ship stats and the pilot
 
@@ -310,7 +349,7 @@ field means absent, and `fleets: []` is the same as no `fleets`.
 
 **Anchors.** A squad anchors on `anchor.ship` (default: the FC, whoever that is)
 and keeps `anchor.range` metres, surface to surface as EVE's overview measures
-it (default by role: logi 30,000 m, every other role 1,000 m, EVE's "anchor
+it (on the Destiny balls' radii, as `get_state`'s `targetDistance` reports) (default by role: logi 30,000 m, every other role 1,000 m, EVE's "anchor
 up"). Both are stored as written, so an omitted value follows a new FC or role.
 
 - An anchor on the FC or on a ship outside the squad: every member except the FC

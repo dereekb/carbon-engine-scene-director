@@ -16,7 +16,8 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `src/lib/carbonenginejs-runtime.d.ts` types those imports (the runtime ships no `.d.ts`). Add a member to the
   declarations file when the page starts using it; do not reach for `any`. `src/lib/runtime-sim.ts` is its light half
   (math, Blue curve bases, the Destiny server, typed by `carbonenginejs-server.d.ts`), re-exported by `runtime.ts`.
-  `clock.ts` (the scene clock) and `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship) have node
+  `clock.ts` (the scene clock), `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship, and the
+  movement orders) and `flight.ts` (each ship's Ship-stats flight numbers from the hub's `/ship-stats`) have node
   specs: the viewer has a `test` target (`project: viewer`).
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
@@ -49,8 +50,18 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `engine.Frame(timestamp, now)`, so
   `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame at 1 s so the master's 6-tick
   backlog drop never fires.
-- Node-tested modules (`clock.ts`, `destiny.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are
-  fine): the full facade drags in the renderer and the `runtime-dist/` alias, which vitest does not have.
+- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`) import `./runtime-sim`, never `./runtime` (type-only
+  imports are fine): the full facade drags in the renderer and the `runtime-dist/` alias, which vitest does not have.
+- Destiny's `FollowBall` / `Orbit` / `GotoPoint` return without a word, keeping the old order, for a missing, self,
+  moribund or cloaked target, a target in another bubble (a master only) or a non-finite value. `DestinyWorld`
+  resolves the target itself and checks that both parks reached the order's mode, or stops the ship on both.
+- Destiny's `RemoveBall` sends an interactive orbiter straight on along its velocity and stops other followers.
+  `DestinyWorld.RemoveShip` stops every follower of the removed ship first, so all of them stop and the parks stay
+  identical.
+- A ball's radius is the hull's SDE `radius` when the hub knows it; order ranges and `targetDistance` are surface to
+  surface on it. The SOF bounding sphere is only for framing and `get_state`'s `radius` and `distances`.
+- `flight.ts` runs class values (no SDE, unknown DNA) through the max-skills pilot too, so `stats` means the same with
+  or without the SDE.
 - Destiny's heading snap (`SetBallVelocity`) keeps the ClientBall's banking roll, so a teleported ship's roll levels out
   over a few seconds; its forward vector is exact at once. A ClientBall caches its sample per time: a teleport shows
   from the next frame.

@@ -19,12 +19,14 @@
  * - When things apply. Adding, removing, placing and physics apply at once (they teleport). Movement orders wait for
  *   the next tick boundary, as EVE applies commands before a tick, so the interval a ClientBall is interpolating is
  *   never disturbed.
- * - Physics are class defaults by SOF hull category (or bounding radius), not dogma; the document's `stats`
- *   overrides replace them.
+ * - Orders. A target order's ball resolves at the tick boundary. Destiny refuses some orders without a word, keeping
+ *   the old one, so both parks must reach the order's mode, or the ship stops on both. Removing a ship stops its
+ *   followers first, because Destiny alone sends an orbiter straight on along its velocity.
+ * - Physics come from flight.ts (Ship stats); the world takes them as given and accepts a max velocity of 0.
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { HullStatOverrides, SceneShip, SceneVector, ShipOrder } from '@scene-director/scene';
+import { APPROACH_RANGE, isTargetShipOrder, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
@@ -63,53 +65,9 @@ export interface ShipPhysics {
 }
 
 /**
- * Cruiser-class physics, used until a ship's hull is known.
+ * Cruiser-class physics, for a ship added without any.
  */
 export const DEFAULT_SHIP_PHYSICS: ShipPhysics = { mass: 1.1e7, agility: 0.5, maxVelocity: 230, radius: 100 };
-
-type ShipClass = 'frigate' | 'destroyer' | 'cruiser' | 'battlecruiser' | 'battleship' | 'capital' | 'titan';
-
-/**
- * Class defaults, chosen for plausible align times (frigate about 5 s, battleship about 17 s).
- */
-const CLASS_PHYSICS: Record<ShipClass, Omit<ShipPhysics, 'radius'>> = {
-  frigate: { mass: 1.2e6, agility: 3.2, maxVelocity: 350 },
-  destroyer: { mass: 1.7e6, agility: 3.5, maxVelocity: 260 },
-  cruiser: { mass: 1.1e7, agility: 0.5, maxVelocity: 230 },
-  battlecruiser: { mass: 1.3e7, agility: 0.7, maxVelocity: 160 },
-  battleship: { mass: 1e8, agility: 0.12, maxVelocity: 110 },
-  capital: { mass: 1.1e9, agility: 0.035, maxVelocity: 80 },
-  titan: { mass: 2.4e9, agility: 0.025, maxVelocity: 70 }
-};
-
-/**
- * SOF hull categories by class. Names other than frigate and battleship are unconfirmed; an unknown category falls
- * back to the radius bands.
- */
-const CATEGORY_CLASSES: Readonly<Record<string, ShipClass>> = {
-  frigate: 'frigate',
-  destroyer: 'destroyer',
-  cruiser: 'cruiser',
-  battlecruiser: 'battlecruiser',
-  battleship: 'battleship',
-  carrier: 'capital',
-  dreadnought: 'capital',
-  supercarrier: 'capital',
-  forceauxiliary: 'capital',
-  titan: 'titan'
-};
-
-/**
- * Bounding radius (m) upper bounds by class; anything larger is a titan.
- */
-const RADIUS_BANDS: readonly (readonly [number, ShipClass])[] = [
-  [75, 'frigate'],
-  [150, 'destroyer'],
-  [350, 'cruiser'],
-  [600, 'battlecruiser'],
-  [1500, 'battleship'],
-  [5000, 'capital']
-];
 
 /**
  * A hull's class and size, from SOF.
@@ -139,11 +97,44 @@ export interface ShipMotion {
    */
   readonly speed: number;
   /**
-   * The ball mode: stop, goto, follow, orbit, warp, ...
+   * The ball mode: direction and goto orders fly goto, approach and keep-at-range fly follow, orbit flies orbit, and
+   * stop flies stop.
    */
   readonly mode: string;
+  /**
+   * What the ball is flying: the last order applied, or stop when the world ended it (placement, a removed target, a
+   * refusal). Stop at first.
+   */
+  readonly order: ShipOrder;
+  /**
+   * The order given since the last tick, applying at the next one.
+   */
+  readonly pendingOrder?: ShipOrder;
+  /**
+   * Why the world stopped the ship itself, e.g. `stopped: target "x" was removed`; cleared by the next order.
+   */
+  readonly orderNote?: string;
+  /**
+   * For an applied approach, keep-at-range or orbit: metres to the target, surface to surface on the two balls' radii
+   * (EVE's measure), rounded to 1 m; negative when the balls overlap.
+   */
+  readonly targetDistance?: number;
   readonly physics: ShipPhysics;
 }
+
+const STOP_ORDER: ShipOrder = { type: 'stop' };
+
+/**
+ * The ball mode each order flies in.
+ */
+const ORDER_MODES: Readonly<Record<ShipOrderType, number>> = {
+  direction: CjsDestinyBall.DSTBALLMODE.DSTBALL_GOTO,
+  goto: CjsDestinyBall.DSTBALLMODE.DSTBALL_GOTO,
+  approach: CjsDestinyBall.DSTBALLMODE.DSTBALL_FOLLOW,
+  'keep-at-range': CjsDestinyBall.DSTBALLMODE.DSTBALL_FOLLOW,
+  orbit: CjsDestinyBall.DSTBALLMODE.DSTBALL_ORBIT,
+  stop: CjsDestinyBall.DSTBALLMODE.DSTBALL_STOP
+};
 
 /**
  * The curves a ship's ball drives.
@@ -192,9 +183,18 @@ export class BallRotation extends ITriQuaternionFunction {
 }
 
 interface ShipEntry {
+  readonly id: string;
   readonly ballId: number;
   readonly curves: ShipCurves;
   physics: ShipPhysics;
+  /**
+   * The order the ball is flying.
+   */
+  order: ShipOrder;
+  /**
+   * Why the world stopped the ship itself.
+   */
+  note: Maybe<string>;
 }
 
 /**
@@ -205,9 +205,9 @@ export class DestinyWorld {
   readonly replica: CjsBallparkController;
   private readonly ships = new Map<string, ShipEntry>();
   /**
-   * Movement orders waiting for the next tick boundary, by ball id; the latest order wins.
+   * Movement orders waiting for the next tick boundary, by ship id; the latest order wins.
    */
-  private readonly pending = new Map<number, ShipOrder>();
+  private readonly pending = new Map<string, ShipOrder>();
   private nextBallId = FIRST_SHIP_BALL_ID;
 
   constructor() {
@@ -244,13 +244,13 @@ export class DestinyWorld {
       this.Both((park) => park.AddBall(ballId, physics.mass, physics.radius, physics.maxVelocity, true, false, false, true, false, x, y, z, 0, 0, 0, physics.agility, 1));
       const ball = this.replica.GetBall(ballId);
       if (!(ball instanceof CjsDestinyClientBall)) throw new Error(`the replica park did not create a ClientBall for ${doc.id}`);
-      this.ships.set(doc.id, { ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics });
+      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null });
     }
     this.PlaceShip(doc);
   }
 
   /**
-   * Puts a ship at rest at a placement, facing along its rotation.
+   * Puts a ship at rest at a placement, facing along its rotation, ending its order. Its followers chase it there.
    *
    * @param doc - The document ship.
    */
@@ -258,7 +258,9 @@ export class DestinyWorld {
     const entry = this.ships.get(doc.id);
     if (!entry) return;
     const { ballId } = entry;
-    this.pending.delete(ballId);
+    this.pending.delete(doc.id);
+    entry.order = STOP_ORDER;
+    entry.note = null;
     const [x, y, z] = doc.position;
     const rotation = DocumentRotation(doc.rotation);
     const forward = vec3.transformQuat(vec3.create(), [0, 0, 1], rotation);
@@ -287,7 +289,8 @@ export class DestinyWorld {
    *
    * @param id - The ship id.
    * @param physics - The new physics.
-   * @throws {Error} When a value is not positive and finite (Destiny would stop the whole park on it).
+   * @throws {Error} When a value is not finite, or not positive (max velocity may be 0); Destiny would stop the whole
+   *   park on it.
    */
   SetPhysics(id: string, physics: ShipPhysics): void {
     RequireValidPhysics(physics);
@@ -304,16 +307,29 @@ export class DestinyWorld {
   }
 
   /**
-   * Removes a ship's ball from both parks (they drop it on their next tick).
+   * Removes a ship's ball from both parks (they drop it on their next tick). Every ship approaching, keeping range on
+   * or orbiting it, or with such an order pending, stops at once on both parks first.
    *
    * @param id - The ship id.
+   * @returns The ids of the ships it stopped, in the order they were added.
    */
-  RemoveShip(id: string): void {
+  RemoveShip(id: string): string[] {
     const entry = this.ships.get(id);
-    if (!entry) return;
+    if (!entry) return [];
     this.ships.delete(id);
-    this.pending.delete(entry.ballId);
+    this.pending.delete(id);
+    const stopped: string[] = [];
+    for (const other of this.ships.values()) {
+      const pending = this.pending.get(other.id);
+      const queued = pending !== undefined && TargetOf(pending) === id;
+      if (queued) this.pending.delete(other.id);
+      if (queued || TargetOf(other.order) === id) {
+        this.Halt(other, `stopped: target "${id}" was removed`);
+        stopped.push(other.id);
+      }
+    }
     this.Both((park) => park.RemoveBall(entry.ballId));
+    return stopped;
   }
 
   /**
@@ -321,13 +337,13 @@ export class DestinyWorld {
    *
    * @param id - The ship id.
    * @param order - A normalized order.
-   * @returns False when no ship has that id.
+   * @returns False when no ship has that id, or the order targets the ship itself or an id with no ship.
    */
   Order(id: string, order: ShipOrder): boolean {
-    const entry = this.ships.get(id);
-    if (!entry) return false;
-    this.pending.set(entry.ballId, order);
-    return true;
+    const target = TargetOf(order);
+    const valid = this.ships.has(id) && (!target || (target !== id && this.ships.has(target)));
+    if (valid) this.pending.set(id, order);
+    return valid;
   }
 
   /**
@@ -339,8 +355,12 @@ export class DestinyWorld {
   Tick(now: number): void {
     const time = BigInt(Math.round(now));
     if (this.pending.size && time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS)) {
-      for (const [ballId, order] of this.pending) this.ApplyOrder(ballId, order);
+      const orders = [...this.pending];
       this.pending.clear();
+      for (const [id, order] of orders) {
+        const entry = this.ships.get(id);
+        if (entry) this.ApplyOrder(entry, order);
+      }
     }
     let failure: unknown = null;
     for (const park of [this.master, this.replica]) {
@@ -373,24 +393,80 @@ export class DestinyWorld {
     const entry = this.ships.get(id);
     const ball = entry ? this.master.GetBall(entry.ballId) : null;
     if (!entry || !ball) return null;
+    const pending = this.pending.get(id);
+    const target = TargetOf(entry.order);
+    const targetEntry = target ? this.ships.get(target) : null;
+    const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
     return {
       position: [Round(ball.x, 100), Round(ball.y, 100), Round(ball.z, 100)],
       velocity: [Round(ball.vx, 100), Round(ball.vy, 100), Round(ball.vz, 100)],
       speed: Round(Math.hypot(ball.vx, ball.vy, ball.vz), 10),
       mode: ModeName(ball.mode),
+      order: entry.order,
+      ...(pending ? { pendingOrder: pending } : {}),
+      ...(entry.note ? { orderNote: entry.note } : {}),
+      ...(targetBall ? { targetDistance: Round(Math.hypot(ball.x - targetBall.x, ball.y - targetBall.y, ball.z - targetBall.z) - ball.radius - targetBall.radius, 1) } : {}),
       physics: entry.physics
     };
   }
 
-  private ApplyOrder(ballId: number, order: ShipOrder): void {
+  /**
+   * Gives an order to both parks; a missing target or Destiny's silent refusal stops the ship instead.
+   *
+   * @param entry - The ordered ship.
+   * @param order - A normalized order.
+   */
+  private ApplyOrder(entry: ShipEntry, order: ShipOrder): void {
+    const { ballId } = entry;
+    const target = TargetOf(order);
+    const targetBallId = target ? (this.ships.get(target)?.ballId ?? null) : null;
+    if (target && targetBallId === null) {
+      this.Halt(entry, `stopped: target "${target}" was removed`);
+      return;
+    }
     this.Both((park) => {
-      if (order.type === 'stop') {
-        park.Stop(ballId);
-      } else {
-        park.SetSpeedFraction(ballId, order.speed);
-        park.GotoDirection(ballId, ...order.direction);
+      if (order.type !== 'stop') park.SetSpeedFraction(ballId, order.speed);
+      switch (order.type) {
+        case 'direction':
+          park.GotoDirection(ballId, ...order.direction);
+          break;
+        case 'goto':
+          park.GotoPoint(ballId, ...order.point);
+          break;
+        case 'approach':
+          park.FollowBall(ballId, targetBallId ?? 0, APPROACH_RANGE);
+          break;
+        case 'keep-at-range':
+          park.FollowBall(ballId, targetBallId ?? 0, order.range);
+          break;
+        case 'orbit':
+          park.Orbit(ballId, targetBallId ?? 0, order.range);
+          break;
+        case 'stop':
+          park.Stop(ballId);
+          break;
       }
     });
+    const mode = ORDER_MODES[order.type];
+    if (this.master.GetBall(ballId)?.mode === mode && this.replica.GetBall(ballId)?.mode === mode) {
+      entry.order = order;
+      entry.note = null;
+    } else {
+      console.warn(`ship ${entry.id}: Destiny refused the ${order.type} order, so it stops`);
+      this.Halt(entry, `stopped: Destiny refused the ${order.type} order`);
+    }
+  }
+
+  /**
+   * Stops a ship on both parks and records why.
+   *
+   * @param entry - The ship.
+   * @param note - Why the world stopped it.
+   */
+  private Halt(entry: ShipEntry, note: string): void {
+    this.Both((park) => park.Stop(entry.ballId));
+    entry.order = STOP_ORDER;
+    entry.note = note;
   }
 
   /**
@@ -413,27 +489,6 @@ export class DestinyWorld {
 export function AttachShipCurves(ship: CurveHost, curves: ShipCurves): void {
   ship.translationCurve = curves.translation;
   ship.rotationCurve = curves.rotation;
-}
-
-/**
- * Class-default physics for a hull, with the document's stat overrides on top.
- *
- * @param hull - The hull's SOF category and radius; null when unknown.
- * @param overrides - The document ship's `stats`.
- * @returns The physics.
- */
-export function ShipPhysicsFromHull(hull: Maybe<ShipHull>, overrides?: Maybe<HullStatOverrides>): ShipPhysics {
-  const radius = IsPositive(hull?.radius) ? hull.radius : DEFAULT_SHIP_PHYSICS.radius;
-  const category = hull?.category?.toLowerCase().replaceAll(/[^a-z]/gu, '');
-  let shipClass: Maybe<ShipClass> = category ? CATEGORY_CLASSES[category] : null;
-  if (!shipClass && IsPositive(hull?.radius)) shipClass = RADIUS_BANDS.find(([bound]) => radius < bound)?.[1] ?? 'titan';
-  const base = shipClass ? { ...CLASS_PHYSICS[shipClass], radius } : DEFAULT_SHIP_PHYSICS;
-  return {
-    mass: IsPositive(overrides?.mass) ? overrides.mass : base.mass,
-    agility: IsPositive(overrides?.agility) ? overrides.agility : base.agility,
-    maxVelocity: IsPositive(overrides?.maxVelocity) ? overrides.maxVelocity : base.maxVelocity,
-    radius: base.radius
-  };
 }
 
 /**
@@ -472,12 +527,21 @@ function HeadingRotation(x: number, y: number, z: number): Quat {
 }
 
 function RequireValidPhysics(physics: ShipPhysics): void {
-  const bad = (['mass', 'agility', 'maxVelocity', 'radius'] as const).filter((key) => !IsPositive(physics[key]));
-  if (bad.length) throw new Error(`ship physics must be positive and finite: ${bad.join(', ')}`);
+  const bad = (['mass', 'agility', 'maxVelocity', 'radius'] as const).filter((key) => {
+    const value = physics[key];
+    return !Number.isFinite(value) || value < 0 || (value === 0 && key !== 'maxVelocity');
+  });
+  if (bad.length) throw new Error(`ship physics must be finite and positive (max velocity may be 0): ${bad.join(', ')}`);
 }
 
-function IsPositive(value: Maybe<number>): value is number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+/**
+ * The ship an order flies relative to.
+ *
+ * @param order - A normalized order.
+ * @returns The target's id, or null for an order without one.
+ */
+function TargetOf(order: ShipOrder): Maybe<string> {
+  return isTargetShipOrder(order) ? order.target : null;
 }
 
 function Round(value: number, scale: number): number {

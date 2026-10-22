@@ -44,12 +44,38 @@ interface SceneListing {
   readonly scenes: { readonly name: string; readonly store: string }[];
 }
 
+interface ShipOrderState {
+  readonly type: string;
+  readonly target?: string;
+  readonly range?: number;
+  readonly point?: [number, number, number];
+  readonly speed?: number;
+}
+
+interface ShipPhysicsState {
+  readonly mass: number;
+  readonly agility: number;
+  readonly maxVelocity: number;
+  readonly radius: number;
+  readonly signatureRadius: number;
+  readonly alignTime: number;
+  readonly source: string;
+  readonly typeID?: number;
+  readonly typeName?: string;
+  readonly note?: string;
+}
+
 interface ShipState extends Partial<ShipFleetMembership> {
   readonly id: string;
   readonly position?: [number, number, number];
   readonly velocity?: [number, number, number];
   readonly speed?: number;
   readonly mode?: string;
+  readonly order?: ShipOrderState;
+  readonly pendingOrder?: ShipOrderState;
+  readonly orderNote?: string;
+  readonly targetDistance?: number;
+  readonly physics?: ShipPhysicsState;
 }
 
 interface ViewerState {
@@ -262,6 +288,30 @@ try {
     return `3 balls at rest, tick ${state.simulation.tick}`;
   });
 
+  await Check('ships fly at their Ship-stats numbers', async () => {
+    const answer = await call<ShipStatsAnswer>('ship_stats', { dna: 'mf1_t1:minmatarbase:minmatar' }).catch(SkipWithoutSde);
+    const physicsOf = async (id: string, done: (physics: ShipPhysicsState) => boolean): Promise<ShipPhysicsState> => {
+      let physics = ShipIn(await call<ViewerState>('get_state'), id).physics;
+      for (let attempt = 0; attempt < 60 && !(physics && done(physics)); attempt++) {
+        await Delay(250);
+        physics = ShipIn(await call<ViewerState>('get_state'), id).physics;
+      }
+      Expect(physics && done(physics), `${id} after 15 s: ${JSON.stringify(physics)}`);
+      return physics as ShipPhysicsState;
+    };
+    const rifter = await physicsOf('rifter', (physics) => physics.source === 'sde');
+    const { stats, hull } = answer;
+    for (const key of ['mass', 'agility', 'maxVelocity', 'alignTime'] as const) Expect(Close(rifter[key], stats[key]), `${key}: page ${rifter[key]}, ship_stats ${stats[key]}`);
+    Expect(rifter.radius === hull.published?.radius && rifter.typeID === hull.typeID, `radius ${rifter.radius} / type ${rifter.typeID} vs ${JSON.stringify(hull)}`);
+    const bogus = await physicsOf('bogus', (physics) => physics.source === 'class');
+    Expect(/nosuchhull/u.test(bogus.note ?? ''), `bogus note: ${bogus.note}`);
+    await call('patch_scene', { operations: [{ op: 'update_ship', id: 'rifter', set: { stats: { maxVelocity: 200 } } }] });
+    await physicsOf('rifter', (physics) => physics.maxVelocity === 250);
+    await call('patch_scene', { operations: [{ op: 'update_ship', id: 'rifter', set: { stats: null } }] });
+    await physicsOf('rifter', (physics) => physics.maxVelocity === stats.maxVelocity);
+    return `rifter flies as ${rifter.typeName} (${rifter.typeID}): ${rifter.maxVelocity} m/s, align ${rifter.alignTime.toFixed(2)} s; stats 200 -> 250 m/s; bogus flies class values`;
+  });
+
   await Check('patch_scene moves, removes and renames without rebuilding', async () => {
     const result = await call<SceneResult>('patch_scene', {
       operations: [
@@ -314,8 +364,95 @@ try {
     Expect(/no ship "nobody"/u.test(unknown), unknown);
     const warp = await refusal({ id: 'rifter', order: { type: 'warp' } });
     Expect(/order\.type must be one of/u.test(warp), warp);
-    return 'unknown ship and warp refused';
+    const nobody = await refusal({ id: 'rifter', order: { type: 'orbit', target: 'nobody', range: 1000 } });
+    Expect(/order\.target "nobody" is not a ship in the scene/u.test(nobody), nobody);
+    const itself = await refusal({ id: 'rifter', order: { type: 'approach', target: 'rifter' } });
+    Expect(/order\.target must be another ship/u.test(itself), itself);
+    const rangeless = await refusal({ id: 'rifter', order: { type: 'keep-at-range', target: 'punisher' } });
+    Expect(/order\.range must be a number of metres/u.test(rangeless), rangeless);
+    return 'unknown ship, warp, a missing target, the ship itself and a missing range refused';
   });
+
+  const helpers = new Set(['anchor', 'orbiter', 'keeper', 'chaser', 'goer']);
+  try {
+    await Check("orbit, keep-at-range, approach and goto fly at the ships' speeds", async () => {
+      const frigate = 'mf1_t1:minmatarbase:minmatar';
+      const amarr = 'af1_t1:amarrbase:amarr';
+      const added = await call<SceneResult>('patch_scene', {
+        operations: [
+          { op: 'add_ship', ship: { id: 'anchor', dna: amarr, position: [20000, 0, 0] } },
+          { op: 'add_ship', ship: { id: 'orbiter', dna: frigate, position: [27000, 0, 0] } },
+          { op: 'add_ship', ship: { id: 'keeper', dna: frigate, position: [20000, 0, 6000] } },
+          { op: 'add_ship', ship: { id: 'chaser', dna: frigate, position: [14000, 0, 0] } },
+          { op: 'add_ship', ship: { id: 'goer', dna: amarr, position: [20000, 0, -3000] } }
+        ]
+      });
+      Expect(added.changes['added'] === 5, JSON.stringify(added.changes));
+      const orders: Record<string, ShipOrderState & { mode: string }> = {
+        orbiter: { type: 'orbit', target: 'anchor', range: 5000, mode: 'orbit' },
+        keeper: { type: 'keep-at-range', target: 'anchor', range: 1500, mode: 'follow' },
+        chaser: { type: 'approach', target: 'anchor', mode: 'follow' },
+        goer: { type: 'goto', point: [20000, 0, -6000], mode: 'goto' }
+      };
+      let t0 = 0;
+      for (const [id, { mode: _mode, ...order }] of Object.entries(orders)) {
+        const { tick } = await call<{ tick: number }>('order_ship', { id, order });
+        if (id === 'goer') t0 = tick;
+      }
+      let orbitHeld = 0;
+      let keepHeld = 0;
+      let closest = Infinity;
+      let chaserTop = 0;
+      let alignTicks: Maybe<number> = null;
+      let goerArrived = false;
+      let last: Record<string, ShipState> = {};
+      const done = (): boolean => orbitHeld >= 5 && keepHeld >= 5 && closest < 300 && alignTicks !== null && goerArrived;
+      for (let poll = 0; poll < 120 && !done(); poll++) {
+        await Delay(500);
+        const state = await call<ViewerState>('get_state');
+        last = Object.fromEntries(Object.keys(orders).map((id) => [id, ShipIn(state, id)]));
+        for (const [id, { mode, ...order }] of Object.entries(orders)) {
+          const ship = last[id];
+          if (ship.order?.type !== order.type) continue;
+          Expect(ship.mode === mode && ship.order.target === order.target && ship.order.range === order.range, `${id}: ${JSON.stringify(ship)}`);
+        }
+        const { orbiter, keeper, chaser, goer } = last;
+        const max = (ship: ShipState): number => ship.physics?.maxVelocity ?? Infinity;
+        const orbiting = orbiter.order?.type === 'orbit' && (orbiter.targetDistance ?? 0) >= 5000 && (orbiter.targetDistance ?? Infinity) <= 5600 && (orbiter.speed ?? 0) >= 0.9 * max(orbiter);
+        orbitHeld = orbiting ? orbitHeld + 1 : 0;
+        keepHeld = keeper.order?.type === 'keep-at-range' && Math.abs((keeper.targetDistance ?? Infinity) - 1500) <= 250 ? keepHeld + 1 : 0;
+        if (chaser.order?.type === 'approach') closest = Math.min(closest, chaser.targetDistance ?? Infinity);
+        chaserTop = Math.max(chaserTop, chaser.speed ?? 0);
+        Expect(chaserTop <= max(chaser) + 0.1, `chaser above its max velocity: ${JSON.stringify(chaser)}`);
+        if (alignTicks === null && (goer.speed ?? 0) >= 0.75 * max(goer)) alignTicks = state.simulation.tick - t0;
+        const goerPosition = goer.position ?? [0, 0, 0];
+        goerArrived = Math.hypot(goerPosition[0] - 20000, goerPosition[1], goerPosition[2] + 6000) < 150 && (goer.speed ?? Infinity) < 10;
+      }
+      Expect(done(), `after 60 s: orbit held ${orbitHeld}, keep held ${keepHeld}, closest ${closest}, align ${alignTicks}, goer arrived ${goerArrived}: ${JSON.stringify(last)}`);
+      const { orbiter, keeper, chaser, goer } = last;
+      Expect(chaserTop >= 0.95 * (chaser.physics?.maxVelocity ?? Infinity), `chaser top speed ${chaserTop} of ${chaser.physics?.maxVelocity}`);
+      const alignLag = (alignTicks ?? 0) - (goer.physics?.alignTime ?? 0);
+      Expect(alignLag >= 0 && alignLag < 1.5, `goer reached 75 % after ${alignTicks} ticks for an align of ${goer.physics?.alignTime} s`);
+      return `orbit ${orbiter.targetDistance} m at ${orbiter.speed} m/s, keep ${keeper.targetDistance} m, approach closest ${closest} m (top ${chaserTop} m/s), goto ${goer.speed} m/s at ${JSON.stringify(goer.position)}, align ${alignTicks} ticks for ${goer.physics?.alignTime.toFixed(2)} s`;
+    });
+
+    await Check('removing a target stops its followers', async () => {
+      const { changes } = await call<SceneResult>('patch_scene', { operations: [{ op: 'remove_ship', id: 'anchor' }] });
+      Expect(changes['stopped'] === 3, JSON.stringify(changes));
+      const state = await call<ViewerState>('get_state');
+      for (const id of ['orbiter', 'keeper', 'chaser']) {
+        const ship = ShipIn(state, id);
+        Expect(ship.order?.type === 'stop' && ship.mode === 'stop' && /target "anchor" was removed/u.test(ship.orderNote ?? ''), `${id}: ${JSON.stringify(ship)}`);
+      }
+      const goer = ShipIn(state, 'goer');
+      Expect(goer.order?.type === 'goto' && goer.mode === 'goto', `goer: ${JSON.stringify(goer)}`);
+      return `orbiter, keeper and chaser stopped: ${ShipIn(state, 'orbiter').orderNote}`;
+    });
+  } finally {
+    const { ships } = await call<{ ships: { id: string }[] }>('get_scene');
+    const operations = ships.filter((ship) => helpers.has(ship.id)).map((ship) => ({ op: 'remove_ship', id: ship.id }));
+    if (operations.length) await call('patch_scene', { operations });
+  }
 
   await Check('an invalid patch is refused with its problems', async () => {
     let refused: unknown = null;

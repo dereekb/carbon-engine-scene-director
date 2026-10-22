@@ -1,14 +1,27 @@
 import { createRequire } from 'node:module';
-import type { SceneShip, SceneVector } from '@scene-director/scene';
-import { describe, expect, it } from 'vitest';
+import type { SceneShip, SceneVector, ShipOrder } from '@scene-director/scene';
+import { describe, expect, it, vi } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, ShipPhysicsFromHull, type CurveHost } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipMotion } from './destiny';
+import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { CjsDestinyBall, CjsDestinyClientBall, quat, vec3, type Quat, type Vec3 } from './runtime-sim';
 
 const FRAME_TICKS = Math.round(TICKS_PER_SECOND / 60);
 const FRIGATE = { mass: 1.2e6, agility: 3.2, maxVelocity: 350, radius: 30 };
 
+// Published values (EVE typeDogma via ESI, 2026-10-21), the Ship-stats spec fixtures.
+const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31 } };
+const GUARDIAN: PublishedHull = { typeID: 11987, name: 'Guardian', published: { mass: 11_980_000, maxVelocity: 209, agility: 0.61, signatureRadius: 70, radius: 80 } };
+const TFI: PublishedHull = { typeID: 17732, name: 'Tempest Fleet Issue', published: { mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250 } };
+
 type Placement = Pick<SceneShip, 'id' | 'position' | 'rotation'>;
+
+/**
+ * The max-skills Ship-stats numbers of a fixture hull.
+ */
+function Fly(hull: PublishedHull): ShipFlight {
+  return ResolveFlight({ published: hull, hull: null, overrides: null });
+}
 
 interface Sample {
   readonly position: Vec3;
@@ -48,6 +61,33 @@ class Harness {
 
 function Ship(id: string, position: SceneVector, rotation: SceneVector = [0, 0, 0]): Placement {
   return { id, position, rotation };
+}
+
+function RequireMotion(world: DestinyWorld, id: string): ShipMotion {
+  const motion = world.Motion(id);
+  if (!motion) throw new Error(`no motion for ${id}`);
+  return motion;
+}
+
+/**
+ * Runs frames until the world has evolved `count` more ticks, calling back after each one.
+ */
+function RunTicks(harness: Harness, count: number, onTick?: () => void): void {
+  const end = harness.world.tick + count;
+  let tick = harness.world.tick;
+  while (harness.world.tick < end) {
+    harness.Run(1 / 60);
+    if (harness.world.tick !== tick) {
+      tick = harness.world.tick;
+      onTick?.();
+    }
+  }
+}
+
+function ExpectLockstep(world: DestinyWorld, balls: number): void {
+  expect(world.master.currentTime).toBe(world.replica.currentTime);
+  const state = (ball: CjsDestinyBall | null): number[] => (ball ? [ball.x, ball.y, ball.z, ball.vx, ball.vy, ball.vz, ball.mode] : []);
+  for (let id = FIRST_SHIP_BALL_ID; id < FIRST_SHIP_BALL_ID + balls; id++) expect(state(world.replica.GetBall(id))).toEqual(state(world.master.GetBall(id)));
 }
 
 function ExpectSameRotation(actual: ArrayLike<number>, expected: ArrayLike<number>, tolerance = 1e-6): void {
@@ -254,25 +294,246 @@ describe('DestinyWorld', () => {
   });
 });
 
-describe('ShipPhysicsFromHull', () => {
-  it('picks class defaults by SOF category, with the hull radius', () => {
-    expect(ShipPhysicsFromHull({ category: 'Frigate', radius: 27.9 })).toEqual({ mass: 1.2e6, agility: 3.2, maxVelocity: 350, radius: 27.9 });
-    expect(ShipPhysicsFromHull({ category: 'force auxiliary', radius: 2000 })).toMatchObject({ mass: 1.1e9, radius: 2000 });
+describe('DestinyWorld orders at Ship-stats speeds', () => {
+  const rifter = Fly(RIFTER);
+  const guardian = Fly(GUARDIAN);
+
+  function OrbitRun(speed: number): { distances: number[]; speeds: number[]; motion: ShipMotion; world: DestinyWorld } {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [10000, 0, 0]), rifter);
+    world.AddShip(Ship('t', [0, 0, 0]), guardian);
+    const order: ShipOrder = { type: 'orbit', target: 't', range: 5000, speed };
+    expect(world.Order('a', order)).toBe(true);
+    expect(RequireMotion(world, 'a').pendingOrder).toEqual(order);
+    harness.Run(60);
+    const distances: number[] = [];
+    const speeds: number[] = [];
+    harness.Run(30, () => {
+      const motion = RequireMotion(world, 'a');
+      distances.push(motion.targetDistance ?? Number.NaN);
+      speeds.push(motion.speed);
+    });
+    const motion = RequireMotion(world, 'a');
+    expect(motion).toMatchObject({ mode: 'orbit', order });
+    expect(motion.pendingOrder).toBeUndefined();
+    return { distances, speeds, motion, world };
+  }
+
+  it("settles an orbit near its range at the hull's speed", () => {
+    const { distances, speeds, world } = OrbitRun(1);
+    expect(Math.min(...distances)).toBeGreaterThanOrEqual(5000);
+    expect(Math.max(...distances)).toBeLessThanOrEqual(5500);
+    expect(Math.max(...distances) - Math.min(...distances)).toBeLessThan(10);
+    expect(Math.min(...speeds)).toBeGreaterThanOrEqual(0.95 * rifter.maxVelocity);
+    expect(Math.max(...speeds)).toBeLessThanOrEqual(rifter.maxVelocity + 0.1);
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID)?.followRange).toBe(Math.fround(5000));
+    ExpectLockstep(world, 2);
   });
 
-  it('falls back to radius bands for an unknown category', () => {
-    expect(ShipPhysicsFromHull({ category: 'mystery', radius: 726 })).toEqual({ mass: 1e8, agility: 0.12, maxVelocity: 110, radius: 726 });
-    expect(ShipPhysicsFromHull({ category: null, radius: 49 })).toMatchObject({ mass: 1.2e6, radius: 49 });
-    expect(ShipPhysicsFromHull({ category: null, radius: 20000 })).toMatchObject({ mass: 2.4e9 });
+  it('orbits at a speed fraction', () => {
+    const { distances, speeds } = OrbitRun(0.5);
+    expect(Math.min(...distances)).toBeGreaterThanOrEqual(5000);
+    expect(Math.max(...distances)).toBeLessThanOrEqual(5500);
+    expect(Math.min(...speeds)).toBeGreaterThanOrEqual(0.95 * 0.5 * rifter.maxVelocity);
+    expect(Math.max(...speeds)).toBeLessThanOrEqual(0.5 * rifter.maxVelocity + 0.1);
   });
 
-  it('uses cruiser defaults when the hull is unknown', () => {
-    expect(ShipPhysicsFromHull(null)).toEqual(DEFAULT_SHIP_PHYSICS);
-    expect(ShipPhysicsFromHull({ category: null, radius: null })).toEqual(DEFAULT_SHIP_PHYSICS);
+  it('holds a keep-at-range distance from outside and from inside', () => {
+    for (const [start, seconds] of [
+      [10000, 90],
+      [500 + 31 + 80, 60]
+    ] as const) {
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('a', [start, 0, 0]), rifter);
+      world.AddShip(Ship('t', [0, 0, 0]), guardian);
+      world.Order('a', { type: 'keep-at-range', target: 't', range: 2500, speed: 1 });
+      harness.Run(seconds);
+      const motion = RequireMotion(world, 'a');
+      expect(motion.mode).toBe('follow');
+      expect(Math.abs((motion.targetDistance ?? 0) - 2500)).toBeLessThanOrEqual(150);
+      if (start > 1000) expect(motion.speed).toBeLessThan(2);
+    }
   });
 
-  it("applies the document's stat overrides", () => {
-    expect(ShipPhysicsFromHull({ category: 'frigate', radius: 30 }, { mass: 5e6, maxVelocity: 420 })).toEqual({ mass: 5e6, agility: 3.2, maxVelocity: 420, radius: 30 });
-    expect(ShipPhysicsFromHull(null, { agility: 0 })).toEqual(DEFAULT_SHIP_PHYSICS);
+  it('keeps range on a moving target, matching its speed', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('t', [0, 0, 0]), guardian);
+    world.AddShip(Ship('a', [-6000, 0, 3000]), rifter);
+    world.Order('t', { type: 'direction', direction: [1, 0, 0], speed: 0.5 });
+    world.Order('a', { type: 'keep-at-range', target: 't', range: 1000, speed: 1 });
+    harness.Run(120);
+    const follower = RequireMotion(world, 'a');
+    const target = RequireMotion(world, 't');
+    expect(Math.abs(follower.speed - target.speed) / target.speed).toBeLessThan(0.05);
+    expect(follower.targetDistance).toBeGreaterThanOrEqual(1000);
+    expect(follower.targetDistance).toBeLessThanOrEqual(1500);
+    ExpectLockstep(world, 2);
+  });
+
+  it('closes in on an approach', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [10000, 0, 0]), rifter);
+    world.AddShip(Ship('t', [0, 0, 0]), guardian);
+    world.Order('a', { type: 'approach', target: 't', speed: 1 });
+    const distances: number[] = [];
+    RunTicks(harness, 40, () => distances.push(RequireMotion(world, 'a').targetDistance ?? Number.NaN));
+    const closing = distances.slice(0, 21);
+    for (let index = 1; index < closing.length; index++) expect(closing[index]).toBeLessThan(closing[index - 1]);
+    expect(Math.min(...distances)).toBeLessThan(100);
+    harness.Run(50);
+    const motion = RequireMotion(world, 'a');
+    expect(Math.abs(motion.targetDistance ?? Infinity)).toBeLessThan(100);
+    expect(motion.mode).toBe('follow');
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID)?.followRange).toBe(50);
+  });
+
+  it('flies to a goto point and slows to a halt near it', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), rifter);
+    world.Order('a', { type: 'goto', point: [3000, 400, -4000], speed: 1 });
+    harness.Run(90);
+    const motion = RequireMotion(world, 'a');
+    expect(vec3.distance(motion.position, [3000, 400, -4000])).toBeLessThan(150);
+    expect(motion.speed).toBeLessThan(2);
+    expect(motion.mode).toBe('goto');
+    expect(motion.targetDistance).toBeUndefined();
+  });
+
+  it('aligns in the Ship-stats align time, to the whole tick', () => {
+    for (const hull of [RIFTER, GUARDIAN, TFI]) {
+      const flight = Fly(hull);
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('a', [0, 0, 0]), flight);
+      harness.Run(1.5);
+      const start = world.tick;
+      world.Order('a', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+      const ball = (): CjsDestinyBall | null => world.master.GetBall(FIRST_SHIP_BALL_ID);
+      const speed = (): number => Math.hypot(ball()?.vx ?? 0, ball()?.vy ?? 0, ball()?.vz ?? 0);
+      for (let frame = 0; frame < 60 * 30 && speed() < 0.75 * flight.maxVelocity; frame++) harness.Run(1 / 60);
+      expect({ hull: hull.name, ticks: world.tick - start }).toEqual({ hull: hull.name, ticks: Math.ceil(flight.alignTime) });
+    }
+  });
+
+  it('stops every follower of a removed ship, pending ones included', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('t', [0, 0, 0]), guardian);
+    world.AddShip(Ship('o', [8000, 0, 0]), rifter);
+    world.AddShip(Ship('k', [0, 0, 8000]), rifter);
+    world.AddShip(Ship('c', [-8000, 0, 0]), rifter);
+    world.AddShip(Ship('p', [0, 0, -8000]), rifter);
+    world.AddShip(Ship('x', [0, 5000, 0]), rifter);
+    world.AddShip(Ship('u', [0, 9000, 0]), guardian);
+    world.Order('o', { type: 'orbit', target: 't', range: 3000, speed: 1 });
+    world.Order('k', { type: 'keep-at-range', target: 't', range: 2000, speed: 1 });
+    world.Order('c', { type: 'approach', target: 't', speed: 1 });
+    world.Order('x', { type: 'direction', direction: [1, 0, 0], speed: 1 });
+    harness.Run(5);
+    const before = new Map(['o', 'k', 'c'].map((id) => [id, RequireMotion(world, id).speed]));
+    world.Order('p', { type: 'orbit', target: 't', range: 1000, speed: 1 });
+    const keep: ShipOrder = { type: 'keep-at-range', target: 'u', range: 500, speed: 1 };
+    world.Order('x', keep);
+    expect(world.RemoveShip('t')).toEqual(['o', 'k', 'c', 'p']);
+    for (const id of ['o', 'k', 'c', 'p']) {
+      const motion = RequireMotion(world, id);
+      expect(motion).toMatchObject({ order: { type: 'stop' }, orderNote: 'stopped: target "t" was removed', mode: 'stop' });
+      expect(motion.pendingOrder).toBeUndefined();
+    }
+    expect(RequireMotion(world, 'x').pendingOrder).toEqual(keep);
+    harness.Run(5);
+    expect(RequireMotion(world, 'x')).toMatchObject({ order: keep, mode: 'follow' });
+    for (const [id, speed] of before) expect(RequireMotion(world, id).speed).toBeLessThan(speed);
+    ExpectLockstep(world, 7);
+  });
+
+  it('stops a ship on both parks when Destiny refuses its order', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('a', [5000, 0, 0]), rifter);
+      world.AddShip(Ship('t', [0, 0, 0]), guardian);
+      world.Order('a', { type: 'orbit', target: 't', range: 1000, speed: 1 });
+      // Breaks lockstep on purpose: the replica's Orbit finds no target and keeps the old order.
+      world.replica.RemoveBall(FIRST_SHIP_BALL_ID + 1);
+      harness.Run(1.5);
+      expect(RequireMotion(world, 'a')).toMatchObject({ order: { type: 'stop' }, orderNote: 'stopped: Destiny refused the orbit order', mode: 'stop' });
+      expect(ModeName(world.replica.GetBall(FIRST_SHIP_BALL_ID)?.mode ?? -1)).toBe('stop');
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('ship a');
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('refuses orders on the ship itself or a ship that does not exist', () => {
+    const { world } = new Harness();
+    world.AddShip(Ship('a', [0, 0, 0]), rifter);
+    expect(world.Order('a', { type: 'approach', target: 'a', speed: 1 })).toBe(false);
+    expect(world.Order('a', { type: 'orbit', target: 'nobody', range: 100, speed: 1 })).toBe(false);
+    expect(world.Order('nobody', { type: 'stop' })).toBe(false);
+    expect(RequireMotion(world, 'a').pendingOrder).toBeUndefined();
+  });
+
+  it("ends a follower's order on its placement, and keeps it on its target's", () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('t', [0, 0, 0]), guardian);
+    world.AddShip(Ship('k', [6000, 0, 0]), rifter);
+    const keep: ShipOrder = { type: 'keep-at-range', target: 't', range: 1000, speed: 1 };
+    world.Order('k', keep);
+    harness.Run(3);
+    world.PlaceShip(Ship('k', [6000, 0, 0]));
+    const placed = RequireMotion(world, 'k');
+    expect(placed).toMatchObject({ order: { type: 'stop' }, mode: 'stop' });
+    expect(placed.orderNote).toBeUndefined();
+    world.Order('k', keep);
+    harness.Run(3);
+    world.PlaceShip(Ship('t', [0, 0, 20000]));
+    const chasing = RequireMotion(world, 'k');
+    expect(chasing).toMatchObject({ order: keep, mode: 'follow' });
+    harness.Run(30);
+    expect(RequireMotion(world, 'k').targetDistance).toBeLessThan(chasing.targetDistance ?? 0);
+  });
+
+  it('keeps the parks in lockstep through every order, a retune and a removal', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0], [30, 0, 0]), rifter);
+    world.AddShip(Ship('b', [2000, 100, -400], [0, 45, 0]), guardian);
+    world.AddShip(Ship('c', [-3000, 0, 4000]), Fly(TFI));
+    world.AddShip(Ship('d', [500, -600, 9000]), rifter);
+    world.Order('a', { type: 'goto', point: [4000, 0, 4000], speed: 0.8 });
+    world.Order('b', { type: 'direction', direction: [0, 0, -1], speed: 1 });
+    harness.Run(3.3);
+    world.Order('c', { type: 'orbit', target: 'b', range: 2000, speed: 1 });
+    world.Order('d', { type: 'keep-at-range', target: 'b', range: 1500, speed: 0.7 });
+    world.Order('a', { type: 'approach', target: 'c', speed: 1 });
+    harness.Run(6.4);
+    world.SetPhysics('c', { ...Fly(TFI), maxVelocity: 300 });
+    harness.Run(4.1);
+    expect(world.RemoveShip('b')).toEqual(['c', 'd']);
+    harness.Run(5.2);
+    ExpectLockstep(world, 4);
+  });
+
+  it('accepts a zero max velocity and keeps such a ship in place', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [1000, 0, 0]), rifter);
+    world.AddShip(Ship('t', [0, 0, 0]), guardian);
+    world.SetPhysics('a', { ...rifter, maxVelocity: 0 });
+    world.Order('a', { type: 'orbit', target: 't', range: 300, speed: 1 });
+    harness.Run(10);
+    const motion = RequireMotion(world, 'a');
+    expect(motion.position).toEqual([1000, 0, 0]);
+    expect(JSON.stringify(motion)).not.toMatch(/NaN|null/);
+    expect([...motion.position, ...motion.velocity, motion.speed, motion.targetDistance].every(Number.isFinite)).toBe(true);
   });
 });
