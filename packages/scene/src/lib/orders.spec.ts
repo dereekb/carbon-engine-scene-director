@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTargetShipOrder, MAX_ORDER_RANGE, normalizeShipOrder, SHIP_ORDER_TYPES, type ShipOrderContext } from './orders';
+import { isTargetShipOrder, MAX_ORDER_RANGE, normalizeShipOrder, normalizeShipOrderRequest, SHIP_ORDER_REQUEST_TYPES, SHIP_ORDER_TYPES, type ShipOrderContext } from './orders';
 import { SceneError } from './scene';
 import { findTool } from './tools';
 
@@ -35,11 +35,15 @@ describe('normalizeShipOrder', () => {
     expect(Problems({ type: 'stop', speed: 1 })).toEqual(['order.speed is not a stop order field']);
   });
 
-  it('is a page tool whose schema lists the order types', () => {
+  it('is a page tool whose schema lists the order request types', () => {
     const tool = findTool('order_ship');
     expect(tool?.where).toBe('page');
     expect(tool?.inputSchema.required).toEqual(['id', 'order']);
-    expect(JSON.stringify(tool?.inputSchema)).toContain(JSON.stringify([...SHIP_ORDER_TYPES]));
+    expect(JSON.stringify(tool?.inputSchema)).toContain(JSON.stringify([...SHIP_ORDER_REQUEST_TYPES]));
+  });
+
+  it('refuses the fleet order rejoin: it is no ball order', () => {
+    expect(Problems({ type: 'rejoin' })).toEqual([`order.type must be one of ${SHIP_ORDER_TYPES.join(', ')}`]);
   });
   it('accepts goto, approach, keep-at-range and orbit orders with their defaults', () => {
     expect(normalizeShipOrder({ type: 'goto', point: [3000, 400, -4000] })).toEqual({ type: 'goto', point: [3000, 400, -4000], speed: 1 });
@@ -103,5 +107,29 @@ describe('normalizeShipOrder', () => {
     const order = (findTool('order_ship')?.inputSchema.properties as Record<string, { properties: Record<string, { maximum?: number }> }>)['order'];
     expect(Object.keys(order.properties)).toEqual(expect.arrayContaining(['point', 'target', 'range']));
     expect(order.properties['range'].maximum).toBe(MAX_ORDER_RANGE);
+  });
+});
+
+describe('normalizeShipOrderRequest', () => {
+  function RequestProblems(input: unknown): string[] {
+    try {
+      normalizeShipOrderRequest(input);
+    } catch (error) {
+      if (error instanceof SceneError) return error.problems;
+      throw error;
+    }
+    throw new Error('the order was accepted');
+  }
+
+  it('accepts rejoin with no fields and passes movement orders to normalizeShipOrder', () => {
+    expect(normalizeShipOrderRequest({ type: 'rejoin' })).toEqual({ type: 'rejoin' });
+    expect(normalizeShipOrderRequest({ type: 'keep-at-range', target: ' a ', range: 500 }, { self: 'b' })).toEqual({ type: 'keep-at-range', target: 'a', range: 500, speed: 1 });
+  });
+
+  it('refuses rejoin fields, unknown types and non-objects', () => {
+    expect(RequestProblems({ type: 'rejoin', target: 'x' })).toEqual(['order.target is not a rejoin order field']);
+    expect(RequestProblems({ type: 'warp' })).toEqual([`order.type must be one of ${SHIP_ORDER_REQUEST_TYPES.join(', ')}`]);
+    expect(RequestProblems('rejoin')).toEqual(['order must be an object']);
+    expect(RequestProblems({ type: 'stop', speed: 1 })).toEqual(['order.speed is not a stop order field']);
   });
 });

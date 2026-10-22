@@ -4,7 +4,7 @@ import { requireComposition, TFI, tfisComposition } from '../compositions/compos
 import type { FleetComposition } from '../compositions/composition';
 import type { SceneVector } from '../scene';
 import type { SceneFleet } from './fleet';
-import { formationSpacing, layoutFleetFormation } from './formation';
+import { formationSpacing, layoutFleetFormation, toFleetFormationSlots } from './formation';
 import { toFleetAnchors } from './membership';
 
 interface Laid {
@@ -95,5 +95,65 @@ describe('layoutFleetFormation', () => {
   it('throws when an anchor is never placed', () => {
     const fleet: SceneFleet = { id: 'f', commander: 'fc', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['a'], anchor: { ship: 'ghost' } }] }] };
     expect(() => layoutFleetFormation({ fleet, origin: [0, 0, 0], heading: 0, radiusOf: () => 100 })).toThrow(/ship "a" anchors on a ship that is never placed/u);
+  });
+});
+
+describe('toFleetFormationSlots', () => {
+  const rotateYaw = (heading: number, [x, y, z]: SceneVector): SceneVector => {
+    const yaw = (heading * Math.PI) / 180;
+    return [x * Math.cos(yaw) + z * Math.sin(yaw), y, -x * Math.sin(yaw) + z * Math.cos(yaw)];
+  };
+
+  it('flies every ship back onto layoutFleetFormation from its laid anchor, at headings 0, 90 and 180', () => {
+    const { fleet, radii } = lay(tfisComposition());
+    const radiusOf = (ship: string): number => radii.get(ship)!;
+    for (const heading of [0, 90, 180]) {
+      const input = { fleet, origin: [0, 0, 80000] as SceneVector, heading, radiusOf };
+      const positions = layoutFleetFormation(input);
+      const slots = toFleetFormationSlots(input);
+      expect(slots.size).toBe(positions.size - 1);
+      for (const [ship, slot] of slots) {
+        const from = positions.get(slot.anchor)!;
+        const direction = rotateYaw(heading, slot.direction);
+        const reach = slot.range + radiusOf(slot.anchor) + radiusOf(ship);
+        const flown: SceneVector = [from[0] + direction[0] * reach, from[1] + direction[1] * reach, from[2] + direction[2] * reach];
+        expect(distance(flown, positions.get(ship)!), `${ship} at heading ${heading}`).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+
+  it('keeps the anchor range on the first shell and one spacing more per outer shell', () => {
+    const { fleet, radii } = lay(battleshipSquad(60));
+    const slots = toFleetFormationSlots({ fleet, origin: [0, 0, 0], heading: 0, radiusOf: (ship) => radii.get(ship)! });
+    const anchors = toFleetAnchors(fleet);
+    const shells = new Set<number>();
+    for (const [ship, slot] of slots) {
+      const anchor = anchors.get(ship)!.anchor!;
+      expect(slot.anchor).toBe(anchor.ship);
+      const shell = (slot.range - anchor.range) / formationSpacing(250, 250);
+      expect(Number.isInteger(shell), `${ship} shell ${shell}`).toBe(true);
+      shells.add(shell);
+    }
+    expect(shells.has(0)).toBe(true);
+    expect([...shells].some((shell) => shell >= 1)).toBe(true);
+  });
+
+  it('gives unit directions on the trailing hemisphere, deterministically, and no slot for the FC', () => {
+    const { fleet, radii } = lay(tfisComposition());
+    const input = { fleet, origin: [0, 0, 0] as SceneVector, heading: 0, radiusOf: (ship: string) => radii.get(ship)! };
+    const slots = toFleetFormationSlots(input);
+    expect(slots.has(fleet.commander)).toBe(false);
+    for (const [ship, { direction }] of slots) {
+      expect(Math.hypot(...direction), ship).toBeCloseTo(1, 9);
+      expect(direction[2], ship).toBeLessThanOrEqual(0);
+    }
+    expect(toFleetFormationSlots(input)).toEqual(slots);
+  });
+
+  it('clears the anchor when the range is 0: the slot range covers the spacing', () => {
+    const { fleet, radii } = lay(battleshipSquad(5, 0));
+    for (const slot of toFleetFormationSlots({ fleet, origin: [0, 0, 0], heading: 0, radiusOf: (ship) => radii.get(ship)! }).values()) {
+      expect(slot.range).toBeGreaterThanOrEqual(formationSpacing(250, 250) - 500);
+    }
   });
 });

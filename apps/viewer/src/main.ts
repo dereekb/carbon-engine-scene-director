@@ -35,7 +35,8 @@ interface OverlayState {
 }
 
 /**
- * The status panel over the canvas: hub link, renderer, scene and per-ship build status. H toggles it.
+ * The status panel over the canvas: hub link, renderer, scene, each fleet's formation and per-ship build status. H
+ * toggles it.
  */
 class Overlay {
   private readonly element: HTMLElement;
@@ -62,6 +63,10 @@ class Overlay {
       ['renderer', this.RendererText(director)],
       ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` : 'none']
     ];
+    for (const fleet of scene?.fleets ?? []) {
+      const formation = director?.following.FleetReport(fleet);
+      if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
+    }
     const ships = (scene?.ships ?? []).map((doc) => {
       const entry = director?.live.get(doc.id);
       const error = entry?.error ? `<div class="error">${Escape(entry.error)}</div>` : '';

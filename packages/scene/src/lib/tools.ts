@@ -10,7 +10,7 @@
 import type { Maybe } from '@dereekb/util';
 import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, FLEET_COMPOSITION_SCHEMA, MAX_FLEET_SHIPS } from './compositions/composition';
 import { DEFAULT_ANCHOR_RANGES, DEFAULT_ANCHOR_UP_RANGE, DEFAULT_FORMATION_RADIUS, FORMATION_GAP, FORMATION_SPACING, SQUAD_ROLES } from './fleets';
-import { APPROACH_RANGE, MAX_ORDER_RANGE, SHIP_ORDER_TYPES } from './orders';
+import { APPROACH_RANGE, MAX_ORDER_RANGE, SHIP_ORDER_REQUEST_TYPES } from './orders';
 import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 
 /**
@@ -48,7 +48,7 @@ const SCENE_FORMAT = `Scene document (${SCENE_SCHEMA}). Metres and degrees, Y up
 dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find hull names. rotation is [yaw, pitch, roll].
 "type" (EVE type id or name) and "stats" ({ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional) set a ship's flight numbers; ship_stats shows them.
 "orders" and "pilot" on a ship and a top-level "timeline" are reserved for later phases: stored, not played.
-"fleets" (optional) groups ships into EVE fleets: [{ "id", "name"?, "commander": "<FC ship id>", "wings": [{ "id", "name"?, "commander"?, "squads": [{ "id", "name"?, "role": "${SQUAD_ROLES.join('|')}", "commander"?: "<a member>", "members": ["<ship id>"], "anchor"?: { "ship"?: "<ship id; default the FC>", "range"?: <metres, surface to surface; default logi ${DEFAULT_ANCHOR_RANGES.logi}, others ${DEFAULT_ANCHOR_UP_RANGE}> } }] }] }]. A squad anchored on one of its own members (a logi anchor) puts that ship at range off the FC, and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m. A ship holds positions in one fleet and sits in at most one squad. Fleets are stored and reported by get_state; ships do not follow yet. "team" is independent of fleets.`;
+"fleets" (optional) groups ships into EVE fleets: [{ "id", "name"?, "commander": "<FC ship id>", "wings": [{ "id", "name"?, "commander"?, "squads": [{ "id", "name"?, "role": "${SQUAD_ROLES.join('|')}", "commander"?: "<a member>", "members": ["<ship id>"], "anchor"?: { "ship"?: "<ship id; default the FC>", "range"?: <metres, surface to surface; default logi ${DEFAULT_ANCHOR_RANGES.logi}, others ${DEFAULT_ANCHOR_UP_RANGE}> } }] }] }]. A squad anchored on one of its own members (a logi anchor) puts that ship at range off the FC, and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m. A ship holds positions in one fleet and sits in at most one squad. Fleet members keep range on their anchors in formation behind the FC (get_state "following"). "team" is independent of fleets.`;
 
 const FLEET_COMPOSITION_FORMAT = `Fleet composition (${FLEET_COMPOSITION_SCHEMA}): a doctrine fleet to drop into a scene. Metres.
 {
@@ -159,7 +159,8 @@ export const TOOLS: ToolDefinition[] = [
 { "op": "add_fleet_composition", "composition": { ...${FLEET_COMPOSITION_SCHEMA} }, "position": [x, y, z], "heading"?: <yaw degrees> | "facing"?: [x, y, z], "fleet"?: "<fleet id>", "team"? }   (needs dna on every ship line; the add_fleet_composition tool resolves hull names and saved names first)
 Taking a ship out of a squad (remove_ship, remove_from_fleet, move_to_squad, remove_squad, remove_wing) falls a squad anchored on it back to its squad commander, then its wing commander, then the FC, with a warning; a fleet commander must be replaced (update_fleet) or its fleet removed first. Removing a fleet, wing or squad keeps its ships in the scene, unless remove_fleet has "withShips": true.
 Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type or stats retunes the ship's flight numbers without a rebuild; stats replaces the whole override object and null clears it.
-Removing a ship stops the ships approaching, keeping range on or orbiting it (changes.stopped counts them).`,
+Removing a ship stops the ships approaching, keeping range on or orbiting it (changes.stopped counts them).
+Fleet edits re-plan the following ships at once (a squad set to its own anchor and range breaks off, and rejoins when set back); a removed anchor's followers re-anchor through the fallback above and keep flying. Moving a following ship puts it there at rest and it flies back to its slot; moving the FC makes its fleet follow. Ships whose following ends (they left their fleet, it was removed, or they became its FC) stop, and changes.stopped counts them.`,
     inputSchema: {
       type: 'object',
       properties: { operations: { type: 'array', items: { type: 'object' }, minItems: 1 } },
@@ -250,7 +251,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
     name: 'get_state',
     where: 'page',
     description:
-      "Live state of the viewer: renderer status, frame rate, camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, follow, orbit) and the physics it flies with (below). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client. Ships in a fleet also report fleet, wing, squad, role, commands and anchor (the ship they keep range on, and the range); fleets is the fleet tree with each squad's anchor resolved. Fleets do not move ships yet. Each ship also reports its order (what its ball is flying, with target, range and speed), pendingOrder (given, applying at the next tick), orderNote (why it stopped on its own, such as its target being removed) and targetDistance (metres, surface to surface on the balls' EVE radii, negative when they overlap); distances use the drawn bounding spheres. physics gives mass, agility, maxVelocity, radius (the ball's EVE radius), signatureRadius, alignTime (s) and source: sde (the hull's in-game values via tools-core), stats (the document's four stats) or class (class values when the EVE data cannot name the hull; note says why).",
+      "Live state of the viewer: renderer status, frame rate, camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, follow, orbit) and the physics it flies with (below). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client. Ships in a fleet also report fleet, wing, squad, role, commands and anchor (the ship they keep range on, and the range); fleets is the fleet tree with each squad's anchor resolved, plus formation (ready, the FC's heading, and how many members are following, in formation, catching up, detached or waiting). A fleet member other than the FC also reports following: state (in-formation, catching-up, detached by an explicit order, or waiting for the ships' radii), anchor and range (what it keeps range on), slot (its formation slot: range and direction in the FC's heading frame), distance (metres, surface to surface, to the anchor) and slotError (metres from its slot); its order is keep-at-range on the anchor, and its mode is goto while it steers to its slot and stop once settled. heading is each ship's [yaw, pitch] in degrees, the authoritative heading. Each ship also reports its order (what its ball is flying, with target, range and speed), pendingOrder (given, applying at the next tick), orderNote (why it stopped on its own, such as its target being removed) and targetDistance (metres, surface to surface on the balls' EVE radii, negative when they overlap); distances use the drawn bounding spheres. physics gives mass, agility, maxVelocity, radius (the ball's EVE radius), signatureRadius, alignTime (s) and source: sde (the hull's in-game values via tools-core), stats (the document's four stats) or class (class values when the EVE data cannot name the hull; note says why).",
     inputSchema: { type: 'object', properties: {} }
   },
   {
@@ -263,7 +264,9 @@ ${FLEET_COMPOSITION_FORMAT}`,
 { "type": "keep-at-range", "target": "<ship id>", "range": <metres>, "speed"? }   hold the range on the target, following it
 { "type": "orbit", "target": "<ship id>", "range": <metres>, "speed"? }   circle the target; fast ships settle a little wider than the range, as in EVE
 { "type": "stop" }   decelerate to a halt
-Removing a ship stops every ship approaching, keeping range on or orbiting it. A new position or rotation (or load_scene) puts a ship at rest and ends its order. Returns { id, order, tick }. get_state shows each ship's order, pendingOrder, orderNote, targetDistance, mode and physics.`,
+{ "type": "rejoin" }   a fleet member that left its formation keeps range on its anchor in its slot again
+Fleets fly in formation on their FC: ordering the FC moves its fleet. Any order above on a fleet member (not the FC) takes it out of formation until rejoin, a fleet edit that regroups it, or load_scene; rejoin is refused for the FC and for a ship in no fleet.
+Removing a ship stops every ship approaching, keeping range on or orbiting it. A new position or rotation (or load_scene) puts a ship at rest and ends its order. Returns { id, order, tick }, plus following: "detached" when the order took a fleet member out of formation, or the member's following report for rejoin. get_state shows each ship's order, pendingOrder, orderNote, targetDistance, mode and physics.`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -271,7 +274,7 @@ Removing a ship stops every ship approaching, keeping range on or orbiting it. A
         order: {
           type: 'object',
           properties: {
-            type: { type: 'string', enum: [...SHIP_ORDER_TYPES] },
+            type: { type: 'string', enum: [...SHIP_ORDER_REQUEST_TYPES] },
             direction: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
             point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'World position to fly to, metres.' },
             target: { type: 'string', description: 'Ship id to approach, keep range on or orbit.' },

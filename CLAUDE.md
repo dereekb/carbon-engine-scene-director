@@ -9,9 +9,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   operations, diff), the shared tool list, `src/lib/stats/` (ship stats math, skills, prop mods, the pilot
   context), `src/lib/fleets/` (fleets, wings and squads: validation, edits, and the anchor rules, resolved only in
   `toFleetMemberships`; Follow the FC must fly those, not re-derive them; `formation.ts` is the at-rest formation
-  Follow the FC flies) and `src/lib/compositions/` (the `cjs-fleet/1` fleet composition, its expansion, the
-  `add_fleet_composition` op, and the TFIs example in `examples/tfis.json`). No runtime imports; the hub, the page and
-  the tests all use it.
+  Follow the FC flies (`toFleetFormationSlots`), and `following.ts` turns the anchors and the formation into follow
+  plans, flown by the viewer's `following.ts` / `steering.ts` / `destiny.ts`) and `src/lib/compositions/` (the
+  `cjs-fleet/1` fleet composition, its expansion, the `add_fleet_composition` op, and the TFIs example in
+  `examples/tfis.json`). No runtime imports; the hub, the page and the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
   and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. Building it builds the viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
@@ -19,8 +20,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   declarations file when the page starts using it; do not reach for `any`. `src/lib/runtime-sim.ts` is its light half
   (math, Blue curve bases, the Destiny server, typed by `carbonenginejs-server.d.ts`), re-exported by `runtime.ts`.
   `clock.ts` (the scene clock), `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship, and the
-  movement orders) and `flight.ts` (each ship's Ship-stats flight numbers from the hub's `/ship-stats`) have node
-  specs: the viewer has a `test` target (`project: viewer`).
+  movement orders and fleet following), `flight.ts` (each ship's Ship-stats flight numbers from the hub's
+  `/ship-stats`), `steering.ts` (Follow the FC's steering math) and `following.ts` (`FleetFollowing`: the document's
+  fleets reconciled into the world's follows, detach and rejoin) have node specs: the viewer has a `test` target
+  (`project: viewer`).
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Commands
@@ -65,14 +68,27 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `engine.Frame(timestamp, now)`, so
   `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame at 1 s so the master's 6-tick
   backlog drop never fires.
-- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`) import `./runtime-sim`, never `./runtime` (type-only
-  imports are fine): the full facade drags in the renderer and the `runtime-dist/` alias, which vitest does not have.
+- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `steering.ts`, `following.ts`) import `./runtime-sim`,
+  never `./runtime` (type-only imports are fine): the full facade drags in the renderer and the `runtime-dist/` alias,
+  which vitest does not have.
+- Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a
+  tick is due, so it relies on one evolve per `Tick` call (the clock's 1 s frame cap). FollowBall cannot hold a
+  bearing (it aims at the nearest point of the range sphere, so followers stack at the trailing pole), and Destiny's
+  native formations reserve 16 slots per leader and bank with it.
+- Settling a follower: aim its goto point along its *current* heading before `SetBallVelocity(0, 0, 0)` (zero
+  velocity snaps the legacy heading to the goto point), then along the fleet heading. Legacy heading faces the goto
+  point only at exactly zero velocity. A fresh park's first ~3 ticks freeze a ClientBall's drawn rotation (no
+  two-tick history yet), then jump: specs that measure drawn smoothness skip them.
+- Formation slots wait for settled radii (`Director.FormationRadius`: an SDE radius, or a finished SOF build) and are
+  laid out at the FC's *document* placement. With the 100 m interim radius a composition-added fleet would be pulled
+  about 300 m inward and scramble.
 - Destiny's `FollowBall` / `Orbit` / `GotoPoint` return without a word, keeping the old order, for a missing, self,
   moribund or cloaked target, a target in another bubble (a master only) or a non-finite value. `DestinyWorld`
   resolves the target itself and checks that both parks reached the order's mode, or stops the ship on both.
 - Destiny's `RemoveBall` sends an interactive orbiter straight on along its velocity and stops other followers.
   `DestinyWorld.RemoveShip` stops every follower of the removed ship first, so all of them stop and the parks stay
-  identical.
+  identical. Formation followers (Follow the FC) are the exception: `FleetFollowing.Reconcile` re-anchors them in the
+  same edit, and `Steer` halts any whose anchor or FC ball is gone.
 - A ball's radius is the hull's SDE `radius` when the hub knows it; order ranges and `targetDistance` are surface to
   surface on it. The SOF bounding sphere is only for framing and `get_state`'s `radius` and `distances`.
 - `flight.ts` runs class values (no SDE, unknown DNA) through the max-skills pilot too, so `stats` means the same with

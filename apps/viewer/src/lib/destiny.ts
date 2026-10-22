@@ -23,13 +23,23 @@
  *   the old one, so both parks must reach the order's mode, or the ship stops on both. Removing a ship stops its
  *   followers first, because Destiny alone sends an orbiter straight on along its velocity.
  * - Physics come from flight.ts (Ship stats); the world takes them as given and accepts a max velocity of 0.
+ * - Following (Follow the FC). A fleet member flies its formation slot by per-tick goto steering: at every tick
+ *   boundary, right after the pending orders, Steer re-aims its GotoPoint on both parks at its slot (its anchor's live
+ *   position plus the slot's direction in the FC's heading frame, Destiny's legacy heading without roll), led along
+ *   the anchor's velocity by Destiny's goto lag (steering.ts), at its own max velocity. Not FollowBall, which aims at
+ *   the nearest point of the range sphere and cannot hold a bearing (followers stack at the trailing pole), and not
+ *   Destiny's native formations (16 slots per leader, a leader frame that banks, park-held tables). A member whose
+ *   anchor is at rest settles in its slot: it stops and turns smoothly to the fleet heading. It reports itself as
+ *   keep-at-range on its anchor. An explicit order ends following; RemoveShip leaves followers to the director
+ *   (FleetFollowing re-anchors them in the same edit), and Steer halts any whose anchor or FC is gone.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { APPROACH_RANGE, isTargetShipOrder, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
+import { APPROACH_RANGE, isTargetShipOrder, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
+import { FleetFrame, FormationGoto, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, type FormationGoto as FormationGotoResult } from './steering';
 
 /**
  * The replica's ego: a fixed ball at the origin, which makes ClientBall samples absolute.
@@ -119,7 +129,46 @@ export interface ShipMotion {
    * (EVE's measure), rounded to 1 m; negative when the balls overlap.
    */
   readonly targetDistance?: number;
+  /**
+   * The authoritative heading, [yaw, pitch] degrees in the document-rotation convention: Destiny's legacy heading,
+   * yaw in [0, 360), rounded to 0.1.
+   */
+  readonly heading: [number, number];
+  /**
+   * For a ship following its fleet: metres from its formation slot, rounded to 1 m.
+   */
+  readonly slotError?: number;
   readonly physics: ShipPhysics;
+}
+
+/**
+ * What a fleet member flies while following (FleetFollowing gives it).
+ */
+export interface ShipFollow {
+  /**
+   * The ship it keeps range on: its resolved fleet anchor.
+   */
+  readonly anchor: string;
+  /**
+   * The anchor's range (metres, surface to surface): the range its keep-at-range order reports.
+   */
+  readonly range: number;
+  /**
+   * The fleet commander: its heading frames the slot.
+   */
+  readonly frame: string;
+  /**
+   * The slot's unit direction from the anchor in the frame (x right, y up, z forward).
+   */
+  readonly direction: SceneVector;
+  /**
+   * The slot's range, metres surface to surface.
+   */
+  readonly slotRange: number;
+  /**
+   * Fraction of max velocity, (0, 1]; 1 (each member's own speed) unless a later fleet command sets it.
+   */
+  readonly speed: number;
 }
 
 const STOP_ORDER: ShipOrder = { type: 'stop' };
@@ -195,6 +244,18 @@ interface ShipEntry {
    * Why the world stopped the ship itself.
    */
   note: Maybe<string>;
+  /**
+   * The formation slot it follows; null when it flies its own order.
+   */
+  follow: Maybe<ShipFollow>;
+  /**
+   * Whether Steer has applied `follow` since it was set (or since the ship was placed).
+   */
+  followApplied: boolean;
+  /**
+   * Whether it sits settled in its slot (mode stop, turning to the fleet heading).
+   */
+  settled: boolean;
 }
 
 /**
@@ -244,13 +305,14 @@ export class DestinyWorld {
       this.Both((park) => park.AddBall(ballId, physics.mass, physics.radius, physics.maxVelocity, true, false, false, true, false, x, y, z, 0, 0, 0, physics.agility, 1));
       const ball = this.replica.GetBall(ballId);
       if (!(ball instanceof CjsDestinyClientBall)) throw new Error(`the replica park did not create a ClientBall for ${doc.id}`);
-      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null });
+      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null, follow: null, followApplied: false, settled: false });
     }
     this.PlaceShip(doc);
   }
 
   /**
-   * Puts a ship at rest at a placement, facing along its rotation, ending its order. Its followers chase it there.
+   * Puts a ship at rest at a placement, facing along its rotation, ending its order. Its followers chase it there. A
+   * ship following its fleet keeps following and flies back to its slot from there.
    *
    * @param doc - The document ship.
    */
@@ -261,26 +323,21 @@ export class DestinyWorld {
     this.pending.delete(doc.id);
     entry.order = STOP_ORDER;
     entry.note = null;
-    const [x, y, z] = doc.position;
+    entry.followApplied = false;
+    entry.settled = false;
     const rotation = DocumentRotation(doc.rotation);
     const forward = vec3.transformQuat(vec3.create(), [0, 0, 1], rotation);
-    const gotoX = x + forward[0] * GOTO_DISTANCE;
-    const gotoY = y + forward[1] * GOTO_DISTANCE;
-    const gotoZ = z + forward[2] * GOTO_DISTANCE;
-    this.Both((park) => {
+    const goto = this.Both((park) => {
       park.Stop(ballId);
-      park.SetBallPosition(ballId, x, y, z);
-      const ball = park.GetBall(ballId);
-      if (ball) {
-        ball.gotoX = gotoX;
-        ball.gotoY = gotoY;
-        ball.gotoZ = gotoZ;
-      }
+      park.SetBallPosition(ballId, ...doc.position);
+      const aimed = this.AimAlong(park, ballId, doc.position, forward);
       // Zero velocity snaps the legacy heading to the goto point.
       park.SetBallVelocity(ballId, 0, 0, 0);
+      return aimed;
     });
     // The heading Destiny derives from the same goto offsets, then whatever the document adds to it (its roll).
-    const heading = HeadingRotation(gotoX - x, gotoY - y, gotoZ - z);
+    const [x, y, z] = doc.position;
+    const heading = HeadingRotation(goto[0] - x, goto[1] - y, goto[2] - z);
     quat.multiply(entry.curves.rotation.attitude, quat.conjugate(heading, heading), rotation);
   }
 
@@ -308,7 +365,8 @@ export class DestinyWorld {
 
   /**
    * Removes a ship's ball from both parks (they drop it on their next tick). Every ship approaching, keeping range on
-   * or orbiting it, or with such an order pending, stops at once on both parks first.
+   * or orbiting it, or with such an order pending, stops at once on both parks first. Ships following it in formation
+   * are left to the caller to re-point (Follow) in the same call; Steer halts any it does not.
    *
    * @param id - The ship id.
    * @returns The ids of the ships it stopped, in the order they were added.
@@ -323,7 +381,7 @@ export class DestinyWorld {
       const pending = this.pending.get(other.id);
       const queued = pending !== undefined && TargetOf(pending) === id;
       if (queued) this.pending.delete(other.id);
-      if (queued || TargetOf(other.order) === id) {
+      if (queued || (!other.follow && TargetOf(other.order) === id)) {
         this.Halt(other, `stopped: target "${id}" was removed`);
         stopped.push(other.id);
       }
@@ -333,7 +391,7 @@ export class DestinyWorld {
   }
 
   /**
-   * Queues a movement order for the next tick boundary.
+   * Queues a movement order for the next tick boundary. It supersedes following: the ship leaves its formation.
    *
    * @param id - The ship id.
    * @param order - A normalized order.
@@ -341,26 +399,81 @@ export class DestinyWorld {
    */
   Order(id: string, order: ShipOrder): boolean {
     const target = TargetOf(order);
-    const valid = this.ships.has(id) && (!target || (target !== id && this.ships.has(target)));
-    if (valid) this.pending.set(id, order);
+    const entry = this.ships.get(id);
+    const valid = entry !== undefined && (!target || (target !== id && this.ships.has(target)));
+    if (valid) {
+      this.pending.set(id, order);
+      entry.follow = null;
+      entry.settled = false;
+    }
     return valid;
   }
 
   /**
-   * Evolves both parks to `now`. Pending orders apply first when this call will run a tick.
+   * Starts or re-points a ship's following from the next tick boundary, dropping any order it has pending.
+   *
+   * @param id - The ship id.
+   * @param follow - Its anchor, frame and slot.
+   * @returns False for an unknown ship, an anchor or frame that is the ship itself, or an anchor or frame with no ball.
+   */
+  Follow(id: string, follow: ShipFollow): boolean {
+    const entry = this.ships.get(id);
+    const valid = entry !== undefined && follow.anchor !== id && follow.frame !== id && this.ships.has(follow.anchor) && this.ships.has(follow.frame);
+    if (valid) {
+      this.pending.delete(id);
+      entry.follow = follow;
+      entry.followApplied = false;
+      entry.settled = false;
+    }
+    return valid;
+  }
+
+  /**
+   * Ends a ship's following: it stops at once on both parks.
+   *
+   * @param id - The ship id.
+   * @param note - Why, for its orderNote.
+   * @returns Whether the ship was following.
+   */
+  Unfollow(id: string, note: string): boolean {
+    const entry = this.ships.get(id);
+    const following = Boolean(entry?.follow);
+    if (entry && following) {
+      entry.follow = null;
+      entry.settled = false;
+      this.Halt(entry, note);
+    }
+    return following;
+  }
+
+  /**
+   * What a ship flies while following.
+   *
+   * @param id - The ship id.
+   * @returns Its follow, or null when it is not following (or no ship has that id).
+   */
+  Following(id: string): Maybe<ShipFollow> {
+    return this.ships.get(id)?.follow ?? null;
+  }
+
+  /**
+   * Evolves both parks to `now`. When this call will run a tick, pending orders apply first, then every following
+   * ship is steered. The clock caps a frame at 1 s and a tick is 1 s, so a call evolves at most one tick: the steering
+   * always precedes the tick it is for, which is why there is one OnTick per call rather than a loop.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
    * @throws {Error} The first park failure, after both parks have had their turn.
    */
   Tick(now: number): void {
     const time = BigInt(Math.round(now));
-    if (this.pending.size && time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS)) {
+    if (time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS)) {
       const orders = [...this.pending];
       this.pending.clear();
       for (const [id, order] of orders) {
         const entry = this.ships.get(id);
         if (entry) this.ApplyOrder(entry, order);
       }
+      this.Steer();
     }
     let failure: unknown = null;
     for (const park of [this.master, this.replica]) {
@@ -393,10 +506,11 @@ export class DestinyWorld {
     const entry = this.ships.get(id);
     const ball = entry ? this.master.GetBall(entry.ballId) : null;
     if (!entry || !ball) return null;
-    const pending = this.pending.get(id);
+    const pending = this.pending.get(id) ?? (entry.follow && !entry.followApplied ? FollowOrder(entry.follow) : null);
     const target = TargetOf(entry.order);
     const targetEntry = target ? this.ships.get(target) : null;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
+    const slot = entry.follow ? this.Slot(entry, entry.follow) : null;
     return {
       position: [Round(ball.x, 100), Round(ball.y, 100), Round(ball.z, 100)],
       velocity: [Round(ball.vx, 100), Round(ball.vy, 100), Round(ball.vz, 100)],
@@ -406,8 +520,115 @@ export class DestinyWorld {
       ...(pending ? { pendingOrder: pending } : {}),
       ...(entry.note ? { orderNote: entry.note } : {}),
       ...(targetBall ? { targetDistance: Round(Math.hypot(ball.x - targetBall.x, ball.y - targetBall.y, ball.z - targetBall.z) - ball.radius - targetBall.radius, 1) } : {}),
+      heading: [Round(Wrap(ball.mNewYaw / DEGREES, 0), 10) % 360, Round(Wrap(ball.mNewPitch / DEGREES, -180), 10)],
+      ...(slot ? { slotError: Round(slot.error, 1) } : {}),
       physics: entry.physics
     };
+  }
+
+  /**
+   * Re-aims every following ship at its formation slot on both parks, or settles it there (section Following above).
+   */
+  private Steer(): void {
+    for (const entry of this.ships.values()) {
+      const follow = entry.follow;
+      if (!follow) continue;
+      const missing = this.ships.has(follow.frame) ? `anchor "${follow.anchor}"` : `fleet commander "${follow.frame}"`;
+      const slot = this.ships.has(follow.anchor) && this.ships.has(follow.frame) ? this.Slot(entry, follow) : null;
+      if (!slot) {
+        entry.follow = null;
+        this.Halt(entry, `stopped: ${missing} was removed`);
+        continue;
+      }
+      if (!entry.followApplied) {
+        entry.order = FollowOrder(follow);
+        entry.note = null;
+        entry.followApplied = true;
+      }
+      const tolerance = toFollowTolerance({ slotRange: follow.slotRange, anchorSpeed: slot.anchorSpeed });
+      const anchorAtRest = slot.anchorSpeed < SETTLE_SPEED;
+      if (entry.settled && anchorAtRest && slot.error <= SETTLE_HOLD * tolerance) continue;
+      let mode: number;
+      if (anchorAtRest && slot.error <= tolerance && slot.memberSpeed < SETTLE_SPEED) {
+        this.Settle(entry, slot.forward);
+        mode = CjsDestinyBall.DSTBALLMODE.DSTBALL_STOP;
+      } else {
+        entry.settled = false;
+        this.Both((park) => {
+          park.SetSpeedFraction(entry.ballId, follow.speed);
+          park.GotoPoint(entry.ballId, ...slot.goto);
+        });
+        mode = CjsDestinyBall.DSTBALLMODE.DSTBALL_GOTO;
+      }
+      if (this.master.GetBall(entry.ballId)?.mode !== mode || this.replica.GetBall(entry.ballId)?.mode !== mode) {
+        console.warn(`ship ${entry.id}: Destiny refused the formation goto, so it stops`);
+        entry.follow = null;
+        entry.settled = false;
+        this.Halt(entry, 'stopped: Destiny refused the formation goto');
+      }
+    }
+  }
+
+  /**
+   * A following ship's slot, from the master park.
+   *
+   * @param entry - The ship.
+   * @param follow - What it follows.
+   * @returns The slot point, the goto point and the slot error; null when its anchor or frame has no ball.
+   */
+  private Slot(entry: ShipEntry, follow: ShipFollow): Maybe<FormationGotoResult> {
+    const ball = this.master.GetBall(entry.ballId);
+    const anchorEntry = this.ships.get(follow.anchor);
+    const frameEntry = this.ships.get(follow.frame);
+    const anchor = anchorEntry ? this.master.GetBall(anchorEntry.ballId) : null;
+    const frame = frameEntry ? this.master.GetBall(frameEntry.ballId) : null;
+    if (!ball || !anchor || !frame) return null;
+    return FormationGoto({
+      anchor: { position: [anchor.x, anchor.y, anchor.z], velocity: [anchor.vx, anchor.vy, anchor.vz], radius: anchor.radius },
+      member: { position: [ball.x, ball.y, ball.z], velocity: [ball.vx, ball.vy, ball.vz], radius: ball.radius, maxVelocity: ball.maxVelocity, speed: follow.speed },
+      frame: FleetFrame(frame.mNewYaw, frame.mNewPitch),
+      direction: follow.direction,
+      slotRange: follow.slotRange,
+      tickSeconds: this.master.tickInterval / 1000
+    });
+  }
+
+  /**
+   * Settles a following ship in its slot on both parks: it stops, and Destiny's legacy heading then turns it smoothly
+   * to the fleet heading. The goto point is aimed along its current heading before the velocity is zeroed, because
+   * zero velocity snaps the heading to the goto point; only then is it aimed along the fleet heading.
+   *
+   * @param entry - The ship.
+   * @param forward - The fleet's forward vector.
+   */
+  private Settle(entry: ShipEntry, forward: ArrayLike<number>): void {
+    const ball = this.master.GetBall(entry.ballId);
+    if (!ball) return;
+    const position = [ball.x, ball.y, ball.z];
+    const current = HeadingForward(ball.mNewYaw, ball.mNewPitch);
+    this.Both((park) => {
+      park.Stop(entry.ballId);
+      this.AimAlong(park, entry.ballId, position, current);
+      park.SetBallVelocity(entry.ballId, 0, 0, 0);
+      this.AimAlong(park, entry.ballId, position, forward);
+    });
+    entry.settled = true;
+  }
+
+  /**
+   * Puts a ball's goto point far along a forward vector, so its legacy heading faces that way.
+   *
+   * @param park - The park.
+   * @param ballId - The ball.
+   * @param from - The ball's position.
+   * @param forward - A unit vector.
+   * @returns The goto point.
+   */
+  private AimAlong(park: CjsBallparkController, ballId: number, from: ArrayLike<number>, forward: ArrayLike<number>): SceneVector {
+    const goto: SceneVector = [from[0] + forward[0] * GOTO_DISTANCE, from[1] + forward[1] * GOTO_DISTANCE, from[2] + forward[2] * GOTO_DISTANCE];
+    const ball = park.GetBall(ballId);
+    if (ball) [ball.gotoX, ball.gotoY, ball.gotoZ] = goto;
+    return goto;
   }
 
   /**
@@ -473,10 +694,12 @@ export class DestinyWorld {
    * Applies a change to the master, then the replica.
    *
    * @param change - Called with each park.
+   * @returns What the change returned for the master.
    */
-  private Both(change: (park: CjsBallparkController) => void): void {
-    change(this.master);
+  private Both<T>(change: (park: CjsBallparkController) => T): T {
+    const result = change(this.master);
     change(this.replica);
+    return result;
   }
 }
 
@@ -542,6 +765,27 @@ function RequireValidPhysics(physics: ShipPhysics): void {
  */
 function TargetOf(order: ShipOrder): Maybe<string> {
   return isTargetShipOrder(order) ? order.target : null;
+}
+
+/**
+ * The keep-at-range order a following ship reports: on its anchor at the anchor's range.
+ *
+ * @param follow - What it follows.
+ * @returns The order.
+ */
+function FollowOrder(follow: ShipFollow): ShipOrder {
+  return { type: 'keep-at-range', target: follow.anchor, range: follow.range, speed: follow.speed };
+}
+
+/**
+ * An angle in degrees wrapped to one turn from `from`.
+ *
+ * @param degrees - The angle.
+ * @param from - The lower bound, inclusive.
+ * @returns The angle in [from, from + 360).
+ */
+function Wrap(degrees: number, from: number): number {
+  return ((((degrees - from) % 360) + 360) % 360) + from;
 }
 
 function Round(value: number, scale: number): number {

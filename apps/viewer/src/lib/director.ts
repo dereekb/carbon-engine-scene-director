@@ -13,16 +13,23 @@
  * its `stats` and the max-skills pilot, retuned when the hub answers. Removing
  * a ship stops its followers.
  *
+ * Fleets fly (Follow the FC, following.ts): every fleet member but the FC
+ * keeps range on its resolved anchor in its formation slot, re-planned at the
+ * end of every edit and whenever a radius settles. Ordering the FC moves its
+ * fleet. An order on a member takes it out of formation until a rejoin order,
+ * a fleet edit that regroups it, or a load.
+ *
  * Without a renderer (no WebGPU), the director still validates documents and
  * builds each ship's SOF values, so DNA mistakes surface; it just has nothing
  * to draw into.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrder, SceneError, toFleetMemberships, toFleetReports, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipFleetMembership, type ShipOrder } from '@scene-director/scene';
+import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrderRequest, SceneError, toFleetMemberships, toFleetReports, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipFleetMembership, type ShipOrderRequest } from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, type HullStatsAnswer, type ShipFlight } from './flight';
+import { FleetFollowing, type ShipFollowingReport } from './following';
 import { EncodePng, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ErrorText } from './resources';
@@ -100,11 +107,15 @@ interface ApplyOptions {
 
 export interface OrderShipResult {
   readonly id: string;
-  readonly order: ShipOrder;
+  readonly order: ShipOrderRequest;
   /**
    * The Destiny tick when the order was given; it applies at the next one.
    */
   readonly tick: number;
+  /**
+   * `detached` when the order took a fleet member out of formation; its following report for a rejoin.
+   */
+  readonly following?: 'detached' | ShipFollowingReport;
 }
 
 interface WorldSphere {
@@ -127,6 +138,10 @@ export class Director {
   readonly world: DestinyWorld;
   readonly clock: SceneClock;
   readonly live = new Map<string, LiveShip>();
+  /**
+   * The fleets' following (Follow the FC).
+   */
+  readonly following: FleetFollowing;
   scene: Maybe<SceneDocument> = null;
   private readonly onChange: () => void;
   private readonly hullStats: HullStatsLookup;
@@ -144,6 +159,7 @@ export class Director {
     this.world = world;
     this.clock = clock;
     this.onChange = onChange;
+    this.following = new FleetFollowing({ world, scene: () => this.scene, radiusOf: (id) => this.FormationRadius(id) });
   }
 
   /**
@@ -173,19 +189,23 @@ export class Director {
   }
 
   /**
-   * Gives a ship a live movement order; it applies at the next Destiny tick and is not saved.
+   * Gives a ship a live movement order; it applies at the next Destiny tick and is not saved. A movement order on a
+   * fleet member (not the FC) takes it out of formation; rejoin puts it back.
    *
    * @param id - The ship id.
    * @param order - The order as JSON; a target must be another ship in the scene.
-   * @returns The normalized order and the tick it was given at.
-   * @throws {Error} When no ship has the id, or the order is invalid (a SceneError with every problem).
+   * @returns The normalized order, the tick it was given at, and what it did to the ship's following.
+   * @throws {Error} When no ship has the id, the order is invalid (a SceneError with every problem), or a rejoin is
+   *   for the FC or a ship in no fleet.
    */
   OrderShip(id: unknown, order: unknown): OrderShipResult {
     const ships = new Set((this.scene?.ships ?? []).map((doc) => doc.id));
     if (typeof id !== 'string' || !ships.has(id)) throw new Error(`no ship "${String(id)}"`);
-    const normalized = normalizeShipOrder(order, { ships, self: id });
+    const normalized = normalizeShipOrderRequest(order, { ships, self: id });
+    if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
     if (!this.world.Order(id, normalized)) throw new Error(`ship "${id}" or its target has no Destiny ball`);
-    return { id, order: normalized, tick: this.world.tick };
+    const detached = this.following.Detach(id);
+    return { id, order: normalized, tick: this.world.tick, ...(detached ? { following: 'detached' as const } : {}) };
   }
 
   async Save(name: unknown): Promise<{ saved: string; ships: number }> {
@@ -226,7 +246,7 @@ export class Director {
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
       distances,
-      fleets: this.scene ? toFleetReports(this.scene) : []
+      fleets: this.scene ? toFleetReports(this.scene).map((report) => ({ ...report, formation: this.following.FleetReport(report) })) : []
     };
   }
 
@@ -303,6 +323,7 @@ export class Director {
     }
     const retuned = restart ? scene.ships : [...diff.added, ...diff.rebuilt, ...diff.retuned];
     for (const id of new Set(retuned.map((doc) => doc.id))) this.Retune(id);
+    stopped.push(...this.following.Reconcile({ regrouped: diff.regrouped.map((doc) => doc.id), restart }));
     await this.store.Put(CURRENT_KEY, scene);
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
     this.onChange();
@@ -346,6 +367,8 @@ export class Director {
       entry.error = ErrorText(error);
       console.error(`ship ${doc.id} (${doc.dna}) failed: ${entry.error}`);
     } finally {
+      // The build settles the ship's radius when the hub has no SDE radius for it.
+      this.following.Reconcile();
       this.onChange();
     }
   }
@@ -367,6 +390,7 @@ export class Director {
       const current = this.scene?.ships.find((ship) => ship.id === id);
       if (!current || HullStatsKey(current) !== key) return;
       this.SetFlight(current, answer);
+      this.following.Reconcile();
       this.onChange();
     });
   }
@@ -403,6 +427,21 @@ export class Director {
       console.error(`ship ${doc.id}: no flight numbers (${ErrorText(error)}); it keeps its previous physics`);
     }
     return flight;
+  }
+
+  /**
+   * A ship's ball radius once it is settled, for its fleet's formation: the hub has answered its /ship-stats lookup,
+   * and either gave the hull's EVE radius or its SOF build has finished (its bounding radius then stands in).
+   *
+   * @param id - The ship id.
+   * @returns The radius in metres; null while it may still change.
+   */
+  private FormationRadius(id: string): Maybe<number> {
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    const answer = doc ? this.hullStats.Cached(doc) : null;
+    const status = this.live.get(id)?.status;
+    const settled = Boolean(answer) && ((answer?.hull?.published.radius ?? 0) > 0 || status === 'validated' || status === 'ready' || status === 'failed');
+    return settled ? (this.flights.get(id)?.radius ?? this.world.Motion(id)?.physics.radius ?? null) : null;
   }
 
   private Retire(id: string): void {
@@ -449,10 +488,11 @@ export class Director {
     return sphere;
   }
 
-  private ShipState(doc: SceneShip, membership: Maybe<ShipFleetMembership>): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number } & Partial<ShipFleetMembership> & Partial<ShipMotion> {
+  private ShipState(doc: SceneShip, membership: Maybe<ShipFleetMembership>): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number; following?: ShipFollowingReport } & Partial<ShipFleetMembership> & Partial<ShipMotion> {
     const sphere = this.WorldSphere(doc);
     const motion = this.world.Motion(doc.id);
-    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion, physics: this.flights.get(doc.id) ?? motion?.physics };
+    const following = this.following.Report(doc.id);
+    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, ...(following ? { following } : {}), worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion, physics: this.flights.get(doc.id) ?? motion?.physics };
   }
 
   private ShipReport(id: string): ShipReport {

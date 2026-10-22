@@ -3,14 +3,28 @@ import { SceneError, type SceneVector } from './scene';
 /**
  * Live movement orders for a ship's Destiny ball (the `order_ship` tool): fly a direction, fly to a world point
  * (`goto`), approach a target ship, keep at range on it, orbit it, or stop. Ranges are metres surface to surface
- * between the two ships' Destiny balls (EVE's radii), exactly what Destiny takes. The orders are not part of the
- * document yet; the reserved ship `orders` field will reuse this normalizer, passing a {@link ShipOrderContext} with the
- * scene's ship ids, the ordered ship and its own message prefix.
+ * between the two ships' Destiny balls (EVE's radii), exactly what Destiny takes. `order_ship` also takes the fleet
+ * order `rejoin` (a fleet member that left its formation anchors up again): {@link normalizeShipOrderRequest}. The
+ * orders are not part of the document yet; the reserved ship `orders` field will reuse normalizeShipOrderRequest
+ * (so a script can rejoin), passing a {@link ShipOrderContext} with the scene's ship ids, the ordered ship and its own
+ * message prefix.
  */
 
 export const SHIP_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'stop'] as const;
 
 export type ShipOrderType = (typeof SHIP_ORDER_TYPES)[number];
+
+/**
+ * Fleet orders order_ship takes beside the movement orders.
+ */
+export const FLEET_SHIP_ORDER_TYPES = ['rejoin'] as const;
+
+/**
+ * Every order type order_ship takes.
+ */
+export const SHIP_ORDER_REQUEST_TYPES = [...SHIP_ORDER_TYPES, ...FLEET_SHIP_ORDER_TYPES] as const;
+
+export type ShipOrderRequestType = (typeof SHIP_ORDER_REQUEST_TYPES)[number];
 
 /**
  * The orders that fly relative to another ship.
@@ -75,8 +89,9 @@ export interface ApproachShipOrder {
 }
 
 /**
- * Hold a range on a target ship, following it (Destiny's FollowBall at the range). Follow the FC issues this on a
- * member's anchor; a formation offset will be one more optional field.
+ * Hold a range on a target ship, following it (Destiny's FollowBall at the range). A fleet member following its fleet
+ * reports itself as this order on its anchor at the anchor's range, flown by formation steering (a goto on its slot
+ * each tick) rather than FollowBall.
  */
 export interface KeepAtRangeShipOrder {
   readonly type: 'keep-at-range';
@@ -123,6 +138,18 @@ export interface StopShipOrder {
 export type TargetShipOrder = ApproachShipOrder | KeepAtRangeShipOrder | OrbitShipOrder;
 
 export type ShipOrder = DirectionShipOrder | GotoShipOrder | TargetShipOrder | StopShipOrder;
+
+/**
+ * A fleet member that left its formation (an explicit order) anchors up on its fleet again.
+ */
+export interface RejoinShipOrder {
+  readonly type: 'rejoin';
+}
+
+/**
+ * What order_ship takes: a movement order for the ship's ball, or a fleet order.
+ */
+export type ShipOrderRequest = ShipOrder | RejoinShipOrder;
 
 /**
  * What the normalizer checks an order against.
@@ -250,4 +277,28 @@ export function normalizeShipOrder(input: unknown, context: ShipOrderContext = {
   const order = readOrder(reader, orderType, context);
   if (reader.problems.length) throw new SceneError(reader.problems);
   return order;
+}
+
+/**
+ * Validates what order_ship takes: a movement order (normalizeShipOrder) or the fleet order `rejoin`, which has no
+ * fields.
+ *
+ * @param input - The order as JSON.
+ * @param context - The scene's ship ids, the ordered ship and the message prefix.
+ * @returns The order with its defaults filled in and its strings trimmed.
+ * @throws {SceneError} With every problem found; an unknown type lists SHIP_ORDER_REQUEST_TYPES.
+ */
+export function normalizeShipOrderRequest(input: unknown, context: ShipOrderContext = {}): ShipOrderRequest {
+  const where = context.where ?? 'order';
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new SceneError([`${where} must be an object`]);
+  const record = input as Record<string, unknown>;
+  const type = record['type'];
+  if (!SHIP_ORDER_REQUEST_TYPES.includes(type as ShipOrderRequestType)) throw new SceneError([`${where}.type must be one of ${SHIP_ORDER_REQUEST_TYPES.join(', ')}`]);
+  if (type !== 'rejoin') return normalizeShipOrder(input, context);
+
+  const problems = Object.keys(record)
+    .filter((key) => key !== 'type')
+    .map((key) => `${where}.${key} is not a rejoin order field`);
+  if (problems.length) throw new SceneError(problems);
+  return { type: 'rejoin' };
 }

@@ -54,6 +54,13 @@ declare module '@carbonenginejs/server/destiny' {
      */
     readonly followRange: number;
     /**
+     * The legacy heading in radians, yaw atan2(x, z) and pitch -asin(y / r) (DocumentRotation's convention), that
+     * Destiny turns each tick toward the velocity, biased toward the goto point, or toward the goto point at exactly
+     * zero velocity. Damped by mass; the yaw is kept continuous, so it is not wrapped to one turn.
+     */
+    readonly mNewYaw: number;
+    readonly mNewPitch: number;
+    /**
      * The point a legacy-oriented ball heads for, and faces while it is at rest.
      */
     gotoX: number;

@@ -1,0 +1,102 @@
+/**
+ * Follow the FC, the runtime-free half: what each fleet member flies (its resolved anchor and its formation slot)
+ * and how far from its slot it may be and still count as in formation. The viewer's FleetFollowing turns these
+ * plans into Destiny steering.
+ */
+
+import type { SceneVector } from '../scene';
+import type { SceneFleet } from './fleet';
+import { type FleetFormationSlot, toFleetFormationSlots } from './formation';
+import { type FleetAnchor, toFleetAnchors } from './membership';
+
+/**
+ * What a fleet member flies while following its fleet.
+ */
+export interface FleetFollowPlan {
+  readonly fleet: string;
+  /**
+   * The fleet commander: its heading frames every slot.
+   */
+  readonly commander: string;
+  /**
+   * Exactly toFleetMemberships' anchor for the ship.
+   */
+  readonly anchor: FleetAnchor;
+  /**
+   * Its formation slot; `slot.anchor === anchor.ship`.
+   */
+  readonly slot: FleetFormationSlot;
+}
+
+export interface FleetFollowPlansInput {
+  readonly fleet: SceneFleet;
+  /**
+   * The FC's document position: the layout runs there, so a fleet laid out there gets its own slots back.
+   */
+  readonly origin: SceneVector;
+  /**
+   * The FC's document yaw, degrees.
+   */
+  readonly heading: number;
+  /**
+   * Each ship's radius in metres (its ball radius).
+   */
+  readonly radiusOf: (ship: string) => number;
+}
+
+/**
+ * Every non-FC fleet ship's follow plan: its anchor from toFleetAnchors (never re-derived) and its slot from
+ * toFleetFormationSlots.
+ *
+ * @param input - The fleet, the FC's document position and yaw, and each ship's radius.
+ * @returns Each plan keyed by ship id, in toFleetAnchors' order; the FC has none.
+ * @throws {Error} As layoutFleetFormation does, which never happens for a normalized fleet within EVE's fleet size.
+ */
+export function toFleetFollowPlans(input: FleetFollowPlansInput): Map<string, FleetFollowPlan> {
+  const { fleet } = input;
+  const slots = toFleetFormationSlots(input);
+  const plans = new Map<string, FleetFollowPlan>();
+  for (const [ship, membership] of toFleetAnchors(fleet)) {
+    const slot = slots.get(ship);
+    if (membership.anchor && slot) plans.set(ship, { fleet: fleet.id, commander: fleet.commander, anchor: membership.anchor, slot });
+  }
+  return plans;
+}
+
+/**
+ * Metres a following ship may sit from its slot and still count as in formation, at least.
+ */
+export const FOLLOW_TOLERANCE = 200;
+
+/**
+ * The share of the slot range added to FOLLOW_TOLERANCE: a far slot swings further on a turn.
+ */
+export const FOLLOW_TOLERANCE_FRACTION = 0.05;
+
+/**
+ * Seconds of the anchor's speed added to FOLLOW_TOLERANCE: steering re-aims once a tick, so a member as fast as its
+ * anchor sits about two ticks back at full speed.
+ */
+export const FOLLOW_TOLERANCE_SECONDS = 2.5;
+
+export interface FollowToleranceInput {
+  /**
+   * The slot's range, metres surface to surface.
+   */
+  readonly slotRange: number;
+  /**
+   * The anchor's speed, m/s.
+   */
+  readonly anchorSpeed: number;
+}
+
+/**
+ * How far from its slot a following ship may be and still count as in formation.
+ *
+ * @param input - The slot range and the anchor's speed.
+ * @returns Metres: FOLLOW_TOLERANCE, plus FOLLOW_TOLERANCE_FRACTION of the slot range, plus FOLLOW_TOLERANCE_SECONDS of
+ *   the anchor's speed.
+ */
+export function toFollowTolerance(input: FollowToleranceInput): number {
+  return FOLLOW_TOLERANCE + FOLLOW_TOLERANCE_FRACTION * Math.max(0, input.slotRange) + FOLLOW_TOLERANCE_SECONDS * Math.max(0, input.anchorSpeed);
+}

@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { formationSpacing, type FleetReport, type ShipFleetMembership } from '@scene-director/scene';
+import { formationSpacing, toFollowTolerance, type FleetReport, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -77,6 +77,28 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly orderNote?: string;
   readonly targetDistance?: number;
   readonly physics?: ShipPhysicsState;
+  readonly heading?: [number, number];
+  readonly slotError?: number;
+  readonly following?: ShipFollowingState;
+}
+
+interface ShipFollowingState {
+  readonly state: string;
+  readonly anchor: string;
+  readonly range: number;
+  readonly slot?: { readonly range: number; readonly direction: SceneVector };
+  readonly distance?: number;
+  readonly slotError?: number;
+}
+
+interface FleetFormationState {
+  readonly ready: boolean;
+  readonly heading: [number, number];
+  readonly following: number;
+  readonly inFormation: number;
+  readonly catchingUp: number;
+  readonly detached: number;
+  readonly waiting: number;
 }
 
 interface ViewerState {
@@ -85,13 +107,13 @@ interface ViewerState {
   readonly simulation: { readonly tick: number; readonly seconds: number };
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: FleetReport[];
+  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState })[];
 }
 
 interface AddedFleetResult extends Omit<SceneResult, 'scene'> {
   readonly added: { readonly fleet: string; readonly commander: string; readonly ships: string[] };
   readonly hulls: { readonly hull?: string; readonly radius: number; readonly dnaFrom: string; readonly radiusFrom: string }[];
-  readonly scene: { readonly name: string; readonly ships: { readonly id: string; readonly type?: string }[] };
+  readonly scene: { readonly name: string; readonly ships: { readonly id: string; readonly type?: string; readonly position: SceneVector }[] };
 }
 
 interface LogEntry {
@@ -165,6 +187,18 @@ function ShipIn(state: ViewerState, id: string): ShipState {
 }
 
 /**
+ * The smallest angle between two yaws.
+ *
+ * @param a - Degrees.
+ * @param b - Degrees.
+ * @returns Degrees in [0, 180].
+ */
+function YawGap(a: number, b: number): number {
+  const gap = Math.abs(a - b) % 360;
+  return Math.min(gap, 360 - gap);
+}
+
+/**
  * Waits.
  *
  * @param ms - Milliseconds.
@@ -189,6 +223,43 @@ const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> =
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'] });
 const results: string[] = [];
 let failed = 0;
+
+/**
+ * Polls get_state every 500 ms until a test passes on `streak` polls in a row.
+ *
+ * @param what - What is awaited, for the failure.
+ * @param seconds - The budget.
+ * @param test - Returns null when the state passes, else what is wrong.
+ * @param streak - Consecutive passing polls needed.
+ * @returns The last state polled.
+ * @throws {Error} With the last problem when the budget runs out.
+ */
+async function WaitFor(what: string, seconds: number, test: (state: ViewerState) => Maybe<string>, streak = 1): Promise<ViewerState> {
+  const end = Date.now() + seconds * 1000;
+  let run = 0;
+  let last = 'never polled';
+  while (Date.now() < end) {
+    const state = await call<ViewerState>('get_state');
+    const problem = test(state);
+    run = problem == null ? run + 1 : 0;
+    if (problem == null && run >= streak) return state;
+    if (problem != null) last = problem;
+    await Delay(500);
+  }
+  throw new Error(`${what} within ${seconds} s: ${last}`);
+}
+
+/**
+ * The first fleet member not in formation.
+ *
+ * @param state - The viewer state.
+ * @param ids - The members.
+ * @returns What is wrong with it, or null when every member is in formation.
+ */
+function NotInFormation(state: ViewerState, ids: readonly string[]): Maybe<string> {
+  const off = ids.map((id) => ShipIn(state, id)).find((ship) => ship.following?.state !== 'in-formation');
+  return off ? `${off.id} ${JSON.stringify(off.following)}` : null;
+}
 
 /**
  * Runs one check and records its outcome.
@@ -222,6 +293,10 @@ try {
   const rendering = state.renderer.available;
   const renderer = rendering ? state.renderer.adapter : `unavailable (${state.renderer.reason})`;
   results.push(`info  renderer: ${renderer}; EVE build ${status.build}`);
+  /**
+   * The TFIs fleet the composition check added, for the follow check after it.
+   */
+  let tfis: Maybe<AddedFleetResult> = null;
 
   await Check('get_state reports the environment only with a renderer', async () => {
     const { environment } = state;
@@ -553,14 +628,13 @@ try {
 
     const hullRadius = new Map(result.hulls.map((hull) => [hull.hull, hull.radius]));
     const radius = new Map(result.scene.ships.filter((ship) => ship.id.startsWith('tfis-')).map((ship) => [ship.id, hullRadius.get(ship.type) ?? 0]));
-    let ships: ShipState[] = [];
-    for (let attempt = 0; attempt < 50; attempt++) {
-      ships = (await call<ViewerState>('get_state')).ships.filter((ship) => radius.has(ship.id));
-      if (ships.length === 44 && ships.every((ship) => ship.position)) break;
-      await Delay(100);
-    }
-    Expect(ships.length === 44 && ships.every((ship) => ship.position), `${ships.length} tfis ships with positions`);
-    const at = new Map(ships.map((ship) => [ship.id, ship]));
+    const live = (await call<ViewerState>('get_state')).ships.filter((ship) => radius.has(ship.id));
+    Expect(live.length === 44, `${live.length} tfis ships in get_state`);
+    const at = new Map(live.map((ship) => [ship.id, ship]));
+    // Spacing is checked on the document positions: the fleet may already be following (and, without the SDE,
+    // re-forming to SOF radii) by the time the tool returns.
+    const ships = result.scene.ships.filter((ship) => radius.has(ship.id));
+    const placed = new Map(ships.map((ship) => [ship.id, ship.position]));
     const fc = at.get('tfis-fc');
     Expect(fc?.anchor === null && JSON.stringify(fc.commands) === '["fleet"]', `tfis-fc: ${JSON.stringify(fc)}`);
     const anchors: [string, object][] = [
@@ -570,7 +644,7 @@ try {
     ];
     for (const [id, anchor] of anchors) Expect(JSON.stringify(at.get(id)?.anchor) === JSON.stringify(anchor), `${id}: ${JSON.stringify(at.get(id)?.anchor)}`);
 
-    const origin = fc?.position ?? [0, 0, 0];
+    const origin = placed.get('tfis-fc') ?? [0, 0, 0];
     let smallestGap = Infinity;
     for (const [index, a] of ships.entries()) {
       Expect(origin[2] - (a.position?.[2] ?? 0) <= 1, `${a.id} is ahead of the FC: ${JSON.stringify(a.position)}`);
@@ -582,8 +656,33 @@ try {
         smallestGap = Math.min(smallestGap, apart - ra - rb);
       }
     }
-    const lead = at.get('tfis-logi-01')?.position ?? origin;
+    const lead = placed.get('tfis-logi-01') ?? origin;
+    tfis = result;
     return `44 ships, smallest surface gap ${smallestGap.toFixed(0)} m, logi lead ${Math.hypot(lead[0] - origin[0], lead[1] - origin[1], lead[2] - origin[2]).toFixed(0)} m off the FC`;
+  });
+
+  await Check('a fleet added in formation starts following without a scramble', async () => {
+    const added = tfis;
+    if (!added) throw new Skipped('the TFIs fleet was not added');
+    const hullRadius = new Map(added.hulls.map((hull) => [hull.hull, hull.radius]));
+    const members = added.added.ships.filter((id) => id !== added.added.commander);
+    const state = await WaitFor('the TFIs formation is ready', 60, (polled) => (polled.fleets.find((fleet) => fleet.id === 'tfis')?.formation?.ready ? null : JSON.stringify(polled.fleets.find((fleet) => fleet.id === 'tfis')?.formation)));
+    const typeOf = new Map(added.scene.ships.map((ship) => [ship.id, ship.type]));
+    const differs = added.added.ships.find((id) => ShipIn(state, id).physics?.radius !== hullRadius.get(typeOf.get(id)));
+    if (differs) throw new Skipped(`the page's radii differ from the composition's (${differs}: ${ShipIn(state, differs).physics?.radius} m): no SDE or another SDE build`);
+    const before = new Map(members.map((id) => [id, ShipIn(state, id).position ?? [0, 0, 0]]));
+    await Delay(5000);
+    const after = await call<ViewerState>('get_state');
+    let worst = 0;
+    for (const id of members) {
+      const ship = ShipIn(after, id);
+      const [x, y, z] = before.get(id) ?? [0, 0, 0];
+      const [ax, ay, az] = ship.position ?? [0, 0, 0];
+      const moved = Math.hypot(ax - x, ay - y, az - z);
+      worst = Math.max(worst, moved);
+      Expect(ship.following?.state === 'in-formation' && (ship.following.slotError ?? Infinity) <= 5 && moved <= 2 && (ship.speed ?? Infinity) < 0.5, `${id}: moved ${moved.toFixed(1)} m, ${JSON.stringify({ following: ship.following, speed: ship.speed, mode: ship.mode })}`);
+    }
+    return `${members.length} members in formation, the most moved ${worst.toFixed(2)} m`;
   });
 
   await Check('compositions save, list, add by name with a unique id, and delete', async () => {
@@ -609,6 +708,139 @@ try {
     Expect(hull?.dnaFrom === 'sde' && hull.radiusFrom === 'sde' && added.added.fleet === 'named', JSON.stringify(added.hulls));
     await call('patch_scene', { operations: [{ op: 'remove_fleet', fleet: 'named', withShips: true }] });
     return `Rifter radius ${hull.radius} m`;
+  });
+
+  // Follow the FC on a self-contained scene: every ship pins its stats, so these run with or without the SDE.
+  const RIFTER_STATS = { mass: 1_067_000, agility: 3.2, maxVelocity: 320, signatureRadius: 35 };
+  const FLW_MEMBERS = ['flw-d1', 'flw-d2', 'flw-d3', 'flw-d4', 'flw-l1', 'flw-l2'];
+  const followScene = {
+    name: 'verify-follow',
+    ships: [
+      { id: 'flw-fc', dna: 'af1_t1:amarrbase:amarr', stats: { mass: 1.2e6, agility: 3.2, maxVelocity: 160, signatureRadius: 35 } },
+      ...FLW_MEMBERS.map((id, index) => ({ id, dna: 'mf1_t1:minmatarbase:minmatar', stats: RIFTER_STATS, position: [2000 + 1400 * index, 300 * (index % 3), 2500 - 1200 * index], rotation: [45 * index, 0, 0] })),
+      { id: 'loner', dna: 'mf1_t1:minmatarbase:minmatar', stats: RIFTER_STATS, position: [-5000, 0, 0] }
+    ],
+    fleets: [
+      {
+        id: 'flw',
+        commander: 'flw-fc',
+        wings: [
+          {
+            id: 'w',
+            squads: [
+              { id: 'dps', role: 'dps', members: ['flw-d1', 'flw-d2', 'flw-d3', 'flw-d4'] },
+              { id: 'logi', role: 'logi', members: ['flw-l1', 'flw-l2'], anchor: { ship: 'flw-l1', range: 4000 } }
+            ]
+          }
+        ]
+      }
+    ]
+  };
+  const fleetFormation = (state: ViewerState): Maybe<FleetFormationState> => state.fleets.find((fleet) => fleet.id === 'flw')?.formation;
+
+  await Check('fleet members form up on their anchors', async () => {
+    await call('load_scene', { scene: followScene });
+    await WaitFor('the formation is ready', 30, (state) => (fleetFormation(state)?.ready ? null : JSON.stringify(fleetFormation(state))));
+    const state = await WaitFor(
+      'every member in formation at its slot range',
+      90,
+      (polled) => {
+        const off = NotInFormation(polled, FLW_MEMBERS);
+        if (off) return off;
+        for (const id of FLW_MEMBERS) {
+          const { following } = ShipIn(polled, id);
+          const slotRange = following?.slot?.range ?? 0;
+          const tolerance = toFollowTolerance({ slotRange, anchorSpeed: ShipIn(polled, following?.anchor ?? '').speed ?? 0 });
+          if (Math.abs((following?.distance ?? Infinity) - slotRange) > tolerance) return `${id} ${following?.distance} m from its anchor, slot ${slotRange} m`;
+        }
+        return null;
+      },
+      3
+    );
+    return `${fleetFormation(state)?.inFormation} in formation, flw-l1 ${ShipIn(state, 'flw-l1').following?.distance} m off the FC`;
+  });
+
+  await Check('the fleet follows a moving FC', async () => {
+    await call('order_ship', { id: 'flw-fc', order: { type: 'direction', direction: [1, 0, 0], speed: 0.5 } });
+    const start = ShipIn(await call<ViewerState>('get_state'), 'flw-fc').position ?? [0, 0, 0];
+    const state = await WaitFor(
+      'the FC 3 km on, its members in formation, facing and flying with it',
+      90,
+      (polled) => {
+        const fc = ShipIn(polled, 'flw-fc');
+        const [x, y, z] = fc.position ?? start;
+        if (Math.hypot(x - start[0], y - start[1], z - start[2]) < 3000) return `the FC has moved ${Math.hypot(x - start[0], y - start[1], z - start[2]).toFixed(0)} m`;
+        const off = NotInFormation(polled, FLW_MEMBERS);
+        if (off) return off;
+        for (const id of FLW_MEMBERS) {
+          const ship = ShipIn(polled, id);
+          if (YawGap(ship.heading?.[0] ?? 0, 90) > 5) return `${id} heading ${JSON.stringify(ship.heading)}`;
+          if (Math.abs((ship.speed ?? 0) - (fc.speed ?? 0)) > 0.15 * (fc.speed ?? 0)) return `${id} at ${ship.speed} m/s, the FC at ${fc.speed} m/s`;
+        }
+        return null;
+      },
+      3
+    );
+    return `FC at ${ShipIn(state, 'flw-fc').speed} m/s, ${fleetFormation(state)?.inFormation} in formation`;
+  });
+
+  await Check('re-anchoring breaks a squad off and brings it back', async () => {
+    const out = await call<SceneResult>('patch_scene', { operations: [{ op: 'set_anchor', fleet: 'flw', squad: 'logi', anchor: { range: 12000 } }] });
+    Expect(out.changes['regrouped'] === 1, JSON.stringify(out.changes));
+    const off = await WaitFor('flw-l1 in formation 12 km off', 60, (state) => {
+      const { following } = ShipIn(state, 'flw-l1');
+      return following?.range === 12000 && following.state === 'in-formation' ? null : JSON.stringify(following);
+    });
+    await call('patch_scene', { operations: [{ op: 'set_anchor', fleet: 'flw', squad: 'logi', anchor: { range: 4000 } }] });
+    await WaitFor('flw-l1 back in formation 4 km off', 60, (state) => {
+      const { following } = ShipIn(state, 'flw-l1');
+      return following?.range === 4000 && following.state === 'in-formation' ? null : JSON.stringify(following);
+    });
+    return `out at ${ShipIn(off, 'flw-l1').following?.distance} m, then back at 4000 m`;
+  });
+
+  await Check('an order detaches a member and rejoin brings it back', async () => {
+    const stopped = await call<{ following?: unknown }>('order_ship', { id: 'flw-d1', order: { type: 'stop' } });
+    Expect(stopped.following === 'detached', JSON.stringify(stopped));
+    await WaitFor('flw-d1 detached and stopping', 10, (state) => {
+      const ship = ShipIn(state, 'flw-d1');
+      return ship.following?.state === 'detached' && ship.order?.type === 'stop' ? null : JSON.stringify({ following: ship.following, order: ship.order });
+    });
+    const rejoined = await call<{ following?: { anchor?: string } }>('order_ship', { id: 'flw-d1', order: { type: 'rejoin' } });
+    Expect(rejoined.following?.anchor === 'flw-fc', JSON.stringify(rejoined));
+    await WaitFor('flw-d1 back in formation', 60, (state) => NotInFormation(state, ['flw-d1']));
+    for (const [id, pattern] of [
+      ['flw-fc', /follows nobody/u],
+      ['loner', /in no fleet/u]
+    ] as const) {
+      const refusal = await call('order_ship', { id, order: { type: 'rejoin' } }).then(
+        () => 'accepted',
+        (error: unknown) => ErrorMessage(error)
+      );
+      Expect(pattern.test(refusal), `rejoin ${id}: ${refusal}`);
+    }
+    return 'detached, rejoined, and rejoin refused for the FC and a loner';
+  });
+
+  await Check('removing a squad lead falls its squad back onto the FC', async () => {
+    const removed = await call<SceneResult>('patch_scene', { operations: [{ op: 'remove_ship', id: 'flw-l1' }] });
+    Expect(removed.changes['stopped'] === 0, JSON.stringify(removed.changes));
+    await WaitFor('flw-l2 in formation 4 km off the FC', 60, (state) => {
+      const { following } = ShipIn(state, 'flw-l2');
+      return following?.anchor === 'flw-fc' && following.range === 4000 && following.state === 'in-formation' ? null : JSON.stringify(following);
+    });
+    return 'flw-l2 keeps 4000 m on flw-fc';
+  });
+
+  await Check("the fleet settles facing the FC's heading when it stops", async () => {
+    await call('order_ship', { id: 'flw-fc', order: { type: 'stop' } });
+    const members = FLW_MEMBERS.filter((id) => id !== 'flw-l1');
+    const state = await WaitFor('every member settled in formation, facing the FC', 120, (polled) => {
+      const yaw = ShipIn(polled, 'flw-fc').heading?.[0] ?? 0;
+      const off = members.map((id) => ShipIn(polled, id)).find((ship) => ship.mode !== 'stop' || ship.following?.state !== 'in-formation' || YawGap(ship.heading?.[0] ?? 0, yaw) > 5);
+      return off ? `${off.id} ${JSON.stringify({ mode: off.mode, heading: off.heading, following: off.following, fc: yaw })}` : null;
+    });
+    return `settled facing ${ShipIn(state, 'flw-fc').heading?.[0]} degrees`;
   });
 
   if (rendering) {

@@ -58,6 +58,31 @@ interface PlacedShip {
 }
 
 /**
+ * A ship's place in its fleet's formation, relative to its anchor: Follow the FC flies it.
+ */
+export interface FleetFormationSlot {
+  /**
+   * The ship the slot is relative to: the ship's anchor (toFleetAnchors).
+   */
+  readonly anchor: string;
+  /**
+   * Unit direction from the anchor in the fleet's heading frame: x right, y up, z forward.
+   */
+  readonly direction: SceneVector;
+  /**
+   * Metres, surface to surface: the anchor's range on the first shell, one formationSpacing further per outer shell.
+   */
+  readonly range: number;
+}
+
+interface PlacedFleetShip extends PlacedShip {
+  /**
+   * Null for the FC.
+   */
+  readonly slot: FleetFormationSlot | null;
+}
+
+/**
  * Lays a fleet out around its FC, at rest: every ship sits at its anchor's range (toFleetAnchors, surface to
  * surface) on a shell trailing the FC's heading, and no two ships sit closer than formationSpacing of their radii.
  * Deterministic: the same fleet, origin, heading and radii give the same positions.
@@ -66,8 +91,8 @@ interface PlacedShip {
  * sphere's trailing hemisphere, then shells one spacing further out. Positions are rounded to the metre, and the
  * spacing is checked on the rounded positions.
  *
- * Follow the FC should fly these slots (each ship's offset from its anchor, in the FC's heading frame) on top of
- * toFleetMemberships' anchors, so a fleet added in formation starts following without a scramble.
+ * Follow the FC flies these slots (toFleetFormationSlots: each ship's offset from its anchor, in the FC's heading
+ * frame) on top of toFleetMemberships' anchors, so a fleet added in formation starts following without a scramble.
  *
  * @param input - The fleet, the FC's position, the heading and each ship's radius.
  * @returns Each fleet ship's position, keyed by ship id: the FC first, then toFleetAnchors' order.
@@ -75,9 +100,29 @@ interface PlacedShip {
  *   normalized fleet within EVE's fleet size).
  */
 export function layoutFleetFormation(input: FleetFormationInput): Map<string, SceneVector> {
+  return new Map([...placeFleet(input)].map(([ship, { position }]) => [ship, position]));
+}
+
+/**
+ * Every ship's formation slot but the FC's: the same placement as layoutFleetFormation (same input, same shells, same
+ * fit checks on the same rounded positions), kept as a direction and a range instead of a position. A ship flown to
+ * `anchor + rotate(heading, direction) × (range + anchor radius + radius)` from where layoutFleetFormation put its
+ * anchor lands where layoutFleetFormation put it, to rounding.
+ *
+ * @param input - The fleet, the FC's position, the heading and each ship's radius.
+ * @returns Each non-FC fleet ship's slot, keyed by ship id, in layoutFleetFormation's order.
+ * @throws {Error} As layoutFleetFormation does.
+ */
+export function toFleetFormationSlots(input: FleetFormationInput): Map<string, FleetFormationSlot> {
+  const slots = new Map<string, FleetFormationSlot>();
+  for (const [ship, { slot }] of placeFleet(input)) if (slot) slots.set(ship, slot);
+  return slots;
+}
+
+function placeFleet(input: FleetFormationInput): Map<string, PlacedFleetShip> {
   const { fleet, origin, heading, radiusOf } = input;
   const anchors = toFleetAnchors(fleet);
-  const placed = new Map<string, PlacedShip>([[fleet.commander, { position: [...origin], radius: radiusOf(fleet.commander) }]]);
+  const placed = new Map<string, PlacedFleetShip>([[fleet.commander, { position: [...origin], radius: radiusOf(fleet.commander), slot: null }]]);
   const yaw = (heading * Math.PI) / 180;
   const frame: Frame = { forward: [Math.sin(yaw), 0, Math.cos(yaw)], right: [Math.cos(yaw), 0, -Math.sin(yaw)] };
 
@@ -87,14 +132,14 @@ export function layoutFleetFormation(input: FleetFormationInput): Map<string, Sc
     for (const ship of pending) {
       const anchor = anchors.get(ship)?.anchor ?? { ship: fleet.commander, range: DEFAULT_ANCHOR_UP_RANGE };
       const at = placed.get(anchor.ship);
-      if (at) placed.set(ship, placeShip({ ship, radius: radiusOf(ship), anchor: at, range: anchor.range, frame, placed }));
+      if (at) placed.set(ship, placeShip({ ship, radius: radiusOf(ship), anchor: { id: anchor.ship, ...at }, range: anchor.range, frame, placed }));
       else waiting.push(ship);
     }
     if (waiting.length === pending.length) throw new Error(`fleet "${fleet.id}": ship "${waiting[0]}" anchors on a ship that is never placed; every anchor chain must end at the FC`);
     pending = waiting;
   }
 
-  return new Map([...placed].map(([ship, { position }]) => [ship, position]));
+  return placed;
 }
 
 interface Frame {
@@ -105,20 +150,20 @@ interface Frame {
 interface PlaceShipInput {
   readonly ship: string;
   readonly radius: number;
-  readonly anchor: PlacedShip;
+  readonly anchor: PlacedShip & { readonly id: string };
   readonly range: number;
   readonly frame: Frame;
   readonly placed: ReadonlyMap<string, PlacedShip>;
 }
 
-function placeShip(input: PlaceShipInput): PlacedShip {
+function placeShip(input: PlaceShipInput): PlacedFleetShip {
   const { ship, radius, anchor, range, frame, placed } = input;
   const step = formationSpacing(radius, radius);
   for (let shell = 0; shell < MAX_FORMATION_SHELLS; shell += 1) {
     const distance = range + anchor.radius + radius + shell * step;
     for (const direction of shellDirections(distance, step)) {
       const position = toWorld({ anchor: anchor.position, distance, direction, frame });
-      if (fits(position, radius, placed)) return { position, radius };
+      if (fits(position, radius, placed)) return { position, radius, slot: { anchor: anchor.id, direction, range: range + shell * step } };
     }
   }
   throw new Error(`no room for ship "${ship}" within ${MAX_FORMATION_SHELLS} shells of its anchor`);

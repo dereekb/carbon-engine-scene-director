@@ -11,10 +11,11 @@ saved scenes. **Movement** (in progress): every ship flies as a Destiny ball
 from [`@carbonenginejs/server`](https://github.com/dereekb/carbon-engine-server),
 and `order_ship` gives live direction, goto, approach, keep-at-range, orbit and
 stop orders at each ship's in-game speed and agility. Warp, prop mods, fleet
-following, combat and timelines come in later phases; the document's `orders`
+commands, combat and timelines come in later phases; the document's `orders`
 and `timeline` fields stay reserved until then. **Fleets**: the document holds EVE
-fleet structure (fleet commander, wings, squads with a role and an anchor),
-stored and reported but not flown yet.
+fleet structure (fleet commander, wings, squads with a role and an anchor), and
+fleets fly: every member keeps range on its anchor in formation behind the FC
+(Follow the FC).
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -100,8 +101,8 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, physics), orders, distances, the simulation tick, fleet membership and the fleet tree |
-| `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, or stop (see Movement) |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, distances, the simulation tick, fleet membership, each member's `following` and the fleet tree with each fleet's `formation` |
+| `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
 
@@ -247,6 +248,7 @@ or not, and the ball drives the drawn ship's translation and rotation curves.
 | `keep-at-range` | `FollowBall` at the range | holds the range within about ±3 % on a stationary target; trails a moving one (about +33 % at 1 km behind a 130 m/s ship), matching its speed |
 | `orbit` | `Orbit` | settles about 5 % wide at 5 km; tight orbits on fast ships run much wider (500 m gives about 890 m), as in EVE |
 | `stop` | `Stop` | decelerates to a halt |
+| `rejoin` | (formation steering) | a fleet member that left its formation flies back to its slot (see Follow the FC); refused for the FC and a ship in no fleet |
 
 Every movement order takes `speed`, a fraction of max velocity in (0, 1]
 (default 1). Ranges are metres, surface to surface on the balls' radii. A target
@@ -301,9 +303,10 @@ A ship with all four `stats` needs no SDE.
 ## Fleets
 
 A scene's `fleets` are EVE fleets: a fleet commander (FC) commands the fleet, the
-fleet splits into wings, and each wing into squads. This is structure only: it
-is validated, edited by `patch_scene`, saved and reported by `get_state`, but
-ships do not follow it yet (Follow the FC builds on it).
+fleet splits into wings, and each wing into squads. It is validated, edited by
+`patch_scene`, saved and reported by `get_state`, and the page flies it: every
+member keeps range on its anchor in formation behind the FC (see Follow the FC
+below).
 
 ```json
 {
@@ -410,7 +413,69 @@ A fleet commander is never removed implicitly: give the fleet another commander
 keeps range on under the rules above; `null` for the FC). Ships in no fleet have
 none of these keys. `fleets` is the fleet tree with `ships` (every ship holding a
 position) and each squad's anchor resolved; `scene.fleets` counts them. An edit's
-`changes.regrouped` counts the ships whose membership changed.
+`changes.regrouped` counts the ships whose membership changed. Each member but
+the FC also reports `following` and each fleet `formation` (see Follow the FC).
+
+### Follow the FC
+
+Fleets fly in formation on their FC under Destiny, in the page
+(`fleets/following.ts` plans; the viewer's `following.ts`, `steering.ts` and
+`destiny.ts` fly them).
+
+- **Who follows.** Every ship whose resolved anchor is set: squad members and
+  wing commanders outside squads, never the FC. It keeps range on exactly the
+  anchor and range the rules above resolve; nothing is re-derived.
+- **Slots.** Each member flies the slot the at-rest formation gives it
+  (`toFleetFormationSlots`, the same placement as `layoutFleetFormation`): a
+  direction from its anchor in the fleet's heading frame and a range, the
+  anchor's range on the first shell, one spacing further per outer shell. Slots
+  are laid out at the FC's document placement with the ships' ball radii, so a
+  fleet added in formation gets its own positions back and nothing moves. A
+  chained member (a logi on its lead) slots on its own anchor, in the FC's frame.
+- **The frame** is the FC's heading: Destiny's legacy heading, without its
+  banking roll. The fleet's heading is the FC's heading.
+- **Steering.** At every 1 s tick each member's goto point is re-aimed at its
+  slot on both parks, led along its anchor's velocity by Destiny's goto lag, at
+  the member's own max velocity: faster ships close up and hold their slots,
+  ships as fast as the FC sit about two ticks back at full speed, slower ones
+  trail at their own speed. There is never a shared scripted speed.
+- **Settling.** A member whose anchor is at rest, within tolerance of its slot
+  and slower than 1 m/s settles: it stops (mode `stop`) and turns smoothly to the
+  fleet heading. It moves again when its anchor does, or when its slot drifts
+  past 1.5 × the tolerance.
+- **States.** `in-formation` while the slot error is within 200 m + 5 % of the
+  slot range + 2.5 s of the anchor's speed, else `catching-up`; `detached` after
+  an explicit order; `waiting` until the fleet's radii settle.
+- **Explicit orders.** Any `order_ship` movement order on a member takes it out
+  of formation: it flies that order and reports `detached`. It rejoins on
+  `{ "type": "rejoin" }`, on a fleet edit that regroups it, or on `load_scene` /
+  `open_scene`; a placement edit leaves it detached. The FC is never detached:
+  ordering it moves its fleet.
+- **Edits re-plan at once.** `set_anchor`, `update_squad`, `move_to_squad`,
+  `update_fleet` (a new FC), squad and wing edits, `remove_ship` and the anchor
+  fallback re-plan the members on the same edit: a logi squad set to its own
+  anchor and range breaks off, and rejoins when set back. A removed anchor's
+  followers re-anchor through the fallback and keep flying. Ships whose following
+  ends (they left the fleet, it was removed, or they became its FC) stop with an
+  `orderNote`, and `changes.stopped` counts them.
+- **Readiness.** A fleet is planned once every ship holding a position in it has
+  a settled radius: its `/ship-stats` answer gave the hull's EVE radius, or its
+  SOF build finished. With the SDE that takes a fraction of a second; without it
+  the fleet waits for its builds, then re-forms to the SOF radii.
+- **Placement.** A following member moved by `patch_scene` is put at rest there
+  and flies back to its slot; moving the FC makes the fleet chase it.
+- **`get_state`.** Each member reports `following`: `state`, `anchor`, `range`,
+  `slot` (`range` and `direction`), `distance` (metres, surface to surface, to
+  the anchor) and `slotError` (metres from its slot). Its `order` is
+  `keep-at-range` on the anchor, and its mode is `goto` while it steers and
+  `stop` once settled. Every ship reports `heading` (`[yaw, pitch]` degrees, the
+  authoritative heading). Each fleet reports `formation`: `ready`, `heading`
+  (the FC's), and how many members are `following`, `inFormation`,
+  `catchingUp`, `detached` and `waiting`.
+- **Limits.** No collisions: ships may pass through each other while re-forming.
+  Slots are rigid, so on an FC turn a far squad (logi at 30 km) swings across
+  the fleet and takes minutes to get back. Fleet-level orders, fleet warp and
+  prop-mod toggling are later entries.
 
 ## Fleet compositions
 
@@ -541,9 +606,9 @@ close-range armor doctrine of
 DNA and radius were checked against tools-core's SDE build 3632936. The Buffer
 Apostle and the secondary (L3ARN) fits are left out.
 
-**Not applied yet.** `propMod` (the Prop mods entry), the fits (Turrets), moving
-with the FC (Follow the FC) and arriving from warp (Fleet warp-in) are stored or
-planned, not played: added fleets sit at rest in formation.
+**Not applied yet.** `propMod` (the Prop mods entry), the fits (Turrets) and
+arriving from warp (Fleet warp-in) are stored or planned, not played: added
+fleets start at rest in formation and follow their FC from there.
 
 ## Development
 

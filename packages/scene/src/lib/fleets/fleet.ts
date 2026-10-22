@@ -1,7 +1,7 @@
 /**
  * EVE fleet structure in the scene document: a fleet commander (FC), wings, and squads with a role and an
- * anchor. It is document structure only: validated, edited, saved and reported, but nothing moves because
- * of it yet (Follow the FC flies it later).
+ * anchor. It is validated, edited, saved and reported here, and the page flies it (Follow the FC): every member
+ * but the FC keeps range on its resolved anchor in its formation slot (following.ts), behind the FC's heading.
  *
  * `team` is independent of fleets: a ship's team is the side it is on (hostility, for combat), while a
  * fleet is who commands it and where it flies. Fleets neither set nor check teams, and a fleet may mix them.

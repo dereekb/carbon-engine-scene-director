@@ -83,8 +83,8 @@ export interface SceneDocument {
   camera: SceneCamera;
   ships: SceneShip[];
   /**
-   * EVE fleets: a fleet commander, wings and squads with a role and an anchor (see fleets/fleet.ts). Stored and
-   * reported, not flown yet. Omitted when there are none.
+   * EVE fleets: a fleet commander, wings and squads with a role and an anchor (see fleets/fleet.ts). The page flies
+   * them: members keep range on their anchors in formation behind the FC. Omitted when there are none.
    */
   fleets?: SceneFleet[];
   /**

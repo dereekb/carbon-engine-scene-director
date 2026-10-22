@@ -1,8 +1,8 @@
 import { createRequire } from 'node:module';
-import type { SceneShip, SceneVector, ShipOrder } from '@scene-director/scene';
+import { toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder } from '@scene-director/scene';
 import { describe, expect, it, vi } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipMotion } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipFollow, type ShipMotion, type ShipPhysics } from './destiny';
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { CjsDestinyBall, CjsDestinyClientBall, quat, vec3, type Quat, type Vec3 } from './runtime-sim';
 
@@ -86,7 +86,7 @@ function RunTicks(harness: Harness, count: number, onTick?: () => void): void {
 
 function ExpectLockstep(world: DestinyWorld, balls: number): void {
   expect(world.master.currentTime).toBe(world.replica.currentTime);
-  const state = (ball: CjsDestinyBall | null): number[] => (ball ? [ball.x, ball.y, ball.z, ball.vx, ball.vy, ball.vz, ball.mode] : []);
+  const state = (ball: CjsDestinyBall | null): number[] => (ball ? [ball.x, ball.y, ball.z, ball.vx, ball.vy, ball.vz, ball.mode, ball.mNewYaw, ball.mNewPitch] : []);
   for (let id = FIRST_SHIP_BALL_ID; id < FIRST_SHIP_BALL_ID + balls; id++) expect(state(world.replica.GetBall(id))).toEqual(state(world.master.GetBall(id)));
 }
 
@@ -535,5 +535,221 @@ describe('DestinyWorld orders at Ship-stats speeds', () => {
     expect(motion.position).toEqual([1000, 0, 0]);
     expect(JSON.stringify(motion)).not.toMatch(/NaN|null/);
     expect([...motion.position, ...motion.velocity, motion.speed, motion.targetDistance].every(Number.isFinite)).toBe(true);
+  });
+});
+
+describe('DestinyWorld fleet following', () => {
+  const tfi = Fly(TFI);
+  const rifter = Fly(RIFTER);
+  const guardian = Fly(GUARDIAN);
+  const BATTLESHIP: ShipPhysics = { mass: 1e8, agility: 0.12, maxVelocity: 105, radius: 400 };
+  const DIRECTIONS: SceneVector[] = [
+    [0, 0, -1],
+    [0.6, 0, -0.8],
+    [-0.6, 0, -0.8],
+    [0, 0.6, -0.8]
+  ];
+
+  function SlotPoint(anchor: ArrayLike<number>, yawDegrees: number, direction: SceneVector, reach: number): SceneVector {
+    const yaw = (yawDegrees * Math.PI) / 180;
+    const [x, y, z] = direction;
+    return [anchor[0] + (x * Math.cos(yaw) + z * Math.sin(yaw)) * reach, anchor[1] + y * reach, anchor[2] + (-x * Math.sin(yaw) + z * Math.cos(yaw)) * reach];
+  }
+
+  function FollowOf(anchor: string, direction: SceneVector, slotRange = 1000, frame = 'fc'): ShipFollow {
+    return { anchor, range: slotRange, frame, direction, slotRange, speed: 1 };
+  }
+
+  interface FleetSetup {
+    readonly harness: Harness;
+    readonly world: DestinyWorld;
+    readonly members: string[];
+  }
+
+  /**
+   * An FC at the origin facing +Z and members on it at 1 km, in their slots or scattered (facing +X).
+   */
+  function MakeFleet(input: { readonly fc: ShipPhysics; readonly member: ShipPhysics; readonly count?: number; readonly scatter?: boolean }): FleetSetup {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('fc', [0, 0, 0]), input.fc);
+    const members = DIRECTIONS.slice(0, input.count ?? DIRECTIONS.length).map((direction, index) => {
+      const id = `m${index}`;
+      const at = input.scatter ? ([2000 + 1500 * index, 300 * index, 9000 - 2500 * index] as SceneVector) : SlotPoint([0, 0, 0], 0, direction, 1000 + input.fc.radius + input.member.radius);
+      world.AddShip(Ship(id, at, input.scatter ? [90, 0, 0] : [0, 0, 0]), input.member);
+      expect(world.Follow(id, FollowOf('fc', direction))).toBe(true);
+      return id;
+    });
+    return { harness, world, members };
+  }
+
+  function YawGap(a: number, b: number): number {
+    const gap = Math.abs(a - b) % 360;
+    return Math.min(gap, 360 - gap);
+  }
+
+  function Angle(a: ArrayLike<number>, b: ArrayLike<number>): number {
+    const dot = (a[0] * b[0] + a[1] * b[1] + a[2] * b[2]) / (Math.hypot(a[0], a[1], a[2]) * Math.hypot(b[0], b[1], b[2]));
+    return (Math.acos(Math.min(1, Math.max(-1, dot))) * 180) / Math.PI;
+  }
+
+  it('settles a member placed exactly in its slot on the first tick, and it holds still facing the fleet heading', () => {
+    const { harness, world, members } = MakeFleet({ fc: tfi, member: guardian });
+    const before = members.map((id) => RequireMotion(world, id).position);
+    RunTicks(harness, 1);
+    harness.Run(20);
+    for (const [index, id] of members.entries()) {
+      const motion = RequireMotion(world, id);
+      expect(motion).toMatchObject({ mode: 'stop', speed: 0, heading: [0, 0], order: { type: 'keep-at-range', target: 'fc', range: 1000, speed: 1 } });
+      for (let axis = 0; axis < 3; axis++) expect(Math.abs(motion.position[axis] - before[index][axis])).toBeLessThanOrEqual(0.01);
+      expect(motion.slotError).toBe(0);
+    }
+    ExpectLockstep(world, 5);
+  });
+
+  it('forms scattered members up on a stationary FC and turns them smoothly to its heading', () => {
+    const { harness, world, members } = MakeFleet({ fc: tfi, member: guardian, scatter: true });
+    for (const id of members) harness.Sample(id);
+    const forwards = new Map(members.map((id) => [id, Forward(harness.Sample(id).rotation)]));
+    let maxStep = 0;
+    let settledAt = Number.NaN;
+    const track = (): void => {
+      for (const id of members) {
+        const forward = Forward(harness.Sample(id).rotation);
+        // A fresh park's first ticks hold the drawn rotation (the ClientBall's two-tick delay has no history yet),
+        // whatever the ship flies; only steps after them count.
+        if (world.tick >= 4) maxStep = Math.max(maxStep, Angle(forward, forwards.get(id)!));
+        forwards.set(id, forward);
+      }
+    };
+    for (let second = 0; second < 120 && Number.isNaN(settledAt); second++) {
+      harness.Run(1, track);
+      if (members.every((id) => RequireMotion(world, id).mode === 'stop')) settledAt = second;
+    }
+    expect(settledAt).toBeLessThan(120);
+    harness.Run(20, track);
+    for (const id of members) {
+      expect(YawGap(RequireMotion(world, id).heading[0], 0), id).toBeLessThanOrEqual(1);
+      expect(Angle(Forward(harness.Sample(id).rotation), [0, 0, 1]), id).toBeLessThanOrEqual(2);
+      const motion = RequireMotion(world, id);
+      expect(motion.slotError).toBeLessThanOrEqual(toFollowTolerance({ slotRange: 1000, anchorSpeed: 0 }));
+    }
+    expect(maxStep).toBeLessThanOrEqual(2);
+    ExpectLockstep(world, 5);
+  });
+
+  it('keeps faster members in their slots behind an FC at full speed, while a slower one trails at its own speed', () => {
+    const { harness, world, members } = MakeFleet({ fc: tfi, member: rifter, count: 3 });
+    world.AddShip(Ship('bs', SlotPoint([0, 0, 0], 0, DIRECTIONS[3], 1000 + tfi.radius + BATTLESHIP.radius)), BATTLESHIP);
+    world.Follow('bs', FollowOf('fc', DIRECTIONS[3]));
+    world.Order('fc', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+    harness.Run(60);
+    const fc = RequireMotion(world, 'fc');
+    for (const id of members) {
+      const motion = RequireMotion(world, id);
+      expect(motion.slotError, id).toBeLessThan(50);
+      expect(YawGap(motion.heading[0], fc.heading[0]), id).toBeLessThanOrEqual(1);
+      expect(motion.mode).toBe('goto');
+    }
+    const bs = RequireMotion(world, 'bs');
+    expect(bs.slotError).toBeGreaterThan(1000);
+    expect(Math.abs(bs.speed - BATTLESHIP.maxVelocity) / BATTLESHIP.maxVelocity).toBeLessThanOrEqual(0.01);
+    ExpectLockstep(world, 5);
+  });
+
+  it('converges same-hull members behind an FC at 0.9', () => {
+    const { harness, world, members } = MakeFleet({ fc: tfi, member: tfi, count: 3 });
+    world.Order('fc', { type: 'direction', direction: [0, 0, 1], speed: 0.9 });
+    harness.Run(120);
+    for (const id of members) expect(RequireMotion(world, id).slotError, id).toBeLessThan(60);
+  });
+
+  it('swings the formation round an FC turning 90 degrees', () => {
+    const { harness, world, members } = MakeFleet({ fc: tfi, member: rifter });
+    world.Order('fc', { type: 'direction', direction: [0, 0, 1], speed: 0.5 });
+    harness.Run(30);
+    world.Order('fc', { type: 'direction', direction: [1, 0, 0], speed: 0.5 });
+    harness.Run(45);
+    expect(YawGap(RequireMotion(world, 'fc').heading[0], 90)).toBeLessThanOrEqual(1);
+    for (const id of members) expect(RequireMotion(world, id).slotError, id).toBeLessThan(100);
+    ExpectLockstep(world, 5);
+  });
+
+  it("slots a chained member on its own anchor in the FC's frame", () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('fc', [0, 0, 0]), tfi);
+    world.AddShip(Ship('lead', [3000, 0, -4000]), guardian);
+    world.AddShip(Ship('member', [-2000, 0, -2000]), guardian);
+    expect(world.Follow('lead', FollowOf('fc', [0, 0, -1], 5000))).toBe(true);
+    expect(world.Follow('member', FollowOf('lead', [0.6, 0, -0.8]))).toBe(true);
+    world.Order('fc', { type: 'direction', direction: [0, 0, 1], speed: 0.7 });
+    harness.Run(120);
+    const lead = RequireMotion(world, 'lead');
+    expect(lead.slotError).toBeLessThan(100);
+    expect(RequireMotion(world, 'member').slotError).toBeLessThanOrEqual(toFollowTolerance({ slotRange: 1000, anchorSpeed: lead.speed }));
+    ExpectLockstep(world, 3);
+  });
+
+  it('hands a ship between its own orders and following', () => {
+    const { harness, world, members } = MakeFleet({ fc: tfi, member: guardian, count: 2, scatter: true });
+    const [a, b] = members;
+    const follow = FollowOf('fc', DIRECTIONS[0]);
+    expect(RequireMotion(world, a).pendingOrder).toEqual({ type: 'keep-at-range', target: 'fc', range: 1000, speed: 1 });
+    RunTicks(harness, 1);
+    const following = RequireMotion(world, a);
+    expect(following.pendingOrder).toBeUndefined();
+    expect(following.order).toEqual({ type: 'keep-at-range', target: 'fc', range: 1000, speed: 1 });
+    expect(following.targetDistance).toBeGreaterThan(0);
+    expect(following.slotError).toBeGreaterThan(0);
+    expect(following.heading).toHaveLength(2);
+
+    const stop: ShipOrder = { type: 'stop' };
+    expect(world.Order(a, stop)).toBe(true);
+    expect(world.Following(a)).toBeNull();
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, a)).toMatchObject({ order: stop, mode: 'stop' });
+    expect(RequireMotion(world, a).slotError).toBeUndefined();
+
+    world.Order(a, { type: 'direction', direction: [1, 0, 0], speed: 1 });
+    expect(world.Follow(a, follow)).toBe(true);
+    expect(RequireMotion(world, a).pendingOrder).toEqual({ type: 'keep-at-range', target: 'fc', range: 1000, speed: 1 });
+    expect(world.Follow(a, { ...follow, anchor: a })).toBe(false);
+    expect(world.Follow(a, { ...follow, anchor: 'ghost' })).toBe(false);
+    expect(world.Follow('ghost', follow)).toBe(false);
+
+    expect(world.Unfollow(b, 'stopped: test')).toBe(true);
+    expect(world.Unfollow(b, 'stopped: test')).toBe(false);
+    expect(world.Following(b)).toBeNull();
+    expect(RequireMotion(world, b)).toMatchObject({ order: stop, orderNote: 'stopped: test' });
+
+    harness.Run(90);
+    world.PlaceShip(Ship(a, [8000, 0, 8000]));
+    expect(world.Following(a)).toEqual(follow);
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, a).mode).toBe('goto');
+    harness.Run(90);
+    expect(RequireMotion(world, a).slotError).toBeLessThanOrEqual(toFollowTolerance({ slotRange: 1000, anchorSpeed: 0 }));
+    ExpectLockstep(world, 3);
+  });
+
+  it('leaves the followers of a removed anchor to the caller, and halts the ones it does not re-point', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('fc', [0, 0, 0]), tfi);
+    world.AddShip(Ship('lead', [0, 0, -5000]), guardian);
+    world.AddShip(Ship('kept', [500, 0, -6000]), guardian);
+    world.AddShip(Ship('lost', [-500, 0, -6000]), guardian);
+    world.Follow('lead', FollowOf('fc', [0, 0, -1], 5000));
+    world.Follow('kept', FollowOf('lead', [0.6, 0, -0.8]));
+    world.Follow('lost', FollowOf('lead', [-0.6, 0, -0.8]));
+    harness.Run(5);
+    expect(world.RemoveShip('lead')).toEqual([]);
+    expect(world.Follow('kept', FollowOf('fc', [0.6, 0, -0.8], 5000))).toBe(true);
+    RunTicks(harness, 1);
+    expect(world.Following('lost')).toBeNull();
+    expect(RequireMotion(world, 'lost')).toMatchObject({ order: { type: 'stop' }, orderNote: 'stopped: anchor "lead" was removed' });
+    expect(RequireMotion(world, 'kept')).toMatchObject({ mode: 'goto', order: { type: 'keep-at-range', target: 'fc', range: 5000 } });
+    ExpectLockstep(world, 4);
   });
 });
