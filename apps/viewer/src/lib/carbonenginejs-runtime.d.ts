@@ -372,8 +372,16 @@ declare module '@carbonenginejs/runtime/trinity' {
   export class Tr2PostProcess2 {
     readonly tonemapping: Tr2PPTonemappingEffect | null;
     readonly dynamicExposure: Tr2PPDynamicExposureEffect | null;
+    /**
+     * The distance fog (a Tr2PPFogEffect, not declared here), or null.
+     */
+    readonly fog: object | null;
     SetTonemapping(effect: Tr2PPTonemappingEffect | null): void;
     SetDynamicExposure(effect: Tr2PPDynamicExposureEffect | null): void;
+    /**
+     * Installs the fog effect; null clears the slot.
+     */
+    SetFog(effect: object | null): void;
   }
 
   export class EveLensflare {

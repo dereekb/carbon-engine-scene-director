@@ -836,8 +836,12 @@ Drawing is checked in a real Chrome or Edge tab through `get_state`,
   location star's, else `env_sun_yellow_01a`), `?flare=off|<name>` (under
   `res:/fisfx/lensflare/`; default the star's, else `yellow`), a named one
   overriding the star's; `?dress=off|all|<nebula,sun,planets,objects>` (the
-  location dressing's parts, all by default), `?aa=off` (no TAA) and
-  `?tier=lo|hi` (the shader tier, default `depth`).
+  location dressing's parts, all by default), `?aa=off` (no TAA),
+  `?fog=on` (keeps the template's distance fog, dropped by default: on the GPU
+  it fogs planets as background so they read translucent, washes the frame in
+  its colour and draws a flat haze around the origin that a far camera sees as
+  a glowing disc; `environment.dressing.fog` reports it) and `?tier=lo|hi` (the
+  shader tier, default `depth`).
 
 ## Runtime notes
 

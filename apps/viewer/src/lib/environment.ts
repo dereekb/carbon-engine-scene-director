@@ -28,6 +28,7 @@ import { ErrorText } from './resources';
 import { blue, CjsSchema, EveLensflare, Tr2PostProcess2, Tr2PPDynamicExposureEffect, Tr2PPTonemappingEffect, Tr2Renderer, Tr2TranslationAdapter, vec3, type EveSpaceScene } from './runtime';
 
 const OFF = 'off';
+const ON = 'on';
 const RESOURCE_NAME = /^[a-z0-9_]+$/u;
 const CLIENT_DEFAULTS_ONLY = 'client defaults only';
 
@@ -50,6 +51,12 @@ export interface RenderOptions {
    * TAA, which a scene post process turns on at Carbon's default quality.
    */
   readonly antiAliasing: boolean;
+  /**
+   * The template's distance fog (Tr2PPFogEffect), dropped unless `?fog=on`: on the GPU it fogs the planet pass as
+   * background (planets read translucent), washes the frame in its colour and draws a flat haze around the origin
+   * that a far camera sees as a glowing disc.
+   */
+  readonly fog: boolean;
 }
 
 export type DressingSource = 'template' | 'client';
@@ -65,6 +72,11 @@ export interface SceneDressing {
   postProcess: Maybe<string>;
   tonemapping: Maybe<DressingSource>;
   dynamicExposure: Maybe<DressingSource>;
+  /**
+   * The template's fog: `template` when drawn (`?fog=on`), `off` when dropped (the default), null when the template has
+   * none.
+   */
+  fog: Maybe<'template' | 'off'>;
   flare: Maybe<string>;
   antiAliasing: boolean;
   /**
@@ -147,7 +159,8 @@ export function ReadRenderOptions(search: string = globalThis.location?.search ?
   return {
     post: ResourceName(params, 'post'),
     flare: ResourceName(params, 'flare'),
-    antiAliasing: params.get('aa') !== OFF
+    antiAliasing: params.get('aa') !== OFF,
+    fog: params.get('fog') === ON
   };
 }
 
@@ -158,7 +171,7 @@ export function ReadRenderOptions(search: string = globalThis.location?.search ?
  * @returns The record, in the `loading` state.
  */
 export function CreateSceneDressing(options: RenderOptions): SceneDressing {
-  return { state: 'loading', postProcess: null, tonemapping: null, dynamicExposure: null, flare: null, antiAliasing: options.antiAliasing, source: null, star: null, errors: [] };
+  return { state: 'loading', postProcess: null, tonemapping: null, dynamicExposure: null, fog: null, flare: null, antiAliasing: options.antiAliasing, source: null, star: null, errors: [] };
 }
 
 /**
@@ -266,6 +279,9 @@ export class SceneDresser {
       if (!post.tonemapping) post.SetTonemapping((this.clientTonemapping ??= new Tr2PPTonemappingEffect()));
       this.report.dynamicExposure = post.dynamicExposure ? 'template' : 'client';
       if (!post.dynamicExposure) post.SetDynamicExposure((this.clientExposure ??= new Tr2PPDynamicExposureEffect()));
+      // The loader may hand back a cached template, so a fog dropped before reads as null: report the switch.
+      this.report.fog = this.options.fog ? (post.fog ? 'template' : null) : 'off';
+      if (!this.options.fog) post.SetFog(null);
       scene.postprocess = post;
     } catch (error) {
       errors.push(`post process: ${ErrorText(error)}`);

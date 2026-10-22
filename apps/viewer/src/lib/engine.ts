@@ -319,8 +319,7 @@ export class Engine {
     try {
       const values = await ResourceValues(path);
       if (values._type !== 'EveSpaceScene') throw new Error(`it is a ${values._type}, not an EveSpaceScene`);
-      const background = values['backgroundEffect'] as Maybe<CjsModelValues>;
-      effect = background ? CjsSchema.from<Tr2Effect>(background._type || 'Tr2Effect', background) : null;
+      effect = NebulaEffect(values);
       if (generation !== this.nebulaGeneration) {
         effect?.Destruct();
         return;
@@ -407,11 +406,13 @@ export class Engine {
     };
 
     const scene = new EveSpaceScene();
+    let universeValues: Maybe<CjsModelValues> = null;
     if (universe) {
       // Applied as values: loading it as an object would run Initialize before the device exists.
       const values = await ResourceValues(universe);
       if (values._type !== 'EveSpaceScene') throw new Error(`${universe} is a ${values._type}, not an EveSpaceScene`);
       CjsSchema.setValues(scene, values);
+      universeValues = values;
       this.universe = universe;
       this.nebula = { path: universe, source: 'universe', state: 'applied' };
     }
@@ -474,6 +475,15 @@ export class Engine {
       driver.Execute([renderTarget], null, this.frameNow, this.frameNow, null, renderContext);
     });
     this.parts = { scene, driver, camera, renderTarget, al, pump, format };
+    // The background effect setValues hydrated above draws black on the GPU (2026-10-22: no location, ?dress=off, or
+    // a location whose region nebula is the universe), while one SetNebula swaps in draws. Apply the universe's nebula
+    // the same way: a fresh effect, and the env map and low quality paths reloaded through OnModified.
+    if (universeValues) {
+      const old = scene.backgroundEffect;
+      const effect = NebulaEffect(universeValues);
+      ApplyNebulaValues(scene, universeValues, effect);
+      if (old && old !== effect) old.Destruct();
+    }
   }
 
   /**
@@ -854,6 +864,14 @@ function CreateFramePump(device: TriDevice, draw: () => void): FramePump {
       if (failure) throw failure;
     }
   };
+}
+
+/**
+ * Hydrates a universe file's background effect (the nebula) as a fresh Tr2Effect; null when the file has none.
+ */
+function NebulaEffect(values: CjsModelValues): Maybe<Tr2Effect> {
+  const background = values['backgroundEffect'] as Maybe<CjsModelValues>;
+  return background ? CjsSchema.from<Tr2Effect>(background._type || 'Tr2Effect', background) : null;
 }
 
 /**
