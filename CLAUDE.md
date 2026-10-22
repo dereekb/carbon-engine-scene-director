@@ -75,8 +75,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   stale runtime after the repo move. Check the md5 after any reinstall.
 - The scene needs the EVE client's dressing (`environment.ts`): a sun template post process with the client's
   tonemapping and dynamic exposure, plus the lens flare. Without dynamic exposure the nebula (median ~0.01 linear)
-  renders at about the clear colour's level, the most likely reason it looked like no background (static analysis
-  as of 2026-10-21; a real-GPU check is pending). `?post=off` / `?flare=off` / `?aa=off` A/B it.
+  renders at about the clear colour's level, which is why it looked like no background (real-GPU A/B, 2026-10-21:
+  the default draws a nebula field, `?post=off` a near-black one with only the sun and flare). Whether the exposed
+  nebula looks like the client's is still open: it rendered as a flat brown wash that day, possibly the output
+  device. `?post=off` / `?flare=off` / `?aa=off` A/B it.
 - WebGPU validation errors reach `page_log` (and `get_state.renderer.gpuErrors`) only through `engine.ts`'s
   `uncapturederror` listener; Chrome otherwise prints them to DevTools alone.
 - `runtime.ts` imports `@carbonenginejs/runtime/audio` for its side effects: SOF hull values carry audio classes.
