@@ -26,7 +26,8 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `clock.ts` (the scene clock), `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship, and the
   movement orders, warp (phases, `OnWarp`) and fleet following), `flight.ts` (each ship's Ship-stats flight numbers
   from the hub's `/ship-stats`), `warp.ts` (warp factor, landing and Destiny's warp profile math), `boosters.ts` (the
-  per-frame booster drive), `steering.ts` (Follow the FC's steering math), `following.ts` (`FleetFollowing`: the
+  per-frame booster drive), `steering.ts` (Follow the FC's steering math), `camera.ts` (`CameraFollow`: the camera following its
+  target in orbit or chase mode, and alt-click picking), `following.ts` (`FleetFollowing`: the
   document's fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the
   location's system from the hub's `/map/system`, and get_state's report) have node specs: the viewer has a `test`
   target (`project: viewer`).
@@ -72,9 +73,9 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - The Destiny master and replica parks must stay in lockstep (replication is unported): only `DestinyWorld` touches
   them, every change goes to both in one call, and movement orders apply to both right before the `OnTick` that
   evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` →
-  `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame
-  at 1 s so the master's 6-tick backlog drop never fires.
-- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `following.ts`,
+  `director.TrackCamera(now)` → `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer
+  `now`; the clock caps a frame at 1 s so the master's 6-tick backlog drop never fires.
+- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`,
   `location.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
   renderer and the `runtime-dist/` alias, which vitest does not have.
 - Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a

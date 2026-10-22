@@ -30,9 +30,27 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrderRequest, SceneError, toFleetMemberships, toFleetReports, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipFleetMembership, type ShipOrderRequest } from '@scene-director/scene';
+import {
+  applySceneOperations,
+  createEmptyScene,
+  diffScenes,
+  normalizeScene,
+  normalizeShipOrderRequest,
+  SceneError,
+  toFleetMemberships,
+  toFleetReports,
+  SCENE_CAMERA_MODES,
+  type NormalizedScene,
+  type SceneCamera,
+  type SceneCameraMode,
+  type SceneDocument,
+  type SceneShip,
+  type ShipFleetMembership,
+  type ShipOrderRequest
+} from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { DriveBoosters } from './boosters';
+import { CameraFollow, PickShip, type FollowedShip, type PickSphere } from './camera';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -40,7 +58,7 @@ import { EncodePng, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { LocationLookup } from './location';
 import { ErrorText } from './resources';
-import { vec3, type EveShip2, type Vec3 } from './runtime';
+import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
 
@@ -94,6 +112,18 @@ export interface ShipBoosterState {
  * The ClientBall velocity scratch for DriveBoosters.
  */
 const BOOSTER_VELOCITY = new Float32Array(3);
+
+/**
+ * The ClientBall samples TrackCamera reads.
+ */
+const CAMERA_TARGET_POSITION = new Float32Array(3);
+const CAMERA_TARGET_ROTATION = new Float32Array(4);
+const CAMERA_TARGET_FORWARD = new Float32Array(3);
+
+/**
+ * A ship's forward axis in its own frame (a heading of yaw 0 faces +Z).
+ */
+const SHIP_FORWARD = new Float32Array([0, 0, 1]);
 
 export interface ShipReport {
   readonly id: string;
@@ -158,6 +188,7 @@ interface FrameCameraArgs {
   readonly yaw?: number;
   readonly pitch?: number;
   readonly distance?: number;
+  readonly mode?: SceneCameraMode;
   readonly persist?: boolean;
 }
 
@@ -183,6 +214,14 @@ export class Director {
    * What each ship flies with, as get_state reports it.
    */
   private readonly flights = new Map<string, ShipFlight>();
+  /**
+   * The camera following its target ship (camera.ts).
+   */
+  private readonly cameraFollow = new CameraFollow();
+  /**
+   * The camera a page change already applied, so the document write that follows does not frame it again.
+   */
+  private appliedCamera: Maybe<string> = null;
   private queue: Promise<unknown> = Promise.resolve();
 
   constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup() }: DirectorOptions) {
@@ -195,6 +234,7 @@ export class Director {
     this.onChange = onChange;
     this.following = new FleetFollowing({ world, scene: () => this.scene, radiusOf: (id) => this.FormationRadius(id) });
     this.location = new LocationLookup({ onChange: () => this.onChange() });
+    if (engine) this.AttachCameraControls(engine.canvas);
   }
 
   /**
@@ -261,6 +301,32 @@ export class Director {
     }
   }
 
+  /**
+   * Moves the camera with the ship it targets, for the frame at `now`, in the document's camera mode (camera.ts).
+   * Runs between world.Tick and engine.Frame and samples the ClientBall the renderer draws.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  TrackCamera(now: number): void {
+    const view = this.engine?.camera;
+    if (view) this.cameraFollow.Frame(now, view, (id) => this.DrawnShip(id, now));
+  }
+
+  /**
+   * The ship the camera follows.
+   */
+  get followedShip(): Maybe<string> {
+    return this.cameraFollow.following;
+  }
+
+  /**
+   * Follows a ship with the camera, keeping the view's angles and zoom (alt-click, the overlay's follow buttons); null
+   * frames every ship instead.
+   */
+  FollowShip(id: Maybe<string>): void {
+    this.ChangeCamera({ target: id });
+  }
+
   async Save(name: unknown): Promise<{ saved: string; ships: number }> {
     const scene = this.Current();
     const key = RequireName(name ?? scene.name);
@@ -314,11 +380,13 @@ export class Director {
   /**
    * Points the camera without editing the document unless `persist`.
    */
-  async FrameCamera({ target, yaw, pitch, distance, persist = false }: FrameCameraArgs = {}): Promise<unknown> {
+  async FrameCamera({ target, yaw, pitch, distance, mode, persist = false }: FrameCameraArgs = {}): Promise<unknown> {
     const camera: SceneCamera = { ...this.Current().camera, target: target ?? null };
     if (IsFiniteNumber(yaw)) camera.yaw = yaw;
     if (IsFiniteNumber(pitch)) camera.pitch = pitch;
     camera.distance = IsFiniteNumber(distance) ? distance : null;
+    if (mode != null && !SCENE_CAMERA_MODES.includes(mode)) throw new Error(`mode must be one of ${SCENE_CAMERA_MODES.join(', ')}`);
+    if (mode) camera.mode = mode;
     if (persist) return this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera }])));
     if (camera.target && !this.live.has(camera.target)) throw new Error(`no ship "${camera.target}"`);
     this.ApplyCamera(camera);
@@ -386,7 +454,8 @@ export class Director {
     // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order.
     for (const doc of builds) await this.Build(doc);
 
-    this.ApplyCamera(scene.camera);
+    if (JSON.stringify(scene.camera) !== this.appliedCamera) this.ApplyCamera(scene.camera);
+    this.appliedCamera = null;
     this.onChange();
     return {
       scene,
@@ -511,6 +580,8 @@ export class Director {
   private ApplyCamera(camera: SceneCamera): void {
     const view = this.engine?.camera;
     if (!view) return;
+    // A view already following a ship glides from where it is to the new framing.
+    const previous = this.cameraFollow.following ? Array.from(view.focus) : null;
     view.Set({ yaw: camera.yaw, pitch: camera.pitch, fov: camera.fov });
     const ships = this.scene?.ships ?? [];
     const docs = camera.target ? ships.filter((doc) => doc.id === camera.target) : ships;
@@ -525,6 +596,84 @@ export class Director {
     } else {
       view.Set({ focus: [0, 0, 0], distance: camera.distance ?? 1000 });
     }
+    // Framing placed the focus off the master ball; TrackCamera moves it on from there.
+    const target = camera.target ? docs[0] : null;
+    this.cameraFollow.mode = camera.mode;
+    this.cameraFollow.Follow(target ? { id: target.id, position: this.world.Motion(target.id)?.position ?? target.position } : null, previous ? previous.map((value, axis) => value - view.focus[axis]) : null, this.clock.now);
+  }
+
+  /**
+   * A ship as drawn at `now`: its ClientBall position and forward vector.
+   */
+  private DrawnShip(id: string, now: number): Maybe<FollowedShip> {
+    const curves = this.world.Curves(id);
+    let drawn: Maybe<FollowedShip> = null;
+    if (curves) {
+      const rotation = curves.rotation.GetValueAt__Ticks(now, CAMERA_TARGET_ROTATION);
+      drawn = { position: curves.translation.GetValueAt__Ticks(now, CAMERA_TARGET_POSITION), forward: vec3.transformQuat(CAMERA_TARGET_FORWARD, SHIP_FORWARD, rotation) };
+    }
+    return drawn;
+  }
+
+  /**
+   * The page's camera input on top of OrbitCamera's drag, pan and wheel: alt-click a ship to follow it, C switches
+   * between orbit and chase, and a held drag keeps chase's look-around offset.
+   */
+  private AttachCameraControls(canvas: HTMLCanvasElement): void {
+    canvas.addEventListener('pointerdown', (event) => {
+      if (event.altKey && event.button === 0) {
+        event.preventDefault();
+        this.PickTarget(event, canvas);
+      } else {
+        this.cameraFollow.dragging = true;
+      }
+    });
+    const release = (): void => {
+      this.cameraFollow.dragging = false;
+    };
+    canvas.addEventListener('pointerup', release);
+    canvas.addEventListener('pointercancel', release);
+    addEventListener('keydown', (event) => {
+      if (event.key.toLowerCase() === 'c' && !event.ctrlKey && !event.metaKey && !event.altKey) this.ChangeCamera({ mode: this.cameraFollow.mode === 'chase' ? 'orbit' : 'chase' });
+    });
+  }
+
+  /**
+   * Follows the ship under the pointer, when there is one.
+   */
+  private PickTarget(event: PointerEvent, canvas: HTMLCanvasElement): void {
+    const view = this.engine?.camera;
+    if (view) {
+      const box = canvas.getBoundingClientRect();
+      const now = this.clock.now;
+      const spheres: PickSphere[] = [];
+      for (const live of this.live.values()) {
+        const curves = this.world.Curves(live.id);
+        if (live.ship && curves) {
+          const rotation = curves.rotation.GetValueAt__Ticks(now, quat.create());
+          const centre = vec3.transformQuat(vec3.create(), live.ship.boundingSphereCenter, rotation);
+          vec3.add(centre, centre, curves.translation.GetValueAt__Ticks(now, vec3.create()));
+          spheres.push({ id: live.id, centre, radius: live.ship.boundingSphereRadius || UNBUILT_RADIUS });
+        }
+      }
+      const id = PickShip({ view: view.eve.GetViewMatrix().transform, fov: view.fov, width: box.width, height: box.height }, event.clientX - box.left, event.clientY - box.top, spheres);
+      if (id) this.FollowShip(id);
+    }
+  }
+
+  /**
+   * A camera change made in the page (alt-click, C, the overlay's follow buttons), with the live angles and distance so
+   * the view stays where it is. The view moves at once; the document's camera is written after, through the edit
+   * queue, which may be busy building ships, and that apply skips re-framing the same camera.
+   */
+  private ChangeCamera(change: Partial<SceneCamera>): void {
+    const view = this.engine?.camera;
+    const live = view ? { yaw: Math.round((((view.yaw % 360) + 360) % 360) * 10) / 10, pitch: Math.round(view.pitch * 10) / 10, distance: Math.max(1, Math.round(view.distance)) } : {};
+    const camera: SceneCamera = { ...this.Current().camera, ...live, ...change };
+    this.ApplyCamera(camera);
+    this.appliedCamera = JSON.stringify(camera);
+    this.onChange();
+    this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera: { ...live, ...change } }]))).catch((error: unknown) => console.warn(`camera change failed: ${ErrorText(error)}`));
   }
 
   /**

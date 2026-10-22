@@ -56,9 +56,16 @@ export interface SceneShip {
   pilot?: unknown;
 }
 
+/**
+ * How the camera follows its target ship: `orbit` keeps the angles you set, `chase` sits behind the ship and turns
+ * with it.
+ */
+export const SCENE_CAMERA_MODES = ['orbit', 'chase'] as const;
+export type SceneCameraMode = (typeof SCENE_CAMERA_MODES)[number];
+
 export interface SceneCamera {
   /**
-   * Ship id to frame, or null to frame every ship.
+   * Ship id to frame and follow, or null to frame every ship.
    */
   target: Maybe<string>;
   /**
@@ -68,6 +75,10 @@ export interface SceneCamera {
   yaw: number;
   pitch: number;
   fov: number;
+  /**
+   * How the camera follows its target; without a target it does nothing.
+   */
+  mode: SceneCameraMode;
 }
 
 export interface SceneEnvironment {
@@ -147,7 +158,7 @@ const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', ...RESERVED_SCENE_KEYS]);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', ...RESERVED_SHIP_KEYS]);
-const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov']);
+const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
 const UNIVERSE_PATTERN = /^res:\/.+\.(black|red)$/iu;
@@ -176,7 +187,7 @@ export function createEmptyScene(name: string = DEFAULT_SCENE_NAME): SceneDocume
     schema: SCENE_SCHEMA,
     name,
     environment: { universe: DEFAULT_UNIVERSE },
-    camera: { target: null, distance: null, yaw: 45, pitch: -15, fov: 45 },
+    camera: { target: null, distance: null, yaw: 45, pitch: -15, fov: 45, mode: 'orbit' },
     ships: []
   };
 }
@@ -421,6 +432,10 @@ function normalizeCamera(input: unknown, problems: string[], warnings: string[])
   if (input['yaw'] !== undefined) camera.yaw = readNumber(input['yaw'], 'camera.yaw', problems);
   if (input['pitch'] !== undefined) camera.pitch = readNumber(input['pitch'], 'camera.pitch', problems, { min: -89, max: 89 });
   if (input['fov'] !== undefined) camera.fov = readNumber(input['fov'], 'camera.fov', problems, { min: 5, max: 120 });
+  if (input['mode'] !== undefined) {
+    if (SCENE_CAMERA_MODES.includes(input['mode'] as SceneCameraMode)) camera.mode = input['mode'] as SceneCameraMode;
+    else problems.push(`camera.mode must be one of ${SCENE_CAMERA_MODES.join(', ')}`);
+  }
   return camera;
 }
 

@@ -78,6 +78,14 @@ describe('scene documents', () => {
     expect(next.name).toBe('trio');
   });
 
+  it('the camera mode defaults to orbit, set_camera switches it, and an unknown mode is a problem', () => {
+    const { scene } = normalizeScene({ ...duel, camera: { target: 'b' } });
+    expect(scene.camera.mode).toBe('orbit');
+    const next = applySceneOperations(scene, [{ op: 'set_camera', camera: { mode: 'chase' } }]).scene;
+    expect(next.camera).toMatchObject({ target: 'b', mode: 'chase' });
+    expect(catchSceneError(() => normalizeScene({ ...duel, camera: { mode: 'pov' } })).problems).toEqual(['camera.mode must be one of orbit, chase']);
+  });
+
   it("removing the camera's target clears it; bad operations all report", () => {
     const { scene } = normalizeScene({ ...duel, camera: { target: 'b' } });
     expect(applySceneOperations(scene, [{ op: 'remove_ship', id: 'b' }]).scene.camera.target).toBeNull();

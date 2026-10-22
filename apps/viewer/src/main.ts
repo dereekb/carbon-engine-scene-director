@@ -36,8 +36,8 @@ interface OverlayState {
 }
 
 /**
- * The status panel over the canvas: hub link, renderer, scene, each fleet's formation and per-ship build status. H
- * toggles it.
+ * The status panel over the canvas: hub link, renderer, scene, each fleet's formation and per-ship build status, with
+ * a button per ship to follow it with the camera. H toggles it.
  */
 class Overlay {
   private readonly element: HTMLElement;
@@ -47,6 +47,15 @@ class Overlay {
     this.element = element;
     addEventListener('keydown', (event) => {
       if (event.key === 'h' && !event.ctrlKey && !event.metaKey) this.element.hidden = !this.element.hidden;
+    });
+    // pointerdown, not click: the panel re-renders every second, which can swap the button between press and release.
+    this.element.addEventListener('pointerdown', (event) => {
+      const button = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-follow]') : null;
+      const director = this.state.director;
+      if (button && director) {
+        const id = button.dataset['follow'] ?? null;
+        director.FollowShip(id === director.followedShip ? null : id);
+      }
     });
     setInterval(() => this.Render(), 1000);
   }
@@ -70,17 +79,23 @@ class Overlay {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
     }
+    const followed = director?.followedShip;
     const ships = (scene?.ships ?? []).map((doc) => {
       const entry = director?.live.get(doc.id);
       const error = entry?.error ? `<div class="error">${Escape(entry.error)}</div>` : '';
-      return `<li class="${entry?.status ?? ''}">${Escape(doc.id)} <span>${Escape(entry?.status ?? '?')}</span>${error}</li>`;
+      const following = doc.id === followed;
+      const button = `<button class="follow${following ? ' on' : ''}" data-follow="${Escape(doc.id)}" title="${following ? 'Stop following' : 'Follow with the camera'}">${following ? 'following' : 'follow'}</button>`;
+      return `<li class="${entry?.status ?? ''}">${button} ${Escape(doc.id)} <span>${Escape(entry?.status ?? '?')}</span>${error}</li>`;
     });
     const list = ships.length ? `<ul>${ships.join('')}</ul>` : '';
+    const scrolled = this.element.querySelector('ul')?.scrollTop ?? 0;
     this.element.innerHTML = `
       <h1>scene-director</h1>
       <dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${Escape(value)}</dd>`).join('')}</dl>
       ${list}
-      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · H hides this</p>`;
+      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship to follow it · C chase camera · H hides this</p>`;
+    const shipList = this.element.querySelector('ul');
+    if (shipList) shipList.scrollTop = scrolled;
   }
 
   private RendererText(director: Maybe<Director>): string {
@@ -155,6 +170,7 @@ async function Start(): Promise<void> {
       tickError = message;
     }
     liveDirector?.DriveBoosters(now);
+    liveDirector?.TrackCamera(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);
   };

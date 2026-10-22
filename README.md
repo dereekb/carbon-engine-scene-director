@@ -110,7 +110,7 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials |
 | `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, warp to a point or a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
 | `screenshot` | page | the next frame as a PNG |
-| `frame_camera` | page | points the camera at a ship or fits all ships |
+| `frame_camera` | page | points the camera at a ship and follows it, or fits all ships |
 
 ## Saved scenes
 
@@ -163,7 +163,7 @@ node bin/scene-director.js call get_scene --out current.json                   #
   "schema": "cjs-scene/1",
   "name": "duel",
   "environment": { "universe": "res:/dx9/scene/universe/a01_cube.black" },
-  "camera": { "target": null, "distance": null, "yaw": 45, "pitch": -15, "fov": 45 },
+  "camera": { "target": null, "distance": null, "yaw": 45, "pitch": -15, "fov": 45, "mode": "orbit" },
   "ships": [
     { "id": "punisher-1", "dna": "af1_t1:amarrbase:amarr", "team": "red", "position": [0, 0, 0] },
     { "id": "rifter-1", "dna": "mf1_t1:minmatarbase:minmatar", "team": "blue", "position": [3000, 0, 0], "rotation": [180, 0, 0] }
@@ -172,7 +172,14 @@ node bin/scene-director.js call get_scene --out current.json                   #
 ```
 
 Metres and degrees, Y up. `rotation` is `[yaw, pitch, roll]`. A `null` camera
-target frames every ship; a `null` distance fits the target. Unknown fields are
+target frames every ship; a `null` distance fits the target. A ship target is
+followed: the camera moves with the drawn ship every frame, keeping any orbit,
+pan or zoom made meanwhile. `mode` is how it follows: `orbit` (the default)
+keeps the angles you set; `chase` sits behind the ship, 12° above its heading,
+and turns with it (a drag looks around and eases back once released). In the
+page, alt-click a ship to follow it (the view glides over, keeping its angles
+and zoom) and press C to switch between orbit and chase; both are written into
+the document's camera. Unknown fields are
 reported as warnings and dropped. `orders` on a ship and a top-level `timeline`
 are stored but not played yet. A top-level `fleets` list groups ships into EVE
 fleets (see Fleets below), and an optional `location` puts the scene at a real
