@@ -1,8 +1,10 @@
+import type { Maybe } from '@dereekb/util';
 import { SceneError, type SceneVector } from './scene';
 
 /**
  * Live movement orders for a ship's Destiny ball (the `order_ship` tool): fly a direction, fly to a world point
- * (`goto`), approach a target ship, keep at range on it, orbit it, or stop. Ranges are metres surface to surface
+ * (`goto`), approach a target ship, keep at range on it, orbit it, warp (align, warp and land, to a point or at a range
+ * from a ship), or stop. Ranges are metres surface to surface
  * between the two ships' Destiny balls (EVE's radii), exactly what Destiny takes. `order_ship` also takes the fleet
  * order `rejoin` (a fleet member that left its formation anchors up again): {@link normalizeShipOrderRequest}. The
  * orders are not part of the document yet; the reserved ship `orders` field will reuse normalizeShipOrderRequest
@@ -10,7 +12,7 @@ import { SceneError, type SceneVector } from './scene';
  * message prefix.
  */
 
-export const SHIP_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'stop'] as const;
+export const SHIP_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop'] as const;
 
 export type ShipOrderType = (typeof SHIP_ORDER_TYPES)[number];
 
@@ -42,6 +44,11 @@ export const APPROACH_RANGE = 50;
  * Metres: the longest keep-at-range or orbit range an order may ask for.
  */
 export const MAX_ORDER_RANGE = 1_000_000;
+
+/**
+ * Metres: EVE's client refuses a warp that would land nearer than this (Destiny itself flies a goto below 100 km).
+ */
+export const MIN_WARP_DISTANCE = 150_000;
 
 /**
  * Fly along a direction at a fraction of max velocity.
@@ -129,6 +136,39 @@ export interface OrbitShipOrder {
 }
 
 /**
+ * Align and warp to a world point (Destiny's WarpTo), landing `range` metres short of it, back toward where warp
+ * begins. A warp always aligns at full speed.
+ */
+export interface WarpToPointShipOrder {
+  readonly type: 'warp';
+  /**
+   * World position, metres.
+   */
+  readonly point: SceneVector;
+  /**
+   * Metres short of the point, in [0, {@link MAX_ORDER_RANGE}]; default 0.
+   */
+  readonly range: number;
+}
+
+/**
+ * Align and warp to where another ship is when the order applies, landing `range` metres from it, surface to surface.
+ */
+export interface WarpToShipShipOrder {
+  readonly type: 'warp';
+  /**
+   * The target ship's id.
+   */
+  readonly target: string;
+  /**
+   * Metres, surface to surface, in [0, {@link MAX_ORDER_RANGE}]; default 0.
+   */
+  readonly range: number;
+}
+
+export type WarpShipOrder = WarpToPointShipOrder | WarpToShipShipOrder;
+
+/**
  * Decelerate to a halt.
  */
 export interface StopShipOrder {
@@ -137,7 +177,7 @@ export interface StopShipOrder {
 
 export type TargetShipOrder = ApproachShipOrder | KeepAtRangeShipOrder | OrbitShipOrder;
 
-export type ShipOrder = DirectionShipOrder | GotoShipOrder | TargetShipOrder | StopShipOrder;
+export type ShipOrder = DirectionShipOrder | GotoShipOrder | TargetShipOrder | WarpShipOrder | StopShipOrder;
 
 /**
  * A fleet member that left its formation (an explicit order) anchors up on its fleet again.
@@ -175,6 +215,7 @@ const ORDER_KEYS: Readonly<Record<ShipOrderType, ReadonlySet<string>>> = {
   approach: new Set(['type', 'target', 'speed']),
   'keep-at-range': new Set(['type', 'target', 'range', 'speed']),
   orbit: new Set(['type', 'target', 'range', 'speed']),
+  warp: new Set(['type', 'point', 'target', 'range']),
   stop: new Set(['type'])
 };
 
@@ -188,6 +229,26 @@ const TARGET_TYPES: ReadonlySet<ShipOrderType> = new Set(TARGET_SHIP_ORDER_TYPES
  */
 export function isTargetShipOrder(order: ShipOrder): order is TargetShipOrder {
   return TARGET_TYPES.has(order.type);
+}
+
+/**
+ * Whether an order is a warp to another ship.
+ *
+ * @param order - A normalized order.
+ * @returns True for a warp with a target.
+ */
+export function isWarpToShipOrder(order: ShipOrder): order is WarpToShipShipOrder {
+  return order.type === 'warp' && 'target' in order;
+}
+
+/**
+ * The ship an order names: approach, keep-at-range, orbit, or a warp to a ship.
+ *
+ * @param order - A normalized order.
+ * @returns The target ship's id, or null.
+ */
+export function shipOrderTarget(order: ShipOrder): Maybe<string> {
+  return isTargetShipOrder(order) || isWarpToShipOrder(order) ? order.target : null;
 }
 
 interface OrderReader {
@@ -217,8 +278,8 @@ function readTarget(reader: OrderReader, context: ShipOrderContext): string {
   return target;
 }
 
-function readRange(reader: OrderReader): number {
-  const value = reader.record['range'];
+function readRange(reader: OrderReader, fallback?: number): number {
+  const value = reader.record['range'] ?? fallback;
   const valid = typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= MAX_ORDER_RANGE;
   if (!valid) reader.problems.push(`${reader.where}.range must be a number of metres in [0, ${MAX_ORDER_RANGE}]`);
   return valid ? value : 0;
@@ -229,6 +290,21 @@ function readSpeed(reader: OrderReader): number {
   const valid = typeof value === 'number' && Number.isFinite(value) && value > 0 && value <= 1;
   if (!valid) reader.problems.push(`${reader.where}.speed must be a number in (0, 1]`);
   return valid ? value : 1;
+}
+
+function readWarp(reader: OrderReader, context: ShipOrderContext): WarpShipOrder {
+  const hasPoint = reader.record['point'] !== undefined;
+  const hasTarget = reader.record['target'] !== undefined;
+  let order: WarpShipOrder;
+  if (hasPoint === hasTarget) {
+    reader.problems.push(`${reader.where} must give a warp destination: exactly one of point or target`);
+    order = { type: 'warp', point: [0, 0, 0], range: readRange(reader, 0) };
+  } else if (hasPoint) {
+    order = { type: 'warp', point: readVector(reader, 'point'), range: readRange(reader, 0) };
+  } else {
+    order = { type: 'warp', target: readTarget(reader, context), range: readRange(reader, 0) };
+  }
+  return order;
 }
 
 function readOrder(reader: OrderReader, type: ShipOrderType, context: ShipOrderContext): ShipOrder {
@@ -246,6 +322,9 @@ function readOrder(reader: OrderReader, type: ShipOrderType, context: ShipOrderC
     case 'keep-at-range':
     case 'orbit':
       order = { type, target: readTarget(reader, context), range: readRange(reader), speed: readSpeed(reader) };
+      break;
+    case 'warp':
+      order = readWarp(reader, context);
       break;
     case 'stop':
       order = { type };

@@ -21,6 +21,7 @@ declare module '@carbonenginejs/server/destiny' {
       readonly DSTBALL_FOLLOW: number;
       readonly DSTBALL_STOP: number;
       readonly DSTBALL_ORBIT: number;
+      readonly DSTBALL_WARP: number;
     };
     readonly id: bigint;
     /**
@@ -66,6 +67,43 @@ declare module '@carbonenginejs/server/destiny' {
     gotoX: number;
     gotoY: number;
     gotoZ: number;
+    /**
+     * In warp mode: -1 minus the ticks spent aligning, then the tick proper warp began.
+     */
+    readonly effectStamp: number;
+    /**
+     * In warp mode, the warp factor (1000 × AU/s).
+     */
+    get ownerId(): bigint;
+    set ownerId(value: DestinyInt64);
+    readonly isMassive: boolean;
+    /**
+     * Whether the ball is in warp mode: aligning or in proper warp.
+     */
+    IsWarpish(): boolean;
+    IsAligningForWarp(): boolean;
+    /**
+     * Whether the ball is in proper warp (past aligning).
+     */
+    IsWarping(): boolean;
+  }
+
+  /**
+   * SetupWarpConstants' record: Destiny's three-phase warp profile.
+   */
+  export interface WarpConstants {
+    accelDuration: number;
+    cruiseDuration: number;
+    decelDuration: number;
+    accelDistance: number;
+    cruiseDistance: number;
+    decelDistance: number;
+    accelRate: number;
+    decelRate: number;
+    /**
+     * m/s, capped for short warps.
+     */
+    warpSpeed: number;
   }
 
   /**
@@ -98,6 +136,10 @@ declare module '@carbonenginejs/server/destiny' {
      * The tick length, in milliseconds.
      */
     tickInterval: number;
+    /**
+     * Seconds per tick.
+     */
+    readonly dt: number;
     get ego(): bigint;
     set ego(value: DestinyInt64);
     AddBall(objectId: DestinyInt64, mass: number, radius: number, maxVel: number, isFree: boolean, isGlobal: boolean, isMassive: boolean, isInteractive: boolean, isSpaceJunk: boolean, x: number, y: number, z: number, vx: number, vy: number, vz: number, agility: number, speedFraction: number): CjsDestinyBall;
@@ -138,5 +180,15 @@ declare module '@carbonenginejs/server/destiny' {
      * Clamped to [0, 1].
      */
     SetSpeedFraction(id: DestinyInt64, fraction: number): void;
+    /**
+     * Aligns and warps a ball, landing minRange metres back from the point toward where warp begins. Returns without a
+     * word for a non-finite point or a missing ball; a point within 100 km becomes GotoPoint; the same destination while
+     * in warp mode is a no-op.
+     *
+     * @throws {RangeError} For a warp factor that is not an int32.
+     */
+    WarpTo(id: DestinyInt64, x: number, y: number, z: number, minRange?: number, warpFactor?: number): void;
+    SetBallMassive(id: DestinyInt64, flag: boolean): void;
+    SetupWarpConstants(warpFactor: number, warpDistance: number, out: Partial<WarpConstants>): WarpConstants;
   }
 }

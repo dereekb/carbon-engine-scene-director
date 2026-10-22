@@ -18,7 +18,10 @@ import type { Maybe } from '@dereekb/util';
 import { toFleetAnchors, toFleetFollowPlans, toFleetMemberships, toFollowTolerance, type FleetFollowPlan, type SceneDocument, type SceneFleet, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
 import type { DestinyWorld, ShipFollow } from './destiny';
 
-export type FollowingState = 'in-formation' | 'catching-up' | 'detached' | 'waiting';
+/**
+ * holding: stopped while its anchor or FC is in warp; it flies to its slot once that ship lands.
+ */
+export type FollowingState = 'in-formation' | 'catching-up' | 'holding' | 'detached' | 'waiting';
 
 /**
  * A fleet member's following, as get_state reports it.
@@ -45,6 +48,10 @@ export interface ShipFollowingReport {
    * Metres from the slot point.
    */
   readonly slotError?: number;
+  /**
+   * Holding only: the ship in warp it holds for.
+   */
+  readonly warping?: string;
 }
 
 /**
@@ -60,11 +67,12 @@ export interface FleetFormationReport {
    */
   readonly heading: [number, number];
   /**
-   * The members that keep range on an anchor (all but the FC); the four counts below split them.
+   * The members that keep range on an anchor (all but the FC); the five counts below split them.
    */
   readonly following: number;
   readonly inFormation: number;
   readonly catchingUp: number;
+  readonly holding: number;
   readonly detached: number;
   readonly waiting: number;
 }
@@ -213,13 +221,18 @@ export class FleetFollowing {
       const tolerance = toFollowTolerance({ slotRange: follow.slotRange, anchorSpeed: anchorMotion.speed });
       const [x, y, z] = motion.position;
       const [ax, ay, az] = anchorMotion.position;
+      // The tolerance grows with the anchor's speed, which an anchor in warp would make meaningless.
+      const warping = this.world.FollowHold(id);
+      let state: FollowingState = slotError <= tolerance ? 'in-formation' : 'catching-up';
+      if (warping) state = 'holding';
       report = {
-        state: slotError <= tolerance ? 'in-formation' : 'catching-up',
+        state,
         anchor: follow.anchor,
         range: follow.range,
         slot: { range: follow.slotRange, direction: follow.direction },
         distance: Math.round(Math.hypot(x - ax, y - ay, z - az) - motion.physics.radius - anchorMotion.physics.radius),
-        slotError
+        slotError,
+        ...(warping ? { warping } : {})
       };
     }
     return report;
@@ -234,7 +247,7 @@ export class FleetFollowing {
   FleetReport(fleet: Pick<SceneFleet, 'id' | 'commander'>): FleetFormationReport {
     const scene = this.scene();
     const document = scene?.fleets?.find((candidate) => candidate.id === fleet.id);
-    const counts: Record<FollowingState, number> = { 'in-formation': 0, 'catching-up': 0, detached: 0, waiting: 0 };
+    const counts: Record<FollowingState, number> = { 'in-formation': 0, 'catching-up': 0, holding: 0, detached: 0, waiting: 0 };
     for (const [id, membership] of this.Memberships()) {
       if (membership.fleet !== fleet.id || !membership.anchor) continue;
       const state = this.Report(id)?.state;
@@ -243,9 +256,10 @@ export class FleetFollowing {
     return {
       ready: Boolean(scene && document && this.Plans(scene, document)),
       heading: this.world.Motion(fleet.commander)?.heading ?? [0, 0],
-      following: counts['in-formation'] + counts['catching-up'] + counts.detached + counts.waiting,
+      following: counts['in-formation'] + counts['catching-up'] + counts.holding + counts.detached + counts.waiting,
       inFormation: counts['in-formation'],
       catchingUp: counts['catching-up'],
+      holding: counts.holding,
       detached: counts.detached,
       waiting: counts.waiting
     };

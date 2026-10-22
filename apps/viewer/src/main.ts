@@ -142,6 +142,7 @@ async function Start(): Promise<void> {
   let engine: Maybe<Engine> = null;
   let engineError: Maybe<Error> = null;
   let tickError: Maybe<string> = null;
+  let liveDirector: Maybe<Director> = null;
   const frame = (timestamp: number): void => {
     const now = clock.Advance(timestamp);
     try {
@@ -153,6 +154,7 @@ async function Start(): Promise<void> {
       if (tickError !== message) console.error(`destiny tick failed: ${message}\n${(error as Maybe<Error>)?.stack ?? ''}`);
       tickError = message;
     }
+    liveDirector?.DriveBoosters(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);
   };
@@ -168,6 +170,7 @@ async function Start(): Promise<void> {
   }
 
   const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director) });
+  liveDirector = director;
   overlay.Render(director);
   for (const [name, handler] of Object.entries(director.Handlers())) link.Handle(name, handler);
   link.Connect();

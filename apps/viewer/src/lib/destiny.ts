@@ -32,14 +32,24 @@
  *   anchor is at rest settles in its slot: it stops and turns smoothly to the fleet heading. It reports itself as
  *   keep-at-range on its anchor. An explicit order ends following; RemoveShip leaves followers to the director
  *   (FleetFollowing re-anchors them in the same edit), and Steer halts any whose anchor or FC is gone.
+ * - Warp. A warp order is Destiny's WarpTo on both parks at the ship's warp speed (warp.ts: factor = 1000 × AU/s) and
+ *   speed fraction 1 (Destiny only enters warp at 75 % of max velocity). The phases are read from the master after
+ *   each evolved tick: aligning (warp mode, effectStamp < 0), in proper warp (warping, then exiting), landed (Destiny
+ *   dropped it to stop). Nothing may stop a ball in proper warp but a placement: Destiny's orders only switch its mode
+ *   and it coasts on at warp speed, so OrderRefusal refuses orders in warp, Halt leaves a warping ship alone and
+ *   Steer skips it. Destiny's exit makes the ball massive, so a landed ship is set non-massive again on both parks.
+ *   In warp the drawn ship runs up to a tick ahead of the master; both reach the exit point at the tick OnWarp
+ *   reports. A fleet member holds (stopped) while its anchor or FC is in proper warp, as Destiny's StopAllFollowers
+ *   does, and flies to its slot after the landing.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { APPROACH_RANGE, isTargetShipOrder, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
+import { APPROACH_RANGE, isTargetShipOrder, MIN_WARP_DISTANCE, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
 import { FleetFrame, FormationGoto, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, type FormationGoto as FormationGotoResult } from './steering';
+import { DEFAULT_WARP_SPEED, LandingPoint, WarpExitTime, WarpFactor, WarpLength, WarpPhaseAt, type WarpProfile } from './warp';
 
 /**
  * The replica's ego: a fixed ball at the origin, which makes ClientBall samples absolute.
@@ -72,12 +82,93 @@ export interface ShipPhysics {
    * m.
    */
   readonly radius: number;
+  /**
+   * AU/s; DEFAULT_WARP_SPEED when absent.
+   */
+  readonly warpSpeed?: number;
 }
 
 /**
  * Cruiser-class physics, for a ship added without any.
  */
-export const DEFAULT_SHIP_PHYSICS: ShipPhysics = { mass: 1.1e7, agility: 0.5, maxVelocity: 230, radius: 100 };
+export const DEFAULT_SHIP_PHYSICS: ShipPhysics = { mass: 1.1e7, agility: 0.5, maxVelocity: 230, radius: 100, warpSpeed: DEFAULT_WARP_SPEED };
+
+/**
+ * A warp's phase: aligning (flying at full speed toward the destination until 75 % of max velocity on its heading,
+ * or 180 ticks), warping (accelerating and cruising in warp), exiting (slowing out of warp), landed (out of warp; it
+ * coasts to a halt).
+ */
+export type WarpPhase = 'aligning' | 'warping' | 'exiting' | 'landed';
+
+/**
+ * A warp order's progress, from the master park.
+ */
+export interface ShipWarp {
+  readonly phase: WarpPhase;
+  /**
+   * Where it lands, metres (0.01): from warp start on, Destiny's landing point; while aligning, where it would land if
+   * warp began now.
+   */
+  readonly landing: SceneVector;
+  /**
+   * AU/s: the warp speed it flies (its warp factor / 1000).
+   */
+  readonly warpSpeed: number;
+  /**
+   * Aligning only: ticks spent aligning (Destiny warps anyway after 180).
+   */
+  readonly alignTicks?: number;
+  /**
+   * From warp start on: metres from where warp began to the landing point (1 m).
+   */
+  readonly distance?: number;
+  /**
+   * Metres to the landing point (1 m); after landing, how far it ended from it.
+   */
+  readonly remaining: number;
+  /**
+   * Share of the warp distance covered, 0 to 1 (0.001): 0 while aligning, 1 once landed.
+   */
+  readonly progress: number;
+  /**
+   * Warping and exiting only: whole seconds until it drops out of warp, from Destiny's warp profile.
+   */
+  readonly landsIn?: number;
+}
+
+export type WarpEventKind = 'enter' | 'exit';
+
+/**
+ * A ship entering or leaving proper warp (OnWarp).
+ */
+export interface WarpEvent {
+  readonly kind: WarpEventKind;
+  readonly id: string;
+  /**
+   * The master's tick count after the evolve it happened in.
+   */
+  readonly tick: number;
+  /**
+   * Metres (0.01): where warp began (enter), or the master position one tick past the exit point (exit); the drawn
+   * ship is at the exit point on that frame.
+   */
+  readonly position: SceneVector;
+  /**
+   * m/s (0.01).
+   */
+  readonly velocity: SceneVector;
+  /**
+   * Unit vector from where warp began to the landing point.
+   */
+  readonly direction: SceneVector;
+  readonly landing: SceneVector;
+  /**
+   * AU/s.
+   */
+  readonly warpSpeed: number;
+}
+
+export type WarpListener = (event: WarpEvent) => void;
 
 /**
  * A hull's class and size, from SOF.
@@ -138,6 +229,10 @@ export interface ShipMotion {
    * For a ship following its fleet: metres from its formation slot, rounded to 1 m.
    */
   readonly slotError?: number;
+  /**
+   * While a warp order is in force (from apply until the next order, a placement or a follow taking over).
+   */
+  readonly warp?: ShipWarp;
   readonly physics: ShipPhysics;
 }
 
@@ -182,6 +277,7 @@ const ORDER_MODES: Readonly<Record<ShipOrderType, number>> = {
   approach: CjsDestinyBall.DSTBALLMODE.DSTBALL_FOLLOW,
   'keep-at-range': CjsDestinyBall.DSTBALLMODE.DSTBALL_FOLLOW,
   orbit: CjsDestinyBall.DSTBALLMODE.DSTBALL_ORBIT,
+  warp: CjsDestinyBall.DSTBALLMODE.DSTBALL_WARP,
   stop: CjsDestinyBall.DSTBALLMODE.DSTBALL_STOP
 };
 
@@ -231,6 +327,41 @@ export class BallRotation extends ITriQuaternionFunction {
   }
 }
 
+interface WarpStart {
+  readonly from: SceneVector;
+  readonly landing: SceneVector;
+  readonly distance: number;
+  /**
+   * The ball's effectStamp: the tick proper warp began.
+   */
+  readonly stamp: number;
+  readonly profile: WarpProfile;
+}
+
+interface WarpEntry {
+  /**
+   * The resolved destination: the order's point, or the target ship's centre when the order applied.
+   */
+  readonly destination: SceneVector;
+  /**
+   * Destiny's minRange, metres back from the destination: the order's range, plus both EVE radii for a ship.
+   */
+  readonly range: number;
+  /**
+   * Destiny's warp factor; SetPhysics updates it while the ship aligns.
+   */
+  factor: number;
+  /**
+   * The master position at the latest tick boundary while aligning: where warp begins if the next evolve starts it.
+   */
+  lastAlign: SceneVector;
+  start: Maybe<WarpStart>;
+  /**
+   * The tick it dropped out of warp.
+   */
+  landed: Maybe<number>;
+}
+
 interface ShipEntry {
   readonly id: string;
   readonly ballId: number;
@@ -256,6 +387,14 @@ interface ShipEntry {
    * Whether it sits settled in its slot (mode stop, turning to the fleet heading).
    */
   settled: boolean;
+  /**
+   * Its warp order's state, while one is in force.
+   */
+  warp: Maybe<WarpEntry>;
+  /**
+   * The warping ship (its anchor or FC) a following ship holds for, stopped.
+   */
+  held: Maybe<string>;
 }
 
 /**
@@ -269,6 +408,7 @@ export class DestinyWorld {
    * Movement orders waiting for the next tick boundary, by ship id; the latest order wins.
    */
   private readonly pending = new Map<string, ShipOrder>();
+  private readonly warpListeners = new Set<WarpListener>();
   private nextBallId = FIRST_SHIP_BALL_ID;
 
   constructor() {
@@ -305,14 +445,14 @@ export class DestinyWorld {
       this.Both((park) => park.AddBall(ballId, physics.mass, physics.radius, physics.maxVelocity, true, false, false, true, false, x, y, z, 0, 0, 0, physics.agility, 1));
       const ball = this.replica.GetBall(ballId);
       if (!(ball instanceof CjsDestinyClientBall)) throw new Error(`the replica park did not create a ClientBall for ${doc.id}`);
-      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null, follow: null, followApplied: false, settled: false });
+      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null, follow: null, followApplied: false, settled: false, warp: null, held: null });
     }
     this.PlaceShip(doc);
   }
 
   /**
-   * Puts a ship at rest at a placement, facing along its rotation, ending its order. Its followers chase it there. A
-   * ship following its fleet keeps following and flies back to its slot from there.
+   * Puts a ship at rest at a placement, facing along its rotation, ending its order (a warp too, with no exit event).
+   * Its followers chase it there. A ship following its fleet keeps following and flies back to its slot from there.
    *
    * @param doc - The document ship.
    */
@@ -325,6 +465,8 @@ export class DestinyWorld {
     entry.note = null;
     entry.followApplied = false;
     entry.settled = false;
+    entry.warp = null;
+    entry.held = null;
     const rotation = DocumentRotation(doc.rotation);
     const forward = vec3.transformQuat(vec3.create(), [0, 0, 1], rotation);
     const goto = this.Both((park) => {
@@ -342,7 +484,8 @@ export class DestinyWorld {
   }
 
   /**
-   * Changes what a ship flies with, on both parks.
+   * Changes what a ship flies with, on both parks. A new warp speed reaches a ship that is aligning; once in warp its
+   * warp speed is fixed, as in EVE.
    *
    * @param id - The ship id.
    * @param physics - The new physics.
@@ -361,11 +504,20 @@ export class DestinyWorld {
       park.SetBallAgility(ballId, physics.agility);
     });
     entry.physics = physics;
+    const factor = WarpFactor(physics.warpSpeed ?? DEFAULT_WARP_SPEED);
+    if (entry.warp && !entry.warp.start && factor !== entry.warp.factor && this.master.GetBall(ballId)?.IsAligningForWarp()) {
+      this.Both((park) => {
+        const ball = park.GetBall(ballId);
+        if (ball) ball.ownerId = factor;
+      });
+      entry.warp.factor = factor;
+    }
   }
 
   /**
    * Removes a ship's ball from both parks (they drop it on their next tick). Every ship approaching, keeping range on
-   * or orbiting it, or with such an order pending, stops at once on both parks first. Ships following it in formation
+   * or orbiting it, or with such an order (or a warp to it) pending, stops at once on both parks first. A warp to it
+   * that already applied flies on to where it was. Ships following it in formation
    * are left to the caller to re-point (Follow) in the same call; Steer halts any it does not.
    *
    * @param id - The ship id.
@@ -379,7 +531,7 @@ export class DestinyWorld {
     const stopped: string[] = [];
     for (const other of this.ships.values()) {
       const pending = this.pending.get(other.id);
-      const queued = pending !== undefined && TargetOf(pending) === id;
+      const queued = pending !== undefined && shipOrderTarget(pending) === id;
       if (queued) this.pending.delete(other.id);
       if (queued || (!other.follow && TargetOf(other.order) === id)) {
         this.Halt(other, `stopped: target "${id}" was removed`);
@@ -395,18 +547,75 @@ export class DestinyWorld {
    *
    * @param id - The ship id.
    * @param order - A normalized order.
-   * @returns False when no ship has that id, or the order targets the ship itself or an id with no ship.
+   * @returns False when OrderRefusal refuses it.
    */
   Order(id: string, order: ShipOrder): boolean {
-    const target = TargetOf(order);
     const entry = this.ships.get(id);
-    const valid = entry !== undefined && (!target || (target !== id && this.ships.has(target)));
+    const valid = entry !== undefined && this.OrderRefusal(id, order) === null;
     if (valid) {
       this.pending.set(id, order);
       entry.follow = null;
       entry.settled = false;
+      entry.held = null;
     }
     return valid;
+  }
+
+  /**
+   * Why Order would refuse an order, from the master's current state.
+   *
+   * @param id - The ship id.
+   * @param order - A normalized order.
+   * @returns The reason, or null when Order takes it: no ship (or a target that is itself or has no ball), a ship in
+   *   proper warp (any order), and for a warp a max velocity of 0, a target in warp, or a landing under
+   *   MIN_WARP_DISTANCE away.
+   */
+  OrderRefusal(id: string, order: ShipOrder): Maybe<string> {
+    const entry = this.ships.get(id);
+    const ball = entry ? this.master.GetBall(entry.ballId) : null;
+    const target = shipOrderTarget(order);
+    const targetEntry = target && target !== id ? this.ships.get(target) : undefined;
+    const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
+    let refusal: Maybe<string> = null;
+    if (!entry || !ball || (target && !targetBall)) {
+      refusal = `ship "${id}" or its target has no Destiny ball`;
+    } else if (ball.IsWarping()) {
+      const landsIn = this.WarpReport(entry, ball)?.landsIn;
+      const when = landsIn === undefined ? '' : `, in about ${landsIn} s`;
+      refusal = `ship "${id}" is in warp; it takes orders again once it lands${when}`;
+    } else if (order.type === 'warp') {
+      const destination: SceneVector = 'point' in order ? order.point : [targetBall?.x ?? 0, targetBall?.y ?? 0, targetBall?.z ?? 0];
+      const range = order.range + (targetBall ? ball.radius + targetBall.radius : 0);
+      const length = WarpLength(destination, range, [ball.x, ball.y, ball.z]);
+      if (!(ball.maxVelocity > 0)) refusal = `ship "${id}" cannot warp: its max velocity is 0`;
+      else if (targetBall?.IsWarping()) refusal = `target "${target}" is in warp`;
+      else if (length < MIN_WARP_DISTANCE) refusal = `ship "${id}" would land ${Round(Math.max(0, length) / 1000, 10)} km away; EVE warps only ${MIN_WARP_DISTANCE / 1000} km or more, so use goto`;
+    }
+    return refusal;
+  }
+
+  /**
+   * Calls a listener after every tick a ship enters or leaves proper warp, once both parks evolved and the exit was
+   * fixed up. A placement that ends a warp emits nothing. A throwing listener is logged and the rest still run.
+   *
+   * @param listener - Called with each event.
+   * @returns The unsubscribe.
+   */
+  OnWarp(listener: WarpListener): () => void {
+    this.warpListeners.add(listener);
+    return () => {
+      this.warpListeners.delete(listener);
+    };
+  }
+
+  /**
+   * The warping ship a following ship holds for.
+   *
+   * @param id - The ship id.
+   * @returns Its anchor or FC while that ship is in proper warp and this one is held, else null.
+   */
+  FollowHold(id: string): Maybe<string> {
+    return this.ships.get(id)?.held ?? null;
   }
 
   /**
@@ -424,6 +633,7 @@ export class DestinyWorld {
       entry.follow = follow;
       entry.followApplied = false;
       entry.settled = false;
+      entry.held = null;
     }
     return valid;
   }
@@ -441,6 +651,7 @@ export class DestinyWorld {
     if (entry && following) {
       entry.follow = null;
       entry.settled = false;
+      entry.held = null;
       this.Halt(entry, note);
     }
     return following;
@@ -459,14 +670,16 @@ export class DestinyWorld {
   /**
    * Evolves both parks to `now`. When this call will run a tick, pending orders apply first, then every following
    * ship is steered. The clock caps a frame at 1 s and a tick is 1 s, so a call evolves at most one tick: the steering
-   * always precedes the tick it is for, which is why there is one OnTick per call rather than a loop.
+   * always precedes the tick it is for, which is why there is one OnTick per call rather than a loop. After an evolved
+   * tick the warps are tracked and OnWarp's listeners called.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
    * @throws {Error} The first park failure, after both parks have had their turn.
    */
   Tick(now: number): void {
     const time = BigInt(Math.round(now));
-    if (time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS)) {
+    const due = time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS);
+    if (due) {
       const orders = [...this.pending];
       this.pending.clear();
       for (const [id, order] of orders) {
@@ -474,6 +687,7 @@ export class DestinyWorld {
         if (entry) this.ApplyOrder(entry, order);
       }
       this.Steer();
+      this.MarkAligning();
     }
     let failure: unknown = null;
     for (const park of [this.master, this.replica]) {
@@ -484,6 +698,7 @@ export class DestinyWorld {
       }
     }
     if (failure !== null) throw failure instanceof Error ? failure : new Error(String(failure));
+    if (due) this.TrackWarps();
   }
 
   /**
@@ -511,6 +726,7 @@ export class DestinyWorld {
     const targetEntry = target ? this.ships.get(target) : null;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
     const slot = entry.follow ? this.Slot(entry, entry.follow) : null;
+    const warp = this.WarpReport(entry, ball);
     return {
       position: [Round(ball.x, 100), Round(ball.y, 100), Round(ball.z, 100)],
       velocity: [Round(ball.vx, 100), Round(ball.vy, 100), Round(ball.vz, 100)],
@@ -522,17 +738,20 @@ export class DestinyWorld {
       ...(targetBall ? { targetDistance: Round(Math.hypot(ball.x - targetBall.x, ball.y - targetBall.y, ball.z - targetBall.z) - ball.radius - targetBall.radius, 1) } : {}),
       heading: [Round(Wrap(ball.mNewYaw / DEGREES, 0), 10) % 360, Round(Wrap(ball.mNewPitch / DEGREES, -180), 10)],
       ...(slot ? { slotError: Round(slot.error, 1) } : {}),
+      ...(warp ? { warp } : {}),
       physics: entry.physics
     };
   }
 
   /**
    * Re-aims every following ship at its formation slot on both parks, or settles it there (section Following above).
+   * A following ship in proper warp finishes its warp first; one whose anchor or FC is in proper warp holds, stopped,
+   * until that ship lands.
    */
   private Steer(): void {
     for (const entry of this.ships.values()) {
       const follow = entry.follow;
-      if (!follow) continue;
+      if (!follow || this.InProperWarp(entry)) continue;
       const missing = this.ships.has(follow.frame) ? `anchor "${follow.anchor}"` : `fleet commander "${follow.frame}"`;
       const slot = this.ships.has(follow.anchor) && this.ships.has(follow.frame) ? this.Slot(entry, follow) : null;
       if (!slot) {
@@ -543,8 +762,17 @@ export class DestinyWorld {
       if (!entry.followApplied) {
         entry.order = FollowOrder(follow);
         entry.note = null;
+        entry.warp = null;
         entry.followApplied = true;
       }
+      const warping = [follow.anchor, follow.frame].find((other) => this.InProperWarp(this.ships.get(other)));
+      if (warping) {
+        if (entry.held !== warping) this.Both((park) => park.Stop(entry.ballId));
+        entry.held = warping;
+        entry.settled = false;
+        continue;
+      }
+      entry.held = null;
       const tolerance = toFollowTolerance({ slotRange: follow.slotRange, anchorSpeed: slot.anchorSpeed });
       const anchorAtRest = slot.anchorSpeed < SETTLE_SPEED;
       if (entry.settled && anchorAtRest && slot.error <= SETTLE_HOLD * tolerance) continue;
@@ -632,21 +860,37 @@ export class DestinyWorld {
   }
 
   /**
-   * Gives an order to both parks; a missing target or Destiny's silent refusal stops the ship instead.
+   * Gives an order to both parks; a missing target or Destiny's silent refusal stops the ship instead. An order that
+   * finds the ship in proper warp is dropped (OrderRefusal keeps Order from queueing one).
    *
    * @param entry - The ordered ship.
    * @param order - A normalized order.
    */
   private ApplyOrder(entry: ShipEntry, order: ShipOrder): void {
     const { ballId } = entry;
-    const target = TargetOf(order);
-    const targetBallId = target ? (this.ships.get(target)?.ballId ?? null) : null;
-    if (target && targetBallId === null) {
+    const ball = this.master.GetBall(ballId);
+    if (!ball) return;
+    if (ball.IsWarping()) {
+      entry.note = `dropped: the ${order.type} order came after it entered warp`;
+      return;
+    }
+    const target = shipOrderTarget(order);
+    const targetEntry = target ? this.ships.get(target) : undefined;
+    const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
+    if (target && (!targetEntry || !targetBall)) {
       this.Halt(entry, `stopped: target "${target}" was removed`);
       return;
     }
+    const targetBallId = targetEntry?.ballId ?? 0;
+    let warp: Maybe<WarpEntry> = null;
+    if (order.type === 'warp') {
+      // Computed once from the master, outside Both: WarpTo throws for a bad factor, which would leave the replica behind.
+      const destination: SceneVector = 'point' in order ? order.point : [targetBall?.x ?? 0, targetBall?.y ?? 0, targetBall?.z ?? 0];
+      const range = order.range + (targetBall ? ball.radius + targetBall.radius : 0);
+      warp = { destination, range, factor: WarpFactor(entry.physics.warpSpeed ?? DEFAULT_WARP_SPEED), lastAlign: [ball.x, ball.y, ball.z], start: null, landed: null };
+    }
     this.Both((park) => {
-      if (order.type !== 'stop') park.SetSpeedFraction(ballId, order.speed);
+      if (order.type !== 'stop') park.SetSpeedFraction(ballId, 'speed' in order ? order.speed : 1);
       switch (order.type) {
         case 'direction':
           park.GotoDirection(ballId, ...order.direction);
@@ -655,13 +899,16 @@ export class DestinyWorld {
           park.GotoPoint(ballId, ...order.point);
           break;
         case 'approach':
-          park.FollowBall(ballId, targetBallId ?? 0, APPROACH_RANGE);
+          park.FollowBall(ballId, targetBallId, APPROACH_RANGE);
           break;
         case 'keep-at-range':
-          park.FollowBall(ballId, targetBallId ?? 0, order.range);
+          park.FollowBall(ballId, targetBallId, order.range);
           break;
         case 'orbit':
-          park.Orbit(ballId, targetBallId ?? 0, order.range);
+          park.Orbit(ballId, targetBallId, order.range);
+          break;
+        case 'warp':
+          if (warp) park.WarpTo(ballId, ...warp.destination, warp.range, warp.factor);
           break;
         case 'stop':
           park.Stop(ballId);
@@ -672,6 +919,7 @@ export class DestinyWorld {
     if (this.master.GetBall(ballId)?.mode === mode && this.replica.GetBall(ballId)?.mode === mode) {
       entry.order = order;
       entry.note = null;
+      entry.warp = warp;
     } else {
       console.warn(`ship ${entry.id}: Destiny refused the ${order.type} order, so it stops`);
       this.Halt(entry, `stopped: Destiny refused the ${order.type} order`);
@@ -679,15 +927,130 @@ export class DestinyWorld {
   }
 
   /**
-   * Stops a ship on both parks and records why.
+   * Stops a ship on both parks and records why. A ship in proper warp only records why: nothing stops it but a
+   * placement, so it keeps its warp order and stops when it lands.
    *
    * @param entry - The ship.
    * @param note - Why the world stopped it.
    */
   private Halt(entry: ShipEntry, note: string): void {
+    entry.note = note;
+    if (this.InProperWarp(entry)) return;
     this.Both((park) => park.Stop(entry.ballId));
     entry.order = STOP_ORDER;
-    entry.note = note;
+    entry.warp = null;
+  }
+
+  /**
+   * Whether a ship's master ball is in proper warp (past aligning, not yet dropped out).
+   *
+   * @param entry - The ship.
+   * @returns False for no ship.
+   */
+  private InProperWarp(entry: Maybe<ShipEntry>): boolean {
+    return entry ? (this.master.GetBall(entry.ballId)?.IsWarping() ?? false) : false;
+  }
+
+  /**
+   * Notes where every aligning ship is at this tick boundary: where its warp begins if the next evolve starts it.
+   */
+  private MarkAligning(): void {
+    for (const entry of this.ships.values()) {
+      const ball = entry.warp && !entry.warp.start ? this.master.GetBall(entry.ballId) : null;
+      if (entry.warp && ball) entry.warp.lastAlign = [ball.x, ball.y, ball.z];
+    }
+  }
+
+  /**
+   * After an evolved tick: notes each warp that began or ended on the master, sets landed ships non-massive again on
+   * both parks (Destiny's exit makes them massive), then calls the OnWarp listeners.
+   */
+  private TrackWarps(): void {
+    const events: WarpEvent[] = [];
+    for (const entry of this.ships.values()) {
+      const warp = entry.warp;
+      const ball = warp?.landed === null ? this.master.GetBall(entry.ballId) : null;
+      if (!warp || !ball) continue;
+      if (!warp.start && ball.IsWarping()) {
+        const landing: SceneVector = [ball.gotoX, ball.gotoY, ball.gotoZ];
+        const distance = Distance(landing, warp.lastAlign);
+        warp.start = { from: warp.lastAlign, landing, distance, stamp: ball.effectStamp, profile: this.master.SetupWarpConstants(warp.factor, distance, {}) };
+        events.push(this.WarpEventOf('enter', entry, warp, ball));
+      } else if (warp.start && !ball.IsWarpish()) {
+        warp.landed = this.master.currentTime;
+        this.Both((park) => park.SetBallMassive(entry.ballId, false));
+        events.push(this.WarpEventOf('exit', entry, warp, ball));
+      } else if (!warp.start && !ball.IsWarpish()) {
+        console.warn(`ship ${entry.id}: its warp ended while aligning, so it stops`);
+        entry.warp = null;
+        this.Halt(entry, 'stopped: the warp ended while aligning');
+      }
+    }
+    for (const event of events) {
+      for (const listener of this.warpListeners) {
+        try {
+          listener(event);
+        } catch (error) {
+          console.error(`an OnWarp listener failed on ship ${event.id}'s warp ${event.kind}`, error);
+        }
+      }
+    }
+  }
+
+  /**
+   * An OnWarp event for a warp that has started.
+   *
+   * @param kind - Entering or leaving warp.
+   * @param entry - The ship.
+   * @param warp - Its warp, with a start.
+   * @param ball - Its master ball.
+   * @returns The event: at where warp began (enter) or the ball (exit).
+   */
+  private WarpEventOf(kind: WarpEventKind, entry: ShipEntry, warp: WarpEntry, ball: CjsDestinyBall): WarpEvent {
+    const { from, landing, distance } = warp.start ?? { from: warp.lastAlign, landing: warp.destination, distance: 0 };
+    const scale = distance > 0 ? 1 / distance : 0;
+    return {
+      kind,
+      id: entry.id,
+      tick: this.master.currentTime,
+      position: RoundVector(kind === 'enter' ? from : [ball.x, ball.y, ball.z], 100),
+      velocity: RoundVector([ball.vx, ball.vy, ball.vz], 100),
+      direction: [(landing[0] - from[0]) * scale, (landing[1] - from[1]) * scale, (landing[2] - from[2]) * scale],
+      landing: RoundVector(landing, 100),
+      warpSpeed: warp.factor / 1000
+    };
+  }
+
+  /**
+   * A ship's warp progress (ShipMotion.warp).
+   *
+   * @param entry - The ship.
+   * @param ball - Its master ball.
+   * @returns The report, or null without a warp order in force.
+   */
+  private WarpReport(entry: ShipEntry, ball: CjsDestinyBall): Maybe<ShipWarp> {
+    const warp = entry.warp;
+    if (!warp) return null;
+    const position = [ball.x, ball.y, ball.z];
+    const warpSpeed = warp.factor / 1000;
+    let report: ShipWarp;
+    if (warp.start) {
+      const { landing, distance, profile, stamp } = warp.start;
+      const remaining = Distance(landing, position);
+      const common = { landing: RoundVector(landing, 100), warpSpeed, distance: Round(distance, 1), remaining: Round(remaining, 1) };
+      if (warp.landed === null) {
+        const t = (this.master.currentTime - 1 - stamp) * this.master.dt;
+        const exit = WarpExitTime(profile, ball.maxVelocity, this.master.dt);
+        const progress = distance > 0 ? Math.min(1, Math.max(0, 1 - remaining / distance)) : 1;
+        report = { phase: WarpPhaseAt(profile, t), ...common, progress: Round(progress, 1000), ...(Number.isFinite(exit) ? { landsIn: Math.max(0, Math.round(exit - t)) } : {}) };
+      } else {
+        report = { phase: 'landed', ...common, progress: 1 };
+      }
+    } else {
+      const landing = LandingPoint(warp.destination, warp.range, position);
+      report = { phase: 'aligning', landing: RoundVector(landing, 100), warpSpeed, alignTicks: Math.max(0, -1 - ball.effectStamp), remaining: Round(Distance(landing, position), 1), progress: 0 };
+    }
+    return report;
   }
 
   /**
@@ -750,11 +1113,31 @@ function HeadingRotation(x: number, y: number, z: number): Quat {
 }
 
 function RequireValidPhysics(physics: ShipPhysics): void {
-  const bad = (['mass', 'agility', 'maxVelocity', 'radius'] as const).filter((key) => {
+  const bad: string[] = (['mass', 'agility', 'maxVelocity', 'radius'] as const).filter((key) => {
     const value = physics[key];
     return !Number.isFinite(value) || value < 0 || (value === 0 && key !== 'maxVelocity');
   });
+  const { warpSpeed } = physics;
+  if (warpSpeed !== undefined && (!(warpSpeed > 0) || !IsWarpFactor(warpSpeed))) bad.push('warpSpeed');
   if (bad.length) throw new Error(`ship physics must be finite and positive (max velocity may be 0): ${bad.join(', ')}`);
+}
+
+function IsWarpFactor(warpSpeed: number): boolean {
+  let valid = true;
+  try {
+    WarpFactor(warpSpeed);
+  } catch {
+    valid = false;
+  }
+  return valid;
+}
+
+function Distance(a: ArrayLike<number>, b: ArrayLike<number>): number {
+  return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+}
+
+function RoundVector(vector: ArrayLike<number>, scale: number): SceneVector {
+  return [Round(vector[0], scale), Round(vector[1], scale), Round(vector[2], scale)];
 }
 
 /**

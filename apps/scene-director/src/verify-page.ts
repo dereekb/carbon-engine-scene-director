@@ -60,6 +60,7 @@ interface ShipPhysicsState {
   readonly radius: number;
   readonly signatureRadius: number;
   readonly alignTime: number;
+  readonly warpSpeed?: number;
   readonly source: string;
   readonly typeID?: number;
   readonly typeName?: string;
@@ -80,6 +81,19 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly heading?: [number, number];
   readonly slotError?: number;
   readonly following?: ShipFollowingState;
+  readonly warp?: ShipWarpState;
+  readonly boosters?: { readonly maxVel: number; readonly intensity: number; readonly warpIntensity: number };
+}
+
+interface ShipWarpState {
+  readonly phase: 'aligning' | 'warping' | 'exiting' | 'landed';
+  readonly landing: [number, number, number];
+  readonly warpSpeed: number;
+  readonly alignTicks?: number;
+  readonly distance?: number;
+  readonly remaining: number;
+  readonly progress: number;
+  readonly landsIn?: number;
 }
 
 interface ShipFollowingState {
@@ -97,6 +111,7 @@ interface FleetFormationState {
   readonly following: number;
   readonly inFormation: number;
   readonly catchingUp: number;
+  readonly holding: number;
   readonly detached: number;
   readonly waiting: number;
 }
@@ -464,15 +479,17 @@ try {
     };
     const unknown = await refusal({ id: 'nobody', order: { type: 'stop' } });
     Expect(/no ship "nobody"/u.test(unknown), unknown);
-    const warp = await refusal({ id: 'rifter', order: { type: 'warp' } });
-    Expect(/order\.type must be one of/u.test(warp), warp);
+    const jump = await refusal({ id: 'rifter', order: { type: 'jump' } });
+    Expect(/order\.type must be one of/u.test(jump), jump);
+    const nowhere = await refusal({ id: 'rifter', order: { type: 'warp' } });
+    Expect(/exactly one of point or target/u.test(nowhere), nowhere);
     const nobody = await refusal({ id: 'rifter', order: { type: 'orbit', target: 'nobody', range: 1000 } });
     Expect(/order\.target "nobody" is not a ship in the scene/u.test(nobody), nobody);
     const itself = await refusal({ id: 'rifter', order: { type: 'approach', target: 'rifter' } });
     Expect(/order\.target must be another ship/u.test(itself), itself);
     const rangeless = await refusal({ id: 'rifter', order: { type: 'keep-at-range', target: 'punisher' } });
     Expect(/order\.range must be a number of metres/u.test(rangeless), rangeless);
-    return 'unknown ship, warp, a missing target, the ship itself and a missing range refused';
+    return 'unknown ship, an unknown type, a warp with no destination, a missing target, the ship itself and a missing range refused';
   });
 
   const helpers = new Set(['anchor', 'orbiter', 'keeper', 'chaser', 'goer']);
@@ -553,6 +570,90 @@ try {
   } finally {
     const { ships } = await call<{ ships: { id: string }[] }>('get_scene');
     const operations = ships.filter((ship) => helpers.has(ship.id)).map((ship) => ({ op: 'remove_ship', id: ship.id }));
+    if (operations.length) await call('patch_scene', { operations });
+  }
+
+  try {
+    await Check('a ship warps, lands, and refuses orders in warp', async () => {
+      const added = await call<SceneResult>('patch_scene', {
+        operations: [
+          { op: 'add_ship', ship: { id: 'warper', dna: 'mf1_t1:minmatarbase:minmatar', position: [-50000, 0, 0] } },
+          { op: 'add_ship', ship: { id: 'beacon', dna: 'af1_t1:amarrbase:amarr', position: [-50000, 0, 700000] } }
+        ]
+      });
+      Expect(added.changes['added'] === 2, JSON.stringify(added.changes));
+      await WaitFor('the warper gets its warp speed', 60, (state) => {
+        const warper = ShipIn(state, 'warper');
+        return warper.physics?.warpSpeed === 5 ? null : JSON.stringify(warper.physics);
+      });
+      let refused = '';
+      try {
+        await call('order_ship', { id: 'warper', order: { type: 'warp', point: [-50000, 0, 100000] } });
+      } catch (error) {
+        refused = ErrorMessage(error);
+      }
+      Expect(/150 km/u.test(refused), `a 100 km warp: ${refused || 'accepted'}`);
+
+      const point: [number, number, number] = [-50000, 0, 300000];
+      await call('order_ship', { id: 'warper', order: { type: 'warp', point } });
+      const phases: string[] = [];
+      let topSpeed = 0;
+      let progress = 0;
+      let refusedInWarp = '';
+      let peakGlow = 0;
+      let warper = ShipIn(await call<ViewerState>('get_state'), 'warper');
+      for (let poll = 0; poll < 120 && warper.warp?.phase !== 'landed'; poll++) {
+        await Delay(500);
+        warper = ShipIn(await call<ViewerState>('get_state'), 'warper');
+        const warp = warper.warp;
+        if (!warp) continue;
+        if (phases.at(-1) !== warp.phase) phases.push(warp.phase);
+        topSpeed = Math.max(topSpeed, warper.speed ?? 0);
+        peakGlow = Math.max(peakGlow, warper.boosters?.warpIntensity ?? 0);
+        if (warp.phase !== 'landed') Expect(warper.mode === 'warp', `mode in ${warp.phase}: ${JSON.stringify(warper)}`);
+        Expect(warp.progress >= progress, `progress fell from ${progress}: ${JSON.stringify(warp)}`);
+        progress = warp.progress;
+        if ((warp.phase === 'warping' || warp.phase === 'exiting') && !refusedInWarp) {
+          try {
+            await call('order_ship', { id: 'warper', order: { type: 'stop' } });
+            refusedInWarp = 'accepted';
+          } catch (error) {
+            refusedInWarp = ErrorMessage(error);
+          }
+        }
+      }
+      Expect(warper.warp?.phase === 'landed' && warper.mode === 'stop', `after 60 s: ${JSON.stringify(warper)}`);
+      const order = ['aligning', 'warping', 'exiting', 'landed'];
+      Expect(
+        phases.every((phase, index) => index === 0 || order.indexOf(phase) > order.indexOf(phases[index - 1])),
+        `phases ${phases.join(', ')}`
+      );
+      Expect(/is in warp/u.test(refusedInWarp), `a stop in warp: ${refusedInWarp || 'never tried'}`);
+      Expect(topSpeed > 10_000, `top speed ${topSpeed} m/s`);
+      const landing = warper.warp?.landing ?? [Infinity, 0, 0];
+      const gap = (a: ArrayLike<number>, b: ArrayLike<number>): number => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+      Expect(gap(landing, point) < 1 && gap(warper.position ?? [0, 0, 0], landing) < 2000, JSON.stringify(warper));
+
+      await call('order_ship', { id: 'warper', order: { type: 'warp', target: 'beacon', range: 10000 } });
+      const landed = await WaitFor('the warp to the beacon lands', 60, (state) => {
+        const ship = ShipIn(state, 'warper');
+        return ship.order?.type === 'warp' && ship.order.target === 'beacon' && ship.warp?.phase === 'landed' ? null : JSON.stringify(ship.warp ?? ship.order);
+      });
+      const beaconShip = ShipIn(landed, 'beacon');
+      const onBeacon = ShipIn(landed, 'warper');
+      const radii = (onBeacon.physics?.radius ?? 0) + (beaconShip.physics?.radius ?? 0);
+      const range = gap(onBeacon.warp?.landing ?? [0, 0, 0], beaconShip.position ?? [0, 0, 0]) - radii;
+      Expect(Math.abs(range - 10000) <= 1 && gap(onBeacon.position ?? [0, 0, 0], onBeacon.warp?.landing ?? [0, 0, 0]) < 2000, `range ${range}: ${JSON.stringify(onBeacon)}`);
+      let boosters = 'no renderer';
+      if (landed.renderer.available) {
+        Expect(onBeacon.boosters?.maxVel === onBeacon.physics?.maxVelocity && peakGlow > 0.5, `boosters ${JSON.stringify(onBeacon.boosters)}, peak warp glow ${peakGlow}`);
+        boosters = `peak warp glow ${peakGlow}`;
+      }
+      return `phases ${phases.join(' → ')}, top ${Math.round(topSpeed / 1000)} km/s, landed ${Math.round(gap(warper.position ?? [0, 0, 0], landing))} m from the point; ${Math.round(range)} m off the beacon; refused in warp: ${refusedInWarp}; ${boosters}`;
+    });
+  } finally {
+    const { ships } = await call<{ ships: { id: string }[] }>('get_scene');
+    const operations = ships.filter((ship) => ship.id === 'warper' || ship.id === 'beacon').map((ship) => ({ op: 'remove_ship', id: ship.id }));
     if (operations.length) await call('patch_scene', { operations });
   }
 

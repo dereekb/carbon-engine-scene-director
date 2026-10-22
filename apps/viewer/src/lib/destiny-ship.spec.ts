@@ -2,9 +2,10 @@
 import '@carbonenginejs/runtime/trinity';
 import { blue } from '@carbonenginejs/runtime/blue';
 import { CjsSchema } from '@carbonenginejs/runtime/schema';
-import type { EveShip2 } from '@carbonenginejs/runtime/trinity';
+import { TriFloat, type EveShip2 } from '@carbonenginejs/runtime/trinity';
 import { describe, expect, it } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
+import { DriveBoosters } from './boosters';
 import { AttachShipCurves, DestinyWorld, DocumentRotation } from './destiny';
 import { vec3 } from './runtime-sim';
 
@@ -50,5 +51,57 @@ describe('a Destiny ball driving an EveShip2', () => {
     expect(reached).toContain(curves.translation);
     expect(reached).not.toContain(world.replica);
     expect(reached).not.toContain(world.master);
+  });
+
+  it('drives the booster set from the ball speed: dark at rest, steady at full speed, warp colours only in warp', () => {
+    const world = new DestinyWorld();
+    world.AddShip({ id: 'a', position: [0, 0, 0], rotation: [0, 0, 0] }, { mass: 1.2e6, agility: 3.2, maxVelocity: 350, radius: 30, warpSpeed: 5 });
+    const curves = world.Curves('a');
+    if (!curves) throw new Error('no curves');
+    const ship = CjsSchema.from<EveShip2>('EveShip2', { _type: 'EveShip2', boosters: { _type: 'EveBoosterSet2' } });
+    const boosters = ship.boosters;
+    if (!boosters) throw new Error('no booster set');
+    ship.speed = new TriFloat();
+    AttachShipCurves(ship, curves);
+
+    let now = CLOCK_EPOCH_TICKS;
+    const velocity = new Float32Array(3);
+    const peak = { intensity: 0, warpIntensity: 0 };
+    // The page's order (main.ts and Director.DriveBoosters), then what EveShip2.UpdateSyncronous / UpdateAsyncronous do.
+    const frame = (): void => {
+      now += FRAME_TICKS;
+      world.Tick(now);
+      curves.translation.GetValueDotAt__Ticks(now, velocity);
+      DriveBoosters(ship, { speed: Math.hypot(velocity[0], velocity[1], velocity[2]), maxVelocity: 350 });
+      ship.UpdateWorldTransform(now);
+      if (ship.speed) ship.speed.value = vec3.length(ship.worldVelocity);
+      ship.UpdateBoosters({ GetTime: () => now, GetDeltaT: () => 1 / 60 });
+      peak.intensity = Math.max(peak.intensity, ship.GetBoosterIntensity());
+      peak.warpIntensity = Math.max(peak.warpIntensity, boosters.warpIntensity);
+    };
+    const run = (seconds: number): void => {
+      for (let index = 0; index < Math.round(seconds * 60); index++) frame();
+    };
+
+    run(2);
+    expect(ship.GetBoosterIntensity()).toBe(0);
+    expect(boosters.warpIntensity).toBe(0);
+    world.Order('a', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+    run(15);
+    expect(ship.GetBoosterIntensity()).toBeCloseTo(0.8, 1);
+    expect(boosters.warpIntensity).toBe(0);
+    expect(boosters.maxVel).toBe(350);
+    expect(ship.maxSpeed).toBe(350);
+
+    world.Order('a', { type: 'warp', point: [0, 0, 400_000], range: 0 });
+    for (let index = 0; world.Motion('a')?.warp?.phase !== 'landed'; index++) {
+      if (index > 60 * 60) throw new Error('the warp did not land');
+      frame();
+    }
+    expect(peak.intensity).toBeCloseTo(2, 2);
+    expect(peak.warpIntensity).toBe(1);
+    run(10);
+    expect(boosters.warpIntensity).toBe(0);
+    expect(ship.GetBoosterIntensity()).toBeLessThan(0.1);
   });
 });

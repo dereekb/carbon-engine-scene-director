@@ -10,7 +10,7 @@
 import type { Maybe } from '@dereekb/util';
 import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, FLEET_COMPOSITION_SCHEMA, MAX_FLEET_SHIPS } from './compositions/composition';
 import { DEFAULT_ANCHOR_RANGES, DEFAULT_ANCHOR_UP_RANGE, DEFAULT_FORMATION_RADIUS, FORMATION_GAP, FORMATION_SPACING, SQUAD_ROLES } from './fleets';
-import { APPROACH_RANGE, MAX_ORDER_RANGE, SHIP_ORDER_REQUEST_TYPES } from './orders';
+import { APPROACH_RANGE, MAX_ORDER_RANGE, MIN_WARP_DISTANCE, SHIP_ORDER_REQUEST_TYPES } from './orders';
 import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 import { CELESTIAL_KINDS, DEFAULT_STARGATE_LOCATION_RANGE, DEFAULT_STATION_LOCATION_RANGE, MAP_SEARCH_KINDS } from './location';
 
@@ -115,7 +115,7 @@ export const TOOLS: ToolDefinition[] = [
     name: 'ship_stats',
     where: 'hub',
     description:
-      "A hull's in-game flight numbers from the EVE data (tools-core's SDE): mass (kg), max velocity (m/s), agility, signature radius (m) and align time (s). They are given as published and as flown by a pilot with every skill at V, optionally with a prop mod running. Name the hull by dna (a scene ship's DNA; its hull:faction:race picks the EVE type) or type (an EVE type id or exact name; it wins over dna). propMod is \"mwd\" or \"ab\" (the Tech II module sized for the hull) or a module type id. stats overrides the hull's values like a scene ship's stats. For a ship in the scene, pass its dna, type and stats. Needs a prepared SDE in tools-core unless all four stats are given.",
+      "A hull's in-game flight numbers from the EVE data (tools-core's SDE): mass (kg), max velocity (m/s), agility, signature radius (m), align time (s) and warp speed (AU/s). They are given as published and as flown by a pilot with every skill at V, optionally with a prop mod running. Name the hull by dna (a scene ship's DNA; its hull:faction:race picks the EVE type) or type (an EVE type id or exact name; it wins over dna). propMod is \"mwd\" or \"ab\" (the Tech II module sized for the hull) or a module type id. stats overrides the hull's values like a scene ship's stats. For a ship in the scene, pass its dna, type and stats. Needs a prepared SDE in tools-core unless all four stats are given.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -319,8 +319,11 @@ ${FLEET_COMPOSITION_FORMAT}`,
 { "type": "approach", "target": "<ship id>", "speed"? }   close on the target (Destiny aims for ${APPROACH_RANGE} m)
 { "type": "keep-at-range", "target": "<ship id>", "range": <metres>, "speed"? }   hold the range on the target, following it
 { "type": "orbit", "target": "<ship id>", "range": <metres>, "speed"? }   circle the target; fast ships settle a little wider than the range, as in EVE
+{ "type": "warp", "point": [x, y, z], "range"? }   align, warp and land range metres short of the point (default 0)
+{ "type": "warp", "target": "<ship id>", "range"? }   align, warp and land range metres from where the target is when the order applies
 { "type": "stop" }   decelerate to a halt
 { "type": "rejoin" }   a fleet member that left its formation keeps range on its anchor in its slot again
+Warp: the ship aligns at full speed toward the destination until it reaches 75 % of max velocity on that heading, as in EVE, then warps at its warp speed (warpSpeedMultiplier AU/s; class values without the SDE) and lands. The landing must be at least ${MIN_WARP_DISTANCE / 1000} km away (use goto nearer). While aligning any order cancels the warp; in warp a ship refuses orders until it lands. A fleet holds while its FC is in warp, then flies to the FC's landing. get_state shows warp: phase, landing, progress, remaining, landsIn.
 Fleets fly in formation on their FC: ordering the FC moves its fleet. Any order above on a fleet member (not the FC) takes it out of formation until rejoin, a fleet edit that regroups it, or load_scene; rejoin is refused for the FC and for a ship in no fleet.
 Removing a ship stops every ship approaching, keeping range on or orbiting it. A new position or rotation (or load_scene) puts a ship at rest and ends its order. Returns { id, order, tick }, plus following: "detached" when the order took a fleet member out of formation, or the member's following report for rejoin. get_state shows each ship's order, pendingOrder, orderNote, targetDistance, mode and physics.`,
     inputSchema: {
@@ -332,9 +335,9 @@ Removing a ship stops every ship approaching, keeping range on or orbiting it. A
           properties: {
             type: { type: 'string', enum: [...SHIP_ORDER_REQUEST_TYPES] },
             direction: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
-            point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'World position to fly to, metres.' },
-            target: { type: 'string', description: 'Ship id to approach, keep range on or orbit.' },
-            range: { type: 'number', minimum: 0, maximum: MAX_ORDER_RANGE, description: 'Metres, surface to surface.' },
+            point: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: 'World position to fly or warp to, metres.' },
+            target: { type: 'string', description: 'Ship id to approach, keep range on, orbit or warp to.' },
+            range: { type: 'number', minimum: 0, maximum: MAX_ORDER_RANGE, description: 'Metres, surface to surface (warp: metres short of a point, default 0).' },
             speed: { type: 'number', exclusiveMinimum: 0, maximum: 1 }
           },
           required: ['type']

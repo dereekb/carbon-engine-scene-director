@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { isTargetShipOrder, MAX_ORDER_RANGE, normalizeShipOrder, normalizeShipOrderRequest, SHIP_ORDER_REQUEST_TYPES, SHIP_ORDER_TYPES, type ShipOrderContext } from './orders';
+import { isTargetShipOrder, isWarpToShipOrder, MAX_ORDER_RANGE, normalizeShipOrder, normalizeShipOrderRequest, SHIP_ORDER_REQUEST_TYPES, SHIP_ORDER_TYPES, shipOrderTarget, type ShipOrder, type ShipOrderContext } from './orders';
 import { SceneError } from './scene';
 import { findTool } from './tools';
 
@@ -24,7 +24,7 @@ describe('normalizeShipOrder', () => {
   });
 
   it('refuses unknown types and non-objects', () => {
-    expect(Problems({ type: 'warp' })).toEqual([`order.type must be one of ${SHIP_ORDER_TYPES.join(', ')}`]);
+    expect(Problems({ type: 'jump' })).toEqual([`order.type must be one of ${SHIP_ORDER_TYPES.join(', ')}`]);
     expect(Problems(null)).toEqual(['order must be an object']);
     expect(Problems([1, 0, 0])).toEqual(['order must be an object']);
   });
@@ -33,6 +33,46 @@ describe('normalizeShipOrder', () => {
     expect(Problems({ type: 'direction', direction: [0, 0, 0], speed: 2, target: 'x' })).toEqual(['order.target is not a direction order field', 'order.direction must not be zero', 'order.speed must be a number in (0, 1]']);
     expect(Problems({ type: 'direction', direction: [1, Number.NaN, 0], speed: 0 })).toEqual(['order.direction must be an array of three finite numbers', 'order.speed must be a number in (0, 1]']);
     expect(Problems({ type: 'stop', speed: 1 })).toEqual(['order.speed is not a stop order field']);
+  });
+
+  it('accepts a warp to a point, its range defaulting to 0', () => {
+    expect(normalizeShipOrder({ type: 'warp', point: [0, 0, 300000] })).toEqual({ type: 'warp', point: [0, 0, 300000], range: 0 });
+    expect(normalizeShipOrder({ type: 'warp', point: [1, 2, 3], range: 20000 })).toEqual({ type: 'warp', point: [1, 2, 3], range: 20000 });
+  });
+
+  it('accepts a warp to a ship, trimming the target and keeping the range', () => {
+    const context: ShipOrderContext = { ships: new Set(['a', 'b']), self: 'b' };
+    expect(normalizeShipOrder({ type: 'warp', target: ' a ', range: 10000 }, context)).toEqual({ type: 'warp', target: 'a', range: 10000 });
+    expect(normalizeShipOrder({ type: 'warp', target: 'a' }, context)).toEqual({ type: 'warp', target: 'a', range: 0 });
+  });
+
+  it('refuses a warp with no destination, both, a speed or a bad range or target', () => {
+    const destination = 'order must give a warp destination: exactly one of point or target';
+    expect(Problems({ type: 'warp' })).toEqual([destination]);
+    expect(Problems({ type: 'warp', point: [0, 0, 1], target: 'a' })).toEqual([destination]);
+    expect(Problems({ type: 'warp', point: [0, 0, 1], speed: 1 })).toEqual(['order.speed is not a warp order field']);
+    expect(Problems({ type: 'warp', point: [0, 0, 1], range: -1 })).toEqual([`order.range must be a number of metres in [0, ${MAX_ORDER_RANGE}]`]);
+    expect(Problems({ type: 'warp', point: [0, 0, 1], range: MAX_ORDER_RANGE + 1 })).toEqual([`order.range must be a number of metres in [0, ${MAX_ORDER_RANGE}]`]);
+    expect(Problems({ type: 'warp', point: 'x' })).toEqual(['order.point must be an array of three finite numbers']);
+    expect(Problems({ type: 'warp', target: 'b' }, { self: 'b' })).toEqual(['order.target must be another ship, not "b" itself']);
+    expect(Problems({ type: 'warp', target: 'z' }, { ships: new Set(['a']) })).toEqual(['order.target "z" is not a ship in the scene']);
+  });
+
+  it('names the target of approach, keep-at-range, orbit and a warp to a ship', () => {
+    const orders: readonly [ShipOrder, string | undefined][] = [
+      [{ type: 'direction', direction: [1, 0, 0], speed: 1 }, undefined],
+      [{ type: 'goto', point: [0, 0, 0], speed: 1 }, undefined],
+      [{ type: 'approach', target: 'a', speed: 1 }, 'a'],
+      [{ type: 'keep-at-range', target: 'b', range: 0, speed: 1 }, 'b'],
+      [{ type: 'orbit', target: 'c', range: 0, speed: 1 }, 'c'],
+      [{ type: 'warp', target: 'd', range: 0 }, 'd'],
+      [{ type: 'warp', point: [0, 0, 0], range: 0 }, undefined],
+      [{ type: 'stop' }, undefined]
+    ];
+    for (const [order, target] of orders) expect(shipOrderTarget(order) ?? undefined).toBe(target);
+    expect(isWarpToShipOrder({ type: 'warp', target: 'd', range: 0 })).toBe(true);
+    expect(isWarpToShipOrder({ type: 'warp', point: [0, 0, 0], range: 0 })).toBe(false);
+    expect(isTargetShipOrder({ type: 'warp', target: 'd', range: 0 })).toBe(false);
   });
 
   it('is a page tool whose schema lists the order request types', () => {
@@ -124,11 +164,12 @@ describe('normalizeShipOrderRequest', () => {
   it('accepts rejoin with no fields and passes movement orders to normalizeShipOrder', () => {
     expect(normalizeShipOrderRequest({ type: 'rejoin' })).toEqual({ type: 'rejoin' });
     expect(normalizeShipOrderRequest({ type: 'keep-at-range', target: ' a ', range: 500 }, { self: 'b' })).toEqual({ type: 'keep-at-range', target: 'a', range: 500, speed: 1 });
+    expect(normalizeShipOrderRequest({ type: 'warp', point: [0, 0, 300000] })).toEqual({ type: 'warp', point: [0, 0, 300000], range: 0 });
   });
 
   it('refuses rejoin fields, unknown types and non-objects', () => {
     expect(RequestProblems({ type: 'rejoin', target: 'x' })).toEqual(['order.target is not a rejoin order field']);
-    expect(RequestProblems({ type: 'warp' })).toEqual([`order.type must be one of ${SHIP_ORDER_REQUEST_TYPES.join(', ')}`]);
+    expect(RequestProblems({ type: 'jump' })).toEqual([`order.type must be one of ${SHIP_ORDER_REQUEST_TYPES.join(', ')}`]);
     expect(RequestProblems('rejoin')).toEqual(['order must be an object']);
     expect(RequestProblems({ type: 'stop', speed: 1 })).toEqual(['order.speed is not a stop order field']);
   });

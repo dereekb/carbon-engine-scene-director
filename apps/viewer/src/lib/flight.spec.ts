@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, type PublishedHull } from './flight';
 
 // Published values (EVE typeDogma via ESI, 2026-10-21), the Ship-stats spec fixtures.
-const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31 } };
+const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31, warpSpeedMultiplier: 5 } };
 const RIFTER_STATS = { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35 };
 
 describe('ResolveFlight', () => {
@@ -35,6 +35,21 @@ describe('ResolveFlight', () => {
     expect(frigate.typeID).toBeUndefined();
     expect(ResolveFlight({ published: null, hull: { category: 'Mystery', radius: 726 }, overrides: null }).maxVelocity).toBe(137.5);
     expect(ResolveFlight({ published: null, hull: null, overrides: null })).toMatchObject({ maxVelocity: 287.5, radius: 100, source: 'class' });
+  });
+});
+
+describe('ResolveFlight warp speed', () => {
+  it("is the hull's warpSpeedMultiplier, else its class value", () => {
+    expect(ResolveFlight({ published: { ...RIFTER, published: { ...RIFTER.published, warpSpeedMultiplier: 4.5 } }, hull: null, overrides: null }).warpSpeed).toBe(4.5);
+    expect(ResolveFlight({ published: null, hull: { category: 'Frigate', radius: 27.9 }, overrides: null }).warpSpeed).toBe(5);
+    expect(ResolveFlight({ published: null, hull: { category: 'Battleship', radius: 400 }, overrides: null }).warpSpeed).toBe(3);
+    expect(ResolveFlight({ published: null, hull: null, overrides: null }).warpSpeed).toBe(4);
+  });
+
+  it('keeps the published value under all four stats, and falls back to class values when the SDE has none', () => {
+    expect(ResolveFlight({ published: RIFTER, hull: null, overrides: RIFTER_STATS }).warpSpeed).toBe(5);
+    expect(ResolveFlight({ published: null, hull: { category: 'Battleship', radius: 400 }, overrides: RIFTER_STATS }).warpSpeed).toBe(3);
+    expect(ResolveFlight({ published: { ...RIFTER, published: { ...RIFTER.published, warpSpeedMultiplier: null } }, hull: { category: 'Battleship', radius: 400 }, overrides: null }).warpSpeed).toBe(3);
   });
 });
 

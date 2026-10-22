@@ -9,9 +9,10 @@ ship and environment data come from a local
 **Phase 1**: scene documents, ships placed from SOF DNA, camera, screenshots,
 saved scenes. **Movement** (in progress): every ship flies as a Destiny ball
 from [`@carbonenginejs/server`](https://github.com/dereekb/carbon-engine-server),
-and `order_ship` gives live direction, goto, approach, keep-at-range, orbit and
-stop orders at each ship's in-game speed and agility. Warp, prop mods, fleet
-commands, combat and timelines come in later phases; the document's `orders`
+and `order_ship` gives live direction, goto, approach, keep-at-range, orbit,
+warp and stop orders at each ship's in-game speed, agility and warp speed, with
+boosters that follow the ball speed. Prop mods, fleet commands, fleet warp,
+combat and timelines come in later phases; the document's `orders`
 and `timeline` fields stay reserved until then. **Fleets**: the document holds EVE
 fleet structure (fleet commander, wings, squads with a role and an anchor), and
 fleets fly: every member keeps range on its anchor in formation behind the FC
@@ -96,7 +97,7 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `viewer_status` | hub | connected tabs, the URL to open, tools-core reachability |
 | `page_log` | hub | the viewer's recent console output and errors |
 | `search_hulls` | hub | SOF hull, faction or race names |
-| `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature and align time, as published and as flown with every skill at V, optionally with a prop mod (see below) |
+| `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature, align time and warp speed, as published and as flown with every skill at V, optionally with a prop mod (see below) |
 | `search_map` | hub | searches CCP's static map by name: regions, constellations, systems, stars, planets, NPC stations and stargates (see Locations) |
 | `get_system` | hub | one solar system with its star, the region's nebula and its celestials (see Locations) |
 | `set_location` | hub | puts the scene at a real EVE place: resolves a celestial by name or id and sets the document's location, off it at a range (see Locations) |
@@ -106,8 +107,8 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials |
-| `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials |
+| `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, warp to a point or a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
 
@@ -253,6 +254,7 @@ or not, and the ball drives the drawn ship's translation and rotation curves.
 | `approach` | `FollowBall` at 50 m | closes on the target's hull; the balls may overlap slightly, as there are no collisions |
 | `keep-at-range` | `FollowBall` at the range | holds the range within about ±3 % on a stationary target; trails a moving one (about +33 % at 1 km behind a 130 m/s ship), matching its speed |
 | `orbit` | `Orbit` | settles about 5 % wide at 5 km; tight orbits on fast ships run much wider (500 m gives about 890 m), as in EVE |
+| `warp` | `WarpTo` | aligns, then warps at the hull's warp speed and lands on the point (or `range` short of it), or `range` from a ship; a 162 m/s battleship at 3 AU/s goes 300 km in 12 ticks of align and 12 in warp; a frigate at 5 AU/s spends 20 ticks in warp over 10 AU (see Warp) |
 | `stop` | `Stop` | decelerates to a halt |
 | `rejoin` | (formation steering) | a fleet member that left its formation flies back to its slot (see Follow the FC); refused for the FC and a ship in no fleet |
 
@@ -267,6 +269,62 @@ stops and `orderNote` says so. A new position or rotation, `load_scene` and
 chase it. `get_state` reports each ship's `order` (what its ball is flying),
 `pendingOrder` (applying at the next tick), `orderNote` and `targetDistance`.
 Destiny's default (legacy) orbit algorithm is used.
+
+### Warp
+
+`{ "type": "warp", "point": [x, y, z], "range"? }` or `{ "type": "warp",
+"target": "<ship id>", "range"? }` (`range` default 0; no `speed`: a warp
+always aligns at full speed).
+
+- **Phases.** `aligning`: the ship flies at full speed toward the destination
+  until it is within about 8° of it at 75 % of max velocity, as in EVE (Destiny
+  warps anyway after 180 ticks). `warping`: Destiny's accelerate and cruise
+  phases at the hull's warp speed (`warpSpeedMultiplier` AU/s from the SDE,
+  through Ship stats; class values without it: frigate 5, destroyer 4.5,
+  cruiser 4, battlecruiser 3.5, battleship 3, capitals 1.5). `exiting`: the
+  deceleration. Destiny drops the ship out of warp on the first tick its speed
+  is under min(max velocity / 2, 100 m/s); it then coasts to a halt a few
+  hundred metres past the landing point (`landed`, mode `stop`).
+- **Landing.** For a point, `range` metres short of it, back toward where warp
+  begins; for a ship, `range` surface to surface from where the target was when
+  the order applied (it is not tracked during the warp).
+- **Refusals.** A landing under 150 km away (EVE's minimum; use `goto`), a ship
+  with a max velocity of 0, and a warp to a ship in warp are refused. While
+  aligning any order cancels the warp (a new warp replaces it). In warp a ship
+  refuses every order until it lands (`is in warp; it takes orders again once
+  it lands, in about N s`): Destiny cannot stop a ball in warp.
+- **Edits.** Removing the target of an applied warp leaves the warp flying; a
+  pending warp to it stops the ship. A new position or rotation ends a warp at
+  once, at rest at the placement.
+- **Fleets.** While the FC (or a member's anchor) is in warp its members hold,
+  stopped (`following.state` `holding`); after it lands they fly to their slots
+  at their own speed, however far it went. There is no fleet warp yet.
+- **`get_state`.** A ship with a warp order reports `warp`: `phase`,
+  `landing`, `warpSpeed` (AU/s), `alignTicks` (aligning), `distance` (from warp
+  start), `remaining` (metres to the landing), `progress` (0 to 1) and `landsIn`
+  (seconds, in warp). `order` stays the warp order through landing; `mode` is
+  `warp` until it lands.
+- **Far away.** Destiny simulates any distance in float64, but the page draws
+  relative to the scene origin in float32: a ship farther than about 100,000 km
+  jitters on screen if the camera goes there.
+- **Hook.** `DestinyWorld.OnWarp(listener)` reports `enter` and `exit` events
+  after the tick they happen in (where warp began or the exit point, the
+  direction, the landing and the warp speed), for the warp-in effects to come.
+  The client's effects are `res:/fisfx/jump/warp/warp_out_start.black` and
+  `warp_out.black` (leaving) and `warp_in_glow.black` / `warp_in_noglow.black`
+  (arriving); playing them needs a real-GPU check.
+
+### Boosters
+
+The runtime's `EveShip2` derives its `speed` from the ClientBall every frame;
+a booster set's intensity is speed / `boosters.maxVel` (capped at 2), and the
+runtime defaults `maxVel` to 250 m/s for every hull. So every frame, before
+drawing, the page sets each built ship's `boosters.maxVel` and `maxSpeed` to its
+Ship-stats max velocity (full speed reads the same on every hull) and ramps
+`boosters.warpIntensity` (the warp colours) in from 10× to 100× its max
+velocity, so only a warp shows them. Trails fade out in warp by the runtime's
+own rules. `get_state` reports each built ship's `boosters` (`maxVel`,
+`intensity`, `warpIntensity`) when there is a renderer.
 
 ## Ship stats and the pilot
 
@@ -450,8 +508,10 @@ Fleets fly in formation on their FC under Destiny, in the page
   fleet heading. It moves again when its anchor does, or when its slot drifts
   past 1.5 × the tolerance.
 - **States.** `in-formation` while the slot error is within 200 m + 5 % of the
-  slot range + 2.5 s of the anchor's speed, else `catching-up`; `detached` after
-  an explicit order; `waiting` until the fleet's radii settle.
+  slot range + 2.5 s of the anchor's speed, else `catching-up`; `holding`
+  (stopped, with `warping` naming the ship) while its anchor or the FC is in
+  warp; `detached` after an explicit order; `waiting` until the fleet's radii
+  settle.
 - **Explicit orders.** Any `order_ship` movement order on a member takes it out
   of formation: it flies that order and reports `detached`. It rejoins on
   `{ "type": "rejoin" }`, on a fleet edit that regroups it, or on `load_scene` /
@@ -477,7 +537,7 @@ Fleets fly in formation on their FC under Destiny, in the page
   `stop` once settled. Every ship reports `heading` (`[yaw, pitch]` degrees, the
   authoritative heading). Each fleet reports `formation`: `ready`, `heading`
   (the FC's), and how many members are `following`, `inFormation`,
-  `catchingUp`, `detached` and `waiting`.
+  `catchingUp`, `holding`, `detached` and `waiting`.
 - **Limits.** No collisions: ships may pass through each other while re-forming.
   Slots are rigid, so on an FC turn a far squad (logi at 30 km) swings across
   the fleet and takes minutes to get back. Fleet-level orders, fleet warp and
@@ -755,8 +815,12 @@ Drawing is checked in a real Chrome or Edge tab through `get_state`,
   arguments in the opposite order from their docs.
 - `runtime-sim.ts` is the light half of the import point (math, the Blue curve
   bases, the Destiny server); `runtime.ts` re-exports it. The node-tested modules
-  (`clock.ts`, `destiny.ts`) import only `runtime-sim.ts`, so their specs never
+  (`clock.ts`, `destiny.ts`, `warp.ts`, `boosters.ts` and the others) import only `runtime-sim.ts`, so their specs never
   load the renderer. The server's types are in `carbonenginejs-server.d.ts`.
+- Speed chain: the ClientBall's velocity is `EveSpaceObject2.worldVelocity`
+  (`UpdateWorldTransform`), `EveShip2.UpdateSyncronous` sets `speed.value` from
+  it, and `EveBoosterSet2Renderable.CalculateIntensity` divides it by
+  `boosters.maxVel`; `Director.DriveBoosters` sets that per ship each frame.
 - The esbuild plugin fails the build if any `@carbonenginejs/runtime` import,
   the server's included, resolves outside the page's runtime copy: a nested
   second copy would duplicate every class.

@@ -11,7 +11,12 @@
  * patch places only the ships whose placement it changes. Every ship flies at
  * its Ship-stats numbers (flight.ts): the hub's published values for its hull,
  * its `stats` and the max-skills pilot, retuned when the hub answers. Removing
- * a ship stops its followers.
+ * a ship stops its followers. A warp order aligns, warps and lands the ship
+ * (destiny.ts); get_state reports its phase and progress.
+ *
+ * Boosters follow the ball speed (boosters.ts): every frame, before drawing,
+ * each built ship's booster set takes its max velocity as the reference speed
+ * and its drawn speed for the warp colours.
  *
  * Fleets fly (Follow the FC, following.ts): every fleet member but the FC
  * keeps range on its resolved anchor in its formation slot, re-planned at the
@@ -27,6 +32,7 @@
 import type { Maybe } from '@dereekb/util';
 import { applySceneOperations, createEmptyScene, diffScenes, normalizeScene, normalizeShipOrderRequest, SceneError, toFleetMemberships, toFleetReports, type NormalizedScene, type SceneCamera, type SceneDocument, type SceneShip, type ShipFleetMembership, type ShipOrderRequest } from '@scene-director/scene';
 import type { SceneClock } from './clock';
+import { DriveBoosters } from './boosters';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type ShipHull, type ShipMotion } from './destiny';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -65,6 +71,29 @@ export interface LiveShip {
    */
   hull: Maybe<ShipHull>;
 }
+
+/**
+ * A built ship's booster set, for the real-GPU check.
+ */
+export interface ShipBoosterState {
+  /**
+   * m/s: the reference speed (the ship's max velocity).
+   */
+  readonly maxVel: number;
+  /**
+   * The booster intensity, 0 to 2 (0.01).
+   */
+  readonly intensity: number;
+  /**
+   * The warp colours' blend, 0 to 1 (0.01).
+   */
+  readonly warpIntensity: number;
+}
+
+/**
+ * The ClientBall velocity scratch for DriveBoosters.
+ */
+const BOOSTER_VELOCITY = new Float32Array(3);
 
 export interface ShipReport {
   readonly id: string;
@@ -209,9 +238,27 @@ export class Director {
     if (typeof id !== 'string' || !ships.has(id)) throw new Error(`no ship "${String(id)}"`);
     const normalized = normalizeShipOrderRequest(order, { ships, self: id });
     if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
-    if (!this.world.Order(id, normalized)) throw new Error(`ship "${id}" or its target has no Destiny ball`);
+    const refusal = this.world.OrderRefusal(id, normalized);
+    if (refusal !== null || !this.world.Order(id, normalized)) throw new Error(refusal ?? `ship "${id}" or its target has no Destiny ball`);
     const detached = this.following.Detach(id);
     return { id, order: normalized, tick: this.world.tick, ...(detached ? { following: 'detached' as const } : {}) };
+  }
+
+  /**
+   * Feeds every built ship's booster set from its drawn ball speed, for the frame at `now`. Runs between world.Tick
+   * and engine.Frame; the ClientBall caches its sample per time, so the renderer draws the same velocity.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  DriveBoosters(now: number): void {
+    for (const live of this.live.values()) {
+      const curves = live.ship ? this.world.Curves(live.id) : null;
+      if (!live.ship || !curves) continue;
+      curves.translation.GetValueDotAt__Ticks(now, BOOSTER_VELOCITY);
+      const speed = Math.hypot(BOOSTER_VELOCITY[0], BOOSTER_VELOCITY[1], BOOSTER_VELOCITY[2]);
+      // The prop-mod-off max velocity, so an MWD pushes the boosters toward the runtime's cap.
+      DriveBoosters(live.ship, { speed, maxVelocity: this.flights.get(live.id)?.maxVelocity ?? DEFAULT_SHIP_PHYSICS.maxVelocity });
+    }
   }
 
   async Save(name: unknown): Promise<{ saved: string; ships: number }> {
@@ -496,11 +543,13 @@ export class Director {
     return sphere;
   }
 
-  private ShipState(doc: SceneShip, membership: Maybe<ShipFleetMembership>): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number; following?: ShipFollowingReport } & Partial<ShipFleetMembership> & Partial<ShipMotion> {
+  private ShipState(doc: SceneShip, membership: Maybe<ShipFleetMembership>): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number; following?: ShipFollowingReport; boosters?: ShipBoosterState } & Partial<ShipFleetMembership> & Partial<ShipMotion> {
     const sphere = this.WorldSphere(doc);
     const motion = this.world.Motion(doc.id);
     const following = this.following.Report(doc.id);
-    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, ...(following ? { following } : {}), worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion, physics: this.flights.get(doc.id) ?? motion?.physics };
+    const ship = this.engine ? this.live.get(doc.id)?.ship : null;
+    const boosters: Maybe<ShipBoosterState> = ship?.boosters ? { maxVel: ship.boosters.maxVel, intensity: Math.round(ship.GetBoosterIntensity() * 100) / 100, warpIntensity: Math.round(ship.boosters.warpIntensity * 100) / 100 } : null;
+    return { ...this.ShipReport(doc.id), name: doc.name, team: doc.team, ...membership, ...(following ? { following } : {}), worldPosition: Array.from(sphere.centre).map(Math.round), radius: Math.round(sphere.radius), ...motion, physics: this.flights.get(doc.id) ?? motion?.physics, ...(boosters ? { boosters } : {}) };
   }
 
   private ShipReport(id: string): ShipReport {

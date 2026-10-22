@@ -24,11 +24,12 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   declarations file when the page starts using it; do not reach for `any`. `src/lib/runtime-sim.ts` is its light half
   (math, Blue curve bases, the Destiny server, typed by `carbonenginejs-server.d.ts`), re-exported by `runtime.ts`.
   `clock.ts` (the scene clock), `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship, and the
-  movement orders and fleet following), `flight.ts` (each ship's Ship-stats flight numbers from the hub's
-  `/ship-stats`), `steering.ts` (Follow the FC's steering math), `following.ts` (`FleetFollowing`: the document's
-  fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the location's
-  system from the hub's `/map/system`, and get_state's report) have node specs: the viewer has a `test` target
-  (`project: viewer`).
+  movement orders, warp (phases, `OnWarp`) and fleet following), `flight.ts` (each ship's Ship-stats flight numbers
+  from the hub's `/ship-stats`), `warp.ts` (warp factor, landing and Destiny's warp profile math), `boosters.ts` (the
+  per-frame booster drive), `steering.ts` (Follow the FC's steering math), `following.ts` (`FleetFollowing`: the
+  document's fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the
+  location's system from the hub's `/map/system`, and get_state's report) have node specs: the viewer has a `test`
+  target (`project: viewer`).
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Commands
@@ -70,12 +71,12 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   `destiny.ts`'s `BallRotation` overrides every `*__Ticks` method it serves directly.
 - The Destiny master and replica parks must stay in lockstep (replication is unported): only `DestinyWorld` touches
   them, every change goes to both in one call, and movement orders apply to both right before the `OnTick` that
-  evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `engine.Frame(timestamp, now)`, so
-  `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame at 1 s so the master's 6-tick
-  backlog drop never fires.
-- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `steering.ts`, `following.ts`, `location.ts`) import
-  `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the renderer and the
-  `runtime-dist/` alias, which vitest does not have.
+  evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` →
+  `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame
+  at 1 s so the master's 6-tick backlog drop never fires.
+- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `following.ts`,
+  `location.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
+  renderer and the `runtime-dist/` alias, which vitest does not have.
 - Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a
   tick is due, so it relies on one evolve per `Tick` call (the clock's 1 s frame cap). FollowBall cannot hold a
   bearing (it aims at the nearest point of the range sphere, so followers stack at the trailing pole), and Destiny's
@@ -90,6 +91,18 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - Destiny's `FollowBall` / `Orbit` / `GotoPoint` return without a word, keeping the old order, for a missing, self,
   moribund or cloaked target, a target in another bubble (a master only) or a non-finite value. `DestinyWorld`
   resolves the target itself and checks that both parks reached the order's mode, or stops the ship on both.
+- Destiny's warp exit makes the ball massive (and its sensor active) whatever it was before; `DestinyWorld.TrackWarps`
+  sets every landed ship non-massive again on both parks.
+- Nothing may stop a ball in proper warp but a placement: `Stop` / `GotoPoint` / `FollowBall` / `Orbit` / `WarpTo` only
+  switch its mode and it coasts on at warp speed (km/s, measured). `OrderRefusal` refuses every order in warp, `Halt`
+  leaves a warping ship alone (note only), `Steer` skips it, and `ApplyOrder` drops a pending order that finds it there.
+- `WarpTo` throws a RangeError for a non-int32 warp factor, which inside `Both` would leave the replica unchanged:
+  `WarpFactor` (round(AU/s × 1000)) runs first, and `RequireValidPhysics` refuses a warp speed it cannot convert. A
+  warp only enters proper warp at 75 % of max velocity on its heading, so `ApplyOrder` sets speed fraction 1 (below it
+  Destiny can only time out after 180 ticks).
+- EveShip2 derives `speed` from the translation curve itself; booster intensity is speed / `boosters.maxVel`, which the
+  runtime defaults to 250 m/s for every hull and nothing in it drives `warpIntensity`, so `Director.DriveBoosters`
+  sets both per ship every frame (max velocity, prop-mod-off once prop mods land).
 - Destiny's `RemoveBall` sends an interactive orbiter straight on along its velocity and stops other followers.
   `DestinyWorld.RemoveShip` stops every follower of the removed ship first, so all of them stop and the parks stay
   identical. Formation followers (Follow the FC) are the exception: `FleetFollowing.Reconcile` re-anchors them in the

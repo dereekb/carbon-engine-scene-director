@@ -175,6 +175,31 @@ describe('FleetFollowing', () => {
     expect(d1?.slotError).toBeLessThanOrEqual(250);
     expect(rig.following.Report('fc')).toBeNull();
     expect(rig.following.Report('loner')).toBeNull();
-    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toEqual({ ready: true, heading: [0, 0], following: 4, inFormation: 3, catchingUp: 0, detached: 1, waiting: 0 });
+    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toEqual({ ready: true, heading: [0, 0], following: 4, inFormation: 3, catchingUp: 0, holding: 0, detached: 1, waiting: 0 });
+  });
+
+  it('reports members holding while the FC is in warp, then catching up', () => {
+    const rig = new Rig();
+    rig.following.Reconcile();
+    rig.Run(30);
+    expect(rig.world.Order('fc', { type: 'warp', point: [0, 0, 300_000], range: 0 })).toBe(true);
+    const phase = (): Maybe<string> => rig.world.Motion('fc')?.warp?.phase;
+    for (let second = 0; phase() !== 'warping' && phase() !== 'exiting'; second++) {
+      if (second > 30) throw new Error(`the FC never warped: ${phase()}`);
+      rig.Run(1);
+    }
+    rig.Run(2);
+    expect(phase()).not.toBe('landed');
+    for (const id of ['d1', 'd2', 'l1', 'l2']) expect(rig.following.Report(id), id).toMatchObject({ state: 'holding', warping: 'fc' });
+    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toMatchObject({ following: 4, holding: 4, inFormation: 0, catchingUp: 0 });
+    for (let second = 0; phase() !== 'landed'; second++) {
+      if (second > 30) throw new Error(`the FC never landed: ${phase()}`);
+      rig.Run(1);
+    }
+    rig.Run(2);
+    const d1 = rig.following.Report('d1');
+    expect(d1?.state).toBe('catching-up');
+    expect(d1?.warping).toBeUndefined();
+    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toMatchObject({ holding: 0, catchingUp: 4 });
   });
 });

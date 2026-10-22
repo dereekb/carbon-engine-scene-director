@@ -1,18 +1,20 @@
+import type { Maybe } from '@dereekb/util';
 import { createRequire } from 'node:module';
 import { toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder } from '@scene-director/scene';
 import { describe, expect, it, vi } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipFollow, type ShipMotion, type ShipPhysics } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipFollow, type ShipMotion, type ShipPhysics, type ShipWarp, type WarpEvent } from './destiny';
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { CjsDestinyBall, CjsDestinyClientBall, quat, vec3, type Quat, type Vec3 } from './runtime-sim';
+import { WarpExitTime } from './warp';
 
 const FRAME_TICKS = Math.round(TICKS_PER_SECOND / 60);
 const FRIGATE = { mass: 1.2e6, agility: 3.2, maxVelocity: 350, radius: 30 };
 
 // Published values (EVE typeDogma via ESI, 2026-10-21), the Ship-stats spec fixtures.
-const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31 } };
-const GUARDIAN: PublishedHull = { typeID: 11987, name: 'Guardian', published: { mass: 11_980_000, maxVelocity: 209, agility: 0.61, signatureRadius: 70, radius: 80 } };
-const TFI: PublishedHull = { typeID: 17732, name: 'Tempest Fleet Issue', published: { mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250 } };
+const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31, warpSpeedMultiplier: 5 } };
+const GUARDIAN: PublishedHull = { typeID: 11987, name: 'Guardian', published: { mass: 11_980_000, maxVelocity: 209, agility: 0.61, signatureRadius: 70, radius: 80, warpSpeedMultiplier: 4 } };
+const TFI: PublishedHull = { typeID: 17732, name: 'Tempest Fleet Issue', published: { mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250, warpSpeedMultiplier: 3 } };
 
 type Placement = Pick<SceneShip, 'id' | 'position' | 'rotation'>;
 
@@ -751,5 +753,349 @@ describe('DestinyWorld fleet following', () => {
     expect(RequireMotion(world, 'lost')).toMatchObject({ order: { type: 'stop' }, orderNote: 'stopped: anchor "lead" was removed' });
     expect(RequireMotion(world, 'kept')).toMatchObject({ mode: 'goto', order: { type: 'keep-at-range', target: 'fc', range: 5000 } });
     ExpectLockstep(world, 4);
+  });
+});
+
+describe('DestinyWorld warp', () => {
+  const rifter = Fly(RIFTER);
+  const guardian = Fly(GUARDIAN);
+  const tfi = Fly(TFI);
+  const AU = 149_597_870_700;
+  const AHEAD: SceneVector = [0, 0, 300_000];
+
+  function WarpOf(world: DestinyWorld, id: string): Maybe<ShipWarp> {
+    return RequireMotion(world, id).warp ?? null;
+  }
+
+  function Gap(a: ArrayLike<number>, b: ArrayLike<number>): number {
+    return Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  }
+
+  /**
+   * Runs ticks until `done`, failing after `limit` of them.
+   */
+  function RunUntil(harness: Harness, done: () => boolean, limit: number, onTick?: () => void): void {
+    for (let tick = 0; !done(); tick++) {
+      if (tick >= limit) throw new Error(`not done after ${limit} ticks`);
+      RunTicks(harness, 1, onTick);
+    }
+  }
+
+  function Landed(world: DestinyWorld, id: string): boolean {
+    return WarpOf(world, id)?.phase === 'landed';
+  }
+
+  function InWarp(world: DestinyWorld, id: string): boolean {
+    const phase = WarpOf(world, id)?.phase;
+    return phase === 'warping' || phase === 'exiting';
+  }
+
+  it("aligns, warps and lands at the ship's warp speed, in lockstep", () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), rifter);
+    expect(RequireMotion(world, 'a').warp).toBeUndefined();
+    expect(world.Order('a', { type: 'warp', point: AHEAD, range: 0 })).toBe(true);
+    expect(RequireMotion(world, 'a').pendingOrder).toEqual({ type: 'warp', point: AHEAD, range: 0 });
+    const phases: string[] = [];
+    let alignTicks = -1;
+    let progress = 0;
+    let landsIn = Infinity;
+    let topSpeed = 0;
+    RunUntil(
+      harness,
+      () => Landed(world, 'a'),
+      40,
+      () => {
+        ExpectLockstep(world, 1);
+        const motion = RequireMotion(world, 'a');
+        const warp = motion.warp;
+        if (!warp) throw new Error('no warp report');
+        if (phases.at(-1) !== warp.phase) phases.push(warp.phase);
+        expect(warp.warpSpeed).toBe(5);
+        topSpeed = Math.max(topSpeed, motion.speed);
+        if (warp.phase === 'aligning') {
+          expect(motion.mode).toBe('warp');
+          expect(warp).toMatchObject({ progress: 0, landing: AHEAD });
+          expect(warp.alignTicks).toBeGreaterThan(alignTicks);
+          alignTicks = warp.alignTicks ?? 0;
+        } else if (warp.phase !== 'landed') {
+          expect(motion.mode).toBe('warp');
+          expect(warp.progress).toBeGreaterThanOrEqual(progress);
+          expect(warp.landsIn).toBeLessThanOrEqual(landsIn);
+          expect(warp.distance).toBeGreaterThan(290_000);
+          progress = warp.progress;
+          landsIn = warp.landsIn ?? 0;
+          expect(world.master.GetBall(FIRST_SHIP_BALL_ID)?.ownerId).toBe(5000n);
+          expect(world.replica.GetBall(FIRST_SHIP_BALL_ID)?.ownerId).toBe(5000n);
+        }
+      }
+    );
+    expect(phases).toEqual(['aligning', 'warping', 'exiting', 'landed']);
+    expect(topSpeed).toBeGreaterThan(100_000);
+    RunTicks(harness, 10);
+    const motion = RequireMotion(world, 'a');
+    expect(motion).toMatchObject({ mode: 'stop', order: { type: 'warp', point: AHEAD }, warp: { phase: 'landed', progress: 1, landing: AHEAD } });
+    expect(motion.warp?.landsIn).toBeUndefined();
+    expect(Gap(motion.position, AHEAD)).toBeLessThan(2000);
+    expect(motion.warp?.remaining).toBe(Math.round(Gap(motion.position, AHEAD)));
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID)?.isMassive).toBe(false);
+    expect(world.replica.GetBall(FIRST_SHIP_BALL_ID)?.isMassive).toBe(false);
+    ExpectLockstep(world, 1);
+    world.Order('a', { type: 'stop' });
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'a').warp).toBeUndefined();
+  });
+
+  it("lands a faster warp sooner, on Destiny's profile", () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('slow', [-5000, 0, 0]), { ...rifter, warpSpeed: 3 });
+    world.AddShip(Ship('fast', [5000, 0, 0]), rifter);
+    const events: WarpEvent[] = [];
+    world.OnWarp((event) => events.push(event));
+    world.Order('slow', { type: 'warp', point: [-5000, 0, 10 * AU], range: 0 });
+    world.Order('fast', { type: 'warp', point: [5000, 0, 10 * AU], range: 0 });
+    RunUntil(
+      harness,
+      () => Landed(world, 'slow') && Landed(world, 'fast'),
+      80,
+      () => ExpectLockstep(world, 2)
+    );
+    const exits = events.filter((event) => event.kind === 'exit').map((event) => event.id);
+    expect(exits).toEqual(['fast', 'slow']);
+    for (const id of ['slow', 'fast']) {
+      const enter = events.find((event) => event.id === id && event.kind === 'enter');
+      const exit = events.find((event) => event.id === id && event.kind === 'exit');
+      const distance = WarpOf(world, id)?.distance ?? 0;
+      const profile = world.master.SetupWarpConstants(id === 'slow' ? 3000 : 5000, distance, {});
+      expect((exit?.tick ?? 0) - (enter?.tick ?? 0)).toBe(WarpExitTime(profile, rifter.maxVelocity));
+    }
+  });
+
+  it('warps to a ship at a range, surface to surface, and flies on when the target goes', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), rifter);
+    world.AddShip(Ship('t', [0, 0, 400_000]), guardian);
+    world.Order('a', { type: 'warp', target: 't', range: 10_000 });
+    RunUntil(harness, () => Landed(world, 'a'), 40);
+    const landing = WarpOf(world, 'a')?.landing ?? [0, 0, 0];
+    expect(Gap(landing, [0, 0, 400_000])).toBeCloseTo(10_000 + rifter.radius + guardian.radius, 1);
+    expect(Gap(RequireMotion(world, 'a').position, landing)).toBeLessThan(2000);
+
+    world.AddShip(Ship('b', [0, 0, 0]), rifter);
+    world.Order('b', { type: 'warp', target: 'a', range: 0 });
+    RunUntil(harness, () => InWarp(world, 'b'), 20);
+    expect(world.RemoveShip('a')).toEqual([]);
+    RunUntil(harness, () => Landed(world, 'b'), 40);
+    expect(RequireMotion(world, 'b').orderNote).toBeUndefined();
+
+    world.AddShip(Ship('c', [0, 0, -500_000]), rifter);
+    world.Order('c', { type: 'warp', target: 't', range: 0 });
+    expect(world.RemoveShip('t')).toEqual(['c']);
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'c')).toMatchObject({ order: { type: 'stop' }, orderNote: 'stopped: target "t" was removed', mode: 'stop' });
+  });
+
+  it('refuses a short warp, a ship that cannot move, a target in warp and any order in warp', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), rifter);
+    world.AddShip(Ship('near', [0, 0, 120_000]), guardian);
+    world.AddShip(Ship('still', [1000, 0, 0]), { ...FRIGATE, maxVelocity: 0 });
+    world.AddShip(Ship('b', [-1000, 0, 0]), rifter);
+    expect(world.OrderRefusal('a', { type: 'warp', point: [0, 0, 100_000], range: 0 })).toBe('ship "a" would land 100 km away; EVE warps only 150 km or more, so use goto');
+    expect(world.OrderRefusal('a', { type: 'warp', point: AHEAD, range: 200_000 })).toBe('ship "a" would land 100 km away; EVE warps only 150 km or more, so use goto');
+    expect(world.OrderRefusal('a', { type: 'warp', target: 'near', range: 0 })).toMatch(/^ship "a" would land 119\.9 km away/);
+    expect(world.Order('a', { type: 'warp', target: 'near', range: 0 })).toBe(false);
+    expect(world.OrderRefusal('still', { type: 'warp', point: AHEAD, range: 0 })).toBe('ship "still" cannot warp: its max velocity is 0');
+    expect(world.OrderRefusal('a', { type: 'warp', target: 'nobody', range: 0 })).toBe('ship "a" or its target has no Destiny ball');
+    expect(world.OrderRefusal('a', { type: 'warp', point: AHEAD, range: 0 })).toBeNull();
+
+    world.Order('a', { type: 'warp', point: AHEAD, range: 0 });
+    RunUntil(harness, () => InWarp(world, 'a'), 20);
+    expect(world.OrderRefusal('b', { type: 'warp', target: 'a', range: 0 })).toBe('target "a" is in warp');
+    const orders: ShipOrder[] = [{ type: 'stop' }, { type: 'goto', point: [0, 0, 0], speed: 1 }, { type: 'orbit', target: 'b', range: 1000, speed: 1 }, { type: 'warp', point: [0, 0, -AU], range: 0 }];
+    for (const order of orders) {
+      expect(world.OrderRefusal('a', order)).toMatch(/^ship "a" is in warp; it takes orders again once it lands, in about \d+ s$/);
+      expect(world.Order('a', order)).toBe(false);
+    }
+    expect(RequireMotion(world, 'a').pendingOrder).toBeUndefined();
+    RunUntil(harness, () => Landed(world, 'a'), 40);
+    expect(world.Order('a', { type: 'stop' })).toBe(true);
+  });
+
+  it('cancels a warp for an order while aligning, keeping the align counter only for the same destination', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), tfi);
+    world.Order('a', { type: 'warp', point: AHEAD, range: 0 });
+    RunTicks(harness, 2);
+    expect(WarpOf(world, 'a')).toMatchObject({ phase: 'aligning', alignTicks: 2 });
+    world.Order('a', { type: 'warp', point: AHEAD, range: 0 });
+    RunTicks(harness, 1);
+    expect(WarpOf(world, 'a')?.alignTicks).toBe(3);
+    world.Order('a', { type: 'warp', point: [0, 0, 400_000], range: 0 });
+    RunTicks(harness, 1);
+    expect(WarpOf(world, 'a')).toMatchObject({ phase: 'aligning', alignTicks: 1, landing: [0, 0, 400_000] });
+    world.Order('a', { type: 'stop' });
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'a')).toMatchObject({ mode: 'stop', order: { type: 'stop' } });
+    expect(RequireMotion(world, 'a').warp).toBeUndefined();
+    ExpectLockstep(world, 1);
+  });
+
+  it('stops the ship on both parks when Destiny refuses the warp', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    try {
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('a', [0, 0, 0]), rifter);
+      world.Order('a', { type: 'warp', point: AHEAD, range: 0 });
+      // Breaks lockstep on purpose: within 100 km of the point, the replica's WarpTo becomes a GotoPoint.
+      world.replica.SetBallPosition(FIRST_SHIP_BALL_ID, 0, 0, 250_000);
+      RunTicks(harness, 1);
+      expect(RequireMotion(world, 'a')).toMatchObject({ order: { type: 'stop' }, orderNote: 'stopped: Destiny refused the warp order', mode: 'stop' });
+      expect(RequireMotion(world, 'a').warp).toBeUndefined();
+      expect(ModeName(world.replica.GetBall(FIRST_SHIP_BALL_ID)?.mode ?? -1)).toBe('stop');
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('ends a warp on a placement, at rest and with no exit event', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), rifter);
+    const events: WarpEvent[] = [];
+    world.OnWarp((event) => events.push(event));
+    world.Order('a', { type: 'warp', point: [0, 0, AU], range: 0 });
+    RunUntil(harness, () => InWarp(world, 'a'), 20);
+    RunTicks(harness, 2);
+    world.PlaceShip(Ship('a', [100, 200, 300]));
+    RunTicks(harness, 2);
+    const motion = RequireMotion(world, 'a');
+    expect(motion).toMatchObject({ position: [100, 200, 300], speed: 0, mode: 'stop', order: { type: 'stop' } });
+    expect(motion.warp).toBeUndefined();
+    expect(events.map((event) => event.kind)).toEqual(['enter']);
+    ExpectLockstep(world, 1);
+  });
+
+  it('reports entering and leaving warp to every listener, after the tick', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('a', [0, 0, 0]), rifter);
+      const events: WarpEvent[] = [];
+      world.OnWarp(() => {
+        throw new Error('listener failure');
+      });
+      const off = world.OnWarp((event) => {
+        expect(event.tick).toBe(world.tick);
+        events.push(event);
+      });
+      world.Order('a', { type: 'warp', point: AHEAD, range: 0 });
+      RunUntil(harness, () => Landed(world, 'a'), 40);
+      expect(events.map((event) => event.kind)).toEqual(['enter', 'exit']);
+      const [enter, exit] = events;
+      expect(enter).toMatchObject({ id: 'a', landing: AHEAD, warpSpeed: 5 });
+      expect(enter.direction[2]).toBeCloseTo(1, 6);
+      expect(Math.hypot(enter.position[0], enter.position[1])).toBeLessThan(1);
+      expect(enter.position[2]).toBeLessThan(5000);
+      expect(exit.tick).toBeGreaterThan(enter.tick);
+      expect(Gap(exit.position, AHEAD)).toBeLessThan(2000);
+      expect(error).toHaveBeenCalledTimes(2);
+      off();
+      world.Order('a', { type: 'warp', point: [0, 0, 0], range: 0 });
+      RunUntil(harness, () => Landed(world, 'a'), 40);
+      expect(events).toHaveLength(2);
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('retunes the warp speed while aligning, not in warp', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), tfi);
+    world.Order('a', { type: 'warp', point: AHEAD, range: 0 });
+    RunTicks(harness, 1);
+    world.SetPhysics('a', { ...tfi, warpSpeed: 4 });
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID)?.ownerId).toBe(4000n);
+    expect(world.replica.GetBall(FIRST_SHIP_BALL_ID)?.ownerId).toBe(4000n);
+    expect(WarpOf(world, 'a')?.warpSpeed).toBe(4);
+    RunUntil(harness, () => InWarp(world, 'a'), 40);
+    world.SetPhysics('a', { ...tfi, warpSpeed: 2 });
+    expect(world.master.GetBall(FIRST_SHIP_BALL_ID)?.ownerId).toBe(4000n);
+    expect(world.replica.GetBall(FIRST_SHIP_BALL_ID)?.ownerId).toBe(4000n);
+    expect(() => world.SetPhysics('a', { ...tfi, warpSpeed: 0 })).toThrow(/warpSpeed/);
+  });
+
+  it('holds a fleet while its FC is in warp, then flies it to the landing', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('fc', [0, 0, 0]), tfi);
+    const directions: SceneVector[] = [
+      [0, 0, -1],
+      [0.6, 0, -0.8]
+    ];
+    directions.forEach((direction, index) => {
+      world.AddShip(Ship(`m${index}`, [direction[0] * 1400, 0, direction[2] * 1400]), rifter);
+      world.Follow(`m${index}`, { anchor: 'fc', range: 1000, frame: 'fc', direction, slotRange: 1000, speed: 1 });
+    });
+    RunTicks(harness, 3);
+    world.Order('fc', { type: 'warp', point: AHEAD, range: 0 });
+    let held = 0;
+    let warpTicks = 0;
+    RunUntil(
+      harness,
+      () => Landed(world, 'fc'),
+      60,
+      () => {
+        ExpectLockstep(world, 3);
+        if (!InWarp(world, 'fc')) return;
+        if (warpTicks++ === 0) return;
+        for (const id of ['m0', 'm1']) {
+          expect(RequireMotion(world, id).mode).toBe('stop');
+          expect(world.FollowHold(id)).toBe('fc');
+          held += 1;
+        }
+      }
+    );
+    expect(held).toBeGreaterThan(4);
+    RunTicks(harness, 2);
+    const errors = ['m0', 'm1'].map((id) => RequireMotion(world, id).slotError ?? 0);
+    RunTicks(harness, 5, () => ExpectLockstep(world, 3));
+    ['m0', 'm1'].forEach((id, index) => {
+      const motion = RequireMotion(world, id);
+      expect(motion.mode).toBe('goto');
+      expect(world.FollowHold(id)).toBeNull();
+      expect(motion.slotError ?? 0).toBeLessThan(errors[index]);
+    });
+  });
+
+  it('lets a ship told to follow while in warp finish its warp first', () => {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('fc', [0, 0, 0]), tfi);
+    world.AddShip(Ship('x', [5000, 0, 0]), rifter);
+    world.Order('x', { type: 'warp', point: [5000, 0, 300_000], range: 0 });
+    RunUntil(harness, () => InWarp(world, 'x'), 20);
+    expect(world.Follow('x', { anchor: 'fc', range: 1000, frame: 'fc', direction: [0, 0, -1], slotRange: 1000, speed: 1 })).toBe(true);
+    RunUntil(
+      harness,
+      () => Landed(world, 'x'),
+      40,
+      () => {
+        if (InWarp(world, 'x')) expect(RequireMotion(world, 'x').mode).toBe('warp');
+      }
+    );
+    RunTicks(harness, 1);
+    const motion = RequireMotion(world, 'x');
+    expect(motion).toMatchObject({ mode: 'goto', order: { type: 'keep-at-range', target: 'fc' } });
+    expect(motion.warp).toBeUndefined();
   });
 });

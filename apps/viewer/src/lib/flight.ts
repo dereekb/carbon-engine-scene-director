@@ -8,6 +8,7 @@
  *   All four `stats` pin the numbers whatever the hull.
  * - The ball radius is the hull's EVE radius (SDE `radius`) when the hub answered, as EVE measures ranges on it; else
  *   the SOF bounding radius, else DEFAULT_FLIGHT_RADIUS. Framing and get_state's `radius` keep the SOF sphere.
+ * - Warp speed is the hull's warpSpeedMultiplier (AU/s; no skill changes it), else its class value.
  * - Lookups are cached per page session by the hub's own key (the EVE type, else the DNA's hull:faction:race); failures
  *   are cached with the hub's message until ForgetFailures (every load_scene / open_scene).
  *
@@ -17,6 +18,7 @@
 import type { Maybe } from '@dereekb/util';
 import { computeShipStats, HULL_STAT_OVERRIDE_KEYS, type HullStatOverrides, type HullStats, type SceneShip } from '@scene-director/scene';
 import type { ShipHull, ShipPhysics } from './destiny';
+import { DEFAULT_WARP_SPEED } from './warp';
 
 /**
  * Where a ship's flight numbers come from: the hub's EVE values, the document's four stats, or class values.
@@ -44,6 +46,10 @@ export interface ShipFlight extends ShipPhysics {
    * Seconds to reach 75 % of max velocity from a standstill.
    */
   readonly alignTime: number;
+  /**
+   * AU/s.
+   */
+  readonly warpSpeed: number;
   readonly source: FlightSource;
   /**
    * The EVE type, when the hub named one.
@@ -81,14 +87,15 @@ export type ShipClass = 'frigate' | 'destroyer' | 'cruiser' | 'battlecruiser' | 
  * Class values, not dogma: published-like numbers for a class, used only when the EVE data cannot name the hull. With
  * the max-skills pilot a frigate aligns in about 3.6 s and a battleship flies 137.5 m/s with about an 11 s align.
  */
+// Warp speeds (AU/s) are the SDE's warpSpeedMultiplier by class, build 3632936 (2026-10-20).
 export const CLASS_HULLS: Readonly<Record<ShipClass, HullStats>> = {
-  frigate: { mass: 1.2e6, agility: 3.2, maxVelocity: 350, signatureRadius: 35 },
-  destroyer: { mass: 1.7e6, agility: 3.5, maxVelocity: 260, signatureRadius: 65 },
-  cruiser: { mass: 1.1e7, agility: 0.5, maxVelocity: 230, signatureRadius: 130 },
-  battlecruiser: { mass: 1.3e7, agility: 0.7, maxVelocity: 160, signatureRadius: 270 },
-  battleship: { mass: 1e8, agility: 0.12, maxVelocity: 110, signatureRadius: 400 },
-  capital: { mass: 1.1e9, agility: 0.035, maxVelocity: 80, signatureRadius: 11_000 },
-  titan: { mass: 2.4e9, agility: 0.025, maxVelocity: 70, signatureRadius: 18_000 }
+  frigate: { mass: 1.2e6, agility: 3.2, maxVelocity: 350, signatureRadius: 35, warpSpeedMultiplier: 5 },
+  destroyer: { mass: 1.7e6, agility: 3.5, maxVelocity: 260, signatureRadius: 65, warpSpeedMultiplier: 4.5 },
+  cruiser: { mass: 1.1e7, agility: 0.5, maxVelocity: 230, signatureRadius: 130, warpSpeedMultiplier: 4 },
+  battlecruiser: { mass: 1.3e7, agility: 0.7, maxVelocity: 160, signatureRadius: 270, warpSpeedMultiplier: 3.5 },
+  battleship: { mass: 1e8, agility: 0.12, maxVelocity: 110, signatureRadius: 400, warpSpeedMultiplier: 3 },
+  capital: { mass: 1.1e9, agility: 0.035, maxVelocity: 80, signatureRadius: 11_000, warpSpeedMultiplier: 1.5 },
+  titan: { mass: 2.4e9, agility: 0.025, maxVelocity: 70, signatureRadius: 18_000, warpSpeedMultiplier: 1.5 }
 };
 
 /**
@@ -164,11 +171,13 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
   let radius = DEFAULT_FLIGHT_RADIUS;
   if (IsPositive(published?.published.radius)) radius = published.published.radius;
   else if (IsPositive(hull?.radius)) radius = hull.radius;
+  const warpSpeed = [stats.warpSpeedMultiplier, published?.published.warpSpeedMultiplier].find(IsPositive) ?? ClassHull(hull).warpSpeedMultiplier ?? DEFAULT_WARP_SPEED;
   return {
     mass: stats.mass,
     agility: stats.agility,
     maxVelocity: stats.maxVelocity,
     radius,
+    warpSpeed,
     signatureRadius: stats.signatureRadius,
     alignTime: stats.alignTime,
     source,

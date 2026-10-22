@@ -151,7 +151,7 @@ export function HydrateShip(values: CjsModelValues): EveShip2 {
   const before = new Set(TriDevice.GetResourcesRegistered());
   try {
     const ship = CjsSchema.from<EveShip2>(values._type, values);
-    // The client binds m_speed to the ball's velocity; unbound, boosters stay dark.
+    // EveShip2.UpdateSyncronous fills it from the translation curve's velocity every frame; unset, boosters stay dark.
     ship.speed = new TriFloat();
     ship.StartControllers();
     return ship;

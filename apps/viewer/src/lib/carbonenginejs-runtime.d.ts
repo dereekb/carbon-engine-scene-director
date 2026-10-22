@@ -366,7 +366,23 @@ declare module '@carbonenginejs/runtime/trinity' {
     Execute(renderTargets: CjsWebgpuRenderTarget[], depthStencil: null, time: number, realTime: number, viewport: null, renderContext: Tr2RenderContext): void;
   }
 
-  export class TriFloat {}
+  export class TriFloat {
+    value: number;
+  }
+
+  /**
+   * A ship's booster set: glows, halos, lights and trails.
+   */
+  export interface EveBoosterSet2 {
+    /**
+     * m/s: intensity is speed / maxVel (capped at 2); 250 by default for every hull.
+     */
+    maxVel: number;
+    /**
+     * 0 to 1: blends the glows, halos and lights to the hull's warp colours.
+     */
+    warpIntensity: number;
+  }
 
   /**
    * A hydrated ship (CjsSchema.from of SOF values).
@@ -377,6 +393,16 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly boundingSphereCenter: Vec3;
     readonly boundingSphereRadius: number;
     speed: TriFloat | null;
+    /**
+     * m/s: scales the audio speed parameter (speed / maxSpeed); 0 by default.
+     */
+    maxSpeed: number;
+    readonly boosters: EveBoosterSet2 | null;
+    /**
+     * The booster set's last intensity, 0 to 2.
+     */
+    GetBoosterIntensity(): number;
+    UpdateBoosters(context: { GetTime(): number; GetDeltaT(): number }): void;
     /**
      * Sampled from the curves by UpdateWorldTransform each frame.
      */
