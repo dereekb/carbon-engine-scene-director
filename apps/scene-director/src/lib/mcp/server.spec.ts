@@ -24,6 +24,7 @@ describe('mcp server', () => {
       expect(tools.map((tool) => tool.name).sort()).toEqual(TOOLS.map((tool) => tool.name).sort());
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/move_to_squad/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
+      expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/set_location/u);
 
       const status = (await client.callTool({ name: 'viewer_status', arguments: {} })) as { content: { text: string }[] };
       const body = JSON.parse(status.content[0].text) as { connectedTabs: number; toolsCore: { reachable: boolean } };
@@ -33,6 +34,10 @@ describe('mcp server', () => {
       const missing = (await client.callTool({ name: 'get_scene', arguments: {} })) as { isError?: boolean; content: { text: string }[] };
       expect(missing.isError).toBe(true);
       expect(missing.content[0].text).toMatch(/No viewer tab is connected/);
+
+      const map = (await client.callTool({ name: 'search_map', arguments: { query: 'Jita' } })) as { isError?: boolean; content: { text: string }[] };
+      expect(map.isError).toBe(true);
+      expect(map.content[0].text).toMatch(/unreachable|tools-core/u);
     } finally {
       await client.close();
     }

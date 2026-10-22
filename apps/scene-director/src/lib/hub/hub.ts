@@ -3,7 +3,8 @@
  * proxies EVE resources from tools-core, and routes tool calls.
  *
  * HTTP routes: /build, /resfileindex.txt, /resource/<path> (tools-core proxies),
- * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /health, and the viewer files.
+ * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /map/system?id=&origin=x,y,z (a location's
+ * system, celestials relative to the origin, nearest first), /health, and the viewer files.
  *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
@@ -25,10 +26,12 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { findTool, SceneError } from '@scene-director/scene';
+import { findTool, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
+import { Locations } from './locations';
+import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
 import { AnswerShipStats } from './ship-stats-tool';
@@ -83,6 +86,10 @@ export interface HubOptions {
    */
   readonly shipData?: ShipDataApi;
   /**
+   * tools-core's map routes, for the location tools; read from `toolsCore.url` on ShipData's pinned SDE build when omitted.
+   */
+  readonly mapData?: MapDataApi;
+  /**
    * Diagnostics sink; stderr by default, never stdout (MCP owns stdout).
    */
   readonly log?: (line: string) => void;
@@ -126,6 +133,8 @@ export class Hub implements ToolCaller {
   readonly savedScenes: SavedScenes;
   readonly fleetCompositions: FleetCompositions;
   readonly shipData: ShipDataApi;
+  readonly mapData: MapDataApi;
+  readonly locations: Locations;
   private readonly log: (line: string) => void;
   private readonly pages: WebSocket[] = [];
   private readonly pending = new Map<number, PendingCall>();
@@ -134,11 +143,12 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, mapData, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
     this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
+    this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
     const page = {
       Connected: () => this.pages.length > 0,
@@ -147,6 +157,7 @@ export class Hub implements ToolCaller {
     };
     this.savedScenes = new SavedScenes({ files: scenes, page });
     this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, page });
+    this.locations = new Locations({ mapData: this.mapData, page });
     this.log = log;
   }
 
@@ -246,7 +257,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'viewer_status':
@@ -342,6 +353,8 @@ export class Hub implements ToolCaller {
       await this.Proxy(await this.toolsCore.ResourceUrl(pathname.slice('/resource/'.length)), response);
     } else if (pathname === '/ship-stats') {
       await this.ServeShipStats(url, response);
+    } else if (pathname === '/map/system') {
+      await this.ServeMapSystem(url, response);
     } else if (pathname === '/health') {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ ok: true, tabs: this.pages.length }));
@@ -364,6 +377,30 @@ export class Hub implements ToolCaller {
     let body: unknown;
     try {
       body = await AnswerShipStats(this.shipData, args);
+    } catch (error) {
+      status = ShipStatsErrorStatus(error);
+      body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };
+    }
+    response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify(body));
+  }
+
+  /**
+   * A location's system for the page: `id` (a solar system id) and `origin` (x,y,z system metres, 0,0,0 by default).
+   * The hub subtracts the origin in float64, so the page gets origin-relative metres. Errors map as /ship-stats does:
+   * 400 (bad arguments), 404 (no such system) and 503 (no SDE).
+   */
+  private async ServeMapSystem(url: URL, response: ServerResponse): Promise<void> {
+    let status = 200;
+    let body: unknown;
+    try {
+      const id = Number(url.searchParams.get('id'));
+      if (!Number.isSafeInteger(id) || id <= 0) throw new ToolError('id must be a solar system id (a positive integer)');
+      const parts = (url.searchParams.get('origin') ?? '0,0,0').split(',').map((part) => (part.trim() ? Number(part) : NaN));
+      if (parts.length !== 3 || !parts.every((part) => Number.isFinite(part) && Math.abs(part) <= MAX_LOCATION_COORDINATE)) {
+        throw new ToolError('origin must be x,y,z: three finite numbers of system metres, within 1e15 m of the star');
+      }
+      body = await this.locations.SystemAnswer({ system: id, origin: parts as SceneVector });
     } catch (error) {
       status = ShipStatsErrorStatus(error);
       body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };

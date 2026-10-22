@@ -32,6 +32,7 @@ import { HullStatsKey, HullStatsLookup, ResolveFlight, type HullStatsAnswer, typ
 import { FleetFollowing, type ShipFollowingReport } from './following';
 import { EncodePng, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
+import { LocationLookup } from './location';
 import { ErrorText } from './resources';
 import { vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
@@ -142,6 +143,10 @@ export class Director {
    * The fleets' following (Follow the FC).
    */
   readonly following: FleetFollowing;
+  /**
+   * The scene location's system data from the hub, and its get_state report.
+   */
+  readonly location: LocationLookup;
   scene: Maybe<SceneDocument> = null;
   private readonly onChange: () => void;
   private readonly hullStats: HullStatsLookup;
@@ -160,6 +165,7 @@ export class Director {
     this.clock = clock;
     this.onChange = onChange;
     this.following = new FleetFollowing({ world, scene: () => this.scene, radiusOf: (id) => this.FormationRadius(id) });
+    this.location = new LocationLookup({ onChange: () => this.onChange() });
   }
 
   /**
@@ -241,6 +247,7 @@ export class Director {
     return {
       renderer,
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0 } : null,
+      location: this.location.Report(),
       camera: this.engine?.camera.Get() ?? null,
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
@@ -309,6 +316,7 @@ export class Director {
       this.flights.delete(doc.id);
     }
     this.scene = scene;
+    if (restart || diff.location) this.location.Update(scene.location ?? null, { retry: restart });
     if (restart) this.hullStats.ForgetFailures();
 
     // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place

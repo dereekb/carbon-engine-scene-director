@@ -3,6 +3,7 @@ import { DNA_PATTERN, ID_PATTERN, isPlainObject, type JsonObject, readNumber, re
 import { FLEET_OPERATIONS, type FleetOperationContext, applyFleetOperation, normalizeFleets, removeShipFromFleets, type SceneFleet, toFleetMemberships } from './fleets';
 import { type HullStatOverrides, normalizeHullStatOverrides } from './stats';
 import { applyFleetCompositionOperation, FLEET_COMPOSITION_OPERATIONS } from './compositions/operation';
+import { normalizeSceneLocation, type SceneLocation } from './location/location';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -80,6 +81,11 @@ export interface SceneDocument {
   schema: typeof SCENE_SCHEMA;
   name: string;
   environment: SceneEnvironment;
+  /**
+   * Where the scene is in New Eden (see location/location.ts): a solar system and the system-metre point the scene's
+   * [0, 0, 0] sits on. Ships stay in scene metres around it. Omitted when it is nowhere in particular.
+   */
+  location?: SceneLocation;
   camera: SceneCamera;
   ships: SceneShip[];
   /**
@@ -122,6 +128,10 @@ export interface SceneDiff {
    * commands or resolved anchor), joining or leaving a fleet included: the ships whose following must be re-issued.
    */
   readonly regrouped: SceneShip[];
+  /**
+   * Whether the location changed (system, origin or anchor): the page re-fetches its system data.
+   */
+  readonly location: boolean;
 }
 
 /**
@@ -135,7 +145,7 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
 const RESERVED_SCENE_KEYS = ['timeline'] as const;
 const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'camera', 'ships', 'fleets', ...RESERVED_SCENE_KEYS]);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', ...RESERVED_SCENE_KEYS]);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -188,11 +198,15 @@ export function normalizeScene(input: unknown): NormalizedScene {
     problems.push(`schema must be "${SCENE_SCHEMA}", got ${JSON.stringify(input['schema'])}`);
   }
   reportUnknownKeys(input, SCENE_KEYS, 'scene', warnings);
+  const located = normalizeSceneLocation({ input: input['location'] });
+  problems.push(...located.problems);
+  warnings.push(...located.warnings);
 
   const scene: SceneDocument = {
     schema: SCENE_SCHEMA,
     name: input['name'] === undefined ? DEFAULT_SCENE_NAME : readString(input['name'], 'name', problems),
     environment: normalizeEnvironment(input['environment'], problems, warnings),
+    ...(located.location ? { location: located.location } : {}),
     camera: normalizeCamera(input['camera'], problems, warnings),
     ships: []
   };
@@ -238,6 +252,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
  *   { op: "rename", name }
+ *   { op: "set_location", location }   replaces the scene's location (system id, origin, anchor); the set_location tool
+ *                                       resolves names. Ships stay where they are in the scene
+ *   { op: "clear_location" }               removes it; a no-op without one
  *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander? } }
  *   { op: "remove_fleet", fleet, withShips? }   withShips: true also removes every ship holding a position in it
  *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander? } }   { op: "remove_wing", fleet, wing }
@@ -317,6 +334,13 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
     case 'rename':
       next['name'] = operation['name'];
       break;
+    case 'set_location':
+      if (isPlainObject(operation['location'])) next['location'] = structuredClone(operation['location']);
+      else problems.push(`${where}.location must be an object; clear_location removes the location`);
+      break;
+    case 'clear_location':
+      delete next['location'];
+      break;
     default:
       if (FLEET_OPERATIONS.has(String(operation['op']))) applyFleetOperation(operation, context);
       else if (FLEET_COMPOSITION_OPERATIONS.has(String(operation['op']))) applyFleetCompositionOperation(operation, context);
@@ -329,8 +353,8 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move, relabel, retune and regroup, and whether the environment, camera or
- *   fleets changed.
+ * @returns The ships to add, remove, rebuild, move, relabel, retune and regroup, and whether the environment, camera,
+ *   fleets or location changed.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
   const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
@@ -345,7 +369,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     relabelled: [],
     retuned: [],
     fleets: !sameJson(before?.fleets ?? [], after.fleets ?? []),
-    regrouped: []
+    regrouped: [],
+    location: !sameJson(before?.location ?? null, after.location ?? null)
   };
   const membershipsBefore = toFleetMemberships(before ?? {});
   const membershipsAfter = toFleetMemberships(after);

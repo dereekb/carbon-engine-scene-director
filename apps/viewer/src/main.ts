@@ -14,6 +14,7 @@ import { DestinyWorld } from './lib/destiny';
 import { Director } from './lib/director';
 import { Engine } from './lib/engine';
 import { HubLink } from './lib/link';
+import { LocationText } from './lib/location';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
 
@@ -63,6 +64,8 @@ class Overlay {
       ['renderer', this.RendererText(director)],
       ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` : 'none']
     ];
+    const located = director?.location.Report();
+    if (located) rows.push(['location', LocationText(located)]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);

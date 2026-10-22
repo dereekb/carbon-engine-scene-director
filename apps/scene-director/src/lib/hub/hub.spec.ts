@@ -11,6 +11,7 @@ import { SceneFileStore } from '../store/scene-files';
 import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
 import { MakeFakeShipData, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
+import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
 import type { ToolsCoreApi } from './tools-core';
 
 /** A tools-core stand-in: no network, one pinned build, a small hull catalog. */
@@ -330,5 +331,64 @@ describe('fleet compositions', () => {
 
   it('add_fleet_composition with no tab and no scene says to open the viewer or pass scene', async () => {
     await expect(hub.Call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0] })).rejects.toThrow(/No viewer tab is connected\. Open http.*Or pass "scene"/su);
+  });
+});
+
+describe('locations', () => {
+  const ORIGIN = [-107303331552.681, -18744969943.288, 436488926028.301];
+
+  it('GET /map/system answers origin-relative celestials, nearest first', async () => {
+    const located = await StartHub({ mapData: MakeFakeMapData().mapData });
+    try {
+      const response = await fetch(`${located.url}map/system?id=30000142&origin=${ORIGIN.map(String).join(',')}`);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      const answer = (await response.json()) as { celestials: { id: number; distance: number; position: number[] }[]; origin: number[] };
+      expect(answer.origin).toEqual(ORIGIN);
+      expect(answer.celestials[0].id).toBe(60003760);
+      expect(Math.abs(answer.celestials[0].distance - 130000)).toBeLessThanOrEqual(1e-3);
+      const [x, y, z] = answer.celestials[0].position;
+      expect(Math.abs(Math.sqrt(x * x + y * y + z * z) - answer.celestials[0].distance)).toBeLessThanOrEqual(1e-6);
+      expect((await fetch(`${located.url}map/system?id=abc`)).status).toBe(400);
+      expect((await fetch(`${located.url}map/system?id=30000142&origin=1,2`)).status).toBe(400);
+      expect((await fetch(`${located.url}map/system?id=30000142&origin=1.3e17,0,0`)).status).toBe(400);
+      expect((await fetch(`${located.url}map/system?id=123`)).status).toBe(404);
+    } finally {
+      await located.Stop();
+    }
+  });
+
+  it('GET /map/system without a prepared SDE is a 503', async () => {
+    const unprepared = await StartHub({ mapData: MakeUnpreparedMapData() });
+    try {
+      const response = await fetch(`${unprepared.url}map/system?id=30000142`);
+      expect(response.status).toBe(503);
+      expect(await response.json()).toMatchObject({ failure: 'unavailable', error: { message: expect.stringMatching(/cjs-sde-prepare/u) } });
+    } finally {
+      await unprepared.Stop();
+    }
+  });
+
+  it('set_location resolves the celestial, then forwards one patch_scene to the tab', async () => {
+    const located = await StartHub({ mapData: MakeFakeMapData().mapData });
+    const patches: Record<string, unknown>[] = [];
+    const page = await ConnectPage(
+      {
+        patch_scene: (args) => {
+          patches.push(args);
+          return applySceneOperations(createEmptyScene(), args['operations']);
+        }
+      },
+      located
+    );
+    try {
+      const result = (await located.Call('set_location', { celestial: 'Jita IV - Moon 4 - Caldari Navy Assembly Plant', range: 30000 })) as Record<string, unknown>;
+      expect(patches).toHaveLength(1);
+      expect((patches[0]['operations'] as { op: string }[]).map((operation) => operation.op)).toEqual(['set_location', 'set_environment']);
+      expect(result).toMatchObject({ location: { system: 30000142, anchor: { celestial: 60003760 } }, celestial: { id: 60003760 }, scene: { location: { system: 30000142 } } });
+    } finally {
+      page.close();
+      await located.Stop();
+    }
   });
 });

@@ -15,7 +15,9 @@ commands, combat and timelines come in later phases; the document's `orders`
 and `timeline` fields stay reserved until then. **Fleets**: the document holds EVE
 fleet structure (fleet commander, wings, squads with a role and an anchor), and
 fleets fly: every member keeps range on its anchor in formation behind the FC
-(Follow the FC).
+(Follow the FC). **Locations**: a scene can sit at a real EVE place (a solar
+system and a point near one of its celestials, from CCP's static data); it is
+recorded and reported, not drawn yet.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -95,13 +97,16 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `page_log` | hub | the viewer's recent console output and errors |
 | `search_hulls` | hub | SOF hull, faction or race names |
 | `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature and align time, as published and as flown with every skill at V, optionally with a prop mod (see below) |
+| `search_map` | hub | searches CCP's static map by name: regions, constellations, systems, stars, planets, NPC stations and stargates (see Locations) |
+| `get_system` | hub | one solar system with its star, the region's nebula and its celestials (see Locations) |
+| `set_location` | hub | puts the scene at a real EVE place: resolves a celestial by name or id and sets the document's location, off it at a range (see Locations) |
 | `load_scene` | page | replaces the scene with a document |
 | `get_scene` | page | the current document |
-| `patch_scene` | page | edits by operation (ships, camera, environment, rename, fleets) |
+| `patch_scene` | page | edits by operation (ships, camera, environment, rename, fleets, location) |
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, distances, the simulation tick, fleet membership, each member's `following` and the fleet tree with each fleet's `formation` |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials |
 | `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or fits all ships |
@@ -169,7 +174,8 @@ Metres and degrees, Y up. `rotation` is `[yaw, pitch, roll]`. A `null` camera
 target frames every ship; a `null` distance fits the target. Unknown fields are
 reported as warnings and dropped. `orders` on a ship and a top-level `timeline`
 are stored but not played yet. A top-level `fleets` list groups ships into EVE
-fleets (see Fleets below).
+fleets (see Fleets below), and an optional `location` puts the scene at a real
+EVE place (see Locations below).
 
 A ship's flight numbers come from its EVE type (see Ship stats below). `type`
 names it explicitly, as a type id or an exact English name; without it, the
@@ -609,6 +615,99 @@ Apostle and the secondary (L3ARN) fits are left out.
 **Not applied yet.** `propMod` (the Prop mods entry), the fits (Turrets) and
 arriving from warp (Fleet warp-in) are stored or planned, not played: added
 fleets start at rest in formation and follow their FC from there.
+
+## Locations
+
+A scene can sit at a real EVE place. `location` names the solar system and the
+point in it that the scene's `[0, 0, 0]` sits on:
+
+```json
+"location": {
+  "system": 30000142,
+  "name": "Jita",
+  "region": "The Forge",
+  "origin": [-107303331552.681, -18744969943.288, 436488926028.301],
+  "anchor": {
+    "celestial": 60003760,
+    "name": "Jita IV - Moon 4 - Caldari Navy Assembly Plant",
+    "kind": "station",
+    "offset": [31007.319, 5416.712, -126131.699]
+  }
+}
+```
+
+That is 30 km off the Caldari Navy Assembly Plant at Jita IV - Moon 4, toward
+the sun. `origin` is in system metres: float64, the system's star at
+`[0, 0, 0]`, Y up, +Z forward, right-handed (tools-core's map frame). Scene axes
+are the system's axes, so a location only translates. `origin` is authoritative;
+`anchor` is provenance (the celestial the origin was placed from and the offset
+from its centre, as set), and editing `origin` by hand does not update it.
+`system` and `celestial` are EVE ids; names are for people. Every coordinate is
+bounded at 1e15 m, which refuses a galactic position (1e16-1e17 m) passed by
+mistake. Ships stay in scene metres around the origin.
+
+Two patch operations edit it: `{ "op": "set_location", "location": { ... } }`
+replaces it whole (a new origin never keeps a stale anchor), and
+`{ "op": "clear_location" }` removes it (a no-op without one). A location
+change moves the scene in its system, not the ships in the scene.
+
+The hub's tools fill it from names, over tools-core's map routes:
+
+```sh
+node bin/scene-director.js call search_map '{"query":"Perimeter","kinds":["stargate"]}'
+node bin/scene-director.js call get_system '{"system":"Jita","kinds":["stargate"]}'
+node bin/scene-director.js call set_location '{"celestial":"Jita IV - Moon 4 - Caldari Navy Assembly Plant","range":30000}'
+node bin/scene-director.js call set_location '{"celestial":"Perimeter gate","system":"Jita"}'
+```
+
+`set_location` resolves the celestial, computes the origin and forwards one
+`patch_scene` to the tab; with `scene` it edits that document instead, with no
+tab (`loaded: false`). With `origin` and `system` it places the scene with no
+celestial. `range` is metres off the celestial's surface, on its EVE radius
+(the map row's radius for bodies, the type's SDE radius for stations and
+stargates); `direction` is from the celestial toward the origin; `offset`
+(metres from its centre) replaces both. These defaults frame a scene; they are
+not EVE's warp-in points:
+
+| Kind | Default range | Default direction |
+|---|---|---|
+| star, planet, moon | one radius (the body spans 60°) | `"sun"` (toward the star; the star itself: +Z) |
+| station | 5,000 m | `"sun"` |
+| stargate | 2,500 m | `"sun"` |
+| asteroid belt | 0 m from the belt's centre (it is not solid) | `"sun"` |
+
+`direction` is also `"away"` or `[x, y, z]`.
+
+**Names.** In order: the exact name; a name inside `system` (`"IV - Moon 4"`,
+`"Star"`, a unique part such as `"Business Tribunal"`); `"star"` or `"the sun"`;
+a gate shorthand (`"Perimeter gate"`, `"the gate to Perimeter"`); and
+`"<celestial> in <system>"` (`"the Perimeter gate in Jita"`). Without `system`,
+a name is tried as an exact name across the map, then as that phrase, then by
+taking the longest leading words that name a system (`"Jita IV - Moon 4"`,
+`"New Caldari V - Moon 1"`): tools-core's map search does not index moons or
+asteroid belts. Stargates are named after their destination, so
+`"Stargate (Perimeter)"` without `system` is ambiguous (five systems have one).
+An ambiguous name lists the candidates; there is no player slang (`"Jita 4-4"`).
+
+**Nebula.** By default `set_location` also sets `environment.universe` to the
+region's nebula (The Forge's is `res:/dx9/scene/universe/c02_cube.black`); a tab
+with a renderer reloads when the universe changes. `"nebula": false` keeps the
+universe. The raw `set_location` operation never touches the environment.
+
+**The page.** It fetches its location's system from the hub's
+`GET /map/system?id=<system>&origin=<x>,<y>,<z>`: the system, its star (light
+and model), the region's nebula and every celestial with graphics and stargate
+rotations, positions relative to the origin, nearest first. The hub does the
+float64 subtraction, so the page only sees origin-relative metres and float32
+holds. `get_state.location` reports the system, the origin, the fetch status,
+the anchor's actual distance and surface distance, the star's distance and
+direction, and the ten celestials nearest the origin; the overlay shows one
+`location` row.
+
+**Not drawn yet.** The page does not draw the location's sun, planets, stations
+or gates; that is the Location dressing entry. The data is CCP's static data
+(tools-core's map routes over the public SDE; no ESI, no API key): static
+celestials and NPC stations only, no player-built structures.
 
 ## Development
 

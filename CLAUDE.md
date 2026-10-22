@@ -10,19 +10,24 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   context), `src/lib/fleets/` (fleets, wings and squads: validation, edits, and the anchor rules, resolved only in
   `toFleetMemberships`; Follow the FC must fly those, not re-derive them; `formation.ts` is the at-rest formation
   Follow the FC flies (`toFleetFormationSlots`), and `following.ts` turns the anchors and the formation into follow
-  plans, flown by the viewer's `following.ts` / `steering.ts` / `destiny.ts`) and `src/lib/compositions/` (the
+  plans, flown by the viewer's `following.ts` / `steering.ts` / `destiny.ts`), `src/lib/compositions/` (the
   `cjs-fleet/1` fleet composition, its expansion, the `add_fleet_composition` op, and the TFIs example in
-  `examples/tfis.json`). No runtime imports; the hub, the page and the tests all use it.
+  `examples/tfis.json`) and `src/lib/location/` (the document's `location`, the placement math that puts an origin
+  off a celestial, and the `/map/system` answer and get_state report the hub and the page share). No runtime imports;
+  the hub, the page and the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server
-  and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. Building it builds the viewer too (implicit dependency).
+  and the CLI (`serve`, `mcp`, `call`), plus `verify-page.ts`. `hub/map-data.ts` is the tools-core map client and
+  `hub/locations.ts` answers `search_map`, `get_system`, `set_location` and `/map/system`. Building it builds the
+  viewer too (implicit dependency).
 - `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point and
   `src/lib/carbonenginejs-runtime.d.ts` types those imports (the runtime ships no `.d.ts`). Add a member to the
   declarations file when the page starts using it; do not reach for `any`. `src/lib/runtime-sim.ts` is its light half
   (math, Blue curve bases, the Destiny server, typed by `carbonenginejs-server.d.ts`), re-exported by `runtime.ts`.
   `clock.ts` (the scene clock), `destiny.ts` (`DestinyWorld`: master + replica parks, one ball per ship, and the
   movement orders and fleet following), `flight.ts` (each ship's Ship-stats flight numbers from the hub's
-  `/ship-stats`), `steering.ts` (Follow the FC's steering math) and `following.ts` (`FleetFollowing`: the document's
-  fleets reconciled into the world's follows, detach and rejoin) have node specs: the viewer has a `test` target
+  `/ship-stats`), `steering.ts` (Follow the FC's steering math), `following.ts` (`FleetFollowing`: the document's
+  fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the location's
+  system from the hub's `/map/system`, and get_state's report) have node specs: the viewer has a `test` target
   (`project: viewer`).
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
@@ -68,9 +73,9 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `engine.Frame(timestamp, now)`, so
   `OnTick` and `driver.Execute` get the same integer `now`; the clock caps a frame at 1 s so the master's 6-tick
   backlog drop never fires.
-- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `steering.ts`, `following.ts`) import `./runtime-sim`,
-  never `./runtime` (type-only imports are fine): the full facade drags in the renderer and the `runtime-dist/` alias,
-  which vitest does not have.
+- Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `steering.ts`, `following.ts`, `location.ts`) import
+  `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the renderer and the
+  `runtime-dist/` alias, which vitest does not have.
 - Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a
   tick is due, so it relies on one evolve per `Tick` call (the clock's 1 s frame cap). FollowBall cannot hold a
   bearing (it aims at the nearest point of the range sphere, so followers stack at the trailing pole), and Destiny's
@@ -123,6 +128,17 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   forwarded to the page's IndexedDB handlers for `store: "browser"`. Tests and verify-page pass a temp
   `SceneFileStore`; never let a test write to the default per-user scenes directory. The fleet composition tools
   (`hub/fleet-compositions.ts`) are `where: 'hub'` too; tests and verify-page pass a temp `FleetCompositionFileStore`.
+- Map positions are float64 system metres with the star at the origin; a system's galactic `position` is ~1e17 m. The
+  page only ever sees origin-relative values from `/map/system` (the hub subtracts). Never hand system or galactic
+  coordinates to the renderer.
+- tools-core's map rows carry `radius: null` for stations and stargates, so `MapData` reads the type's SDE radius. The
+  generic star, planet and moon types carry a 10 km placeholder radius, so the map row's radius wins when it has one.
+- tools-core's map search does not index moons or asteroid belts. `set_location` finds them through their system's
+  celestial list, taking the system as the longest leading words of the name that are a system name; system names
+  contain spaces (`New Caldari`), so never split on the first word.
+- Stargates are named after their destination: `Stargate (Perimeter)` sits in Jita and in four other systems.
+- A degraded map index (`GET map` → `index.degraded`, no `mapIndex` derivation) finds systems but names stations on
+  moons after their planet. Run `node bin/cjs-sde-prepare.js --build <n> --refresh` in tools-core.
 - `applySceneOperations` stays synchronous and pure (it runs in the page): the `add_fleet_composition` op needs `dna`
   on every ship line, and the hub tool of the same name fills `dna` and `radius` from tools-core before forwarding.
 - tools-core needs Node 22 (its better-sqlite3 binding; Node 24 is the default here). Start it with:

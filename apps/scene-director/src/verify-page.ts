@@ -13,7 +13,7 @@ import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
-import { formationSpacing, toFollowTolerance, type FleetReport, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
+import { formationSpacing, toFollowTolerance, type FleetReport, type LocationReport, type MapSystemAnswer, type SceneLocation, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -108,6 +108,25 @@ interface ViewerState {
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
   readonly fleets: (FleetReport & { readonly formation?: FleetFormationState })[];
+  readonly location?: Maybe<LocationReport>;
+}
+
+interface MapSearchResult {
+  readonly items: { readonly kind: string; readonly id: number; readonly name: string; readonly system?: { readonly id: number; readonly name?: string } }[];
+}
+
+interface SystemResult {
+  readonly nebula: Maybe<string>;
+  readonly counts: Record<string, number>;
+  readonly celestials: { readonly id: number; readonly kind: string; readonly name: string; readonly radius?: number }[];
+}
+
+interface SetLocationResult {
+  readonly location: SceneLocation;
+  readonly celestial: Maybe<{ readonly id: number; readonly kind: string }>;
+  readonly range?: number;
+  readonly loaded?: boolean;
+  readonly scene?: { readonly environment: { readonly universe: string } };
 }
 
 interface AddedFleetResult extends Omit<SceneResult, 'scene'> {
@@ -841,6 +860,77 @@ try {
       return off ? `${off.id} ${JSON.stringify({ mode: off.mode, heading: off.heading, following: off.following, fc: yaw })}` : null;
     });
     return `settled facing ${ShipIn(state, 'flw-fc').heading?.[0]} degrees`;
+  });
+
+  const CNAP = 'Jita IV - Moon 4 - Caldari Navy Assembly Plant';
+  const FORGE_NEBULA = 'res:/dx9/scene/universe/c02_cube.black';
+  let moonLocation: Maybe<SceneLocation> = null;
+
+  await Check('search_map finds Jita and the Perimeter gate in Jita', async () => {
+    const jita = await call<MapSearchResult>('search_map', { query: 'Jita' }).catch(SkipWithoutSde);
+    Expect(jita.items[0]?.id === 30000142, JSON.stringify(jita.items[0]));
+    const gates = await call<MapSearchResult>('search_map', { query: 'Stargate (Perimeter)', kinds: ['stargate'] });
+    const gate = gates.items.find((item) => item.id === 50001249);
+    Expect(gate?.system?.name === 'Jita', JSON.stringify(gate));
+    return `${gates.items.length} Stargate (Perimeter) hits`;
+  });
+
+  await Check("get_system lists Jita's celestials with type radii", async () => {
+    const jita = await call<SystemResult>('get_system', { system: 'Jita' }).catch(SkipWithoutSde);
+    const radius = (id: number) => jita.celestials.find((celestial) => celestial.id === id)?.radius;
+    Expect(jita.celestials.find((celestial) => celestial.id === 60003760)?.kind === 'station' && radius(60003760) === 100000, `CNAP radius ${radius(60003760)}`);
+    Expect(radius(50001249) === 3532, `gate radius ${radius(50001249)}`);
+    Expect(jita.nebula === FORGE_NEBULA, `nebula ${jita.nebula}`);
+    Expect((jita.counts['stargate'] ?? 0) >= 1, JSON.stringify(jita.counts));
+    return JSON.stringify(jita.counts);
+  });
+
+  await Check('set_location puts the scene 30 km off the CNAP and get_state reports it', async () => {
+    await call('load_scene', { scene: { name: 'verify-location', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
+    const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000, nebula: false }).catch(SkipWithoutSde);
+    const offset = set.location.anchor?.offset ?? [0, 0, 0];
+    Expect(set.location.system === 30000142 && set.location.anchor?.celestial === 60003760, JSON.stringify(set.location));
+    Expect(Math.abs(Math.sqrt(offset[0] ** 2 + offset[1] ** 2 + offset[2] ** 2) - 130000) <= 0.01, `offset ${JSON.stringify(offset)}`);
+    const state = await WaitFor('the location report', 20, (polled) => (polled.location?.status === 'ready' ? null : JSON.stringify(polled.location)));
+    const report = state.location as LocationReport;
+    const anchor = report.anchor && 'surfaceDistance' in report.anchor ? report.anchor.surfaceDistance : null;
+    Expect(anchor != null && Math.abs(anchor - 30000) <= 1, `anchor ${JSON.stringify(report.anchor)}`);
+    Expect(report.nearby[0]?.id === 60003760, JSON.stringify(report.nearby[0]));
+    Expect(JSON.stringify(ShipIn(state, 'rifter').position) === JSON.stringify([0, 0, 0]), `rifter at ${JSON.stringify(ShipIn(state, 'rifter').position)}`);
+    const response = await fetch(`${hub.url}map/system?id=30000142&origin=${set.location.origin.map(String).join(',')}`);
+    const answer = (await response.json()) as MapSystemAnswer;
+    Expect(Math.abs((answer.celestials[0]?.distance ?? 0) - 130000) <= 0.01, `/map/system nearest ${JSON.stringify(answer.celestials[0]?.distance)}`);
+    return report.nearby
+      .slice(0, 3)
+      .map((celestial) => `${celestial.name} ${(celestial.distance / 1000).toFixed(1)} km`)
+      .join(', ');
+  });
+
+  await Check('set_location finds the Perimeter gate in Jita and a moon by name', async () => {
+    for (const args of [{ celestial: 'Perimeter gate', system: 'Jita' }, { celestial: 'the Perimeter gate in Jita' }]) {
+      const set = await call<SetLocationResult>('set_location', { ...args, nebula: false }).catch(SkipWithoutSde);
+      Expect(set.location.anchor?.celestial === 50001249 && Math.abs((set.range ?? 0) - 2500) <= 0.01, `${JSON.stringify(args)}: ${JSON.stringify(set.location.anchor)} range ${set.range}`);
+    }
+    const moon = await call<SetLocationResult>('set_location', { celestial: 'Jita IV - Moon 4', nebula: false });
+    Expect(moon.location.anchor?.celestial === 40009087 && moon.location.anchor.kind === 'moon', JSON.stringify(moon.location.anchor));
+    moonLocation = moon.location;
+  });
+
+  await Check('the location round-trips through scene files and clear_location removes it', async () => {
+    if (!moonLocation) throw new Skipped('no location was set');
+    await call('save_scene', { name: 'verify-location' });
+    await call('load_scene', { scene: { name: 'empty', ships: [] } });
+    const opened = await call<{ scene: { location?: SceneLocation } }>('open_scene', { name: 'verify-location' });
+    Expect(JSON.stringify(opened.scene.location) === JSON.stringify(moonLocation), JSON.stringify(opened.scene.location));
+    await call('patch_scene', { operations: [{ op: 'clear_location' }] });
+    Expect((await call<ViewerState>('get_state')).location === null, 'get_state still reports a location');
+    Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-location' })).deleted, 'not deleted');
+  });
+
+  await Check('set_location on a passed scene sets the region nebula', async () => {
+    const set = await call<SetLocationResult>('set_location', { system: 'Jita', celestial: 'star', scene: { name: 'nebula' } }).catch(SkipWithoutSde);
+    Expect(set.loaded === false && set.scene?.environment.universe === FORGE_NEBULA, JSON.stringify({ loaded: set.loaded, environment: set.scene?.environment }));
+    Expect(set.location.anchor?.kind === 'star', JSON.stringify(set.location.anchor));
   });
 
   if (rendering) {

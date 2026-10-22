@@ -17,7 +17,8 @@ If a page tool fails, check page_log for the browser's errors.
 ship_stats gives a hull's in-game speed, agility, signature and align time (needs tools-core's SDE).
 order_ship flies a ship (direction, goto, approach, keep-at-range, orbit, stop) at its in-game speed; get_state shows each ship's order and motion.
 add_fleet_composition drops a doctrine fleet (cjs-fleet/1, inline, saved, or the built-in "tfis") into the live scene at a position and heading; list_fleet_compositions / get_fleet_composition / save_fleet_composition manage compositions.
-Fleets fly in formation on their FC: order the FC to move a fleet; an order on a member takes it out of formation until { "type": "rejoin" }.`;
+Fleets fly in formation on their FC: order the FC to move a fleet; an order on a member takes it out of formation until { "type": "rejoin" }.
+search_map / get_system find real EVE places in CCP's static data (needs tools-core's SDE); set_location puts the scene at one ("30 km off Jita IV - Moon 4 - Caldari Navy Assembly Plant", the Perimeter gate in Jita); get_state reports the location and the nearest celestials.`;
 
 export interface ServeMcpOptions {
   readonly version?: string;
