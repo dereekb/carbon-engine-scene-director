@@ -4,7 +4,8 @@
  *
  * HTTP routes: /build, /resfileindex.txt, /resource/<path> (tools-core proxies),
  * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /prop-mod?module= (a prop mod's numbers by type id
- * or EVE name), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
+ * or EVE name), /fit/type?name=&hull= (a fit line's EVE type and slot), /dogma/types?ids= (a DogmaBundle of up to 200
+ * types) and /dogma/skills (every published skill's), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
  * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range),
  * /health, and the viewer files.
  *
@@ -41,6 +42,8 @@ import { ObjectTools } from './objects';
 import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
+import { DogmaData, type DogmaDataApi, MAX_DOGMA_TYPE_IDS } from './dogma-data';
+import { SdeClient } from './sde-client';
 import { AnswerPropMod, AnswerShipStats } from './ship-stats-tool';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
 import { ToolsCore, type SofCatalogKind, type ToolsCoreApi } from './tools-core';
@@ -94,6 +97,11 @@ export interface HubOptions {
    */
   readonly shipData?: ShipDataApi;
   /**
+   * Fit type names and dogma bundles from tools-core's SDE; shares ShipData's client (build pin and cache) when both
+   * are defaults.
+   */
+  readonly dogmaData?: DogmaDataApi;
+  /**
    * tools-core's map routes, for the location tools; read from `toolsCore.url` on ShipData's pinned SDE build when omitted.
    */
   readonly mapData?: MapDataApi;
@@ -146,6 +154,7 @@ export class Hub implements ToolCaller {
   readonly savedScenes: SavedScenes;
   readonly fleetCompositions: FleetCompositions;
   readonly shipData: ShipDataApi;
+  readonly dogmaData: DogmaDataApi;
   readonly mapData: MapDataApi;
   readonly locations: Locations;
   readonly staging: Staging;
@@ -159,11 +168,12 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, mapData, objectData, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, dogmaData, mapData, objectData, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
     this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
+    this.dogmaData = dogmaData ?? new DogmaData({ sde: this.shipData instanceof ShipData ? this.shipData.sde : new SdeClient({ url: toolsCore.url }) });
     this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
     this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild() });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
@@ -374,6 +384,8 @@ export class Hub implements ToolCaller {
       await this.ServeShipStats(url, response);
     } else if (pathname === '/prop-mod') {
       await this.ServePropMod(url, response);
+    } else if (pathname === '/fit/type' || pathname === '/dogma/types' || pathname === '/dogma/skills') {
+      await this.ServeJson(response, () => this.AnswerDogma(pathname, url));
     } else if (pathname === '/audio/library') {
       await this.StreamProxy({ source: () => this.toolsCore.AudioLibraryUrl(), request, response });
     } else if (pathname.startsWith('/audio/path/')) {
@@ -403,6 +415,47 @@ export class Hub implements ToolCaller {
     let body: unknown;
     try {
       body = await AnswerShipStats(this.shipData, args);
+    } catch (error) {
+      status = ShipStatsErrorStatus(error);
+      body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };
+    }
+    response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify(body));
+  }
+
+  /**
+   * The fit routes for the page: `/fit/type?name=&hull=` (FitTypeAnswer), `/dogma/types?ids=<comma list, at most
+   * MAX_DOGMA_TYPE_IDS>` and `/dogma/skills` (DogmaBundle). Errors map as /ship-stats does.
+   *
+   * @param pathname - The route.
+   * @param url - The request URL.
+   * @returns The answer.
+   */
+  private async AnswerDogma(pathname: string, url: URL): Promise<unknown> {
+    let answer: Promise<unknown>;
+    if (pathname === '/fit/type') {
+      answer = this.dogmaData.TypeByName(url.searchParams.get('name') ?? '', url.searchParams.get('hull'));
+    } else if (pathname === '/dogma/types') {
+      const ids = (url.searchParams.get('ids') ?? '').split(',').filter(Boolean);
+      if (!ids.length || ids.length > MAX_DOGMA_TYPE_IDS || ids.some((id) => !/^\d+$/u.test(id))) throw new ShipDataError('invalid', `ids must be a comma list of 1-${MAX_DOGMA_TYPE_IDS} EVE type ids`);
+      answer = this.dogmaData.Bundle(ids.map(Number));
+    } else {
+      answer = this.dogmaData.Skills();
+    }
+    return answer;
+  }
+
+  /**
+   * Answers JSON, mapping errors as /ship-stats does.
+   *
+   * @param response - The response.
+   * @param answer - Produces the body.
+   */
+  private async ServeJson(response: ServerResponse, answer: () => Promise<unknown>): Promise<void> {
+    let status = 200;
+    let body: unknown;
+    try {
+      body = await answer();
     } catch (error) {
       status = ShipStatsErrorStatus(error);
       body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };

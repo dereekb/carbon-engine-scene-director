@@ -18,7 +18,9 @@
 
 import type { Maybe } from '@dereekb/util';
 import { type HullStats, normalizePropModName, type PropModKind, type PropModStats, type PropModType } from '@scene-director/scene';
-import { ErrorMessage, ToolError } from './tool-call';
+import { type JsonObject, ReadArray, ReadName, ReadNumber, ReadObject, ReadTypeID, SdeClient, type SdeRequest, type SdeTypeDogma, ShipDataError } from './sde-client';
+
+export { ShipDataError, type ShipDataFailure } from './sde-client';
 
 /*
  * EVE dogma ids (ESI, Tranquility, 2026-10-21).
@@ -39,23 +41,7 @@ export const PROPULSION_MODULE_GROUP = 46;
  * The first `dna/search` builds tools-core's DNA index, so it gets a long deadline.
  */
 const DNA_SEARCH_TIMEOUT_MS = 60000;
-const REQUEST_TIMEOUT_MS = 30000;
 const DNA_SEARCH_LIMIT = 50;
-
-export type ShipDataFailure = 'unavailable' | 'not-found' | 'ambiguous' | 'invalid';
-
-/**
- * A hull or prop mod lookup that failed, with why.
- */
-export class ShipDataError extends ToolError {
-  readonly failure: ShipDataFailure;
-
-  constructor(failure: ShipDataFailure, message: string) {
-    super(message);
-    this.name = 'ShipDataError';
-    this.failure = failure;
-  }
-}
 
 export interface ShipDataOptions {
   /**
@@ -67,6 +53,10 @@ export interface ShipDataOptions {
    * Exact SDE build to pin; tools-core's `builds.sde` when absent.
    */
   readonly sdeBuild?: Maybe<string>;
+  /**
+   * A client to share (with DogmaData): its build pin and cache. Built from url, fetch and sdeBuild when absent.
+   */
+  readonly sde?: SdeClient;
 }
 
 /**
@@ -114,13 +104,6 @@ export interface ShipDataApi {
  */
 const PROP_MOD_CANDIDATE_LIMIT = 5;
 
-type JsonObject = Record<string, unknown>;
-
-interface TypeDogma {
-  readonly attributes: ReadonlyMap<number, number>;
-  readonly effects: ReadonlySet<number>;
-}
-
 interface ResolvedType {
   readonly typeID: number;
   readonly dna: Maybe<string>;
@@ -128,33 +111,20 @@ interface ResolvedType {
   readonly candidates: readonly { readonly typeID: number }[];
 }
 
-interface GetJsonConfig {
-  readonly route: string;
-  readonly what: string;
-  readonly timeoutMs?: number;
-}
-
 export class ShipData implements ShipDataApi {
   readonly url: string;
-  private readonly fetchImpl: typeof fetch;
-  private sdeBuild: Maybe<Promise<string>>;
-  private readonly cache = new Map<string, Promise<unknown>>();
+  readonly sde: SdeClient;
 
-  constructor({ url, fetch: fetchImpl = globalThis.fetch, sdeBuild = null }: ShipDataOptions) {
-    this.url = url.replace(/\/+$/u, '');
-    this.fetchImpl = fetchImpl;
-    this.sdeBuild = sdeBuild ? Promise.resolve(sdeBuild) : null;
+  constructor(options: ShipDataOptions) {
+    this.sde = options.sde ?? new SdeClient(options);
+    this.url = this.sde.url;
   }
 
   /**
    * The SDE build every lookup reads, resolved once; retried after a failure.
    */
   async SdeBuild(): Promise<string> {
-    this.sdeBuild ??= this.FetchSdeBuild().catch((error: unknown) => {
-      this.sdeBuild = null;
-      throw error;
-    });
-    return this.sdeBuild;
+    return this.sde.SdeBuild();
   }
 
   /**
@@ -314,99 +284,18 @@ export class ShipData implements ShipDataApi {
   }
 
   private async Type(typeID: number): Promise<JsonObject> {
-    return this.Cached(`type:${typeID}`, () => this.GetJson({ route: `types/${typeID}?lang=en`, what: `type ${typeID}` }));
+    return this.sde.Type(typeID);
   }
 
-  private async TypeDogma(typeID: number): Promise<TypeDogma> {
-    return this.Cached(`typeDogma:${typeID}`, async () => {
-      const body = await this.GetJson({ route: `sde/typeDogma/${typeID}`, what: `type ${typeID}'s dogma` });
-      const payload = ReadObject(body['payload'] ?? body);
-      const attributes = new Map<number, number>();
-      for (const entry of ReadArray(payload['dogmaAttributes'])) {
-        const id = ReadNumber(entry['attributeID']);
-        const value = ReadNumber(entry['value']);
-        if (id != null && value != null) attributes.set(id, value);
-      }
-      const effects = new Set(ReadArray(payload['dogmaEffects']).map((entry) => ReadNumber(entry['effectID'])));
-      return { attributes, effects: effects as ReadonlySet<number> };
-    });
+  private async TypeDogma(typeID: number): Promise<SdeTypeDogma> {
+    return this.sde.TypeDogma(typeID);
   }
 
-  /**
-   * One cached lookup per key; a rejected lookup leaves the cache so the next call retries.
-   */
   private async Cached<T>(key: string, load: () => Promise<T>): Promise<T> {
-    let entry = this.cache.get(key) as Maybe<Promise<T>>;
-    if (!entry) {
-      entry = load();
-      this.cache.set(key, entry);
-      entry.catch(() => this.cache.delete(key));
-    }
-    return entry;
+    return this.sde.Cached(key, load);
   }
 
-  private async FetchSdeBuild(): Promise<string> {
-    const body = await this.Fetch({ path: `${this.url}/eve/latest/build`, what: 'the EVE build', timeoutMs: REQUEST_TIMEOUT_MS });
-    const builds = ReadObject(body.json['builds']);
-    const build = builds['sde'] ?? body.json['build'];
-    if (!body.ok || (typeof build !== 'string' && typeof build !== 'number')) {
-      throw new ShipDataError('unavailable', `tools-core at ${this.url} did not name an EVE build (${body.status})`);
-    }
-    return String(build);
+  private async GetJson(request: SdeRequest): Promise<JsonObject> {
+    return this.sde.GetJson(request);
   }
-
-  private async GetJson({ route, what, timeoutMs = REQUEST_TIMEOUT_MS }: GetJsonConfig): Promise<JsonObject> {
-    const build = await this.SdeBuild();
-    const body = await this.Fetch({ path: `${this.url}/eve/${build}/${route}`, what, timeoutMs });
-    const error = typeof body.json['error'] === 'string' ? body.json['error'] : `answered ${body.status}`;
-    if (body.ok) return body.json;
-    if (body.status >= 500 || (body.status === 404 && /not prepared/iu.test(error))) throw UnavailableSde({ build, error });
-    if (body.status === 404) throw new ShipDataError('not-found', `tools-core has no ${what} (${error})`);
-    if (body.status === 409) throw new ShipDataError('ambiguous', `${what} is ambiguous (${error}); use an EVE type id`);
-    throw new ShipDataError('invalid', `tools-core refused ${what} (${error})`);
-  }
-
-  private async Fetch({ path, what, timeoutMs }: { readonly path: string; readonly what: string; readonly timeoutMs: number }): Promise<{ readonly ok: boolean; readonly status: number; readonly json: JsonObject }> {
-    let response: Response;
-    try {
-      response = await this.fetchImpl(path, { signal: AbortSignal.timeout(timeoutMs) });
-    } catch (error) {
-      throw new ShipDataError('unavailable', `tools-core at ${this.url} is unreachable for ${what}: ${ErrorMessage(error)}`);
-    }
-    const json = ReadObject(await response.json().catch(() => null));
-    return { ok: response.ok, status: response.status, json };
-  }
-}
-
-function UnavailableSde({ build, error }: { readonly build: string; readonly error: string }): ShipDataError {
-  return new ShipDataError('unavailable', `tools-core has no SDE for build ${build} (${error}). In the tools-core checkout run: node bin/cjs-sde-prepare.js --build ${build} (Node 22), or give the ship all four stats.`);
-}
-
-function ReadObject(value: unknown): JsonObject {
-  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as JsonObject) : {};
-}
-
-function ReadArray(value: unknown): JsonObject[] {
-  return Array.isArray(value) ? value.map(ReadObject) : [];
-}
-
-function ReadNumber(value: unknown): Maybe<number> {
-  return typeof value === 'number' && Number.isFinite(value) ? value : null;
-}
-
-/**
- * A type id, which some tools-core routes send as a string (`dna/resolve` does).
- */
-function ReadTypeID(value: unknown): Maybe<number> {
-  const typeID = typeof value === 'string' && /^\d+$/u.test(value) ? Number(value) : value;
-  return typeof typeID === 'number' && Number.isSafeInteger(typeID) && typeID > 0 ? typeID : null;
-}
-
-/**
- * A localized name: a string, `{ text }` or `{ en }`.
- */
-function ReadName(value: unknown): Maybe<string> {
-  const object = ReadObject(value);
-  const name = typeof value === 'string' ? value : (object['text'] ?? object['en']);
-  return typeof name === 'string' && name ? name : null;
 }

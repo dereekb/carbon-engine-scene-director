@@ -16,6 +16,7 @@ import { MakeFakeShipData, SDE, TFI_DNA, UnpreparedSdeRoutes } from './ship-data
 import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
 import type { ToolsCoreApi } from './tools-core';
 import { MakeFakeObjectData } from './object-data.testing';
+import { MakeFakeDogmaData } from './dogma-data.testing';
 
 /** Where the fake tools-core's audio URLs point: a local server a spec starts. */
 let audioUpstream = 'http://127.0.0.1:9';
@@ -344,6 +345,24 @@ describe('ship stats', () => {
       expect(await response.json()).toMatchObject({ failure: 'unavailable', error: { message: expect.stringMatching(/--build 42/) } });
     } finally {
       await stats.Stop();
+    }
+  });
+});
+
+describe('fit routes', () => {
+  it('GET /fit/type, /dogma/types and /dogma/skills answer from DogmaData and map failures', async () => {
+    const fits = await StartHub({ shipData: MakeFakeShipData().shipData, dogmaData: MakeFakeDogmaData() });
+    try {
+      expect(await (await fetch(`${fits.url}fit/type?name=${encodeURIComponent('Warp Scrambler II')}&hull=Rifter`)).json()).toEqual({ typeID: 448, name: 'Warp Scrambler II', groupID: 52, categoryID: 7, category: 'module', slot: 'mid' });
+      expect((await fetch(`${fits.url}fit/type?name=${encodeURIComponent('No Such Thing')}`)).status).toBe(404);
+      const bundle = (await (await fetch(`${fits.url}dogma/types?ids=2048,587`)).json()) as { types: Record<string, unknown>; sdeBuild: string };
+      expect(Object.keys(bundle.types)).toEqual(['587', '2048']);
+      expect(bundle.sdeBuild).toBe(SDE);
+      expect((await fetch(`${fits.url}dogma/types?ids=abc`)).status).toBe(400);
+      expect((await fetch(`${fits.url}dogma/types`)).status).toBe(400);
+      expect(Object.keys(((await (await fetch(`${fits.url}dogma/skills`)).json()) as { types: object }).types)).toHaveLength(512);
+    } finally {
+      await fits.Stop();
     }
   });
 });

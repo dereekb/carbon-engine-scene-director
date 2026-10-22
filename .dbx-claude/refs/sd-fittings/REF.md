@@ -5,9 +5,9 @@
 > itself (numbers, switching, audio): `sd-ship-stats`; compositions and `cjs-fleet/1`: `sd-fleets` → `compositions`;
 > `add_ships` / `stage_engagement`: `sd-staging`.
 
-**Status (2026-10-22)**: slice C1 of the fitted-modules plan
-(`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) is in: fits
-are parsed and ride on scene ships. Not yet: name → type resolution and dogma bundles from tools-core (C2), the dogma
+**Status (2026-10-22)**: slices C1-C2 of the fitted-modules plan
+(`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) are in: fits
+are parsed and ride on scene ships, and the hub resolves fit names and serves dogma bundles. Not yet: the dogma
 evaluator and fit-driven `ship_stats` (C3), the page flying fitted ships and reporting HP / resists (C4), module
 activation (`switch_modules`) and the damage model (C5), module effects and sounds (C6). Until C4 the page ignores a
 fit except through the prop mod a composition line writes into `propMod`. Research behind the design: the dbx-claude
@@ -25,6 +25,11 @@ note `fitted-modules-dogma-and-module-effects-research`.
 | `compositions/operation.ts` | `mergeDraftFits`, `readDraftFits` (also used by staging) |
 | `staging/ships.ts` | a line's `fit` (EFT text; the hull defaults to its header's), `stagedFitKey`, `toShipListComposition` carries `fits` |
 | `staging/add-ships.ts` | `pushStagedShips` moves a staged ship's inline fit into `fits` |
+| `fitting/dogma-bundle.ts` | `DogmaBundle` / `DogmaTypeRecord` / `DogmaEffectRecord` / `DogmaAttributeRecord` / `FitTypeAnswer`, `mergeDogmaBundles`, `readDogmaBundle`, `readFitTypeAnswer`, `fitTypeCategoryOf` |
+| `fitting/fixtures/dogma-3632936.json` | the committed dogma fixture (below); never imported by the package (it would ship in the page bundle): specs read it from disk |
+| `apps/scene-director/src/lib/hub/sde-client.ts` | `SdeClient`: build pin, `GetJson` / `PostJson`, `Cached`, `Type`, `TypeDogma` (with the default effect), failure mapping, readers; `ShipData` delegates to it |
+| `apps/scene-director/src/lib/hub/dogma-data.ts` | `DogmaData` (`TypeByName`, `Bundle`, `Skills`), `FIXED_ATTRIBUTE_IDS`, `MAX_DOGMA_TYPE_IDS` |
+| `apps/scene-director/src/lib/hub/dogma-data.testing.ts` | `DogmaFixture`, `DogmaRoutes` (tools-core routes rebuilt from the fixture), `MakeRoutedDogmaData`, `MakeFakeDogmaData` |
 
 ## Fits in the document
 
@@ -81,6 +86,49 @@ is `{ name, charge?, offline?, section, slot, line }`, an item line `{ name, qua
 line, in written order, naming an MWD or AB, offline ones included; never cargo), `"none"` when it has none; else
 `DEFAULT_PROP_MOD_MODULE` (the hull-sized MWD). The page's director adopts it in C4; today it still reads
 `propMod.module ?? DEFAULT_PROP_MOD_MODULE`, which matches for composition ships (their `propMod` is explicit).
+
+## Names and dogma from tools-core (hub)
+
+Routes (`hub.ts`, GET; errors map like `/ship-stats`: 400 invalid, 404 not found, 409 ambiguous, 503 no SDE or no
+tools-core):
+
+| Route | Answer |
+|---|---|
+| `/fit/type?name=<exact name>&hull=<header hull>` | `FitTypeAnswer { typeID, name, groupID, categoryID, category, slot }` |
+| `/dogma/types?ids=<comma list, 1-200>` | `DogmaBundle` (`missing` lists ids the SDE lacks) |
+| `/dogma/skills` | `DogmaBundle` of the 512 published skills (~4.5 s the first time, then cached per hub) |
+
+- **`TypeByName`**: `POST fitting/parse { text: "[<hull>, resolve]\n<name>" }`, one name per call. The header hull
+  only has to be a published hull; 400 `Unknown hull in EFT header` is retried on `ANCHOR_HULL` (`Rifter`), and 400
+  `Unknown type in EFT text` becomes `not-found`. **Names are case-sensitive** (tools-core matches exact English
+  names; `warp scrambler ii` is not found). Slot from the item's `slot` (`medium` → `mid`; `null` for drones, charges,
+  cargo); group and category from `types/<id>?lang=en`. Cached per exact name.
+- **`Bundle(ids)`**: `types/<id>?lang=en` (name, group, category, published, the `mass` / `radius` / `capacity` /
+  `volume` columns) + `sde/typeDogma/<id>` (attribute values, effect ids, the `isDefault` effect); then every effect
+  the types carry (`sde/dogmaEffects/<id>`: `effectCategoryID`, `guid`, `isWarpSafe`, `isOffensive`, `isAssistance`,
+  the duration / discharge / range / falloff / tracking attribute ids, `modifierInfo`); then the attributes those
+  modifiers and effects name, `FIXED_ATTRIBUTE_IDS`, and each record's `maxAttributeID` (`sde/dogmaAttributes/<id>`:
+  `stackable`, `highIsGood`, `defaultValue`). Attribute values a type has but no effect names get no record. 16
+  requests at a time; records are cached per hub.
+- **`Skills()`**: `sde/groups?field=categoryID&value=16` (25 groups) → `sde/types?field=groupID&value=<g>` → the
+  published ones → `Bundle`. Build 3632936: 512 skills, 726 effects, 686 attributes, ~440 KB.
+- The page never sends a whole fit to the hub (the HTTP layer is GET-only and Node's 16 KB header limit rules out EFT
+  text in a query): it parses the fit itself and resolves names one `/fit/type` at a time (C4).
+
+### The fixture (`fitting/fixtures/dogma-3632936.json`)
+
+The merge of `/dogma/types` for 6 hulls (587 Rifter, 17732 TFI, 11987 Guardian, 19720 Revelation, 22474 Damnation,
+37604 Apostle), the 13 `BAKED_PROP_MODS` and 24 modules (plates, membranes, DC II, extender, hardeners, local / remote /
+ancillary reps and paste, booster, scram, point, web, cap transmitter, siege, triage, suppressor, rig, neut, a turret)
+with `/dogma/skills`: 555 types, 814 effects, 764 attributes, 514 KB. Specs read it from disk (`readFileSync`), the
+hub's through `DogmaFixture()`. **Re-capture when CCP rebalances** (and re-check the stats parity spec, C3):
+
+```sh
+node bin/scene-director.js serve --port 5521 --scenes /tmp/sd/scenes --fleets /tmp/sd/fleets &   # tools-core on 5510
+IDS=587,17732,11987,19720,22474,37604,438,440,12058,12076,12068,12084,41239,41253,5945,5975,35662,35660,41238,20347,11269,2048,3831,2281,13992,1183,3540,33103,28668,10850,448,3244,527,26914,3608,16487,4292,4294,4409,31900,25894,12271,2929
+curl -s "http://127.0.0.1:5521/dogma/types?ids=$IDS" -o types.json && curl -s http://127.0.0.1:5521/dogma/skills -o skills.json
+# merge: { sdeBuild, types, effects, attributes } = union of both, keys sorted numerically, compact JSON
+```
 
 ## Why not tools-core's `fitting/parse`
 
