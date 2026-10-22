@@ -3,8 +3,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FleetCompositionFileStore } from '../store/composition-files';
-import { FleetCompositions, requireFleetComposition, resolveCompositionHulls } from './fleet-compositions';
-import { MakeFakeShipData } from './ship-data.testing';
+import { FleetCompositions, requireFleetComposition, resolveCompositionHulls, resolveCompositionPropMods } from './fleet-compositions';
+import { MakeFakeShipData, PROP_MOD_LISTING_ROUTE } from './ship-data.testing';
 import { ToolError } from './tool-call';
 
 const GUARDIAN = 'ac3_t2:carthum:amarr';
@@ -24,6 +24,58 @@ beforeEach(async () => {
   calls = fake.calls;
   const files = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-')));
   compositions = new FleetCompositions({ files, shipData: fake.shipData, page: NO_PAGE });
+});
+
+describe('resolveCompositionPropMods', () => {
+  it('checks each distinct module once, explicit or from the fit, and skips the keywords', async () => {
+    const fake = MakeFakeShipData();
+    const composition = requireFleetComposition({
+      id: 'p',
+      commander: { hull: 'Guardian', dna: GUARDIAN, propMod: '10MN AB II' },
+      wings: [
+        {
+          id: 'w',
+          squads: [
+            {
+              id: 'a',
+              role: 'dps',
+              ships: [
+                { hull: 'Guardian', dna: GUARDIAN, count: 2, propMod: '10mn afterburner ii' },
+                { hull: 'Guardian', dna: GUARDIAN, propMod: 'mwd' }
+              ]
+            },
+            {
+              id: 'b',
+              role: 'logi',
+              ships: [
+                { hull: 'Guardian', dna: GUARDIAN, fit: 'g' },
+                { hull: 'Guardian', dna: GUARDIAN, propMod: 12084 },
+                { hull: 'Guardian', dna: GUARDIAN, propMod: 'Odd Module' }
+              ]
+            }
+          ]
+        }
+      ],
+      fits: { g: '[Guardian, g]\n50MN Microwarpdrive II\n' }
+    });
+    const { propMods, warnings } = await resolveCompositionPropMods({ composition, shipData: fake.shipData });
+    expect(propMods).toEqual([
+      { module: '10MN AB II', typeID: 12058, name: '10MN Afterburner II', from: 'sde' },
+      { module: '50MN Microwarpdrive II', typeID: 12076, name: '50MN Microwarpdrive II', from: 'sde' },
+      { module: 12084, typeID: 12084, name: '500MN Microwarpdrive II', from: 'sde' },
+      { module: 'Odd Module', from: 'unknown', note: 'no propulsion module is named "Odd Module"' }
+    ]);
+    expect(warnings).toEqual(['prop mod "Odd Module" is not a propulsion module in the EVE data (no propulsion module is named "Odd Module"); those ships fly the hull-sized default']);
+    expect(fake.calls.filter((call) => call === PROP_MOD_LISTING_ROUTE)).toHaveLength(1);
+  });
+
+  it('reports a module it could not check as unchecked, without a warning', async () => {
+    const fake = MakeFakeShipData({ '/eve/latest/build': 'network-error' });
+    const composition = requireFleetComposition({ id: 'p', commander: { hull: 'Guardian', dna: GUARDIAN, propMod: '10MN AB II' } });
+    const { propMods, warnings } = await resolveCompositionPropMods({ composition, shipData: fake.shipData });
+    expect(propMods).toMatchObject([{ module: '10MN AB II', from: 'unchecked' }]);
+    expect(warnings).toEqual([]);
+  });
 });
 
 describe('resolveCompositionHulls', () => {
@@ -65,7 +117,7 @@ describe('resolveCompositionHulls', () => {
 });
 
 describe('FleetCompositions', () => {
-  it('adds the built-in TFIs to a passed scene with no tab and no tools-core request', async () => {
+  it('adds the built-in TFIs to a passed scene with no tab and no hull lookup', async () => {
     for (const name of ['tfis', 'TFIs']) {
       const result = (await compositions.call('add_fleet_composition', { name, position: [0, 0, 0], scene: { name: 'empty' } })) as { added: { fleet: string; ships: string[] }; loaded: boolean; scene: { name: string; ships: unknown[] } };
       expect(result.loaded).toBe(false);
@@ -73,7 +125,7 @@ describe('FleetCompositions', () => {
       expect(result.added.ships).toHaveLength(44);
       expect(result.scene.ships).toHaveLength(44);
     }
-    expect(calls).toEqual([]);
+    expect(calls.filter((call) => call.includes('/dna/') || call.includes('/dogma/types/'))).toEqual([]);
   });
 
   it('refuses composition and name together, and neither, and explains a missing tab', async () => {

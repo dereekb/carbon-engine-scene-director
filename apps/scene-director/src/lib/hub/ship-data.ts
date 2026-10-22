@@ -17,7 +17,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { HullStats, PropModKind, PropModStats } from '@scene-director/scene';
+import { type HullStats, normalizePropModName, type PropModKind, type PropModStats, type PropModType } from '@scene-director/scene';
 import { ErrorMessage, ToolError } from './tool-call';
 
 /*
@@ -30,6 +30,7 @@ export const SPEED_FACTOR_ATTRIBUTE = 20;
 export const SPEED_BOOST_FACTOR_ATTRIBUTE = 567;
 export const MASS_ADDITION_ATTRIBUTE = 796;
 export const SIGNATURE_RADIUS_BONUS_ATTRIBUTE = 554;
+export const DURATION_ATTRIBUTE = 73;
 export const MWD_EFFECT = 6730;
 export const AB_EFFECT = 6731;
 export const PROPULSION_MODULE_GROUP = 46;
@@ -105,7 +106,13 @@ export interface ShipDataApi {
   SdeBuild(): Promise<string>;
   Hull(lookup: HullLookup): Promise<ResolvedHull>;
   PropMod(typeID: number): Promise<ResolvedPropMod>;
+  PropModByName(name: string): Promise<ResolvedPropMod>;
 }
+
+/**
+ * How many close names an unknown module name lists.
+ */
+const PROP_MOD_CANDIDATE_LIMIT = 5;
 
 type JsonObject = Record<string, unknown>;
 
@@ -204,8 +211,52 @@ export class ShipData implements ShipDataApi {
       speedFactor: dogma.attributes.get(SPEED_FACTOR_ATTRIBUTE) ?? 0,
       speedBoostFactor: dogma.attributes.get(SPEED_BOOST_FACTOR_ATTRIBUTE) ?? 0,
       massAddition: dogma.attributes.get(MASS_ADDITION_ATTRIBUTE) ?? 0,
-      signatureRadiusBonus
+      signatureRadiusBonus,
+      duration: dogma.attributes.get(DURATION_ATTRIBUTE) ?? null
     };
+  }
+
+  /**
+   * A propulsion module by its English name, matched exactly after normalizePropModName (any case, MWD / AB
+   * abbreviated), then read as PropMod does.
+   *
+   * @param name - The module name.
+   * @returns The module's numbers.
+   * @throws {ShipDataError} When the SDE is unavailable or no propulsion module has the name (listing close names).
+   */
+  async PropModByName(name: string): Promise<ResolvedPropMod> {
+    const types = await this.PropModTypes();
+    const key = normalizePropModName(name);
+    const found = types.get(key);
+    if (!found) {
+      const words = key.split(' ').filter((word) => word.length > 1);
+      const candidates = [...types.values()].filter((type) => words.every((word) => normalizePropModName(type.name).includes(word))).slice(0, PROP_MOD_CANDIDATE_LIMIT);
+      const names = candidates.map((type) => `"${type.name}"`).join(', ');
+      const hint = candidates.length ? `; close names: ${names}` : '';
+      throw new ShipDataError('not-found', `no propulsion module is named "${name}"${hint}`);
+    }
+    return this.PropMod(found.typeID);
+  }
+
+  /**
+   * Every published propulsion module (group 46), by normalized English name, read once per hub. dna/resolve
+   * cannot resolve modules (they have no graphic, so it answers 500), so this lists the group through tools-core's
+   * SDE inspection route instead (~650 KB, all languages).
+   *
+   * @returns The modules by normalizePropModName key.
+   */
+  private async PropModTypes(): Promise<ReadonlyMap<string, PropModType>> {
+    return this.Cached('propModTypes', async () => {
+      const body = await this.GetJson({ route: `sde/types?field=groupID&value=${PROPULSION_MODULE_GROUP}&limit=1000`, what: 'the propulsion modules' });
+      const types = new Map<string, PropModType>();
+      for (const item of ReadArray(body['items'])) {
+        const payload = ReadObject(item['payload']);
+        const typeID = ReadTypeID(payload['_key'] ?? item['id']);
+        const name = ReadName(payload['name']);
+        if (typeID != null && name && payload['published'] !== false) types.set(normalizePropModName(name), { typeID, name });
+      }
+      return types;
+    });
   }
 
   private async ResolveType({ dna, type }: HullLookup): Promise<ResolvedType> {

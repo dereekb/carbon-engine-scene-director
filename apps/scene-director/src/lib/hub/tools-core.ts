@@ -35,6 +35,8 @@ export interface ToolsCoreApi {
   ResolveBuild(): Promise<string>;
   ResourceUrl(path: string): Promise<string>;
   ResFileIndexUrl(): Promise<string>;
+  AudioLibraryUrl(): Promise<string>;
+  AudioPathUrl(path: string): Promise<string>;
   SofCatalog(kind: SofCatalogKind): Promise<string[]>;
   Status(): Promise<ToolsCoreStatus>;
 }
@@ -87,6 +89,23 @@ export class ToolsCore implements ToolsCoreApi {
   async ResFileIndexUrl(): Promise<string> {
     const build = await this.ResolveBuild();
     return `${this.url}/eve/${build}/app/resfileindex.txt`;
+  }
+
+  /**
+   * The URL of the pinned build's prepared audio library (the CjsAudioMan catalog, ~20 MB of JSON).
+   */
+  async AudioLibraryUrl(): Promise<string> {
+    const build = await this.ResolveBuild();
+    return `${this.url}/eve/${build}/audio/library`;
+  }
+
+  /**
+   * The URL of one audio file (a sound bank or a media file) by its `res:/` path in the pinned build. It answers
+   * byte ranges: the engine stems' media sit inside the 32 MB boosters.bnk.
+   */
+  async AudioPathUrl(path: string): Promise<string> {
+    const build = await this.ResolveBuild();
+    return `${this.url}/eve/${build}/audio/path/${encodeURIComponent(path)}`;
   }
 
   /**

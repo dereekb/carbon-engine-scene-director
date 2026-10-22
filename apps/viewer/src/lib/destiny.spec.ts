@@ -3,8 +3,9 @@ import { createRequire } from 'node:module';
 import { toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder } from '@scene-director/scene';
 import { describe, expect, it, vi } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipFollow, type ShipMotion, type ShipPhysics, type ShipWarp, type WarpEvent } from './destiny';
+import { AttachShipCurves, CycleEnd, DEFAULT_SHIP_PHYSICS, DestinyWorld, DocumentRotation, FIRST_SHIP_BALL_ID, ModeName, REFERENCE_BALL_ID, type CurveHost, type ShipFollow, type ShipMotion, type ShipPhysics, type ShipWarp, type WarpEvent, type PropModEvent } from './destiny';
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
+import { ResolveShipPropMod } from './prop-mods';
 import { CjsDestinyBall, CjsDestinyClientBall, quat, vec3, type Quat, type Vec3 } from './runtime-sim';
 import { WarpExitTime } from './warp';
 
@@ -88,7 +89,7 @@ function RunTicks(harness: Harness, count: number, onTick?: () => void): void {
 
 function ExpectLockstep(world: DestinyWorld, balls: number): void {
   expect(world.master.currentTime).toBe(world.replica.currentTime);
-  const state = (ball: CjsDestinyBall | null): number[] => (ball ? [ball.x, ball.y, ball.z, ball.vx, ball.vy, ball.vz, ball.mode, ball.mNewYaw, ball.mNewPitch] : []);
+  const state = (ball: CjsDestinyBall | null): number[] => (ball ? [ball.x, ball.y, ball.z, ball.vx, ball.vy, ball.vz, ball.mode, ball.mNewYaw, ball.mNewPitch, ball.mass, ball.maxVelocity, ball.agility] : []);
   for (let id = FIRST_SHIP_BALL_ID; id < FIRST_SHIP_BALL_ID + balls; id++) expect(state(world.replica.GetBall(id))).toEqual(state(world.master.GetBall(id)));
 }
 
@@ -1097,5 +1098,255 @@ describe('DestinyWorld warp', () => {
     const motion = RequireMotion(world, 'x');
     expect(motion).toMatchObject({ mode: 'goto', order: { type: 'keep-at-range', target: 'fc' } });
     expect(motion.warp).toBeUndefined();
+  });
+});
+
+describe('DestinyWorld prop mods', () => {
+  const TFI_SIZED: PublishedHull = { ...TFI, published: { ...TFI.published, rigSize: 3 } };
+  const GUARDIAN_SIZED: PublishedHull = { ...GUARDIAN, published: { ...GUARDIAN.published, rigSize: 2 } };
+  const tfi = ResolveFlight({ published: TFI_SIZED, hull: null, overrides: null, propMod: ResolveShipPropMod({ module: 'mwd', rigSize: 3, answer: null }) });
+  const guardianAb = ResolveFlight({ published: GUARDIAN_SIZED, hull: null, overrides: null, propMod: ResolveShipPropMod({ module: 'ab', rigSize: 2, answer: null }) });
+  const MWD_MASS = 153_300_000;
+  const MWD_SPEED = Math.fround(tfi.propMod?.maxVelocity ?? 0);
+  const BASE_SPEED = Math.fround(tfi.maxVelocity);
+
+  function Cruising(physics: ShipPhysics = tfi): { harness: Harness; world: DestinyWorld; events: PropModEvent[] } {
+    const harness = new Harness();
+    const { world } = harness;
+    world.AddShip(Ship('a', [0, 0, 0]), physics);
+    world.Order('a', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+    RunTicks(harness, 30);
+    const events: PropModEvent[] = [];
+    world.OnPropMod((event) => events.push(event));
+    return { harness, world, events };
+  }
+
+  function Ball(world: DestinyWorld, park: 'master' | 'replica' = 'master'): CjsDestinyBall {
+    const ball = world[park].GetBall(FIRST_SHIP_BALL_ID);
+    if (!ball) throw new Error('no ball');
+    return ball;
+  }
+
+  it('switches on at the next tick boundary: both parks fly the MWD numbers and the ship speeds up', () => {
+    const { harness, world, events } = Cruising();
+    expect(RequireMotion(world, 'a').speed).toBeGreaterThan(BASE_SPEED * 0.95);
+    const boundary = world.tick;
+    expect(world.SwitchPropMod('a', true)).toEqual({ state: 'activating', at: boundary });
+    expect(RequireMotion(world, 'a').propMod).toEqual({ state: 'activating', running: false, cycleTime: 10, at: boundary });
+    expect(Ball(world).maxVelocity).toBe(BASE_SPEED);
+    RunTicks(harness, 1);
+    expect(events).toEqual([{ kind: 'on', id: 'a', tick: boundary, cause: 'switch' }]);
+    expect(RequireMotion(world, 'a').propMod).toEqual({ state: 'active', running: true, cycleTime: 10, since: boundary });
+    for (const park of ['master', 'replica'] as const) {
+      expect(Ball(world, park).mass).toBe(MWD_MASS);
+      expect(Ball(world, park).maxVelocity).toBe(MWD_SPEED);
+    }
+    let passed = Number.NaN;
+    RunTicks(harness, 30, () => {
+      if (Number.isNaN(passed) && RequireMotion(world, 'a').speed > 1000) passed = world.tick - boundary;
+    });
+    expect(passed).toBeLessThanOrEqual(30);
+    ExpectLockstep(world, 1);
+  });
+
+  it('switches off at the end of the running cycle, rounded up to a tick, and slows to base speed', () => {
+    const { harness, world, events } = Cruising();
+    world.SwitchPropMod('a', true);
+    RunTicks(harness, 1);
+    const since = RequireMotion(world, 'a').propMod.since ?? 0;
+    expect(world.SwitchPropMod('a', false)).toEqual({ state: 'stopping', stopsAt: since + 10, stopsIn: 9 });
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'stopping', running: true, stopsIn: 9 });
+    RunTicks(harness, 8);
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'stopping', stopsIn: 1 });
+    RunTicks(harness, 1);
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'stopping', stopsIn: 0 });
+    RunTicks(harness, 1);
+    expect(events.map((event) => [event.kind, event.tick])).toEqual([
+      ['on', since],
+      ['off', since + 10]
+    ]);
+    expect(RequireMotion(world, 'a').propMod).toEqual({ state: 'off', running: false, cycleTime: 10 });
+    expect(Ball(world).maxVelocity).toBe(BASE_SPEED);
+    expect(Ball(world).mass).toBe(TFI.published.mass);
+    const fast = RequireMotion(world, 'a').speed;
+    RunTicks(harness, 30);
+    expect(RequireMotion(world, 'a').speed).toBeLessThan(fast / 3);
+    ExpectLockstep(world, 1);
+  });
+
+  it('rounds a 7.5 s afterburner cycle up to a tick', () => {
+    expect(CycleEnd({ since: 100, boundary: 101, cycle: 10 })).toBe(110);
+    expect(CycleEnd({ since: 100, boundary: 111, cycle: 10 })).toBe(120);
+    expect(CycleEnd({ since: 100, boundary: 110, cycle: 10 })).toBe(110);
+    expect(CycleEnd({ since: 100, boundary: 100, cycle: 10 })).toBe(110);
+    expect(CycleEnd({ since: 100, boundary: 101, cycle: 7.5 })).toBe(108);
+    const { harness, world } = Cruising(guardianAb);
+    world.SwitchPropMod('a', true);
+    RunTicks(harness, 1);
+    const since = RequireMotion(world, 'a').propMod.since ?? 0;
+    expect(world.SwitchPropMod('a', false)).toMatchObject({ stopsAt: since + 8 });
+    RunTicks(harness, 8);
+    expect(RequireMotion(world, 'a').propMod.state).toBe('off');
+  });
+
+  it('keeps running when switched on while stopping, and cancels an activation switched off, without events', () => {
+    const { harness, world, events } = Cruising();
+    world.SwitchPropMod('a', true);
+    RunTicks(harness, 1);
+    world.SwitchPropMod('a', false);
+    RunTicks(harness, 3);
+    expect(world.SwitchPropMod('a', true)).toEqual({ state: 'active' });
+    RunTicks(harness, 15);
+    expect(RequireMotion(world, 'a').propMod.state).toBe('active');
+    expect(world.SwitchPropMod('a', true)).toEqual({ state: 'active' });
+    const fresh = Cruising();
+    expect(fresh.world.SwitchPropMod('a', true)?.state).toBe('activating');
+    expect(fresh.world.SwitchPropMod('a', false)).toEqual({ state: 'off' });
+    expect(fresh.world.SwitchPropMod('a', false)).toEqual({ state: 'off' });
+    RunTicks(fresh.harness, 2);
+    expect(fresh.events).toEqual([]);
+    expect(events.map((event) => event.kind)).toEqual(['on']);
+    expect(world.SwitchPropMod('ghost', true)).toBeNull();
+    expect(world.PropModRefusal('ghost', true)).toBe('ship "ghost" has no Destiny ball');
+  });
+
+  it('sets the document state at once, with its events before the call returns', () => {
+    const { world, events } = Cruising();
+    world.SetPropModActive('a', true);
+    expect(events).toEqual([{ kind: 'on', id: 'a', tick: world.tick, cause: 'document' }]);
+    expect(RequireMotion(world, 'a').propMod).toMatchObject({ state: 'active', running: true, since: world.tick });
+    expect(Ball(world, 'replica').maxVelocity).toBe(MWD_SPEED);
+    world.SetPropModActive('a', true);
+    world.SetPropModActive('a', false);
+    world.SetPropModActive('a', false);
+    expect(events.map((event) => [event.kind, event.cause])).toEqual([
+      ['on', 'document'],
+      ['off', 'document']
+    ]);
+    expect(Ball(world).maxVelocity).toBe(BASE_SPEED);
+    ExpectLockstep(world, 1);
+  });
+
+  it('allows a switch while aligning (a slower align), switches off entering warp and refuses to switch on in warp', () => {
+    const align = (on: boolean): { ticks: number; world: DestinyWorld; events: PropModEvent[] } => {
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('a', [0, 0, 0]), tfi);
+      const events: PropModEvent[] = [];
+      world.OnPropMod((event) => events.push(event));
+      if (on) world.SetPropModActive('a', true);
+      world.Order('a', { type: 'warp', point: [0, 0, 1e9], range: 0 });
+      let ticks = 0;
+      while (RequireMotion(world, 'a').warp?.phase === undefined || RequireMotion(world, 'a').warp?.phase === 'aligning') {
+        RunTicks(harness, 1);
+        if (++ticks > 200) throw new Error('never entered warp');
+      }
+      ExpectLockstep(world, 1);
+      return { ticks, world, events };
+    };
+    const off = align(false);
+    const on = align(true);
+    expect(on.ticks).toBeGreaterThan(off.ticks);
+    expect(RequireMotion(on.world, 'a').propMod).toEqual({ state: 'off', running: false, cycleTime: 10, note: 'off: entered warp' });
+    expect(on.events.map((event) => [event.kind, event.cause])).toEqual([
+      ['on', 'document'],
+      ['off', 'warp']
+    ]);
+    expect(Ball(on.world).maxVelocity).toBe(BASE_SPEED);
+    expect(on.world.SwitchPropMod('a', true)).toBeNull();
+    expect(on.world.PropModRefusal('a', true)).toMatch(/^ship "a" is in warp; switch its prop mod on once it lands, in about \d+ s$/u);
+    expect(on.world.PropModRefusal('a', false)).toBeNull();
+    on.world.SetPropModActive('a', true);
+    expect(RequireMotion(on.world, 'a').propMod).toMatchObject({ state: 'off', note: 'not switched on: in warp' });
+  });
+
+  it('flies the new running numbers on a retune, base numbers without a prop mod, and refuses a bad one', () => {
+    const { world } = Cruising();
+    world.SetPropModActive('a', true);
+    const faster = { ...tfi, propMod: { ...(tfi.propMod as NonNullable<typeof tfi.propMod>), maxVelocity: 2000 } };
+    world.SetPhysics('a', faster);
+    expect(Ball(world).maxVelocity).toBe(2000);
+    expect(Ball(world, 'replica').maxVelocity).toBe(2000);
+    const { propMod: _dropped, ...bare } = tfi;
+    world.SetPhysics('a', bare);
+    expect(Ball(world).maxVelocity).toBe(BASE_SPEED);
+    expect(RequireMotion(world, 'a').propMod).toEqual({ state: 'active', running: false, since: world.tick });
+    expect(() => world.SetPhysics('a', { ...tfi, propMod: { mass: 0, maxVelocity: 1, cycleTime: Number.NaN } })).toThrow(/propMod\.mass, propMod\.cycleTime/u);
+    ExpectLockstep(world, 1);
+  });
+
+  it('logs a throwing listener and still calls the rest', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      const { world, events } = Cruising();
+      world.OnPropMod(() => {
+        throw new Error('boom');
+      });
+      const seen: string[] = [];
+      const off = world.OnPropMod((event) => seen.push(event.kind));
+      world.SetPropModActive('a', true);
+      off();
+      world.SetPropModActive('a', false);
+      expect(events).toHaveLength(2);
+      expect(seen).toEqual(['on']);
+      expect(error).toHaveBeenCalledWith("an OnPropMod listener failed on ship a's prop mod on", expect.any(Error));
+    } finally {
+      error.mockRestore();
+    }
+  });
+
+  it('keeps a fleet in formation at MWD speeds, and members off their MWDs trail at their own speed', () => {
+    const DIRECTIONS: SceneVector[] = [
+      [0, 0, -1],
+      [0.6, 0, -0.8],
+      [-0.6, 0, -0.8]
+    ];
+    const fleet = (membersOn: boolean): { harness: Harness; world: DestinyWorld; members: string[] } => {
+      const harness = new Harness();
+      const { world } = harness;
+      world.AddShip(Ship('fc', [0, 0, 0]), tfi);
+      const members = DIRECTIONS.map((direction, index) => {
+        const id = `m${index}`;
+        const reach = 1000 + 2 * tfi.radius;
+        world.AddShip(Ship(id, [direction[0] * reach, direction[1] * reach, direction[2] * reach]), tfi);
+        world.Follow(id, { anchor: 'fc', range: 1000, frame: 'fc', direction, slotRange: 1000, speed: 1 });
+        return id;
+      });
+      RunTicks(harness, 3);
+      world.SetPropModActive('fc', true);
+      if (membersOn) for (const id of members) world.SetPropModActive(id, true);
+      world.Order('fc', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+      RunTicks(harness, 60);
+      return { harness, world, members };
+    };
+    const together = fleet(true);
+    expect(RequireMotion(together.world, 'fc').speed).toBeGreaterThan(1000);
+    for (const id of together.members) {
+      const motion = RequireMotion(together.world, id);
+      expect(motion.speed, id).toBeGreaterThan(1000);
+      expect(motion.slotError, id).toBeLessThanOrEqual(toFollowTolerance({ slotRange: 1000, anchorSpeed: RequireMotion(together.world, 'fc').speed }));
+    }
+    ExpectLockstep(together.world, 4);
+    together.world.Order('fc', { type: 'stop' });
+    let settledAfter = 0;
+    while (!together.members.every((id) => RequireMotion(together.world, id).mode === 'stop')) {
+      RunTicks(together.harness, 1);
+      if (++settledAfter > 600) break;
+    }
+    expect(settledAfter).toBeLessThanOrEqual(240);
+    RunTicks(together.harness, 30);
+    for (const id of together.members) {
+      const motion = RequireMotion(together.world, id);
+      expect(motion.mode, id).toBe('stop');
+      expect(Math.min(Math.abs(motion.heading[0]), 360 - motion.heading[0]), id).toBeLessThanOrEqual(1);
+    }
+    ExpectLockstep(together.world, 4);
+
+    const trailing = fleet(false);
+    for (const id of trailing.members) {
+      const motion = RequireMotion(trailing.world, id);
+      expect(motion.speed, id).toBeLessThanOrEqual(BASE_SPEED + 0.1);
+      expect(motion.slotError, id).toBeGreaterThan(5000);
+    }
   });
 });

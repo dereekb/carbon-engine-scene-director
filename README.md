@@ -11,7 +11,9 @@ saved scenes. **Movement** (in progress): every ship flies as a Destiny ball
 from [`@carbonenginejs/server`](https://github.com/dereekb/carbon-engine-server),
 and `order_ship` gives live direction, goto, approach, keep-at-range, orbit,
 warp and stop orders at each ship's in-game speed, agility and warp speed, with
-boosters that follow the ball speed. Prop mods, fleet commands, fleet warp,
+boosters that follow the ball speed. Every ship fits a prop mod (MWD or AB) that
+`switch_prop_mods` switches on or off for a ship, a squad, a wing or a whole
+fleet, on EVE's cycle timing, with the engine sound. Fleet commands, fleet warp,
 combat and timelines come in later phases; the document's `orders`
 and `timeline` fields stay reserved until then. **Fleets**: the document holds EVE
 fleet structure (fleet commander, wings, squads with a role and an anchor), and
@@ -97,7 +99,7 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `viewer_status` | hub | connected tabs, the URL to open, tools-core reachability |
 | `page_log` | hub | the viewer's recent console output and errors |
 | `search_hulls` | hub | SOF hull, faction or race names |
-| `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature, align time and warp speed, as published and as flown with every skill at V, optionally with a prop mod (see below) |
+| `ship_stats` | hub | a hull's in-game mass, max velocity, agility, signature, align time and warp speed, as published and as flown with every skill at V, optionally with a prop mod by name, type id or kind, and its cycle time (see below) |
 | `search_map` | hub | searches CCP's static map by name: regions, constellations, systems, stars, planets, NPC stations and stargates (see Locations) |
 | `get_system` | hub | one solar system with its star, the region's nebula and its celestials (see Locations) |
 | `set_location` | hub | puts the scene at a real EVE place: resolves a celestial by name or id and sets the document's location, off it at a range; the page draws it (see Locations) |
@@ -107,8 +109,9 @@ node bin/scene-director.js call screenshot '{"maxWidth":960}' --out shot.png
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB (see below) |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) to the live scene at a position and heading, resolving hull names through tools-core (see Fleet compositions) |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
-| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation`, and the scene's `location` with the nearest celestials and what the location dressed |
+| `get_state` | page | renderer status, per-ship build status, Destiny motion (position, velocity, speed, mode, heading, physics), orders, warp progress, booster values, each ship's `propMod`, distances, the simulation tick, fleet membership, each member's `following`, the fleet tree with each fleet's `formation` and `propMods` counts, the page's `audio`, and the scene's `location` with the nearest celestials and what the location dressed |
 | `order_ship` | page | a live movement order at the ship's in-game speed: fly a direction or to a point, approach / keep range on / orbit a ship, warp to a point or a ship, or stop; `rejoin` puts a fleet member back in formation (see Movement and Follow the FC) |
+| `switch_prop_mods` | page | switches prop mods (MWDs and ABs) on or off, live, for ships, a fleet, a wing or a squad, on EVE's cycle timing (see Prop mods) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship and follows it, or fits all ships |
 
@@ -192,12 +195,20 @@ DNA's `hull:faction:race` picks it. `stats` (`{ "mass": kg, "maxVelocity": m/s,
 values before the pilot's skills and a prop mod apply, so `{ "maxVelocity": 200 }`
 flies at 250 m/s with the max-skills pilot; all four together pin the numbers
 with no EVE data. `update_ship` replaces `stats` as a whole, and `null` clears
-`type`, `stats` or `pilot`. `pilot` is reserved for the character system: stored,
+`type`, `stats`, `propMod` or `pilot`. `pilot` is reserved for the character system: stored,
 not used yet.
+
+`propMod` is the ship's propulsion module and its state at load:
+`"50MN Microwarpdrive II"` (shorthand) or `{ "module": "10MN Afterburner II", "active": true }`.
+A module is an EVE type name, a type id, `"mwd"` / `"ab"` (the Tech II module of
+that kind sized for the hull) or `"none"` (fits no prop mod). Omitted, the ship
+fits the hull-sized Tech II microwarpdrive, off. See Prop mods below.
 
 Edits are diffed against the current document: a DNA change rebuilds that
 ship, a placement change moves it in place, a `type`, `stats` or `pilot` change
-retunes it (the diff's `retuned` list: new flight numbers, no rebuild), a fleet
+retunes it (the diff's `retuned` list: new flight numbers, no rebuild), as does
+a `propMod.module` change, a `propMod.active` change switches the prop mod at
+once (the diff's `switched` list, `changes.switched`), a fleet
 change regroups the ships whose membership changed (the diff's `regrouped`
 list: no rebuild), and an environment change reloads the page (the scene's
 environment is initialized with the device).
@@ -331,7 +342,9 @@ Ship-stats max velocity (full speed reads the same on every hull) and ramps
 `boosters.warpIntensity` (the warp colours) in from 10× to 14× its max
 velocity, so only a warp shows them. Trails fade out in warp by the runtime's
 own rules. `get_state` reports each built ship's `boosters` (`maxVel`,
-`intensity`, `warpIntensity`) when there is a renderer.
+`intensity`, `warpIntensity`) when there is a renderer. `maxVel` stays the
+prop-mod-off max velocity, so a running AB pushes the flames past full and an
+MWD drives them to the runtime's cap of 2.
 
 On a real GPU (Windows Chrome on NVIDIA, 2026-10-22, a Slasher and a Tempest
 Fleet Issue):
@@ -353,6 +366,73 @@ Fleet Issue):
 - **An AU/s warp** leaves the ships near the origin untouched: no booster shader
   reads `shipSpeed`.
 
+### Prop mods
+
+Every ship fits one propulsion module: the one its `propMod` names, or the
+Tech II microwarpdrive sized for its hull. `switch_prop_mods` switches modules
+on or off, live; the document's `propMod.active` is the state at load.
+
+- **The module.** A name (matched to CCP's type names case-insensitively, with
+  `MWD` / `AB` read as Microwarpdrive / Afterburner), a type id, `"mwd"` /
+  `"ab"` or `"none"`. The hull size is the SDE's `rigSize` when the hub names
+  the hull, else the SOF class's: frigates and destroyers 5MN / 1MN, cruisers
+  and battlecruisers 50MN / 10MN, battleships 500MN / 100MN, capitals 50000MN /
+  10000MN (the SDE's largest). The page asks the hub's `GET /prop-mod?module=`
+  for the module's speed factor, thrust, mass addition, signature bloom and
+  cycle time (tools-core's SDE); without it, it uses 13 built-in modules (the 8
+  hull-sized Tech II and the 5 the TFIs example names, SDE 3632936), else the
+  hull-sized Tech II module of the name's kind stands in, with a `note`.
+- **Switching** (`switch_prop_mods { active, ships | fleet [, wing | squad] }`)
+  follows EVE's module rules. On applies at the next 1 s tick. Off lets the
+  running cycle finish and stops at its end, rounded up to a tick: 10 s for an
+  MWD, 7.5 s for an AB with Afterburner V, 20 / 15 s on capitals (`stopsIn`
+  counts down). On while stopping keeps it running; off while activating cancels
+  it. A `fleet` selects every ship holding a position in it (FC, wing
+  commanders, squad members), a `wing` its commander and its squads' members, a
+  `squad` its members. Ships fitting `"none"` are skipped; so are ships in warp
+  when switching on. The switch is live only, like an order: it is not saved.
+- **Flying.** A running module swaps the ball's mass and max velocity for the
+  module's on both Destiny parks (`SetBallMass`, `SetMaxSpeed`, as EVE's server
+  does); Destiny then accelerates or slows the ship at its agility (a TFI goes
+  from 159 to 994 m/s in 20 ticks on a 500MN MWD II). Switching on while
+  aligning for a warp slows the align, as in EVE. Fleet members keep following
+  in formation at their own, now boosted, speeds: the switch never takes a ship
+  out of formation, so switch the whole fleet to move it faster.
+- **Warp.** Entering warp switches a running module off at once (`note`
+  `off: entered warp`); it stays off after landing.
+- **`get_state`.** `physics` is what the ship flies now: while its module runs,
+  the module's mass, max velocity, signature radius (the MWD bloom) and align
+  time. `propMod` gives the module (`module` as written, `name`, `typeID`,
+  `kind`, `size` S/M/L/XL, `source` `sde` / `baked` / `default` and a `note`),
+  `state` (`off`, `activating`, `active`, `stopping`), `cycleTime`, `since`,
+  `at`, `stopsIn` and the running numbers; it is null for a ship fitting
+  `"none"`. Each fleet reports `propMods` counts (`activating`, `active`,
+  `stopping`, `off`, `none`).
+- **The document form.** `ships[].propMod.active: true` runs the module from the
+  moment the scene loads. The patch op `{ "op": "set_prop_mods", <selection>,
+  "active"?, "module"? }` edits it for a selection (`module: null` removes the
+  module); the page applies a change at once, like a placement, with no cycle
+  wait. A timeline beat will embed the live command, validated by the pure
+  `normalizePropModSwitch`.
+- **Audio.** Switching on posts `ship_engine_<S|M|L|XL>_<microwarpdrive|afterburner>_3rd_on`
+  on the ship's own emitter, and switching off (by a switch, the document or
+  warp) posts `..._powerdown`, sized by the hull. The page runs the runtime's
+  `CjsAudioMan` on tools-core's audio library (about 20 MB, fetched when audio
+  turns on) through the hub's `/audio/library` and `/audio/path/<resPath>`
+  routes (HTTP ranges into the sound banks), with the listener at the camera.
+  Browsers allow audio only after a user gesture: it turns on with the first
+  click or keypress in the tab (or at once when the tab may autoplay), and
+  `?audio=off` keeps it off. `get_state.audio` reports the state, the last
+  20 events posted, each with `played`, and `frameErrors` / `lastFrameError`
+  when the runtime's audio frame threw (headless Chromium, 2026-10-22: a short
+  burst of `setValueCurveAtTime ... overlaps` from its Web Audio backend while
+  fades overlap, alternating with `setValueAtTime ... overlaps`; the page logs
+  at most one line every 10 s and goes on). The trail look and the sound itself need
+  a real browser to judge.
+- **Not modelled:** capacitor, heat and overload, fitting restrictions (a
+  freighter still gets a 500MN MWD), stacking with other modules, hull trait
+  bonuses.
+
 ## Ship stats and the pilot
 
 `packages/scene/src/lib/stats/` computes the numbers a ship flies by, with no
@@ -371,11 +451,15 @@ runtime imports: `computeShipStats({ hull, overrides, pilot, propMod })` returns
   Evasive Maneuvering −5 % and Spaceship Command −2 %/level agility; Advanced
   Spaceship Command and Capital Ships −5 %/level agility on capital hulls (through
   their `advancedAgility` / `advancedCapitalAgility` hooks); Acceleration Control
-  +5 %/level prop mod speed factor. Afterburner, High Speed Maneuvering, Fuel
-  Conservation and Warp Drive Operation touch only capacitor and duration.
+  +5 %/level prop mod speed factor; Afterburner −5 %/level afterburner cycle
+  time (every AB requires it, no MWD does). High Speed Maneuvering, Fuel
+  Conservation, Warp Drive Operation and Afterburner's capacitor bonus touch
+  only capacitor.
 - **A prop mod** (MWD or AB, as the game applies it): mass += massAddition, then
   `maxVelocity × (1 + speedFactor × thrust / mass / 100)`, and an MWD's signature
-  bloom. `HULL_SIZED_PROP_MODS` names the Tech II module for each hull size.
+  bloom; `propModCycleTime` is its cycle in seconds. `HULL_SIZED_PROP_MODS` names
+  the Tech II module for each hull size, and `BAKED_PROP_MODS` holds 13 modules'
+  numbers for when the SDE is missing.
 - **Not modelled:** hull trait bonuses, rigs, implants, boosters, fleet command
   bursts, heat, other modules, server tick rounding.
 
@@ -383,9 +467,15 @@ Base values come from tools-core's SDE at run time, through the hub: a ship
 resolves to an EVE type by its `type` (a name goes through `dna/resolve`), or by
 its DNA base in tools-core's DNA index (bare-hull matches, lowest type id; the
 others are reported as `candidates`). `ship_stats` answers with the published
-values, the max-skills stats and, with `propMod` (`"mwd"`, `"ab"` or a module
-type id), the stats with it running. `GET /ship-stats?dna=&type=&propMod=` gives
-the page the same JSON (404 unknown hull, 409 ambiguous name, 503 no SDE).
+values, the max-skills stats and, with `propMod` (`"mwd"`, `"ab"`, a module
+type id or a module name such as `"500MN Cold-Gas Enduring Microwarpdrive"`;
+not `"none"`), the stats with it running. Module names resolve against
+tools-core's propulsion module list (group 46): its `dna/resolve` cannot resolve
+modules. With no SDE, a built-in module still answers, with `propModNote`.
+`GET /ship-stats?dna=&type=&propMod=` gives the page the same JSON (404 unknown
+hull, 409 ambiguous name, 503 no SDE), and `GET /prop-mod?module=<name or id>`
+one module's numbers (404 unknown, 400 for `mwd` / `ab` / `none`, which the
+caller sizes itself, 503 no SDE).
 tools-core runs with `--no-sde-auto-prepare`, so the SDE build it reports
 (`builds.sde` in `/eve/latest/build`) must be prepared once:
 `node bin/cjs-sde-prepare.js --build <n>` in the tools-core checkout (Node 22).
@@ -609,7 +699,7 @@ use; the code is in `packages/scene/src/lib/compositions/`.
 | line | `hull` | an exact English EVE type name or type id; becomes each ship's `type`. Omitted: the hull its fit's header names |
 | line | `dna`, `radius` | the SOF DNA and the hull's EVE radius (metres); filled by `add_fleet_composition` from the EVE data when missing |
 | line | `count` | 1 to 256, default 1 |
-| line | `name`, `propMod`, `fit` | the ship name base; a prop mod name (or `mwd` / `ab`, or a type id); a key of `fits` |
+| line | `name`, `propMod`, `fit` | the ship name base; a prop mod name (or `mwd` / `ab` / `none`, or a type id), which becomes each ship's `propMod`; a key of `fits` |
 
 A line needs a `hull`, a `dna` or a `fit`; a string `hull` must match its fit's
 header. Everything is validated together, unknown keys warn and are dropped,
@@ -652,6 +742,15 @@ the EVE data warns. The `add_fleet_composition` patch operation is pure: it
 needs `dna` on every line and says to use the tool otherwise. The TFIs example
 carries both on every line, so it needs no tools-core.
 
+**Prop mods.** A line's `propMod` becomes each of its ships' `propMod` module.
+A line with a `fit` and no `propMod` takes the first fitted microwarpdrive or
+afterburner of its EFT text (cargo and drone `xN` lines skipped, `/OFFLINE` and a
+charge dropped), or `"none"` when the fit has neither (the TFIs Revelations and
+Apostle); a line with neither flies the hull-sized MWD. `add_fleet_composition`
+checks each distinct module name against the EVE data and reports `propMods`
+(`module`, `typeID`, `from`: `sde`, `unknown` or `unchecked`); an unknown name
+warns, and those ships fly the hull-sized default.
+
 **Adding to the live scene.**
 
 ```sh
@@ -660,8 +759,8 @@ node bin/scene-director.js call add_fleet_composition '{"name":"tfis","position"
 
 `position` is the FC's; `heading` is yaw degrees (0 faces +Z, 90 faces +X), or
 pass `facing` (a point) instead; `fleet` and `team` are optional. The result is
-the `patch_scene` result plus `added` (`fleet`, `commander`, `ships`) and
-`hulls`. Pass `scene` (e.g. `{ "name": "tfis-battle" }`) to add to that document
+the `patch_scene` result plus `added` (`fleet`, `commander`, `ships`),
+`hulls` and `propMods`. Pass `scene` (e.g. `{ "name": "tfis-battle" }`) to add to that document
 instead, with no tab: the result is returned, not shown (`load_scene` or
 `save_scene` it). The raw operation is
 `{ "op": "add_fleet_composition", "composition", "position", "heading"? | "facing"?, "fleet"?, "team"? }`
@@ -699,9 +798,10 @@ close-range armor doctrine of
 DNA and radius were checked against tools-core's SDE build 3632936. The Buffer
 Apostle and the secondary (L3ARN) fits are left out.
 
-**Not applied yet.** `propMod` (the Prop mods entry), the fits (Turrets) and
-arriving from warp (Fleet warp-in) are stored or planned, not played: added
-fleets start at rest in formation and follow their FC from there.
+**Not applied yet.** The fits beyond their prop mod (Turrets) and arriving from
+warp (Fleet warp-in) are stored or planned, not played: added fleets start at
+rest in formation, prop mods off, and follow their FC from there
+(`switch_prop_mods { "fleet": "tfis", "active": true }` runs every module).
 
 ## Locations
 
@@ -842,6 +942,9 @@ npx oxfmt --write .                                # formatting
 
 Headless Chromium usually has no WebGPU adapter, so `verify:page` checks
 everything but drawing: SOF builds from real data, edits, storage and reload.
+It launches Chromium with `--autoplay-policy=no-user-gesture-required`, so the
+page turns audio on by itself and the prop mod check sees the engine events
+posted (it cannot hear them).
 
 Drawing is checked in a real Chrome or Edge tab through `get_state`,
 `screenshot` and `page_log`:
@@ -897,6 +1000,13 @@ Drawing is checked in a real Chrome or Edge tab through `get_state`,
 - The esbuild plugin fails the build if any `@carbonenginejs/runtime` import,
   the server's included, resolves outside the page's runtime copy: a nested
   second copy would duplicate every class.
+- Audio (`apps/viewer/src/lib/audio.ts`) is the runtime's `CjsAudioMan` with a
+  media provider over the hub's `/audio/path` route (the runtime's own provider
+  lives in its demo, not the package). It enables every sound bank, as the demo
+  does: PostEvent is gated on bank status, and media is read per event, with
+  HTTP ranges into the banks. Emitters start culled, so a fresh emitter's first
+  event plays when the next audio frame wakes it in range. The SOF ships' own
+  audio emitters (the engine hum) stay inert: nothing adopts their graphs yet.
 
 ## EVE content
 

@@ -5,8 +5,8 @@ import type { SquadRole } from '../fleets';
  * and anchors) and dropped into a scene as many times as wanted. Expanding one (expandFleetComposition) yields
  * unique-id ships in formation plus one `fleets` entry of the scene document.
  *
- * Ranges are EVE ranges: metres, surface to surface. A line's `propMod` and `fit` are stored for later entries
- * (prop mods, turrets) and not applied yet.
+ * Ranges are EVE ranges: metres, surface to surface. A line's `propMod` becomes each of its ships' prop mod (else
+ * its fit's module, else the hull-sized microwarpdrive); the rest of a `fit` is stored for later entries (turrets).
  */
 
 export const FLEET_COMPOSITION_SCHEMA = 'cjs-fleet/1';
@@ -55,11 +55,14 @@ export interface CompositionShip {
    */
   name?: string;
   /**
-   * Stored for the prop mods entry: a module type name, "mwd" / "ab", or a module type id.
+   * The prop mod each of the line's ships fits: a module type name, a type id, "mwd" / "ab" (the hull-sized Tech II
+   * module of that kind) or "none". Omitted: the module the line's fit fits ("none" when it fits none), else the
+   * hull-sized microwarpdrive.
    */
   propMod?: string | number;
   /**
-   * A key of the composition's `fits`. Stored for the turrets entry.
+   * A key of the composition's `fits`. Its prop mod is applied when the line names none; the rest is stored for the
+   * turrets entry.
    */
   fit?: string;
 }

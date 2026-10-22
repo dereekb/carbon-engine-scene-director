@@ -14,8 +14,11 @@
  * - Capital Ships (20533): agilityBonus (151) -5 → effect 1616, ship advancedCapitalAgility (874);
  *   the hull's effect 1617 then multiplies agility by it. Capitals only.
  * - Acceleration Control (3452): speedFBonus (318) +5 → effect 1176, propulsion modules' (group 46) speedFactor (20)
+ * - Afterburner (3450): durationBonus (66) -5 → effect 208 (PreMul by skill level 280), then effect 230 applies it
+ *   postPercent to duration (73) of modules requiring the Afterburner skill: every afterburner, no microwarpdrive
+ *   (checked against SDE build 3632936, 2026-10-22)
  *
- * Checked and excluded, since they touch only capacitor or duration: Afterburner (3450),
+ * Checked and excluded, since they touch only capacitor: Afterburner's capacitor bonus,
  * Fuel Conservation (3451), High Speed Maneuvering (3454) and Warp Drive Operation (3455).
  * No skill changes mass or signature radius. Re-check this table when CCP rebalances.
  */
@@ -23,7 +26,7 @@
 /**
  * What a ship skill changes.
  */
-export type ShipSkillTarget = 'maxVelocity' | 'agility' | 'advancedAgility' | 'advancedCapitalAgility' | 'propModSpeedFactor';
+export type ShipSkillTarget = 'maxVelocity' | 'agility' | 'advancedAgility' | 'advancedCapitalAgility' | 'propModSpeedFactor' | 'afterburnerDuration';
 
 export interface ShipSkill {
   /**
@@ -53,7 +56,9 @@ export const CAPITAL_SHIPS_SKILL: ShipSkill = { typeID: 20533, name: 'Capital Sh
 
 export const ACCELERATION_CONTROL_SKILL: ShipSkill = { typeID: 3452, name: 'Acceleration Control', bonusPerLevel: 5, target: 'propModSpeedFactor' };
 
+export const AFTERBURNER_SKILL: ShipSkill = { typeID: 3450, name: 'Afterburner', bonusPerLevel: -5, target: 'afterburnerDuration' };
+
 /**
  * Every skill the stats math applies, in the order it applies them.
  */
-export const SHIP_SKILLS: readonly ShipSkill[] = [NAVIGATION_SKILL, EVASIVE_MANEUVERING_SKILL, SPACESHIP_COMMAND_SKILL, ADVANCED_SPACESHIP_COMMAND_SKILL, CAPITAL_SHIPS_SKILL, ACCELERATION_CONTROL_SKILL];
+export const SHIP_SKILLS: readonly ShipSkill[] = [NAVIGATION_SKILL, EVASIVE_MANEUVERING_SKILL, SPACESHIP_COMMAND_SKILL, ADVANCED_SPACESHIP_COMMAND_SKILL, CAPITAL_SHIPS_SKILL, ACCELERATION_CONTROL_SKILL, AFTERBURNER_SKILL];

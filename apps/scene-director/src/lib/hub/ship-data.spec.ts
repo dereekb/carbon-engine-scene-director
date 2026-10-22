@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ShipDataError } from './ship-data';
-import { type Answer, MakeFakeShipData, SDE, SHIP_ROUTES, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
+import { type Answer, MakeFakeShipData, PROP_MOD_LISTING_ROUTE, SDE, SHIP_ROUTES, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
 
 async function CaughtShipDataFailure(action: Promise<unknown>): Promise<ShipDataError> {
   const error = await action.then(
@@ -56,7 +56,7 @@ describe('ShipData', () => {
 
   it('reads prop mods by attribute id and their kind from the effects', async () => {
     const { shipData } = MakeFakeShipData();
-    expect(await shipData.PropMod(12084)).toEqual({ typeID: 12084, name: '500MN Microwarpdrive II', kind: 'microwarpdrive', speedFactor: 510, speedBoostFactor: 1.5e8, massAddition: 5e7, signatureRadiusBonus: 475 });
+    expect(await shipData.PropMod(12084)).toEqual({ typeID: 12084, name: '500MN Microwarpdrive II', kind: 'microwarpdrive', speedFactor: 510, speedBoostFactor: 1.5e8, massAddition: 5e7, signatureRadiusBonus: 475, duration: 10_000 });
     expect(await shipData.PropMod(12058)).toMatchObject({ kind: 'afterburner', signatureRadiusBonus: 0, speedBoostFactor: 1.5e7 });
     expect((await CaughtShipDataFailure(shipData.PropMod(3001))).failure).toBe('invalid');
   });
@@ -88,5 +88,21 @@ describe('ShipData', () => {
     await CaughtShipDataFailure(shipData.PropMod(12058));
     routes[`/eve/${SDE}/types/12058?lang=en`] = SHIP_ROUTES[`/eve/${SDE}/types/12058?lang=en`];
     expect((await shipData.PropMod(12058)).kind).toBe('afterburner');
+  });
+
+  it('finds a prop mod by name: exactly, any case, MWD / AB abbreviated, listing the group once', async () => {
+    const { shipData, calls } = MakeFakeShipData();
+    expect(await shipData.PropModByName('500MN Cold-Gas Enduring Microwarpdrive')).toMatchObject({ typeID: 5945, kind: 'microwarpdrive', signatureRadiusBonus: 500, duration: 10_000 });
+    expect((await shipData.PropModByName('500mn mwd ii')).typeID).toBe(12084);
+    expect((await shipData.PropModByName('10MN AB II')).typeID).toBe(12058);
+    expect(calls.filter((call) => call === PROP_MOD_LISTING_ROUTE)).toHaveLength(1);
+  });
+
+  it('refuses an unknown or unpublished module name, listing close names', async () => {
+    const { shipData } = MakeFakeShipData();
+    const unknown = await CaughtShipDataFailure(shipData.PropModByName('500MN Microwarpdrive I'));
+    expect(unknown.failure).toBe('not-found');
+    expect(unknown.message).toBe('no propulsion module is named "500MN Microwarpdrive I"; close names: "500MN Microwarpdrive II", "500MN Cold-Gas Enduring Microwarpdrive"');
+    expect((await CaughtShipDataFailure(shipData.PropModByName('Unpublished Microwarpdrive'))).failure).toBe('not-found');
   });
 });

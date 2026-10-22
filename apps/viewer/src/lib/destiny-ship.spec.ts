@@ -104,4 +104,44 @@ describe('a Destiny ball driving an EveShip2', () => {
     expect(boosters.warpIntensity).toBe(0);
     expect(ship.GetBoosterIntensity()).toBeLessThan(0.1);
   });
+
+  it('an MWD pushes the boosters to the cap with boosters.maxVel still the base max velocity, and they return after it stops', () => {
+    const world = new DestinyWorld();
+    world.AddShip({ id: 'a', position: [0, 0, 0], rotation: [0, 0, 0] }, { mass: 1.2e6, agility: 3.2, maxVelocity: 350, radius: 30, warpSpeed: 5, propMod: { mass: 1.7e6, maxVelocity: 2500, cycleTime: 10 } });
+    const curves = world.Curves('a');
+    if (!curves) throw new Error('no curves');
+    const ship = CjsSchema.from<EveShip2>('EveShip2', { _type: 'EveShip2', boosters: { _type: 'EveBoosterSet2' } });
+    const boosters = ship.boosters;
+    if (!boosters) throw new Error('no booster set');
+    ship.speed = new TriFloat();
+    AttachShipCurves(ship, curves);
+
+    let now = CLOCK_EPOCH_TICKS;
+    const velocity = new Float32Array(3);
+    const run = (seconds: number): void => {
+      for (let index = 0; index < Math.round(seconds * 60); index++) {
+        now += FRAME_TICKS;
+        world.Tick(now);
+        curves.translation.GetValueDotAt__Ticks(now, velocity);
+        DriveBoosters(ship, { speed: Math.hypot(velocity[0], velocity[1], velocity[2]), maxVelocity: 350 });
+        ship.UpdateWorldTransform(now);
+        if (ship.speed) ship.speed.value = vec3.length(ship.worldVelocity);
+        ship.UpdateBoosters({ GetTime: () => now, GetDeltaT: () => 1 / 60 });
+      }
+    };
+
+    world.Order('a', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+    run(15);
+    expect(ship.GetBoosterIntensity()).toBeCloseTo(0.8, 1);
+    world.SwitchPropMod('a', true);
+    run(15);
+    expect(world.Motion('a')?.speed).toBeGreaterThan(2000);
+    expect(ship.GetBoosterIntensity()).toBeCloseTo(2, 2);
+    expect(boosters.maxVel).toBe(350);
+    expect(boosters.warpIntensity).toBe(0);
+    world.SwitchPropMod('a', false);
+    run(40);
+    expect(world.Motion('a')?.propMod.state).toBe('off');
+    expect(ship.GetBoosterIntensity()).toBeCloseTo(0.8, 1);
+  });
 });

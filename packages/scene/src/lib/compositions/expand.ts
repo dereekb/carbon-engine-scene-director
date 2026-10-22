@@ -2,7 +2,8 @@ import type { Maybe } from '@dereekb/util';
 import { DEFAULT_FORMATION_RADIUS, layoutFleetFormation, type SceneFleet, type SceneSquad, type SceneSquadAnchor } from '../fleets';
 import type { SceneShip, SceneVector } from '../scene';
 import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, type CompositionShip, type CompositionSquad, type FleetComposition } from './composition';
-import { readEftHeader } from './eft';
+import { PROP_MOD_MODULE_NONE, type PropModModule, readPropModModule } from '../stats/prop-mods';
+import { readEftHeader, readEftPropMod } from './eft';
 
 /**
  * The longest ship id a scene accepts.
@@ -137,7 +138,8 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
       ...(team ? { team } : {}),
       position: positions.get(slot.id) ?? [...position],
       rotation: [heading, 0, 0],
-      ...(type == null ? {} : { type })
+      ...(type == null ? {} : { type }),
+      ...shipPropMod(slot.ship, composition)
     };
   });
 
@@ -231,6 +233,22 @@ function toSceneAnchor(squad: CompositionSquad, leads: ReadonlyMap<string, strin
   const ship = on === COMPOSITION_ANCHOR_FC ? undefined : leads.get(on === COMPOSITION_ANCHOR_LEAD ? squad.id : on);
   const anchor: SceneSquadAnchor = { ...(ship ? { ship } : {}), ...(range == null ? {} : { range }) };
   return Object.keys(anchor).length ? anchor : null;
+}
+
+/**
+ * A line ship's prop mod: the line's `propMod` as written; else its fit's module, or "none" when the fit has none;
+ * else nothing (the hull-sized default).
+ *
+ * @param ship - The composition ship.
+ * @param composition - The composition, for its fits.
+ * @returns The scene ship's `propMod` key, or nothing.
+ */
+function shipPropMod(ship: CompositionShip, composition: FleetComposition): Pick<SceneShip, 'propMod'> {
+  const fit = ship.fit ? composition.fits?.[ship.fit] : undefined;
+  let module: Maybe<PropModModule> = null;
+  if (ship.propMod != null) module = readPropModModule(ship.propMod, 'propMod', []);
+  else if (fit != null) module = readEftPropMod(fit) ?? PROP_MOD_MODULE_NONE;
+  return module == null ? {} : { propMod: { module } };
 }
 
 function fitHull(ship: CompositionShip, composition: FleetComposition): Maybe<string> {

@@ -32,7 +32,7 @@ describe('pilot context', () => {
 
   it('the partial pilot', () => {
     const pilot = createPilotContext({ name: 'partial', skills: { Navigation: 4, 'Evasive Maneuvering': 3, 'Spaceship Command': 5, 'Acceleration Control': 4 } });
-    expect(SHIP_SKILLS.map((skill) => pilot.skillLevel(skill))).toEqual([4, 3, 5, 0, 0, 4]);
+    expect(SHIP_SKILLS.map((skill) => pilot.skillLevel(skill))).toEqual([4, 3, 5, 0, 0, 4, 0]);
   });
 
   it('rejects impossible levels and repeated skills', () => {

@@ -9,10 +9,28 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, countFleetCompositionShips, type CompositionShip, DEFAULT_FORMATION_RADIUS, FLEET_COMPOSITION_EXAMPLES, type FleetComposition, normalizeFleetComposition, normalizeScene, readEftHeader, type SceneDocument, type SceneFleet, toFleetAnchors } from '@scene-director/scene';
+import {
+  applySceneOperations,
+  countFleetCompositionShips,
+  type CompositionShip,
+  DEFAULT_FORMATION_RADIUS,
+  FLEET_COMPOSITION_EXAMPLES,
+  type FleetComposition,
+  isPropModModuleKeyword,
+  normalizeFleetComposition,
+  normalizePropModName,
+  normalizeScene,
+  type PropModModule,
+  readEftHeader,
+  readEftPropMod,
+  readPropModModule,
+  type SceneDocument,
+  type SceneFleet,
+  toFleetAnchors
+} from '@scene-director/scene';
 import { FleetCompositionError, type FleetCompositionFileStore } from '../store/composition-files';
 import type { SavedScenesPage } from './saved-scenes';
-import type { ResolvedHull, ShipDataApi } from './ship-data';
+import { type ResolvedHull, ShipDataError, type ShipDataApi } from './ship-data';
 import { ErrorMessage, ToolError, type ToolArgs } from './tool-call';
 
 export interface FleetCompositionsOptions {
@@ -70,6 +88,55 @@ export function requireFleetComposition(input: unknown): FleetComposition {
   const { composition, problems } = normalizeFleetComposition({ input });
   if (!composition) throw new FleetCompositionError(problems);
   return composition;
+}
+
+/**
+ * How one prop mod a composition names resolved: through the SDE, not at all (an unknown name or id), or unchecked
+ * (tools-core could not answer).
+ */
+export interface CompositionPropModReport {
+  readonly module: PropModModule;
+  readonly typeID?: number;
+  readonly name?: string;
+  readonly from: 'sde' | 'unknown' | 'unchecked';
+  readonly note?: string;
+}
+
+export interface ResolvedCompositionPropMods {
+  readonly propMods: CompositionPropModReport[];
+  readonly warnings: string[];
+}
+
+/**
+ * Checks each distinct prop mod a composition's ships will fit (a line's `propMod`, else its fit's module) against
+ * the EVE data, in parallel. Keywords ("mwd", "ab", "none") are sized by the page and not checked. An unknown module
+ * warns, since those ships fly the hull-sized default; nothing is refused.
+ *
+ * @param input - The composition and the EVE data.
+ * @param input.composition - A normalized composition.
+ * @param input.shipData - The EVE data.
+ * @returns A report per module and the warnings.
+ */
+export async function resolveCompositionPropMods(input: { readonly composition: FleetComposition; readonly shipData: ShipDataApi }): Promise<ResolvedCompositionPropMods> {
+  const { composition, shipData } = input;
+  const modules = new Map<string, PropModModule>();
+  for (const ship of [composition.commander, ...composition.wings.flatMap((wing) => wing.squads.flatMap((squad) => squad.ships))]) {
+    const fit = ship.fit ? composition.fits?.[ship.fit] : undefined;
+    const module = ship.propMod == null ? (fit == null ? null : readEftPropMod(fit)) : readPropModModule(ship.propMod, 'propMod', []);
+    const key = module == null || isPropModModuleKeyword(module) ? null : typeof module === 'number' ? `id:${module}` : `name:${normalizePropModName(module)}`;
+    if (key && module != null && !modules.has(key)) modules.set(key, module);
+  }
+  const propMods = await Promise.all(
+    [...modules.values()].map(async (module): Promise<CompositionPropModReport> => {
+      const lookup = typeof module === 'number' ? shipData.PropMod(module) : shipData.PropModByName(module);
+      return lookup.then(
+        (propMod) => ({ module, typeID: propMod.typeID, name: propMod.name, from: 'sde' }),
+        (error: unknown) => ({ module, from: error instanceof ShipDataError && (error.failure === 'not-found' || error.failure === 'invalid') ? 'unknown' : 'unchecked', note: ErrorMessage(error) })
+      );
+    })
+  );
+  const warnings = propMods.filter((report) => report.from === 'unknown').map((report) => `prop mod "${report.module}" is not a propulsion module in the EVE data (${report.note}); those ships fly the hull-sized default`);
+  return { propMods, warnings };
 }
 
 /**
@@ -225,7 +292,7 @@ export class FleetCompositions {
 
   async add(args: ToolArgs): Promise<object> {
     const composition = await this.load(args);
-    const resolved = await resolveCompositionHulls({ composition, shipData: this.shipData });
+    const [resolved, propMods] = await Promise.all([resolveCompositionHulls({ composition, shipData: this.shipData }), resolveCompositionPropMods({ composition, shipData: this.shipData })]);
     if (resolved.problems.length) throw new FleetCompositionError(resolved.problems);
     const operation: Record<string, unknown> = { op: 'add_fleet_composition', composition: resolved.composition };
     for (const key of ['position', 'heading', 'facing', 'fleet', 'team']) if (args[key] != null) operation[key] = args[key];
@@ -233,10 +300,10 @@ export class FleetCompositions {
     let result: object;
     if (args['scene'] != null) {
       const { scene, warnings } = applySceneOperations(normalizeScene(args['scene']).scene, [operation]);
-      result = { added: addedFleet(scene), hulls: resolved.hulls, scene, warnings: [...resolved.warnings, ...warnings], loaded: false };
+      result = { added: addedFleet(scene), hulls: resolved.hulls, propMods: propMods.propMods, scene, warnings: [...resolved.warnings, ...propMods.warnings, ...warnings], loaded: false };
     } else if (this.page.Connected()) {
       const patched = (await this.page.Call('patch_scene', { operations: [operation] })) as { readonly scene?: SceneDocument; readonly warnings?: string[] };
-      result = { added: addedFleet(patched.scene), hulls: resolved.hulls, ...patched, warnings: [...resolved.warnings, ...(patched.warnings ?? [])] };
+      result = { added: addedFleet(patched.scene), hulls: resolved.hulls, propMods: propMods.propMods, ...patched, warnings: [...resolved.warnings, ...propMods.warnings, ...(patched.warnings ?? [])] };
     } else {
       throw new ToolError(`${this.page.NotConnected().message} Or pass "scene" to build a document without a tab.`);
     }

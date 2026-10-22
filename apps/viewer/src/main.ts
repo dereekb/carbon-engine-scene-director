@@ -5,6 +5,9 @@
  * One animation loop drives everything: it advances the scene clock, evolves
  * the Destiny parks to it, then draws at it, so the ships' ball curves are
  * sampled on the clock the parks run on. It runs with or without WebGPU.
+ *
+ * Audio (the prop mods' engine sounds) turns on at startup when the tab may
+ * autoplay, else on the first click or keypress; `?audio=off` keeps it off.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -74,6 +77,7 @@ class Overlay {
       ['renderer', this.RendererText(director)],
       ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` : 'none']
     ];
+    if (director) rows.push(['audio', director.audio.Text()]);
     const located = director?.location.Report();
     if (located) rows.push(['location', LocationText(located)]);
     const dressed = DressingText(director?.dressing.Report());
@@ -174,6 +178,7 @@ async function Start(): Promise<void> {
     }
     liveDirector?.DriveBoosters(now);
     liveDirector?.TrackCamera(now);
+    liveDirector?.DriveAudio(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);
   };
@@ -188,8 +193,14 @@ async function Start(): Promise<void> {
     console.error(`renderer unavailable: ${engineError.message}`);
   }
 
-  const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director) });
+  const audioDisabled = new URLSearchParams(location.search).get('audio') === 'off';
+  const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), audioDisabled });
   liveDirector = director;
+  // Browsers start audio only from a user gesture; at startup it goes on only when the tab may autoplay.
+  const enableAudio = (): void => void director.audio.Enable({ auto: false });
+  addEventListener('pointerdown', enableAudio, { capture: true });
+  addEventListener('keydown', enableAudio, { capture: true });
+  void director.audio.Enable({ auto: true });
   overlay.Render(director);
   for (const [name, handler] of Object.entries(director.Handlers())) link.Handle(name, handler);
   link.Connect();

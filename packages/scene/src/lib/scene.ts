@@ -4,6 +4,8 @@ import { FLEET_OPERATIONS, type FleetOperationContext, applyFleetOperation, norm
 import { type HullStatOverrides, normalizeHullStatOverrides } from './stats';
 import { applyFleetCompositionOperation, FLEET_COMPOSITION_OPERATIONS } from './compositions/operation';
 import { normalizeSceneLocation, type SceneLocation } from './location/location';
+import { normalizeShipPropMod, type SceneShipPropMod } from './prop-mods/prop-mod';
+import { applyPropModOperation, PROP_MOD_OPERATIONS } from './prop-mods/operation';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -46,6 +48,11 @@ export interface SceneShip {
    * All four together pin the numbers without the EVE data.
    */
   stats?: HullStatOverrides;
+  /**
+   * The propulsion module it fits and whether it runs at load. Omitted: the hull-sized Tech II microwarpdrive, off.
+   * A string or a type id is shorthand for `{ module }`.
+   */
+  propMod?: SceneShipPropMod;
   /**
    * Reserved for the movement phase: stored, not played yet.
    */
@@ -131,6 +138,11 @@ export interface SceneDiff {
    */
   readonly retuned: SceneShip[];
   /**
+   * Ships present before and after whose `propMod.active` changed: the page switches their prop mods at once.
+   * A module change is a retune instead; a ship can be in both lists.
+   */
+  readonly switched: SceneShip[];
+  /**
    * Whether the fleets changed at all, a name included.
    */
   readonly fleets: boolean;
@@ -157,7 +169,7 @@ const RESERVED_SCENE_KEYS = ['timeline'] as const;
 const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', ...RESERVED_SCENE_KEYS]);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', ...RESERVED_SHIP_KEYS]);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
@@ -257,8 +269,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *
  * Operations:
  *   { op: "add_ship", ship }
- *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, orders?, pilot? } }
- *                                       each key replaces the ship's value (stats as a whole); null clears type, stats and pilot
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, orders?, pilot? } }
+ *                                       each key replaces the ship's value (stats and propMod as a whole); null clears
+ *                                       type, stats, propMod and pilot
  *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused)
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
@@ -278,6 +291,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "add_fleet_composition", composition, position, heading? | facing?, fleet?, team? }
  *                                       adds a cjs-fleet/1 composition's ships in formation and its fleet, with free
  *                                       ids; every ship line needs its dna (see compositions/operation.ts)
+ *   { op: "set_prop_mods", ships | fleet [, wing | squad], active?, module? }
+ *                                       merged into each selected ship's propMod: active false and module null remove
+ *                                       the key (see prop-mods/operation.ts)
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -355,6 +371,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
     default:
       if (FLEET_OPERATIONS.has(String(operation['op']))) applyFleetOperation(operation, context);
       else if (FLEET_COMPOSITION_OPERATIONS.has(String(operation['op']))) applyFleetCompositionOperation(operation, context);
+      else if (PROP_MOD_OPERATIONS.has(String(operation['op']))) applyPropModOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
@@ -364,7 +381,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move, relabel, retune and regroup, and whether the environment, camera,
+ * @returns The ships to add, remove, rebuild, move, relabel, retune, switch and regroup, and whether the environment, camera,
  *   fleets or location changed.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
@@ -379,6 +396,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     moved: [],
     relabelled: [],
     retuned: [],
+    switched: [],
     fleets: !sameJson(before?.fleets ?? [], after.fleets ?? []),
     regrouped: [],
     location: !sameJson(before?.location ?? null, after.location ?? null)
@@ -394,11 +412,12 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     } else if (old.dna === ship.dna) {
       if (!sameJson(old.position, ship.position) || !sameJson(old.rotation, ship.rotation)) diff.moved.push(ship);
       if (old.name !== ship.name || old.team !== ship.team) diff.relabelled.push(ship);
-      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(old.pilot, ship.pilot)) diff.retuned.push(ship);
+      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(old.pilot, ship.pilot) || !sameJson(old.propMod?.module, ship.propMod?.module)) diff.retuned.push(ship);
     } else {
       diff.rebuilt.push(ship);
     }
     if (old && !sameJson(membershipsBefore.get(id), membershipsAfter.get(id))) diff.regrouped.push(ship);
+    if (old && (old.propMod?.active === true) !== (ship.propMod?.active === true)) diff.switched.push(ship);
   }
   return diff;
 }
@@ -462,6 +481,11 @@ function normalizeShip(input: unknown, where: string, problems: string[], warnin
   problems.push(...stats.problems);
   warnings.push(...stats.warnings);
   if (stats.overrides) ship.stats = stats.overrides;
+
+  const propMod = normalizeShipPropMod({ input: input['propMod'], where: `${where}.propMod` });
+  problems.push(...propMod.problems);
+  warnings.push(...propMod.warnings);
+  if (propMod.propMod) ship.propMod = propMod.propMod;
 
   if (input['orders'] !== undefined) {
     ship.orders = structuredClone(input['orders']);

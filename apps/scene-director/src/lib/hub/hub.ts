@@ -3,8 +3,10 @@
  * proxies EVE resources from tools-core, and routes tool calls.
  *
  * HTTP routes: /build, /resfileindex.txt, /resource/<path> (tools-core proxies),
- * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /map/system?id=&origin=x,y,z (a location's
- * system, celestials relative to the origin, nearest first), /health, and the viewer files.
+ * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /prop-mod?module= (a prop mod's numbers by type id
+ * or EVE name), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
+ * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range),
+ * /health, and the viewer files.
  *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
@@ -22,9 +24,11 @@
 import type { Maybe } from '@dereekb/util';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { findTool, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
@@ -34,7 +38,7 @@ import { Locations } from './locations';
 import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
-import { AnswerShipStats } from './ship-stats-tool';
+import { AnswerPropMod, AnswerShipStats } from './ship-stats-tool';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
 import { ToolsCore, type SofCatalogKind, type ToolsCoreApi } from './tools-core';
 
@@ -353,6 +357,13 @@ export class Hub implements ToolCaller {
       await this.Proxy(await this.toolsCore.ResourceUrl(pathname.slice('/resource/'.length)), response);
     } else if (pathname === '/ship-stats') {
       await this.ServeShipStats(url, response);
+    } else if (pathname === '/prop-mod') {
+      await this.ServePropMod(url, response);
+    } else if (pathname === '/audio/library') {
+      await this.StreamProxy({ source: () => this.toolsCore.AudioLibraryUrl(), request, response });
+    } else if (pathname.startsWith('/audio/path/')) {
+      const resPath = pathname.slice('/audio/path/'.length);
+      await this.StreamProxy({ source: () => this.toolsCore.AudioPathUrl(resPath), request, response });
     } else if (pathname === '/map/system') {
       await this.ServeMapSystem(url, response);
     } else if (pathname === '/health') {
@@ -383,6 +394,53 @@ export class Hub implements ToolCaller {
     }
     response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
     response.end(JSON.stringify(body));
+  }
+
+  /**
+   * A prop mod's numbers for the page: `module` is a type id or an EVE module name. Errors map as /ship-stats does:
+   * 400 (no module, or "mwd" / "ab" / "none", which the page sizes itself), 404 (no such module) and 503 (no SDE).
+   */
+  private async ServePropMod(url: URL, response: ServerResponse): Promise<void> {
+    let status = 200;
+    let body: unknown;
+    try {
+      body = await AnswerPropMod(this.shipData, { module: url.searchParams.get('module') ?? undefined });
+    } catch (error) {
+      status = ShipStatsErrorStatus(error);
+      body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };
+    }
+    response.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    response.end(JSON.stringify(body));
+  }
+
+  /**
+   * A streaming proxy for tools-core's audio: forwards Range and If-None-Match, and answers tools-core's status
+   * (200, 206, 304, 404, 416) with its content headers; an unreachable tools-core is a 502. The resource proxy
+   * buffers whole bodies and drops Range, which the 32 MB boosters.bnk cannot afford.
+   */
+  private async StreamProxy(input: { readonly source: () => Promise<string>; readonly request: IncomingMessage; readonly response: ServerResponse }): Promise<void> {
+    const { request, response } = input;
+    const headers: Record<string, string> = {};
+    for (const name of ['range', 'if-none-match']) {
+      const value = request.headers[name];
+      if (typeof value === 'string') headers[name] = value;
+    }
+    let upstream: Response;
+    try {
+      upstream = await fetch(await input.source(), { headers });
+    } catch (error) {
+      response.writeHead(502, { 'content-type': 'text/plain' });
+      response.end(`audio proxy: ${ErrorMessage(error)}`);
+      return;
+    }
+    const forwarded: OutgoingHttpHeaders = { 'cache-control': 'no-store' };
+    for (const name of ['content-type', 'content-length', 'content-range', 'accept-ranges', 'etag']) {
+      const value = upstream.headers.get(name);
+      if (value != null) forwarded[name] = value;
+    }
+    response.writeHead(upstream.status, forwarded);
+    if (upstream.body) Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>).pipe(response);
+    else response.end();
   }
 
   /**

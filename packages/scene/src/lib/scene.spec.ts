@@ -189,4 +189,23 @@ describe('ship flight fields', () => {
     expect(diff.moved).toEqual([]);
     expect(diffScenes(after, applySceneOperations(after, [{ op: 'update_ship', id: 'g', set: { pilot: 'fc' } }]).scene).retuned.map((ship) => ship.id)).toEqual(['g']);
   });
+
+  it('keeps propMod, and the diff retunes a module change and switches an active change', () => {
+    const { scene: before, warnings } = normalizeScene({ ...duel, ships: [{ ...duel.ships[0], propMod: '10MN Afterburner II' }, duel.ships[1]] });
+    expect(warnings).toEqual([]);
+    expect(before.ships[0].propMod).toEqual({ module: '10MN Afterburner II' });
+    expect(normalizeScene(JSON.parse(JSON.stringify(before))).scene).toEqual(before);
+    const { scene: after } = applySceneOperations(before, [
+      { op: 'set_prop_mods', ships: ['a'], active: true },
+      { op: 'update_ship', id: 'b', set: { propMod: 'mwd' } }
+    ]);
+    const diff = diffScenes(before, after);
+    expect(diff.switched.map((ship) => ship.id)).toEqual(['a']);
+    expect(diff.retuned.map((ship) => ship.id)).toEqual(['b']);
+    const cleared = applySceneOperations(after, [{ op: 'update_ship', id: 'a', set: { propMod: null } }]).scene;
+    expect(cleared.ships[0].propMod).toBeUndefined();
+    expect(diffScenes(after, cleared).switched.map((ship) => ship.id)).toEqual(['a']);
+    expect(diffScenes(after, cleared).retuned.map((ship) => ship.id)).toEqual(['a']);
+    expect(diffScenes(null, after).switched).toEqual([]);
+  });
 });

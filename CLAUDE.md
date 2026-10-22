@@ -30,9 +30,11 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   per-frame booster drive), `steering.ts` (Follow the FC's steering math), `camera.ts` (`CameraFollow`: the camera following its
   target in orbit or chase mode, and alt-click picking), `following.ts` (`FleetFollowing`: the
   document's fleets reconciled into the world's follows, detach and rejoin) and `location.ts` (`LocationLookup`: the
-  location's system from the hub's `/map/system`, and get_state's report) and `celestials.ts` (the location dressing's
-  pure half: height map patch, `?dress=`, the slot reconcile, the report) have node specs: the viewer has a `test`
-  target (`project: viewer`). `location-dressing.ts` (runtime) draws a location from them.
+  location's system from the hub's `/map/system`, and get_state's report), `celestials.ts` (the location dressing's
+  pure half: height map patch, `?dress=`, the slot reconcile, the report), `prop-mods.ts` (which module a ship fits,
+  its numbers and the `/prop-mod` lookups) and `prop-mod-audio.ts` (the engine stems a switch posts) have node specs:
+  the viewer has a `test` target (`project: viewer`). `location-dressing.ts` (runtime) draws a location from them, and
+  `audio.ts` (runtime, `PageAudio`) plays the stems through `CjsAudioMan`.
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Commands
@@ -75,10 +77,10 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
 - The Destiny master and replica parks must stay in lockstep (replication is unported): only `DestinyWorld` touches
   them, every change goes to both in one call, and movement orders apply to both right before the `OnTick` that
   evolves. `main.ts` owns the single rAF loop: `clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` →
-  `director.TrackCamera(now)` → `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer
+  `director.TrackCamera(now)` → `director.DriveAudio(now)` → `engine.Frame(timestamp, now)`, so `OnTick` and `driver.Execute` get the same integer
   `now`; the clock caps a frame at 1 s so the master's 6-tick backlog drop never fires.
 - Node-tested modules (`clock.ts`, `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`,
-  `location.ts`, `celestials.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
+  `location.ts`, `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`) import `./runtime-sim`, never `./runtime` (type-only imports are fine): the full facade drags in the
   renderer and the `runtime-dist/` alias, which vitest does not have.
 - Follow the FC is per-tick `GotoPoint` steering in `DestinyWorld.Tick`, run right after the pending orders when a
   tick is due, so it relies on one evolve per `Tick` call (the clock's 1 s frame cap). FollowBall cannot hold a
@@ -105,7 +107,8 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   Destiny can only time out after 180 ticks).
 - EveShip2 derives `speed` from the translation curve itself; booster intensity is speed / `boosters.maxVel`, which the
   runtime defaults to 250 m/s for every hull and nothing in it drives `warpIntensity`, so `Director.DriveBoosters`
-  sets both per ship every frame (max velocity, prop-mod-off once prop mods land).
+  sets both per ship every frame. `boosters.maxVel` stays the prop-mod-off max velocity (`ShipFlight.maxVelocity`; only
+  get_state's `physics` swaps in the running numbers), so a running MWD drives the flames to the cap of 2.
 - No booster shader reads `shipSpeed`, so an AU/s warp is safe. `BoosterVolumetric` reads the warp half of its colour
   gradient for any `warpIntensity` > 0 while its tints still lerp (a low blend draws a Minmatar flame violet), so
   `WARP_GLOW_FROM` / `WARP_GLOW_FULL` stay a short ramp. Booster LOD goes by the booster sphere's pixel size (a
@@ -136,8 +139,19 @@ over MCP tools, rendered live in a browser tab. README.md documents the architec
   device. `?post=off` / `?flare=off` / `?aa=off` A/B it.
 - WebGPU validation errors reach `page_log` (and `get_state.renderer.gpuErrors`) only through `engine.ts`'s
   `uncapturederror` listener; Chrome otherwise prints them to DevTools alone.
-- `runtime.ts` imports `@carbonenginejs/runtime/audio` for its side effects: SOF hull values carry audio classes.
+- `runtime.ts`'s `@carbonenginejs/runtime/audio` import (it re-exports `CjsAudioMan`) also registers the audio classes
+  SOF hull values carry; keep it if audio ever goes.
   `resources.ts` registers `CjsPngFormat` with `ImageIO`: the post process reads PNGs.
+- Prop mods are live module state in `DestinyWorld` (`ShipEntry.prop`), not motion: `SwitchPropMod` (the
+  `switch_prop_mods` tool) follows EVE's cycle (on at the next tick boundary, off at the end of the running cycle);
+  `SetPropModActive` (the document's `propMod.active`) applies at once; entering warp switches a running module off.
+  Every change sets mass and max velocity on both parks (`ApplyPropModNumbers`) at the due boundary, before the
+  orders and `Steer`. `PlaceShip` keeps the state; a live switch is never written to the document.
+- tools-core's `dna/resolve` answers 500 for module names (modules have no graphic). The hub resolves prop mod names
+  from the group 46 listing (`sde/types?field=groupID&value=46&limit=1000`, once per hub, `ShipData.PropModByName`).
+- The audio proxy (`/audio/library`, `/audio/path/<encoded res:/ path>`) must stream and forward `Range`: the engine
+  stems' media sit inside the 32 MB `boosters.bnk` and are read by range. `CjsAudioMan` starts only after a user
+  gesture (or with autoplay allowed: verify-page launches Chromium with `--autoplay-policy=no-user-gesture-required`).
 - Prop mod effects 6730/6731 carry no dogma modifiers (the game applies them in code), so the MWD/AB formula lives in
   `stats/ship-stats.ts`: add the mass first, then `speedFactor × thrust / mass`, as Pyfa does. The skill table in
   `stats/skills.ts` is hard-coded and was checked against the SDE (ESI, 2026-10-21); re-check it when CCP rebalances.

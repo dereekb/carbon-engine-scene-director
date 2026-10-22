@@ -46,6 +46,15 @@ function Hull(config: { readonly typeID: number; readonly name: string; readonly
   };
 }
 
+/**
+ * tools-core's group 46 listing (`sde/types?field=groupID&value=46`), which PropModByName reads.
+ */
+export const PROP_MOD_LISTING_ROUTE = `/eve/${SDE}/sde/types?field=groupID&value=46&limit=1000`;
+
+function PropModRow(typeID: number, name: string, published = true): unknown {
+  return { table: 'types', id: String(typeID), payload: { _key: typeID, groupID: 46, name: { de: `${name} (de)`, en: name }, published } };
+}
+
 function PropModRoutes(config: { readonly typeID: number; readonly name: string; readonly groupID?: number; readonly attributes: Record<number, number>; readonly effects: number[] }): Record<string, Answer> {
   const { typeID, name, groupID = 46, attributes, effects } = config;
   return {
@@ -57,7 +66,7 @@ function PropModRoutes(config: { readonly typeID: number; readonly name: string;
 export const TFI_DNA = 'mb2_t1:minmatarnavy:minmatar';
 
 /**
- * TFI 17732, Guardian 11987, Revelation 19720 and four prop mods, as tools-core serves them.
+ * TFI 17732, Guardian 11987, Revelation 19720, five prop mods and the group 46 listing, as tools-core serves them.
  */
 export const SHIP_ROUTES: Record<string, Answer> = {
   '/eve/latest/build': { json: { build: '3632940', builds: { resources: '3632940', sde: SDE } } },
@@ -80,9 +89,26 @@ export const SHIP_ROUTES: Record<string, Answer> = {
   ...Hull({ typeID: 19720, name: 'Revelation', group: 'Dreadnought', mass: 1_290_000_000, radius: 1700, base: { maxVelocity: 75, agility: 0.044, warpSpeedMultiplier: 1.5, signatureRadius: 11_100 }, dogma: { 1547: 4, 853: 1, 874: 1 } }),
   ...Hull({ typeID: 90000, name: 'Odd Tempest', group: 'Battleship', mass: 1, radius: 1, base: { maxVelocity: 1, agility: 1, signatureRadius: 1 }, dogma: {} }),
   ...Hull({ typeID: 35833, name: 'Astrahus', group: 'Citadel', mass: 1e10, radius: 1, base: { maxVelocity: 0, signatureRadius: 1 }, dogma: {} }),
-  ...PropModRoutes({ typeID: 12084, name: '500MN Microwarpdrive II', attributes: { 20: 510, 567: 1.5e8, 796: 5e7, 554: 475 }, effects: [16, 6730] }),
-  ...PropModRoutes({ typeID: 12058, name: '10MN Afterburner II', attributes: { 20: 135, 567: 1.5e7, 796: 5e6 }, effects: [16, 6731] }),
-  ...PropModRoutes({ typeID: 12076, name: '50MN Microwarpdrive II', attributes: { 20: 510, 567: 1.5e7, 796: 5e6, 554: 475 }, effects: [16, 6730] }),
+  ...PropModRoutes({ typeID: 12084, name: '500MN Microwarpdrive II', attributes: { 20: 510, 567: 1.5e8, 796: 5e7, 554: 475, 73: 10_000 }, effects: [16, 6730] }),
+  ...PropModRoutes({ typeID: 12058, name: '10MN Afterburner II', attributes: { 20: 135, 567: 1.5e7, 796: 5e6, 73: 10_000 }, effects: [16, 6731] }),
+  ...PropModRoutes({ typeID: 12076, name: '50MN Microwarpdrive II', attributes: { 20: 510, 567: 1.5e7, 796: 5e6, 554: 475, 73: 10_000 }, effects: [16, 6730] }),
+  ...PropModRoutes({ typeID: 5945, name: '500MN Cold-Gas Enduring Microwarpdrive', attributes: { 20: 505, 567: 1.5e8, 796: 5e7, 554: 500, 73: 10_000 }, effects: [16, 6730] }),
+  [PROP_MOD_LISTING_ROUTE]: {
+    json: {
+      target: 'eve',
+      table: 'types',
+      filter: { field: 'groupID', value: '46' },
+      items: [
+        PropModRow(438, '1MN Afterburner II'),
+        PropModRow(440, '5MN Microwarpdrive II'),
+        PropModRow(12058, '10MN Afterburner II'),
+        PropModRow(12076, '50MN Microwarpdrive II'),
+        PropModRow(12084, '500MN Microwarpdrive II'),
+        PropModRow(5945, '500MN Cold-Gas Enduring Microwarpdrive'),
+        PropModRow(99999, 'Unpublished Microwarpdrive', false)
+      ]
+    }
+  },
   ...PropModRoutes({ typeID: 3001, name: 'Some Gun', groupID: 55, attributes: {}, effects: [] })
 };
 

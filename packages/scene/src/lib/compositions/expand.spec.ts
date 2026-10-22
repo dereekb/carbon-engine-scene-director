@@ -16,7 +16,7 @@ describe('expandFleetComposition', () => {
     expect(problems).toEqual([]);
     expect(warnings).toEqual([]);
     expect(ships).toHaveLength(44);
-    expect(ships[0]).toEqual({ id: 'tfis-fc', dna: TFI, name: 'FC', position: [0, 0, 0], rotation: [0, 0, 0], type: 'Tempest Fleet Issue' });
+    expect(ships[0]).toEqual({ id: 'tfis-fc', dna: TFI, name: 'FC', position: [0, 0, 0], rotation: [0, 0, 0], type: 'Tempest Fleet Issue', propMod: { module: '500MN Cold-Gas Enduring Microwarpdrive' } });
     const byId = new Map(ships.map((ship) => [ship.id, ship]));
     expect(byId.get('tfis-dps-a-01')?.name).toBe('Tempest Fleet Issue 1');
     expect(byId.get('tfis-dps-b-10')?.name).toBe('Tempest Fleet Issue 10');
@@ -104,5 +104,24 @@ describe('expandFleetComposition', () => {
   it('warns when ships land on ships already in the scene', () => {
     const { warnings } = expand({ composition: requireComposition(makeMiniComposition()), existing: { ships: new Map([['rifter', [0, 0, 100]]]), fleets: new Set() } });
     expect(warnings).toEqual(['fleet "mini": 1 ship lands within 500 m of ships already in the scene (mini-fc near "rifter"); add the fleet at another position']);
+  });
+
+  it('gives each ship the prop mod of its line, else of its fit, else nothing', () => {
+    const { ships } = expand();
+    const modules = new Map(ships.map((ship) => [ship.id, ship.propMod?.module]));
+    expect(modules.get('tfis-logi-01')).toBe('10MN Afterburner II');
+    expect(modules.get('tfis-logi-08')).toBe('50MN Cold-Gas Enduring Microwarpdrive');
+    expect(modules.get('tfis-carriers-01')).toBe('10000MN Monopropellant Enduring Afterburner');
+    expect(modules.get('tfis-dreads-01')).toBe('none');
+    expect(modules.get('tfis-fax-01')).toBe('none');
+    expect(ships.every((ship) => ship.propMod?.active === undefined)).toBe(true);
+
+    const mini = makeMiniComposition();
+    const wings = mini['wings'] as { squads: { ships: Record<string, unknown>[] }[] }[];
+    wings[0].squads[0].ships[0]['propMod'] = 'AB';
+    wings[0].squads[1].ships[0]['fit'] = 'logi';
+    mini['fits'] = { logi: '[Guardian, Logi]\n\nDamage Control II\n\n10MN Afterburner II\n' };
+    const expanded = expand({ composition: requireComposition(mini) }).ships;
+    expect(expanded.map((ship) => ship.propMod?.module ?? null)).toEqual([null, 'ab', 'ab', 'ab', '10MN Afterburner II', '10MN Afterburner II']);
   });
 });

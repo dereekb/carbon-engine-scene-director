@@ -41,6 +41,13 @@
  *   In warp the drawn ship runs up to a tick ahead of the master; both reach the exit point at the tick OnWarp
  *   reports. A fleet member holds (stopped) while its anchor or FC is in proper warp, as Destiny's StopAllFollowers
  *   does, and flies to its slot after the landing.
+ * - Prop mods. A running module flies the physics' `propMod` mass and max velocity on both parks (SetBallMass and
+ *   SetMaxSpeed, the EVE server's own path); Destiny then accelerates or slows the ball at its agility. SwitchPropMod
+ *   follows EVE's module rules: switching on applies at the next tick boundary, before the pending orders and Steer;
+ *   switching off waits for the end of the running cycle (rounded up to a tick). SetPropModActive (the document's
+ *   state) applies at once, like a placement. Entering proper warp switches a running module off; it stays off after
+ *   landing. Steer and the orders read the master ball's live max velocity, so following and orders need nothing more.
+ *   OnPropMod reports every on and off after the tick (or the call) that made it.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -86,7 +93,98 @@ export interface ShipPhysics {
    * AU/s; DEFAULT_WARP_SPEED when absent.
    */
   readonly warpSpeed?: number;
+  /**
+   * The prop mod's running numbers; the ship flies them while the module runs. Absent: no prop mod.
+   */
+  readonly propMod?: ShipPropMod;
 }
+
+/**
+ * What a ship flies while its prop mod runs.
+ */
+export interface ShipPropMod {
+  /**
+   * kg, the module's mass addition included.
+   */
+  readonly mass: number;
+  /**
+   * m/s.
+   */
+  readonly maxVelocity: number;
+  /**
+   * Seconds per cycle; a switched-off module stops at the end of its running cycle.
+   */
+  readonly cycleTime: number;
+}
+
+/**
+ * A prop mod's state: off; activating (switched on, applying at the next tick); active (running); stopping (switched
+ * off, running until its cycle ends).
+ */
+export type PropModState = 'off' | 'activating' | 'active' | 'stopping';
+
+/**
+ * A ship's prop mod in ShipMotion.
+ */
+export interface ShipPropModReport {
+  readonly state: PropModState;
+  /**
+   * Whether the ship flies the module's numbers now (active or stopping, with a prop mod in its physics).
+   */
+  readonly running: boolean;
+  /**
+   * Seconds per cycle; absent when the physics carry no prop mod.
+   */
+  readonly cycleTime?: number;
+  /**
+   * The tick the running module started.
+   */
+  readonly since?: number;
+  /**
+   * The tick an activation applies at (activating).
+   */
+  readonly at?: number;
+  /**
+   * Seconds until a stopping module stops.
+   */
+  readonly stopsIn?: number;
+  /**
+   * Why it is off, e.g. `off: entered warp`.
+   */
+  readonly note?: string;
+}
+
+/**
+ * Why a prop mod changed: a live switch, the document's state, or entering warp.
+ */
+export type PropModCause = 'switch' | 'document' | 'warp';
+
+/**
+ * A prop mod starting (on) or stopping (off).
+ */
+export interface PropModEvent {
+  readonly kind: 'on' | 'off';
+  readonly id: string;
+  readonly tick: number;
+  readonly cause: PropModCause;
+}
+
+export type PropModListener = (event: PropModEvent) => void;
+
+/**
+ * A switch's state after the call: activating with the tick it applies at, stopping with when it stops, or unchanged.
+ */
+export interface PropModSwitchResult {
+  readonly state: PropModState;
+  readonly at?: number;
+  readonly stopsAt?: number;
+  readonly stopsIn?: number;
+}
+
+/**
+ * Slack for the float cycle arithmetic, in ticks.
+ */
+const CYCLE_EPSILON = 1e-9;
 
 /**
  * Cruiser-class physics, for a ship added without any.
@@ -234,6 +332,7 @@ export interface ShipMotion {
    */
   readonly warp?: ShipWarp;
   readonly physics: ShipPhysics;
+  readonly propMod: ShipPropModReport;
 }
 
 /**
@@ -395,6 +494,20 @@ interface ShipEntry {
    * The warping ship (its anchor or FC) a following ship holds for, stopped.
    */
   held: Maybe<string>;
+  prop: PropModEntry;
+}
+
+interface PropModEntry {
+  state: PropModState;
+  /**
+   * The tick the running module started.
+   */
+  since: Maybe<number>;
+  /**
+   * The tick a stopping module stops at.
+   */
+  stopAt: Maybe<number>;
+  note: Maybe<string>;
 }
 
 /**
@@ -409,6 +522,11 @@ export class DestinyWorld {
    */
   private readonly pending = new Map<string, ShipOrder>();
   private readonly warpListeners = new Set<WarpListener>();
+  private readonly propModListeners = new Set<PropModListener>();
+  /**
+   * Prop mod events waiting for the end of the tick (or the call) that made them.
+   */
+  private propModEvents: PropModEvent[] = [];
   private nextBallId = FIRST_SHIP_BALL_ID;
 
   constructor() {
@@ -445,7 +563,7 @@ export class DestinyWorld {
       this.Both((park) => park.AddBall(ballId, physics.mass, physics.radius, physics.maxVelocity, true, false, false, true, false, x, y, z, 0, 0, 0, physics.agility, 1));
       const ball = this.replica.GetBall(ballId);
       if (!(ball instanceof CjsDestinyClientBall)) throw new Error(`the replica park did not create a ClientBall for ${doc.id}`);
-      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null, follow: null, followApplied: false, settled: false, warp: null, held: null });
+      this.ships.set(doc.id, { id: doc.id, ballId, curves: { translation: ball, rotation: new BallRotation(ball) }, physics, order: STOP_ORDER, note: null, follow: null, followApplied: false, settled: false, warp: null, held: null, prop: { state: 'off', since: null, stopAt: null, note: null } });
     }
     this.PlaceShip(doc);
   }
@@ -453,6 +571,7 @@ export class DestinyWorld {
   /**
    * Puts a ship at rest at a placement, facing along its rotation, ending its order (a warp too, with no exit event).
    * Its followers chase it there. A ship following its fleet keeps following and flies back to its slot from there.
+   * Its prop mod keeps its state: that is module state, not motion.
    *
    * @param doc - The document ship.
    */
@@ -485,7 +604,8 @@ export class DestinyWorld {
 
   /**
    * Changes what a ship flies with, on both parks. A new warp speed reaches a ship that is aligning; once in warp its
-   * warp speed is fixed, as in EVE.
+   * warp speed is fixed, as in EVE. A running prop mod flies the new physics' `propMod` numbers at once; physics
+   * without one fly their own numbers whatever the module's state.
    *
    * @param id - The ship id.
    * @param physics - The new physics.
@@ -497,13 +617,14 @@ export class DestinyWorld {
     const entry = this.ships.get(id);
     if (!entry) return;
     const { ballId } = entry;
+    entry.physics = physics;
+    const flown = this.FlownNumbers(entry);
     this.Both((park) => {
-      park.SetBallMass(ballId, physics.mass);
+      park.SetBallMass(ballId, flown.mass);
       park.SetBallRadius(ballId, physics.radius);
-      park.SetMaxSpeed(ballId, physics.maxVelocity);
+      park.SetMaxSpeed(ballId, flown.maxVelocity);
       park.SetBallAgility(ballId, physics.agility);
     });
-    entry.physics = physics;
     const factor = WarpFactor(physics.warpSpeed ?? DEFAULT_WARP_SPEED);
     if (entry.warp && !entry.warp.start && factor !== entry.warp.factor && this.master.GetBall(ballId)?.IsAligningForWarp()) {
       this.Both((park) => {
@@ -609,6 +730,107 @@ export class DestinyWorld {
   }
 
   /**
+   * Switches a ship's prop mod live, by EVE's module rules. On: off becomes activating (it applies at the next tick
+   * boundary) and stopping becomes active again (the stop is cancelled). Off: activating is cancelled, and active
+   * becomes stopping, running until the end of its cycle (rounded up to a tick). Anything else is unchanged.
+   *
+   * @param id - The ship id.
+   * @param on - Switch on, or off.
+   * @returns The state after the call, or null when PropModRefusal refuses it.
+   */
+  SwitchPropMod(id: string, on: boolean): Maybe<PropModSwitchResult> {
+    const entry = this.ships.get(id);
+    if (!entry || this.PropModRefusal(id, on) !== null) return null;
+    const prop = entry.prop;
+    const boundary = this.master.currentTime;
+    if (on && prop.state === 'off') {
+      prop.state = 'activating';
+      prop.note = null;
+    } else if (on && prop.state === 'stopping') {
+      prop.state = 'active';
+      prop.stopAt = null;
+    } else if (!on && prop.state === 'activating') {
+      prop.state = 'off';
+    } else if (!on && prop.state === 'active') {
+      prop.state = 'stopping';
+      prop.stopAt = CycleEnd({ since: prop.since ?? boundary, boundary, cycle: this.CycleTicks(entry) });
+    }
+    let result: PropModSwitchResult = { state: prop.state };
+    if (prop.state === 'activating') result = { state: prop.state, at: boundary };
+    else if (prop.state === 'stopping' && prop.stopAt != null) result = { state: prop.state, stopsAt: prop.stopAt, stopsIn: this.StopsIn(prop.stopAt) };
+    return result;
+  }
+
+  /**
+   * Why SwitchPropMod would refuse a switch.
+   *
+   * @param id - The ship id.
+   * @param on - Switch on, or off.
+   * @returns The reason, or null: no ship, or switching on in proper warp.
+   */
+  PropModRefusal(id: string, on: boolean): Maybe<string> {
+    const entry = this.ships.get(id);
+    const ball = entry ? this.master.GetBall(entry.ballId) : null;
+    let refusal: Maybe<string> = null;
+    if (!entry || !ball) {
+      refusal = `ship "${id}" has no Destiny ball`;
+    } else if (on && ball.IsWarping()) {
+      const landsIn = this.WarpReport(entry, ball)?.landsIn;
+      const when = landsIn === undefined ? '' : `, in about ${landsIn} s`;
+      refusal = `ship "${id}" is in warp; switch its prop mod on once it lands${when}`;
+    }
+    return refusal;
+  }
+
+  /**
+   * Sets a ship's prop mod to the document's state at once, like a placement: no tick wait and no cycle wait. On in
+   * proper warp leaves it off, with a note. Its event (if it changed) reaches the listeners before this returns.
+   *
+   * @param id - The ship id.
+   * @param on - Running, or off.
+   */
+  SetPropModActive(id: string, on: boolean): void {
+    const entry = this.ships.get(id);
+    if (!entry) return;
+    const prop = entry.prop;
+    const running = IsRunning(prop.state);
+    if (on && this.InProperWarp(entry)) {
+      if (!running) {
+        prop.state = 'off';
+        prop.note = 'not switched on: in warp';
+      }
+    } else if (on) {
+      if (!running) {
+        prop.since = this.master.currentTime;
+        this.PropModEventOf('on', entry, 'document');
+      }
+      prop.state = 'active';
+      prop.stopAt = null;
+      prop.note = null;
+    } else {
+      prop.state = 'off';
+      prop.stopAt = null;
+      if (running) this.PropModEventOf('off', entry, 'document');
+    }
+    this.ApplyPropModNumbers(entry);
+    this.DeliverPropModEvents();
+  }
+
+  /**
+   * Calls a listener for every prop mod that starts or stops, after the tick (or the SetPropModActive call) that made
+   * it. A throwing listener is logged and the rest still run.
+   *
+   * @param listener - Called with each event.
+   * @returns The unsubscribe.
+   */
+  OnPropMod(listener: PropModListener): () => void {
+    this.propModListeners.add(listener);
+    return () => {
+      this.propModListeners.delete(listener);
+    };
+  }
+
+  /**
    * The warping ship a following ship holds for.
    *
    * @param id - The ship id.
@@ -680,6 +902,7 @@ export class DestinyWorld {
     const time = BigInt(Math.round(now));
     const due = time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS);
     if (due) {
+      this.ApplyPropMods();
       const orders = [...this.pending];
       this.pending.clear();
       for (const [id, order] of orders) {
@@ -698,7 +921,10 @@ export class DestinyWorld {
       }
     }
     if (failure !== null) throw failure instanceof Error ? failure : new Error(String(failure));
-    if (due) this.TrackWarps();
+    if (due) {
+      this.TrackWarps();
+      this.DeliverPropModEvents();
+    }
   }
 
   /**
@@ -739,7 +965,119 @@ export class DestinyWorld {
       heading: [Round(Wrap(ball.mNewYaw / DEGREES, 0), 10) % 360, Round(Wrap(ball.mNewPitch / DEGREES, -180), 10)],
       ...(slot ? { slotError: Round(slot.error, 1) } : {}),
       ...(warp ? { warp } : {}),
-      physics: entry.physics
+      physics: entry.physics,
+      propMod: this.PropModReport(entry)
+    };
+  }
+
+  /**
+   * At a tick boundary: activations apply (unless the ship entered proper warp meanwhile), and stopping modules whose
+   * cycle has ended stop.
+   */
+  private ApplyPropMods(): void {
+    const boundary = this.master.currentTime;
+    for (const entry of this.ships.values()) {
+      const prop = entry.prop;
+      if (prop.state === 'activating' && this.InProperWarp(entry)) {
+        prop.state = 'off';
+        prop.note = 'not switched on: in warp';
+      } else if (prop.state === 'activating') {
+        prop.state = 'active';
+        prop.since = boundary;
+        this.ApplyPropModNumbers(entry);
+        this.PropModEventOf('on', entry, 'switch');
+      } else if (prop.state === 'stopping' && (prop.stopAt ?? boundary) <= boundary) {
+        prop.state = 'off';
+        prop.stopAt = null;
+        this.ApplyPropModNumbers(entry);
+        this.PropModEventOf('off', entry, 'switch');
+      }
+    }
+  }
+
+  /**
+   * Switches a ship's prop mod off at once as it enters proper warp: no event if it was only activating.
+   *
+   * @param entry - The ship.
+   */
+  private PropModOffForWarp(entry: ShipEntry): void {
+    const prop = entry.prop;
+    if (prop.state === 'off') return;
+    const running = IsRunning(prop.state);
+    prop.state = 'off';
+    prop.stopAt = null;
+    prop.note = 'off: entered warp';
+    this.ApplyPropModNumbers(entry);
+    if (running) this.PropModEventOf('off', entry, 'warp');
+  }
+
+  /**
+   * The mass and max velocity a ship flies now: its prop mod's while the module runs, else its own.
+   *
+   * @param entry - The ship.
+   * @returns The numbers.
+   */
+  private FlownNumbers(entry: ShipEntry): { readonly mass: number; readonly maxVelocity: number } {
+    const propMod = IsRunning(entry.prop.state) ? entry.physics.propMod : undefined;
+    return propMod ?? entry.physics;
+  }
+
+  /**
+   * Sets the numbers a ship flies now on both parks.
+   *
+   * @param entry - The ship.
+   */
+  private ApplyPropModNumbers(entry: ShipEntry): void {
+    const { mass, maxVelocity } = this.FlownNumbers(entry);
+    this.Both((park) => {
+      park.SetBallMass(entry.ballId, mass);
+      park.SetMaxSpeed(entry.ballId, maxVelocity);
+    });
+  }
+
+  private PropModEventOf(kind: PropModEvent['kind'], entry: ShipEntry, cause: PropModCause): void {
+    this.propModEvents.push({ kind, id: entry.id, tick: this.master.currentTime, cause });
+  }
+
+  private DeliverPropModEvents(): void {
+    const events = this.propModEvents;
+    this.propModEvents = [];
+    for (const event of events) {
+      for (const listener of this.propModListeners) {
+        try {
+          listener(event);
+        } catch (error) {
+          console.error(`an OnPropMod listener failed on ship ${event.id}'s prop mod ${event.kind}`, error);
+        }
+      }
+    }
+  }
+
+  /**
+   * A ship's prop mod cycle in ticks.
+   *
+   * @param entry - The ship.
+   * @returns The cycle; DEFAULT_PROP_MOD_CYCLE_SECONDS without a prop mod in the physics.
+   */
+  private CycleTicks(entry: ShipEntry): number {
+    return (entry.physics.propMod?.cycleTime ?? DEFAULT_PROP_MOD_CYCLE_SECONDS) / (this.master.tickInterval / 1000);
+  }
+
+  private StopsIn(stopAt: number): number {
+    return Round(Math.max(0, stopAt - this.master.currentTime) * (this.master.tickInterval / 1000), 10);
+  }
+
+  private PropModReport(entry: ShipEntry): ShipPropModReport {
+    const { state, since, stopAt, note } = entry.prop;
+    const cycleTime = entry.physics.propMod?.cycleTime;
+    return {
+      state,
+      running: IsRunning(state) && entry.physics.propMod !== undefined,
+      ...(cycleTime === undefined ? {} : { cycleTime }),
+      ...(IsRunning(state) && since != null ? { since } : {}),
+      ...(state === 'activating' ? { at: this.master.currentTime } : {}),
+      ...(state === 'stopping' && stopAt != null ? { stopsIn: this.StopsIn(stopAt) } : {}),
+      ...(note ? { note } : {})
     };
   }
 
@@ -972,6 +1310,7 @@ export class DestinyWorld {
       const ball = warp?.landed === null ? this.master.GetBall(entry.ballId) : null;
       if (!warp || !ball) continue;
       if (!warp.start && ball.IsWarping()) {
+        this.PropModOffForWarp(entry);
         const landing: SceneVector = [ball.gotoX, ball.gotoY, ball.gotoZ];
         const distance = Distance(landing, warp.lastAlign);
         warp.start = { from: warp.lastAlign, landing, distance, stamp: ball.effectStamp, profile: this.master.SetupWarpConstants(warp.factor, distance, {}) };
@@ -1117,9 +1456,37 @@ function RequireValidPhysics(physics: ShipPhysics): void {
     const value = physics[key];
     return !Number.isFinite(value) || value < 0 || (value === 0 && key !== 'maxVelocity');
   });
+  const { propMod } = physics;
+  if (propMod) bad.push(...(['mass', 'maxVelocity', 'cycleTime'] as const).filter((key) => !Number.isFinite(propMod[key]) || propMod[key] < 0 || (propMod[key] === 0 && key !== 'maxVelocity')).map((key) => `propMod.${key}`));
   const { warpSpeed } = physics;
   if (warpSpeed !== undefined && (!(warpSpeed > 0) || !IsWarpFactor(warpSpeed))) bad.push('warpSpeed');
   if (bad.length) throw new Error(`ship physics must be finite and positive (max velocity may be 0): ${bad.join(', ')}`);
+}
+
+/**
+ * Seconds per prop mod cycle when the physics carry no prop mod.
+ */
+const DEFAULT_PROP_MOD_CYCLE_SECONDS = 10;
+
+function IsRunning(state: PropModState): boolean {
+  return state === 'active' || state === 'stopping';
+}
+
+/**
+ * The tick a module switched off stops at: the end of the cycle running at the boundary, rounded up to a tick.
+ * On at 100 with a 10-tick cycle, off at 101 stops at 110 and off at 111 at 120; a 7.5-tick cycle off at 101 stops at
+ * 108.
+ *
+ * @param input - When it started, the boundary the switch applies at, and its cycle in ticks.
+ * @param input.since - The tick it started.
+ * @param input.boundary - The tick boundary the switch applies at.
+ * @param input.cycle - Its cycle, in ticks.
+ * @returns The stop tick.
+ */
+export function CycleEnd(input: { readonly since: number; readonly boundary: number; readonly cycle: number }): number {
+  const { since, boundary, cycle } = input;
+  const cycles = Math.max(1, Math.ceil((boundary - since) / cycle - CYCLE_EPSILON));
+  return Math.ceil(since + cycles * cycle - CYCLE_EPSILON);
 }
 
 function IsWarpFactor(warpSpeed: number): boolean {

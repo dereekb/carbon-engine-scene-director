@@ -69,12 +69,12 @@ describe('ship_stats', () => {
 
   it('bad arguments are a SceneError listing every problem', async () => {
     const { shipData } = MakeFakeShipData();
-    const error = await Caught(AnswerShipStats(shipData, { dna: 'nope', type: -3, stats: { mass: -1, speed: 2 }, propMod: 'warp', pilot: { skills: { Navigation: 6 } } }));
+    const error = await Caught(AnswerShipStats(shipData, { dna: 'nope', type: -3, stats: { mass: -1, speed: 2 }, propMod: true, pilot: { skills: { Navigation: 6 } } }));
     expect(error).toBeInstanceOf(SceneError);
     expect((error as SceneError).problems).toEqual([
       'dna must be a SOF DNA string, hull:faction:race[:commands]',
       'type must be a positive integer type id or an EVE type name',
-      'propMod must be "mwd", "ab", a module type id, or { speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus? }',
+      'propMod must be "mwd", "ab", a module type id or name, or { speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus?, duration? }',
       'stats.mass must be a positive number (kg)',
       'name the hull by dna or type, or give all four stats (mass, maxVelocity, agility, signatureRadius)',
       'pilot: skill "Navigation" must be a skill level, an integer from 0 to 5; got 6'
@@ -98,6 +98,34 @@ describe('ship_stats', () => {
     const { shipData } = MakeFakeShipData();
     const error = await Caught(AnswerShipStats(shipData, { stats: GUARDIAN_STATS, propMod: 'ab' }));
     expect(error).toBeInstanceOf(ToolError);
-    expect((error as ToolError).message).toBe("the hull's size is unknown; pass a module type id or explicit prop mod values");
+    expect((error as ToolError).message).toBe("the hull's size is unknown; pass a module type id or name, or explicit prop mod values");
+  });
+
+  it('names a prop mod by its EVE name and reports its cycle time', async () => {
+    const { shipData } = MakeFakeShipData();
+    const coldGas = await AnswerShipStats(shipData, { dna: TFI_DNA, propMod: '500MN Cold-Gas Enduring Microwarpdrive' });
+    expect(coldGas.propMod).toMatchObject({ typeID: 5945, duration: 10_000 });
+    expect(coldGas.withPropMod?.maxVelocity).toBeCloseTo(1166.199853, 3);
+    expect(coldGas.withPropMod?.signatureRadius).toBeCloseTo(2100, 6);
+    expect(coldGas.withPropMod?.propModCycleTime).toBe(10);
+    expect(coldGas.stats.propModCycleTime).toBeNull();
+    expect((await AnswerShipStats(shipData, { type: 'Guardian', propMod: 'ab' })).withPropMod?.propModCycleTime).toBeCloseTo(7.5, 12);
+    const unknown = await Caught(AnswerShipStats(shipData, { type: 'Guardian', propMod: '10MN Nothing II' }));
+    expect(unknown).toBeInstanceOf(ShipDataError);
+    expect((unknown as ShipDataError).failure).toBe('not-found');
+    const none = await Caught(AnswerShipStats(shipData, { type: 'Guardian', propMod: 'none' }));
+    expect((none as SceneError).problems).toEqual(['propMod "none" fits no prop mod; omit propMod instead']);
+  });
+
+  it('uses the built-in numbers of a baked prop mod when tools-core is unreachable', async () => {
+    const { shipData } = MakeFakeShipData({ '/eve/latest/build': 'network-error' });
+    const stats = { mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350 };
+    for (const propMod of [12084, '500MN Microwarpdrive II']) {
+      const answer = await AnswerShipStats(shipData, { stats, propMod });
+      expect(answer.propMod).toMatchObject({ typeID: 12084, duration: 10_000 });
+      expect(answer.withPropMod?.maxVelocity).toBeCloseTo(1176.137476, 3);
+      expect(answer.propModNote).toMatch(/unreachable.*The built-in numbers of 500MN Microwarpdrive II \(SDE build 3632936\) were used\./su);
+    }
+    expect(((await Caught(AnswerShipStats(shipData, { stats, propMod: 'Some Odd MWD' }))) as ShipDataError).failure).toBe('unavailable');
   });
 });

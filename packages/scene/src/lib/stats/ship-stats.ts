@@ -162,7 +162,7 @@ export interface ShipStatsInput {
   readonly propMod?: Maybe<PropModStats>;
 }
 
-export type ShipStatsAttribute = HullStatOverrideKey | 'propModSpeedFactor';
+export type ShipStatsAttribute = HullStatOverrideKey | 'propModSpeedFactor' | 'propModDuration';
 
 /**
  * One step of the math, for answers that show their work.
@@ -205,6 +205,10 @@ export interface ShipStats {
   readonly alignTime: number;
   readonly propModActive: boolean;
   /**
+   * Seconds per prop mod cycle with the pilot's skills; null without a prop mod or its duration.
+   */
+  readonly propModCycleTime: Maybe<number>;
+  /**
    * The pilot context's name.
    */
   readonly pilot: string;
@@ -225,7 +229,7 @@ export function computeShipStats(input: ShipStatsInput): ShipStats {
   const pilot = input.pilot ?? MAX_SKILLS_PILOT;
   const applied: AppliedBonus[] = [];
   if (propMod) checkPropMod(propMod);
-  const values: Record<ShipStatsAttribute, number> = { ...readBaseValues({ hull, overrides, applied }), propModSpeedFactor: propMod?.speedFactor ?? 0 };
+  const values: Record<ShipStatsAttribute, number> = { ...readBaseValues({ hull, overrides, applied }), propModSpeedFactor: propMod?.speedFactor ?? 0, propModDuration: propMod?.duration ?? 0 };
   const step = (source: string, attribute: ShipStatsAttribute, change: (from: number) => number): void => {
     const from = values[attribute];
     values[attribute] = change(from);
@@ -262,6 +266,7 @@ export function computeShipStats(input: ShipStatsInput): ShipStats {
     warpSpeedMultiplier: hull?.warpSpeedMultiplier ?? null,
     alignTime: computeAlignTime(values.mass, values.agility),
     propModActive: propMod != null,
+    propModCycleTime: propMod?.duration == null ? null : values.propModDuration / 1000,
     pilot: pilot.name,
     applied
   };
@@ -304,6 +309,7 @@ function checkPropMod(propMod: PropModStats): void {
     const value = propMod[key];
     if (!(typeof value === 'number' && Number.isFinite(value) && value >= 0)) throw new RangeError(`propMod.${key} must be a number of 0 or more`);
   }
+  if (propMod.duration != null && !(Number.isFinite(propMod.duration) && propMod.duration > 0)) throw new RangeError('propMod.duration must be a positive number (ms)');
 }
 
 interface SkillAttributeInput {
@@ -314,7 +320,9 @@ interface SkillAttributeInput {
 
 /**
  * What a skill changes for this ship, or null when it does not apply (a capital skill on a
- * subcapital hull, Acceleration Control with no prop mod).
+ * subcapital hull, Acceleration Control with no prop mod). Afterburner shortens only an
+ * afterburner's cycle: its effect targets modules requiring the Afterburner skill, which
+ * every afterburner and no microwarpdrive does, so the module's kind stands in for that.
  */
 function skillAttribute(input: SkillAttributeInput): Maybe<ShipStatsAttribute> {
   const { skill, hull, propMod } = input;
@@ -330,6 +338,9 @@ function skillAttribute(input: SkillAttributeInput): Maybe<ShipStatsAttribute> {
       break;
     case 'propModSpeedFactor':
       attribute = propMod ? 'propModSpeedFactor' : null;
+      break;
+    case 'afterburnerDuration':
+      attribute = propMod?.kind === 'afterburner' && propMod.duration != null ? 'propModDuration' : null;
       break;
   }
   return attribute;

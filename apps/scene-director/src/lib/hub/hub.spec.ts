@@ -1,4 +1,6 @@
 import { mkdtemp, readFile } from 'node:fs/promises';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -10,9 +12,12 @@ import { FleetCompositionFileStore } from '../store/composition-files';
 import { SceneFileStore } from '../store/scene-files';
 import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
-import { MakeFakeShipData, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
+import { MakeFakeShipData, SDE, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
 import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
 import type { ToolsCoreApi } from './tools-core';
+
+/** Where the fake tools-core's audio URLs point: a local server a spec starts. */
+let audioUpstream = 'http://127.0.0.1:9';
 
 /** A tools-core stand-in: no network, one pinned build, a small hull catalog. */
 const toolsCore: ToolsCoreApi = {
@@ -25,6 +30,12 @@ const toolsCore: ToolsCoreApi = {
   },
   async ResFileIndexUrl() {
     return 'http://tools-core.test/eve/1234/app/resfileindex.txt';
+  },
+  async AudioLibraryUrl() {
+    return `${audioUpstream}/eve/1234/audio/library`;
+  },
+  async AudioPathUrl(audioPath) {
+    return `${audioUpstream}/eve/1234/audio/path/${encodeURIComponent(audioPath)}`;
   },
   async SofCatalog(kind) {
     return kind === 'hulls' ? ['af1_t1', 'af1_t2', 'cf1_t1', 'mf1_t1'] : ['amarrbase'];
@@ -300,6 +311,66 @@ describe('ship stats', () => {
   });
 });
 
+describe('prop mods and audio', () => {
+  it('GET /prop-mod answers a module by name or id, and maps its failures', async () => {
+    const stats = await StartHub({ shipData: MakeFakeShipData().shipData });
+    try {
+      const byName = await fetch(`${stats.url}prop-mod?module=${encodeURIComponent('500MN Cold-Gas Enduring Microwarpdrive')}`);
+      expect(byName.status).toBe(200);
+      expect(await byName.json()).toEqual({ propMod: { typeID: 5945, name: '500MN Cold-Gas Enduring Microwarpdrive', kind: 'microwarpdrive', speedFactor: 505, speedBoostFactor: 1.5e8, massAddition: 5e7, signatureRadiusBonus: 500, duration: 10_000 }, sdeBuild: SDE });
+      expect(((await (await fetch(`${stats.url}prop-mod?module=12058`)).json()) as { propMod: { name: string } }).propMod.name).toBe('10MN Afterburner II');
+      expect((await fetch(`${stats.url}prop-mod?module=${encodeURIComponent('50MN Nothing II')}`)).status).toBe(404);
+      expect((await fetch(`${stats.url}prop-mod?module=mwd`)).status).toBe(400);
+      expect((await fetch(`${stats.url}prop-mod`)).status).toBe(400);
+    } finally {
+      await stats.Stop();
+    }
+    const unprepared = await StartHub({ shipData: MakeFakeShipData(UnpreparedSdeRoutes('42', 12084)).shipData });
+    try {
+      expect((await fetch(`${unprepared.url}prop-mod?module=12084`)).status).toBe(503);
+    } finally {
+      await unprepared.Stop();
+    }
+  });
+
+  it('the audio routes stream tools-core, forwarding Range', async () => {
+    const bank = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+    const seen: { url: string; range?: string }[] = [];
+    const upstream = createServer((request, response) => {
+      seen.push({ url: request.url ?? '', range: request.headers.range });
+      if (request.url?.endsWith('/audio/library')) {
+        response.writeHead(200, { 'content-type': 'application/json', etag: '"lib"' });
+        response.end('{"metadata":{"SoundBanks":[]}}');
+      } else if (request.headers.range === 'bytes=16-31') {
+        response.writeHead(206, { 'content-type': 'application/octet-stream', 'content-range': 'bytes 16-31/256', 'content-length': '16', 'accept-ranges': 'bytes' });
+        response.end(bank.subarray(16, 32));
+      } else {
+        response.writeHead(404);
+        response.end();
+      }
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    audioUpstream = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+    try {
+      const library = await fetch(`${hub.url}audio/library`);
+      expect(library.status).toBe(200);
+      expect(library.headers.get('etag')).toBe('"lib"');
+      expect(await library.json()).toEqual({ metadata: { SoundBanks: [] } });
+      const resPath = 'res:/audio/essential_media/boosters.bnk';
+      const part = await fetch(`${hub.url}audio/path/${encodeURIComponent(resPath)}`, { headers: { range: 'bytes=16-31' } });
+      expect(part.status).toBe(206);
+      expect(part.headers.get('content-range')).toBe('bytes 16-31/256');
+      expect([...new Uint8Array(await part.arrayBuffer())]).toEqual([...bank.subarray(16, 32)]);
+      expect(seen.at(-1)).toEqual({ url: `/eve/1234/audio/path/${encodeURIComponent(resPath)}`, range: 'bytes=16-31' });
+      expect((await fetch(`${hub.url}audio/path/${encodeURIComponent('res:/audio/missing.bnk')}`)).status).toBe(404);
+    } finally {
+      audioUpstream = 'http://127.0.0.1:9';
+      await new Promise((resolve) => upstream.close(resolve));
+    }
+    expect((await fetch(`${hub.url}audio/library`)).status).toBe(502);
+  });
+});
+
 describe('fleet compositions', () => {
   it('add_fleet_composition resolves hull names, then forwards one patch_scene op to the tab', async () => {
     const fleets = await StartHub({ shipData: MakeFakeShipData().shipData });
@@ -323,6 +394,16 @@ describe('fleet compositions', () => {
       expect(operations[0]).toMatchObject({ op: 'add_fleet_composition', position: [0, 0, 0], heading: 90, composition: { commander: { hull: 'Guardian', dna: 'ac3_t2:carthum:amarr', radius: 80 } } });
       expect(result.added).toEqual({ fleet: 'g', commander: 'g-fc', ships: ['g-fc'] });
       expect(result.hulls).toEqual([{ hull: 'Guardian', typeID: 11987, dna: 'ac3_t2:carthum:amarr', radius: 80, dnaFrom: 'sde', radiusFrom: 'sde' }]);
+
+      const named = (await fleets.Call('add_fleet_composition', { composition: { id: 'p', commander: { hull: 'Guardian', propMod: '10MN AB II' }, wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', ships: [{ hull: 'Guardian', propMod: '10MN Nothing II' }] }] }] }, position: [0, 0, 5000] })) as {
+        propMods: unknown[];
+        warnings: string[];
+      };
+      expect(named.propMods).toEqual([
+        { module: '10MN AB II', typeID: 12058, name: '10MN Afterburner II', from: 'sde' },
+        { module: '10MN Nothing II', from: 'unknown', note: 'no propulsion module is named "10MN Nothing II"' }
+      ]);
+      expect(named.warnings).toContain('prop mod "10MN Nothing II" is not a propulsion module in the EVE data (no propulsion module is named "10MN Nothing II"); those ships fly the hull-sized default');
     } finally {
       page.close();
       await fleets.Stop();

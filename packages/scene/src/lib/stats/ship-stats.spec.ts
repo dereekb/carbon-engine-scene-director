@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createPilotContext, type PilotContext } from './pilot';
-import { findHullSizedPropMod, HULL_SIZED_PROP_MODS, type PropModStats, readPropModKind, type RigSize } from './prop-mods';
+import { BAKED_PROP_MODS, findBakedPropMod, findHullSizedPropMod, HULL_SIZE_CLASSES, HULL_SIZED_PROP_MODS, normalizePropModName, propModKindOfName, type PropModStats, readPropModKind, readPropModModule, readRigSize, type RigSize } from './prop-mods';
 import { computeAlignTime, computeShipStats, type HullStats, normalizeHullStatOverrides } from './ship-stats';
 
 // Published values (EVE typeDogma via ESI, Tranquility, 2026-10-21).
@@ -158,5 +158,87 @@ describe('prop mods', () => {
     expect(readPropModKind('Afterburner')).toBe('afterburner');
     expect(readPropModKind('constructor')).toBeNull();
     expect(readPropModKind(12084)).toBeNull();
+  });
+});
+
+describe('prop mod cycle time', () => {
+  it('Afterburner V shortens an afterburner cycle by a quarter, never a microwarpdrive', () => {
+    expect(computeShipStats({ hull: GUARDIAN, propMod: { ...AB_10MN_II, duration: 10_000 } }).propModCycleTime).toBeCloseTo(7.5, 12);
+    expect(computeShipStats({ hull: GUARDIAN, propMod: { ...AB_10MN_II, duration: 10_000 }, pilot: UNTRAINED }).propModCycleTime).toBe(10);
+    expect(computeShipStats({ hull: GUARDIAN, propMod: { ...MWD_50MN_II, duration: 10_000 } }).propModCycleTime).toBe(10);
+    expect(computeShipStats({ hull: REVELATION, propMod: findBakedPropMod(41239) }).propModCycleTime).toBeCloseTo(15, 12);
+  });
+
+  it('is null without a prop mod or its duration, and leaves the other numbers alone', () => {
+    expect(computeShipStats({ hull: GUARDIAN }).propModCycleTime).toBeNull();
+    expect(computeShipStats({ hull: GUARDIAN, propMod: AB_10MN_II }).propModCycleTime).toBeNull();
+    const withDuration = computeShipStats({ hull: GUARDIAN, propMod: { ...AB_10MN_II, duration: 10_000 } });
+    expect(withDuration.maxVelocity).toBeCloseTo(650.701745, 5);
+    expect(withDuration.applied.map((step) => step.source)).toContain('Afterburner V');
+  });
+
+  it('rejects a duration that is not a positive number', () => {
+    expect(() => computeShipStats({ hull: GUARDIAN, propMod: { ...AB_10MN_II, duration: 0 } })).toThrow(/propMod\.duration/);
+  });
+});
+
+describe('baked prop mods', () => {
+  it('carry the SDE numbers the fixtures pin', () => {
+    expect(computeShipStats({ hull: TEMPEST_FLEET_ISSUE, propMod: findBakedPropMod(12084) }).maxVelocity).toBeCloseTo(1176.137476, 5);
+    const coldGas = computeShipStats({ hull: TEMPEST_FLEET_ISSUE, propMod: findBakedPropMod('500MN Cold-Gas Enduring Microwarpdrive') });
+    expect(coldGas.maxVelocity).toBeCloseTo(1166.199853, 5);
+    expect(coldGas.signatureRadius).toBeCloseTo(2100, 9);
+    for (const rigSize of [1, 2, 3, 4] as RigSize[]) {
+      for (const kind of ['microwarpdrive', 'afterburner'] as const) expect(findBakedPropMod(HULL_SIZED_PROP_MODS[rigSize][kind].typeID)?.name).toBe(HULL_SIZED_PROP_MODS[rigSize][kind].name);
+    }
+    expect(new Set(BAKED_PROP_MODS.map((propMod) => propMod.typeID)).size).toBe(13);
+  });
+
+  it('are found by id, exact name, any case and the MWD / AB abbreviations', () => {
+    expect(findBakedPropMod(12076)?.name).toBe('50MN Microwarpdrive II');
+    expect(findBakedPropMod('50MN Microwarpdrive II')?.typeID).toBe(12076);
+    expect(findBakedPropMod('50mn microwarpdrive ii')?.typeID).toBe(12076);
+    expect(findBakedPropMod('50MN  MWD II')?.typeID).toBe(12076);
+    expect(findBakedPropMod('10MN AB II')?.typeID).toBe(12058);
+    expect(findBakedPropMod('50MN Microwarpdrive I')).toBeNull();
+    expect(findBakedPropMod(1)).toBeNull();
+  });
+});
+
+describe('prop mod modules', () => {
+  it('canonicalizes the keywords, ids and names', () => {
+    const problems: string[] = [];
+    expect(readPropModModule('MWD', 'm', problems)).toBe('mwd');
+    expect(readPropModModule('Microwarpdrive', 'm', problems)).toBe('mwd');
+    expect(readPropModModule(' ab ', 'm', problems)).toBe('ab');
+    expect(readPropModModule('afterburner', 'm', problems)).toBe('ab');
+    expect(readPropModModule('None', 'm', problems)).toBe('none');
+    expect(readPropModModule(12084, 'm', problems)).toBe(12084);
+    expect(readPropModModule('12084', 'm', problems)).toBe(12084);
+    expect(readPropModModule(' 10MN Afterburner II ', 'm', problems)).toBe('10MN Afterburner II');
+    expect(problems).toEqual([]);
+  });
+
+  it('refuses what is not a module', () => {
+    for (const value of [0, -3, 1.5, '', ' ', 'x'.repeat(101), true, {}, []]) {
+      const problems: string[] = [];
+      expect(readPropModModule(value, 'ships[0].propMod.module', problems)).toBeNull();
+      expect(problems).toEqual(['ships[0].propMod.module must be a prop mod: an EVE module name of at most 100 characters, a type id, "mwd", "ab" or "none"']);
+    }
+  });
+
+  it('normalizes names and reads their kind', () => {
+    expect(normalizePropModName('  50MN   MWD  II ')).toBe('50mn microwarpdrive ii');
+    expect(normalizePropModName('Lab Coat')).toBe('lab coat');
+    expect(propModKindOfName('500MN Quad LiF Restrained Microwarpdrive')).toBe('microwarpdrive');
+    expect(propModKindOfName('10MN AB II')).toBe('afterburner');
+    expect(propModKindOfName('Damage Control II')).toBeNull();
+  });
+
+  it('names the size classes', () => {
+    expect(HULL_SIZE_CLASSES).toEqual({ 1: 'S', 2: 'M', 3: 'L', 4: 'XL' });
+    expect(readRigSize(3)).toBe(3);
+    expect(readRigSize(5)).toBeNull();
+    expect(readRigSize('3')).toBeNull();
   });
 });

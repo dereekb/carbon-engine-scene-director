@@ -6,8 +6,25 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { computeShipStats, createPilotContext, findHullSizedPropMod, HULL_STAT_OVERRIDE_KEYS, type HullStatOverrides, MAX_SKILLS_PILOT, normalizeHullStatOverrides, type PilotContext, type PilotContextConfig, type PropModKind, type PropModStats, readPropModKind, SceneError, type ShipStats } from '@scene-director/scene';
-import { type ResolvedHull, ShipDataError, type ShipDataApi } from './ship-data';
+import {
+  computeShipStats,
+  createPilotContext,
+  findBakedPropMod,
+  findHullSizedPropMod,
+  HULL_STAT_OVERRIDE_KEYS,
+  type HullStatOverrides,
+  MAX_SKILLS_PILOT,
+  normalizeHullStatOverrides,
+  type PilotContext,
+  type PilotContextConfig,
+  PROP_MOD_MODULE_NONE,
+  type PropModKind,
+  type PropModStats,
+  readPropModKind,
+  SceneError,
+  type ShipStats
+} from '@scene-director/scene';
+import { type ResolvedHull, type ResolvedPropMod, ShipDataError, type ShipDataApi } from './ship-data';
 import { ErrorMessage, ToolError, type ToolArgs } from './tool-call';
 
 const DNA_PATTERN = /^[^:\s]+:[^:\s]+:[^:\s]+(:\S+)*$/u;
@@ -35,6 +52,10 @@ export interface ShipStatsAnswer {
   readonly pilot: string;
   readonly propMod: Maybe<PropModStats>;
   /**
+   * Why the prop mod's numbers are the built-in ones (the SDE was unavailable).
+   */
+  readonly propModNote?: string;
+  /**
    * As flown by the pilot, with no prop mod running.
    */
   readonly stats: ShipStats;
@@ -45,9 +66,9 @@ export interface ShipStatsAnswer {
 }
 
 /**
- * A prop mod argument: a kind sized for the hull, a module type id, or explicit values.
+ * A prop mod argument: a kind sized for the hull, a module type id or name, or explicit values.
  */
-type PropModArgument = { readonly kind: PropModKind } | { readonly typeID: number } | { readonly stats: PropModStats };
+type PropModArgument = { readonly kind: PropModKind } | { readonly typeID: number } | { readonly name: string } | { readonly stats: PropModStats };
 
 interface ShipStatsArguments {
   readonly dna: Maybe<string>;
@@ -82,13 +103,13 @@ export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs): Pr
   }
 
   let propMod: Maybe<PropModStats> = null;
+  let propModNote: Maybe<string> = null;
   if (propModArgument && 'stats' in propModArgument) {
     propMod = propModArgument.stats;
   } else if (propModArgument) {
-    const sized = 'kind' in propModArgument ? findHullSizedPropMod({ rigSize: hull?.published.rigSize, kind: propModArgument.kind }) : null;
-    const typeID = 'typeID' in propModArgument ? propModArgument.typeID : sized?.typeID;
-    if (typeID == null) throw new ToolError("the hull's size is unknown; pass a module type id or explicit prop mod values");
-    propMod = await shipData.PropMod(typeID);
+    const resolved = await ResolveModule(shipData, { argument: propModArgument, rigSize: hull?.published.rigSize });
+    propMod = resolved.propMod;
+    propModNote = resolved.note;
   }
 
   const compute = (running: Maybe<PropModStats>): ShipStats => {
@@ -105,9 +126,60 @@ export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs): Pr
       : { resolvedFrom: 'stats', candidates: [], ...(overrides ? { overrides } : {}), ...(note ? { note } : {}) },
     pilot: pilot.name,
     propMod,
+    ...(propModNote ? { propModNote } : {}),
     stats: compute(null),
     ...(propMod ? { withPropMod: compute(propMod) } : {})
   };
+}
+
+export interface PropModAnswer {
+  readonly propMod: ResolvedPropMod;
+  readonly sdeBuild: string;
+}
+
+/**
+ * Answers `GET /prop-mod?module=`: a module's numbers by type id or EVE name, for the page. "mwd", "ab" and "none"
+ * depend on the hull, so the page sizes them itself.
+ *
+ * @param shipData - The SDE lookups.
+ * @param args - module: a type id or a module name.
+ * @returns The module's numbers and the SDE build they came from.
+ * @throws {ToolError} When module is missing or a keyword.
+ * @throws {ShipDataError} When the module cannot be resolved.
+ */
+export async function AnswerPropMod(shipData: ShipDataApi, args: ToolArgs): Promise<PropModAnswer> {
+  const value = args['module'];
+  const problems: string[] = [];
+  const argument = ReadPropModArgument(value, problems);
+  if (value == null || problems.length) throw new ToolError(problems[0] ?? 'module is required: a propulsion module type id or EVE name');
+  if (!argument || 'kind' in argument || 'stats' in argument) throw new ToolError(`module "${String(value)}" depends on the hull: size "mwd" / "ab" with HULL_SIZED_PROP_MODS and ask for its type id`);
+  const propMod = 'typeID' in argument ? await shipData.PropMod(argument.typeID) : await shipData.PropModByName((argument as { readonly name: string }).name);
+  return { propMod, sdeBuild: await shipData.SdeBuild() };
+}
+
+interface ResolveModuleInput {
+  readonly argument: Exclude<PropModArgument, { readonly stats: PropModStats }>;
+  readonly rigSize: Maybe<number>;
+}
+
+/**
+ * A kind, type id or name as module numbers: from the SDE, or the built-in numbers when the SDE is unavailable and
+ * the module is one of BAKED_PROP_MODS.
+ */
+async function ResolveModule(shipData: ShipDataApi, input: ResolveModuleInput): Promise<{ readonly propMod: PropModStats; readonly note: Maybe<string> }> {
+  const { argument, rigSize } = input;
+  const sized = 'kind' in argument ? findHullSizedPropMod({ rigSize, kind: argument.kind }) : null;
+  if ('kind' in argument && !sized) throw new ToolError("the hull's size is unknown; pass a module type id or name, or explicit prop mod values");
+  const typeID = 'typeID' in argument ? argument.typeID : sized?.typeID;
+  let result: { readonly propMod: PropModStats; readonly note: Maybe<string> };
+  try {
+    result = { propMod: typeID == null ? await shipData.PropModByName((argument as { readonly name: string }).name) : await shipData.PropMod(typeID), note: null };
+  } catch (error) {
+    const baked = error instanceof ShipDataError && error.failure === 'unavailable' ? findBakedPropMod(typeID ?? (argument as { readonly name: string }).name) : null;
+    if (!baked) throw error;
+    result = { propMod: baked, note: `${ErrorMessage(error)} The built-in numbers of ${baked.name} (SDE build 3632936) were used.` };
+  }
+  return result;
 }
 
 function ReadShipStatsArguments(args: ToolArgs): ShipStatsArguments {
@@ -145,6 +217,10 @@ function ReadPropModArgument(value: unknown, problems: string[]): Maybe<PropModA
     propMod = { kind };
   } else if ((typeof value === 'number' && Number.isSafeInteger(value) && value > 0) || (typeof value === 'string' && TYPE_ID_TEXT.test(value.trim()) && Number(value) > 0)) {
     propMod = { typeID: Number(value) };
+  } else if (typeof value === 'string' && value.trim().toLowerCase() === PROP_MOD_MODULE_NONE) {
+    problems.push('propMod "none" fits no prop mod; omit propMod instead');
+  } else if (typeof value === 'string' && value.trim()) {
+    propMod = { name: value.trim() };
   } else if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
     const object = value as Readonly<Record<string, unknown>>;
     const numbers = ['speedFactor', 'speedBoostFactor', 'massAddition', 'signatureRadiusBonus'].map((key) => {
@@ -157,9 +233,11 @@ function ReadPropModArgument(value: unknown, problems: string[]): Maybe<PropModA
     if (object['kind'] != null && !explicitKind) problems.push('propMod.kind must be "mwd" or "ab"');
     const [speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus] = numbers;
     const name = typeof object['name'] === 'string' ? object['name'] : null;
-    propMod = { stats: { kind: explicitKind ?? (signatureRadiusBonus > 0 ? 'microwarpdrive' : 'afterburner'), speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus, name } };
+    const duration = object['duration'];
+    if (duration != null && !(typeof duration === 'number' && Number.isFinite(duration) && duration > 0)) problems.push('propMod.duration must be a positive number (ms)');
+    propMod = { stats: { kind: explicitKind ?? (signatureRadiusBonus > 0 ? 'microwarpdrive' : 'afterburner'), speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus, name, ...(typeof duration === 'number' ? { duration } : {}) } };
   } else if (value != null) {
-    problems.push('propMod must be "mwd", "ab", a module type id, or { speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus? }');
+    problems.push('propMod must be "mwd", "ab", a module type id or name, or { speedFactor, speedBoostFactor, massAddition, signatureRadiusBonus?, duration? }');
   }
   return propMod;
 }

@@ -700,6 +700,138 @@ declare module '@carbonenginejs/runtime/resource/formats/png' {
 }
 
 /**
- * Registers the audio class families; SOF hull values carry AudEmitter and friends.
+ * Registers the audio class families (SOF hull values carry AudEmitter and friends), and the audio manager the page
+ * plays engine sounds through (audio.ts).
  */
-declare module '@carbonenginejs/runtime/audio' {}
+declare module '@carbonenginejs/runtime/audio' {
+  /**
+   * An audio-library record the manager asks the host to read: a media file or a sound bank, by its res: path.
+   */
+  export interface CjsAudioMediaRecord {
+    readonly resPath?: string;
+  }
+
+  export interface CjsAudioReadOptions {
+    readonly signal?: AbortSignal;
+    /**
+     * `media` (an individual file) or `bank` (a whole bank the manager slices).
+     */
+    readonly kind?: string;
+  }
+
+  export interface CjsAudioRangeOptions extends CjsAudioReadOptions {
+    readonly offset: number;
+    readonly byteLength: number;
+  }
+
+  /**
+   * What a media read returns: the bytes, and whether they are the whole file (the manager slices a whole bank).
+   */
+  export interface CjsAudioMediaRead {
+    readonly bytes: ArrayBuffer;
+    readonly mediaType: string;
+    readonly complete: boolean;
+    readonly offset?: number;
+    readonly byteLength?: number;
+  }
+
+  /**
+   * The host's media acquisition (CjsAudioMan.SetMediaProvider).
+   */
+  export interface CjsAudioMediaProvider {
+    Read(record: CjsAudioMediaRecord, options: CjsAudioReadOptions): Promise<CjsAudioMediaRead>;
+    ReadRange(record: CjsAudioMediaRecord, options: CjsAudioRangeOptions): Promise<CjsAudioMediaRead>;
+  }
+
+  /**
+   * A complete `carbonenginejs.audioLibrary` document (tools-core's prepared audio library).
+   */
+  export interface CjsAudioLibraryDocument {
+    readonly metadata: {
+      /**
+       * Sound banks by name.
+       */
+      readonly SoundBanks: Readonly<Record<string, unknown>>;
+      readonly Events: Readonly<Record<string, unknown>>;
+    };
+  }
+
+  export type CjsWwiseEffectMode = 'strict' | 'approximate-web-audio';
+
+  export interface CjsAudioManOptions {
+    readonly mediaProvider?: CjsAudioMediaProvider;
+    /**
+     * Called on the first Enable; the default creates a global AudioContext.
+     */
+    readonly createContext?: () => AudioContext;
+    /**
+     * World units to panner units.
+     */
+    readonly distanceScale?: number;
+    readonly wwiseDynamics?: CjsWwiseEffectMode;
+    readonly wwiseDistortion?: CjsWwiseEffectMode;
+    readonly wwiseModulation?: CjsWwiseEffectMode;
+    readonly wwiseReverb?: CjsWwiseEffectMode;
+    readonly wwiseRoomVerb?: CjsWwiseEffectMode;
+    readonly wwiseMeterFeedback?: 'strict' | 'omit-telemetry';
+    readonly wwiseVoiceLimits?: 'strict' | 'ignore';
+  }
+
+  /**
+   * A Carbon audio emitter: a game object events play on, at its placement.
+   */
+  export interface AudEmitter {
+    /**
+     * Posts an event.
+     *
+     * @returns Its playing id; 0 when nothing played.
+     */
+    SendEvent(name: string, bypassPrefix?: boolean): number;
+    SetPlacement(front: ArrayLike<number>, top: ArrayLike<number>, position: ArrayLike<number>): number;
+  }
+
+  /**
+   * The manager-owned listener.
+   */
+  export interface AudListener {
+    SetPosition(front: ArrayLike<number>, top: ArrayLike<number>, position: ArrayLike<number>): number;
+  }
+
+  /**
+   * The host's frame timing, in seconds.
+   */
+  export interface CjsAudioFrame {
+    readonly time: number;
+    readonly realTime: number;
+    readonly deltaTime: number;
+    readonly frame: number;
+  }
+
+  export class CjsAudioMan {
+    constructor(library: CjsAudioLibraryDocument, options?: CjsAudioManOptions);
+    readonly listener: AudListener | null;
+    /**
+     * The AudioContext, once Enable created it.
+     */
+    readonly context: AudioContext | null;
+    /**
+     * Attaches, realizes Web Audio and enables audio with the banks; call it from a user gesture.
+     *
+     * @returns False when no AudioContext could be created.
+     */
+    Enable(soundBanks?: readonly string[]): boolean;
+    /**
+     * 0 uninitialized, 1 disabled, 2 enabled.
+     */
+    GetState(): number;
+    CreateEmitter(descriptor?: { readonly name?: string; readonly position?: ArrayLike<number> }): AudEmitter;
+    /**
+     * Stops and unregisters an emitter.
+     */
+    ReleaseEmitter(emitter: AudEmitter): boolean;
+    /**
+     * Drives culling, the Web Audio backend and log flushing, once per frame.
+     */
+    Process(frame: CjsAudioFrame): unknown;
+  }
+}

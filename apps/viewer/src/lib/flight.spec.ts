@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { HullStatsKey, HullStatsLookup, ResolveFlight, type PublishedHull } from './flight';
+import { findBakedPropMod } from '@scene-director/scene';
+import { CLASS_RIG_SIZES, HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, ShipClassOf, type PublishedHull } from './flight';
+import { ResolveShipPropMod } from './prop-mods';
 
 // Published values (EVE typeDogma via ESI, 2026-10-21), the Ship-stats spec fixtures.
 const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31, warpSpeedMultiplier: 5 } };
@@ -35,6 +37,51 @@ describe('ResolveFlight', () => {
     expect(frigate.typeID).toBeUndefined();
     expect(ResolveFlight({ published: null, hull: { category: 'Mystery', radius: 726 }, overrides: null }).maxVelocity).toBe(137.5);
     expect(ResolveFlight({ published: null, hull: null, overrides: null })).toMatchObject({ maxVelocity: 287.5, radius: 100, source: 'class' });
+  });
+});
+
+const TFI: PublishedHull = { typeID: 17732, name: 'Tempest Fleet Issue', published: { mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250, warpSpeedMultiplier: 3, rigSize: 3 } };
+const GUARDIAN: PublishedHull = { typeID: 11987, name: 'Guardian', published: { mass: 11_980_000, maxVelocity: 209, agility: 0.61, signatureRadius: 70, radius: 80, warpSpeedMultiplier: 4, rigSize: 2 } };
+
+describe('ResolveFlight with a prop mod', () => {
+  it('carries the running numbers ship_stats gives withPropMod, leaving the base numbers alone', () => {
+    const propMod = ResolveShipPropMod({ module: 'mwd', rigSize: 3, answer: null });
+    const flight = ResolveFlight({ published: TFI, hull: null, overrides: null, propMod });
+    expect(flight.maxVelocity).toBeCloseTo(162.5, 9);
+    expect(flight.mass).toBe(103_300_000);
+    expect(flight.propMod).toMatchObject({ module: 'mwd', name: '500MN Microwarpdrive II', typeID: 12084, kind: 'microwarpdrive', size: 'L', source: 'baked', mass: 153_300_000, cycleTime: 10 });
+    expect(flight.propMod?.maxVelocity).toBeCloseTo(1176.137476, 5);
+    expect(flight.propMod?.signatureRadius).toBeCloseTo(2012.5, 9);
+    expect(flight.propMod?.alignTime).toBeCloseTo(16.496782, 5);
+    const guardian = ResolveFlight({ published: GUARDIAN, hull: null, overrides: null, propMod: ResolveShipPropMod({ module: '10MN Afterburner II', rigSize: 2, answer: null }) });
+    expect(guardian.propMod?.maxVelocity).toBeCloseTo(650.701745, 5);
+    expect(guardian.propMod?.cycleTime).toBeCloseTo(7.5, 12);
+    expect(ResolveFlight({ published: TFI, hull: null, overrides: null }).propMod).toBeUndefined();
+  });
+
+  it('gives class values prop mod numbers too, and a cycle time without a duration', () => {
+    const stats = { ...findBakedPropMod(12084)!, duration: null };
+    const flight = ResolveFlight({ published: null, hull: { category: 'Battleship', radius: 700 }, overrides: null, propMod: { module: 12084, stats, source: 'sde', size: 'L' } });
+    expect(flight.source).toBe('class');
+    expect(flight.propMod?.mass).toBe(1e8 + 5e7);
+    expect(flight.propMod?.maxVelocity).toBeGreaterThan(flight.maxVelocity * 4);
+    expect(flight.propMod?.cycleTime).toBe(10);
+  });
+
+  it('RunningFlight swaps the numbers only while the module runs', () => {
+    const flight = ResolveFlight({ published: TFI, hull: null, overrides: null, propMod: ResolveShipPropMod({ module: 'mwd', rigSize: 3, answer: null }) });
+    expect(RunningFlight(flight, false)).toBe(flight);
+    const running = RunningFlight(flight, true);
+    expect(running).toMatchObject({ mass: 153_300_000, signatureRadius: flight.propMod?.signatureRadius, alignTime: flight.propMod?.alignTime, maxVelocity: flight.propMod?.maxVelocity, agility: flight.agility, radius: 250 });
+    const none = ResolveFlight({ published: TFI, hull: null, overrides: null });
+    expect(RunningFlight(none, true)).toBe(none);
+  });
+
+  it('sizes a hull by its class', () => {
+    expect(ShipClassOf({ category: 'Battleship', radius: null })).toBe('battleship');
+    expect(ShipClassOf({ category: null, radius: 60 })).toBe('frigate');
+    expect(ShipClassOf(null)).toBe('cruiser');
+    expect(CLASS_RIG_SIZES).toEqual({ frigate: 1, destroyer: 1, cruiser: 2, battlecruiser: 2, battleship: 3, capital: 4, titan: 4 });
   });
 });
 

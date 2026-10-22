@@ -118,6 +118,15 @@ export interface CameraPlacement {
   readonly fov?: number;
 }
 
+/**
+ * Where the camera's eye is and which way it looks, in world space.
+ */
+export interface CameraEye {
+  readonly position: number[];
+  readonly front: number[];
+  readonly up: number[];
+}
+
 export interface EngineCreateOptions {
   readonly canvas: HTMLCanvasElement;
   /**
@@ -562,6 +571,22 @@ export class OrbitCamera {
 
   Get(): { focus: number[]; distance: number; yaw: number; pitch: number; fov: number } {
     return { focus: Array.from(this.focus), distance: this.distance, yaw: this.yaw, pitch: this.pitch, fov: this.fov };
+  }
+
+  /**
+   * The eye in world space, from the view matrix the last frame drew with (the audio listener).
+   *
+   * @returns Its position, forward and up vectors.
+   */
+  Eye(): CameraEye {
+    const view = this.eve.GetViewMatrix().transform;
+    // The view matrix rows are the camera's right, up and back axes in world space; its translation row is the eye
+    // in view space, so the eye in world space is minus that row through the axes.
+    const right = [view[0], view[4], view[8]];
+    const up = [view[1], view[5], view[9]];
+    const back = [view[2], view[6], view[10]];
+    const position = [0, 1, 2].map((axis) => -(right[axis] * view[12] + up[axis] * view[13] + back[axis] * view[14]));
+    return { position, front: back.map((value) => -value), up };
   }
 
   Update(seconds: number, aspect: number): void {

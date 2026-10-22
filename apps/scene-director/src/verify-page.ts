@@ -84,6 +84,35 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly following?: ShipFollowingState;
   readonly warp?: ShipWarpState;
   readonly boosters?: { readonly maxVel: number; readonly intensity: number; readonly warpIntensity: number };
+  readonly propMod?: Maybe<ShipPropModState>;
+}
+
+interface ShipPropModState {
+  readonly module: string | number;
+  readonly name?: string;
+  readonly typeID?: number;
+  readonly source?: string;
+  readonly note?: string;
+  readonly state: 'off' | 'activating' | 'active' | 'stopping';
+  readonly cycleTime?: number;
+  readonly stopsIn?: number;
+  readonly maxVelocity?: number;
+  readonly signatureRadius?: number;
+}
+
+interface SwitchPropModsResult {
+  readonly tick: number;
+  readonly active: boolean;
+  readonly ships: { readonly id: string; readonly module: string; readonly state: string; readonly at?: number; readonly stopsIn?: number }[];
+  readonly skipped: { readonly id: string; readonly reason: string }[];
+}
+
+interface AudioState {
+  readonly state: string;
+  readonly error?: string;
+  readonly emitters: number;
+  readonly posted: { readonly tick: number; readonly ship: string; readonly event: string; readonly played: boolean }[];
+  readonly frameErrors?: number;
 }
 
 interface ShipWarpState {
@@ -123,8 +152,9 @@ interface ViewerState {
   readonly simulation: { readonly tick: number; readonly seconds: number };
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState })[];
+  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number> })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport> }>;
+  readonly audio?: AudioState;
 }
 
 interface MapSearchResult {
@@ -151,6 +181,7 @@ interface SetLocationResult {
 interface AddedFleetResult extends Omit<SceneResult, 'scene'> {
   readonly added: { readonly fleet: string; readonly commander: string; readonly ships: string[] };
   readonly hulls: { readonly hull?: string; readonly radius: number; readonly dnaFrom: string; readonly radiusFrom: string }[];
+  readonly propMods: { readonly module: string | number; readonly typeID?: number; readonly from: string; readonly note?: string }[];
   readonly scene: { readonly name: string; readonly ships: { readonly id: string; readonly type?: string; readonly position: SceneVector }[] };
 }
 
@@ -159,6 +190,8 @@ interface LogEntry {
 }
 
 const SCREENSHOT_FILE = '.scratch/verify.png';
+const TFI_DNA = 'mb2_t1:minmatarnavy:minmatar';
+const GUARDIAN_DNA = 'ac3_t2:carthum:amarr';
 
 /**
  * The value after a command-line flag.
@@ -258,7 +291,8 @@ const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-di
 const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-fleets-')));
 const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, log: () => undefined }).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
-const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan'] });
+// Autoplay lets the page turn audio on without a gesture, so the audio check sees the engine stems post.
+const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] });
 const results: string[] = [];
 let failed = 0;
 
@@ -364,6 +398,19 @@ try {
     const differences = drift.map((key) => `${key} ${live[key]} (fixture ${fixture[key]})`).join(', ');
     if (drift.length) results.push(`info  SDE ${sdeBuild} differs from the spec fixtures in ${differences}`);
     return `SDE ${sdeBuild}: TFI ${stats.maxVelocity.toFixed(2)} m/s, align ${stats.alignTime.toFixed(2)} s; with ${answer.propMod?.name} ${withPropMod?.maxVelocity.toFixed(2)} m/s, sig ${withPropMod?.signatureRadius} m`;
+  });
+
+  await Check('ship_stats names a prop mod by its EVE name', async () => {
+    const coldGas = await call<ShipStatsAnswer>('ship_stats', { dna: TFI_DNA, propMod: '500MN Cold-Gas Enduring Microwarpdrive' }).catch(SkipWithoutSde);
+    const running = coldGas.withPropMod;
+    if (!running) throw new Error('ship_stats gave no Cold-Gas numbers');
+    Expect(coldGas.propMod?.typeID === 5945 && running.propModCycleTime === 10, `${JSON.stringify(coldGas.propMod)} cycle ${running?.propModCycleTime}`);
+    Expect(running.maxVelocity > coldGas.stats.maxVelocity && running.signatureRadius > coldGas.stats.signatureRadius, JSON.stringify(running));
+    // The plan's numbers (SDE 3632936, 2026-10-22); a difference means CCP rebalanced, which is news, not a failure.
+    if (Math.abs(running.maxVelocity - 1166.199853) > 1e-3 || running.signatureRadius !== 2100) results.push(`info  the Cold-Gas TFI flies ${running.maxVelocity} m/s, sig ${running.signatureRadius} (fixture 1166.199853, 2100)`);
+    const guardian = await call<ShipStatsAnswer>('ship_stats', { type: 11987, propMod: 'ab' });
+    Expect(guardian.propMod?.typeID === 12058 && guardian.withPropMod?.propModCycleTime === 7.5, `${JSON.stringify(guardian.propMod)} cycle ${guardian.withPropMod?.propModCycleTime}`);
+    return `TFI with ${coldGas.propMod?.name} ${running.maxVelocity.toFixed(2)} m/s, sig ${running.signatureRadius} m, cycle 10 s; Guardian 10MN AB II cycle 7.5 s`;
   });
 
   await Check("the skill table matches tools-core's dogma evaluation", async () => {
@@ -599,7 +646,11 @@ try {
       Expect(/150 km/u.test(refused), `a 100 km warp: ${refused || 'accepted'}`);
 
       const point: [number, number, number] = [-50000, 0, 300000];
+      // Its MWD runs as it aligns; entering warp switches it off.
+      await call('switch_prop_mods', { ships: ['warper'], active: true });
+      await WaitFor("the warper's MWD runs", 5, (state) => (ShipIn(state, 'warper').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(state, 'warper').propMod)));
       await call('order_ship', { id: 'warper', order: { type: 'warp', point } });
+      let propModInWarp: Maybe<ShipPropModState> = null;
       const phases: string[] = [];
       let topSpeed = 0;
       let progress = 0;
@@ -612,6 +663,7 @@ try {
         const warp = warper.warp;
         if (!warp) continue;
         if (phases.at(-1) !== warp.phase) phases.push(warp.phase);
+        if (warp.phase === 'warping' && !propModInWarp) propModInWarp = warper.propMod;
         topSpeed = Math.max(topSpeed, warper.speed ?? 0);
         peakGlow = Math.max(peakGlow, warper.boosters?.warpIntensity ?? 0);
         if (warp.phase !== 'landed') Expect(warper.mode === 'warp', `mode in ${warp.phase}: ${JSON.stringify(warper)}`);
@@ -633,6 +685,8 @@ try {
         `phases ${phases.join(', ')}`
       );
       Expect(/is in warp/u.test(refusedInWarp), `a stop in warp: ${refusedInWarp || 'never tried'}`);
+      Expect(propModInWarp?.state === 'off' && /entered warp/u.test(propModInWarp.note ?? ''), `the MWD in warp: ${JSON.stringify(propModInWarp)}`);
+      Expect(warper.propMod?.state === 'off', `the MWD after landing: ${JSON.stringify(warper.propMod)}`);
       Expect(topSpeed > 10_000, `top speed ${topSpeed} m/s`);
       const landing = warper.warp?.landing ?? [Infinity, 0, 0];
       const gap = (a: ArrayLike<number>, b: ArrayLike<number>): number => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
@@ -653,11 +707,87 @@ try {
         Expect(onBeacon.boosters?.maxVel === onBeacon.physics?.maxVelocity && peakGlow > 0.5, `boosters ${JSON.stringify(onBeacon.boosters)}, peak warp glow ${peakGlow}`);
         boosters = `peak warp glow ${peakGlow}`;
       }
-      return `phases ${phases.join(' → ')}, top ${Math.round(topSpeed / 1000)} km/s, landed ${Math.round(gap(warper.position ?? [0, 0, 0], landing))} m from the point; ${Math.round(range)} m off the beacon; refused in warp: ${refusedInWarp}; ${boosters}`;
+      return `phases ${phases.join(' → ')}, top ${Math.round(topSpeed / 1000)} km/s, landed ${Math.round(gap(warper.position ?? [0, 0, 0], landing))} m from the point; ${Math.round(range)} m off the beacon; refused in warp: ${refusedInWarp}; MWD ${propModInWarp?.note}; ${boosters}`;
     });
   } finally {
     const { ships } = await call<{ ships: { id: string }[] }>('get_scene');
     const operations = ships.filter((ship) => ship.id === 'warper' || ship.id === 'beacon').map((ship) => ({ op: 'remove_ship', id: ship.id }));
+    if (operations.length) await call('patch_scene', { operations });
+  }
+
+  const propModHelpers = new Set(['mwd-tfi', 'ab-guardian']);
+  try {
+    await Check("switch_prop_mods runs a ship's MWD at its module's numbers", async () => {
+      await call('patch_scene', {
+        operations: [
+          { op: 'add_ship', ship: { id: 'mwd-tfi', dna: TFI_DNA, position: [0, 0, -60000] } },
+          { op: 'add_ship', ship: { id: 'ab-guardian', dna: GUARDIAN_DNA, position: [3000, 0, -60000], propMod: '10MN Afterburner II' } }
+        ]
+      });
+      const answer = await call<ShipStatsAnswer>('ship_stats', { dna: TFI_DNA, propMod: 'mwd' }).catch(SkipWithoutSde);
+      const running = answer.withPropMod;
+      if (!running) throw new Error('ship_stats gave no MWD numbers');
+      await WaitFor('mwd-tfi flies its SDE hull and module', 60, (state) => {
+        const ship = ShipIn(state, 'mwd-tfi');
+        return ship.physics?.source === 'sde' && ship.propMod?.source === 'sde' ? null : JSON.stringify({ physics: ship.physics?.source, propMod: ship.propMod });
+      });
+      const on = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['mwd-tfi'], active: true });
+      Expect(on.active && on.ships[0]?.id === 'mwd-tfi' && on.ships[0].state === 'activating' && on.ships[0].at !== undefined && !on.skipped.length, JSON.stringify(on));
+      const active = await WaitFor('the MWD active', 4, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
+      const tfi = ShipIn(active, 'mwd-tfi');
+      const physics = tfi.physics;
+      if (!physics) throw new Error('mwd-tfi reports no physics');
+      Expect(tfi.propMod?.typeID === 12084 && tfi.propMod.cycleTime === 10, JSON.stringify(tfi.propMod));
+      Expect(Close(physics.maxVelocity, running.maxVelocity) && Close(physics.signatureRadius, running.signatureRadius) && Close(physics.mass, running.mass), `page ${JSON.stringify(physics)}, ship_stats ${JSON.stringify(running)}`);
+      await call('order_ship', { id: 'mwd-tfi', order: { type: 'direction', direction: [0, 0, -1] } });
+      const fast = await WaitFor('mwd-tfi past twice its base speed', 20, (state) => ((ShipIn(state, 'mwd-tfi').speed ?? 0) > 2 * answer.stats.maxVelocity ? null : `${ShipIn(state, 'mwd-tfi').speed} m/s`));
+      const off = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['mwd-tfi'], active: false });
+      const stopsIn = off.ships[0]?.stopsIn ?? Infinity;
+      Expect(off.ships[0]?.state === 'stopping' && stopsIn <= 10, JSON.stringify(off));
+      const stopped = await WaitFor('the MWD off at the end of its cycle', 12, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'off' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
+      const peak = ShipIn(stopped, 'mwd-tfi').speed ?? 0;
+      Expect(Close(ShipIn(stopped, 'mwd-tfi').physics?.maxVelocity ?? 0, answer.stats.maxVelocity), `physics after: ${JSON.stringify(ShipIn(stopped, 'mwd-tfi').physics)}`);
+      const slowing = await WaitFor('mwd-tfi slowing toward its base speed', 10, (state) => ((ShipIn(state, 'mwd-tfi').speed ?? Infinity) < peak - 50 ? null : `${ShipIn(state, 'mwd-tfi').speed} m/s from ${peak}`));
+      await call('order_ship', { id: 'mwd-tfi', order: { type: 'stop' } });
+      return `${tfi.propMod?.name}: ${physics.maxVelocity.toFixed(2)} m/s, sig ${physics.signatureRadius} m; ${ShipIn(fast, 'mwd-tfi').speed} m/s; stopping in ${stopsIn} s, then ${peak} -> ${ShipIn(slowing, 'mwd-tfi').speed} m/s`;
+    });
+
+    await Check('set_prop_mods sets the start state', async () => {
+      const set = await call<SceneResult>('patch_scene', { operations: [{ op: 'set_prop_mods', ships: ['ab-guardian'], active: true }] });
+      Expect(set.changes['switched'] === 1, JSON.stringify(set.changes));
+      const scene = await call<{ ships: { id: string; propMod?: unknown }[] }>('get_scene');
+      const doc = scene.ships.find((ship) => ship.id === 'ab-guardian');
+      Expect(JSON.stringify(doc?.propMod) === JSON.stringify({ module: '10MN Afterburner II', active: true }), JSON.stringify(doc));
+      Expect(ShipIn(await call<ViewerState>('get_state'), 'ab-guardian').propMod?.state === 'active', 'not active at once');
+      await call('load_scene', { scene });
+      const loaded = ShipIn(await call<ViewerState>('get_state'), 'ab-guardian').propMod;
+      Expect(loaded?.state === 'active' && ShipIn(await call<ViewerState>('get_state'), 'mwd-tfi').propMod?.state === 'off', JSON.stringify(loaded));
+      return `ab-guardian's ${loaded?.name ?? '10MN Afterburner II'} active at once and after a load`;
+    });
+
+    await Check('prop mod audio posts the engine stems', async () => {
+      const ready = await WaitFor('the audio settles', 90, (state) => (state.audio && state.audio.state !== 'loading' ? null : JSON.stringify(state.audio)));
+      const audio = ready.audio as AudioState;
+      const why = audio.error ? ` (${audio.error})` : '';
+      results.push(`info  audio: ${audio.state}${why}`);
+      await call('switch_prop_mods', { ships: ['mwd-tfi'], active: true });
+      await WaitFor('the MWD active', 4, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
+      await call('switch_prop_mods', { ships: ['mwd-tfi'], active: false });
+      const after = await WaitFor('the MWD off', 12, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'off' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
+      const posted = (after.audio?.posted ?? []).filter((entry) => entry.ship === 'mwd-tfi').slice(-2);
+      const stem = 'ship_engine_L_microwarpdrive_3rd';
+      Expect(JSON.stringify(posted.map((entry) => entry.event)) === JSON.stringify([`${stem}_on`, `${stem}_powerdown`]), JSON.stringify(after.audio));
+      const on = audio.state === 'on';
+      Expect(
+        posted.every((entry) => entry.played === on),
+        `played with audio ${audio.state}: ${JSON.stringify(posted)}`
+      );
+      const played = on ? 'played' : `audio ${audio.state}, recorded unplayed`;
+      return `${posted.map((entry) => entry.event).join(', ')} (${played}); ${after.audio?.frameErrors ?? 0} audio frames failed in the runtime`;
+    });
+  } finally {
+    const { ships } = await call<{ ships: { id: string }[] }>('get_scene');
+    const operations = ships.filter((ship) => propModHelpers.has(ship.id)).map((ship) => ({ op: 'remove_ship', id: ship.id }));
     if (operations.length) await call('patch_scene', { operations });
   }
 
@@ -807,6 +937,42 @@ try {
       Expect(ship.following?.state === 'in-formation' && (ship.following.slotError ?? Infinity) <= 5 && moved <= 2 && (ship.speed ?? Infinity) < 0.5, `${id}: moved ${moved.toFixed(1)} m, ${JSON.stringify({ following: ship.following, speed: ship.speed, mode: ship.mode })}`);
     }
     return `${members.length} members in formation, the most moved ${worst.toFixed(2)} m`;
+  });
+
+  await Check('a fleet switches its prop mods on and keeps formation', async () => {
+    const added = tfis;
+    if (!added) throw new Skipped('the TFIs fleet was not added');
+    const unresolved = added.propMods.filter((propMod) => propMod.from !== 'sde');
+    if (unresolved.some((propMod) => propMod.from === 'unchecked')) throw new Skipped(`prop mods unchecked: ${unresolved.map((propMod) => propMod.note).join('; ')}`);
+    Expect(added.propMods.length === 6 && !unresolved.length, JSON.stringify(added.propMods));
+    const members = added.added.ships.filter((id) => id !== added.added.commander);
+    const before = await call<ViewerState>('get_state');
+    const base = new Map(added.added.ships.map((id) => [id, ShipIn(before, id).physics?.maxVelocity ?? Infinity]));
+    const on = await call<SwitchPropModsResult>('switch_prop_mods', { fleet: 'tfis', active: true });
+    Expect(on.ships.length === 41 && on.skipped.length === 3 && on.skipped.every((skip) => /fits no prop mod/u.test(skip.reason)), JSON.stringify({ ships: on.ships.length, skipped: on.skipped }));
+    await WaitFor('41 prop mods active', 6, (state) => {
+      const counts = state.fleets.find((fleet) => fleet.id === 'tfis')?.propMods;
+      return counts?.['active'] === 41 && counts['none'] === 3 ? null : JSON.stringify(counts);
+    });
+    await call('order_ship', { id: 'tfis-fc', order: { type: 'direction', direction: [0, 0, -1] } });
+    const end = Date.now() + 20_000;
+    let state = before;
+    while (Date.now() < end) {
+      await Delay(1000);
+      state = await call<ViewerState>('get_state');
+      const astray = members.map((id) => ShipIn(state, id)).find((ship) => ship.following?.state !== 'in-formation' && ship.following?.state !== 'catching-up');
+      Expect(!astray, `${astray?.id} ${JSON.stringify(astray?.following)}`);
+    }
+    const running = members.map((id) => ShipIn(state, id)).filter((ship) => ship.propMod?.state === 'active');
+    const slow = running.find((ship) => (ship.speed ?? 0) <= (base.get(ship.id) ?? Infinity));
+    Expect(running.length === 40 && !slow, slow ? `${slow.id} at ${slow.speed} m/s, base ${base.get(slow.id)}` : `${running.length} members running`);
+    const logi = await call<SwitchPropModsResult>('switch_prop_mods', { fleet: 'tfis', squad: 'logi', active: false });
+    Expect(logi.ships.length === 8 && logi.ships.every((ship) => ship.id.startsWith('tfis-logi-') && ship.state === 'stopping'), JSON.stringify(logi.ships));
+    const counts = state.fleets.find((fleet) => fleet.id === 'tfis')?.propMods;
+    await call('order_ship', { id: 'tfis-fc', order: { type: 'stop' } });
+    await call('switch_prop_mods', { fleet: 'tfis', active: false });
+    const fc = ShipIn(state, 'tfis-fc');
+    return `41 on (${JSON.stringify(counts)}), FC at ${fc.speed} m/s; every member in formation or catching up above its base speed; the 8 logi stopping`;
   });
 
   await Check('compositions save, list, add by name with a unique id, and delete', async () => {

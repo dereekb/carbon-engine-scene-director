@@ -9,6 +9,8 @@
  * - The ball radius is the hull's EVE radius (SDE `radius`) when the hub answered, as EVE measures ranges on it; else
  *   the SOF bounding radius, else DEFAULT_FLIGHT_RADIUS. Framing and get_state's `radius` keep the SOF sphere.
  * - Warp speed is the hull's warpSpeedMultiplier (AU/s; no skill changes it), else its class value.
+ * - A prop mod (prop-mods.ts) runs through the same math: `propMod` is the ship's running numbers, which
+ *   RunningFlight swaps in while the module runs. `maxVelocity` and the rest stay prop-mod-off.
  * - Lookups are cached per page session by the hub's own key (the EVE type, else the DNA's hull:faction:race); failures
  *   are cached with the hub's message until ForgetFailures (every load_scene / open_scene).
  *
@@ -16,8 +18,9 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { computeShipStats, HULL_STAT_OVERRIDE_KEYS, type HullStatOverrides, type HullStats, type SceneShip } from '@scene-director/scene';
-import type { ShipHull, ShipPhysics } from './destiny';
+import { computeShipStats, HULL_STAT_OVERRIDE_KEYS, type HullSizeClass, type HullStatOverrides, type HullStats, type PropModKind, type PropModModule, type RigSize, type SceneShip } from '@scene-director/scene';
+import type { ShipHull, ShipPhysics, ShipPropMod } from './destiny';
+import type { PropModSource, ResolvedShipPropMod } from './prop-mods';
 import { DEFAULT_WARP_SPEED } from './warp';
 
 /**
@@ -32,6 +35,29 @@ export interface PublishedHull {
   readonly typeID: number;
   readonly name: string;
   readonly published: HullStats;
+}
+
+/**
+ * Seconds per prop mod cycle when the module has no duration.
+ */
+export const DEFAULT_PROP_MOD_CYCLE_TIME = 10;
+
+/**
+ * A ship's prop mod and the numbers it flies while the module runs.
+ */
+export interface ShipFlightPropMod extends ShipPropMod {
+  readonly module: PropModModule;
+  readonly name: string;
+  readonly typeID?: number;
+  readonly kind: PropModKind;
+  readonly size: HullSizeClass;
+  readonly source: PropModSource;
+  readonly note?: string;
+  /**
+   * m, the MWD bloom included.
+   */
+  readonly signatureRadius: number;
+  readonly alignTime: number;
 }
 
 /**
@@ -60,6 +86,7 @@ export interface ShipFlight extends ShipPhysics {
    * Why class values were used.
    */
   readonly note?: string;
+  readonly propMod?: ShipFlightPropMod;
 }
 
 export interface ResolveFlightInput {
@@ -79,6 +106,10 @@ export interface ResolveFlightInput {
    * The document ship's `stats`.
    */
   readonly overrides: Maybe<HullStatOverrides>;
+  /**
+   * The ship's prop mod; null or absent when it fits none.
+   */
+  readonly propMod?: Maybe<ResolvedShipPropMod>;
 }
 
 export type ShipClass = 'frigate' | 'destroyer' | 'cruiser' | 'battlecruiser' | 'battleship' | 'capital' | 'titan';
@@ -116,6 +147,11 @@ export const CATEGORY_CLASSES: Readonly<Record<string, ShipClass>> = {
 };
 
 /**
+ * The hull size (rigSize) of each class: it picks the hull-sized prop mod when the EVE data cannot name the hull.
+ */
+export const CLASS_RIG_SIZES: Readonly<Record<ShipClass, RigSize>> = { frigate: 1, destroyer: 1, cruiser: 2, battlecruiser: 2, battleship: 3, capital: 4, titan: 4 };
+
+/**
  * Bounding radius (m) upper bounds by class; anything larger is a titan.
  */
 export const RADIUS_BANDS: readonly (readonly [number, ShipClass])[] = [
@@ -138,19 +174,29 @@ export const DEFAULT_FLIGHT_RADIUS = 100;
 export const HULL_STATS_TIMEOUT_MS = 90_000;
 
 /**
- * Class values for a hull, by its SOF category, else its bounding radius; the cruiser class when nothing is known.
+ * A hull's class, by its SOF category, else its bounding radius; the cruiser class when nothing is known.
  *
  * @param hull - The SOF hull's category and bounding radius.
- * @returns Published-like class values.
+ * @returns The class.
  */
-export function ClassHull(hull: Maybe<ShipHull>): HullStats {
+export function ShipClassOf(hull: Maybe<ShipHull>): ShipClass {
   const category = hull?.category?.toLowerCase().replaceAll(/[^a-z]/gu, '');
   let shipClass: Maybe<ShipClass> = category ? CATEGORY_CLASSES[category] : null;
   if (!shipClass && IsPositive(hull?.radius)) {
     const radius = hull.radius;
     shipClass = RADIUS_BANDS.find(([bound]) => radius < bound)?.[1] ?? 'titan';
   }
-  return CLASS_HULLS[shipClass ?? 'cruiser'];
+  return shipClass ?? 'cruiser';
+}
+
+/**
+ * Class values for a hull, by its SOF category, else its bounding radius; the cruiser class when nothing is known.
+ *
+ * @param hull - The SOF hull's category and bounding radius.
+ * @returns Published-like class values.
+ */
+export function ClassHull(hull: Maybe<ShipHull>): HullStats {
+  return CLASS_HULLS[ShipClassOf(hull)];
 }
 
 /**
@@ -161,13 +207,14 @@ export function ClassHull(hull: Maybe<ShipHull>): HullStats {
  * @throws {RangeError} From computeShipStats, when a value is out of range.
  */
 export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
-  const { published, note, hull, overrides } = input;
+  const { published, note, hull, overrides, propMod } = input;
   const pinned = HULL_STAT_OVERRIDE_KEYS.every((key) => overrides?.[key] != null);
   let source: FlightSource = 'class';
   if (pinned) source = 'stats';
   else if (published) source = 'sde';
   const base = source === 'class' ? ClassHull(hull) : (published?.published ?? null);
   const stats = computeShipStats({ hull: source === 'stats' ? null : base, overrides });
+  const running = propMod ? computeShipStats({ hull: source === 'stats' ? null : base, overrides, propMod: propMod.stats }) : null;
   let radius = DEFAULT_FLIGHT_RADIUS;
   if (IsPositive(published?.published.radius)) radius = published.published.radius;
   else if (IsPositive(hull?.radius)) radius = hull.radius;
@@ -182,8 +229,39 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
     alignTime: stats.alignTime,
     source,
     ...(published ? { typeID: published.typeID, typeName: published.name } : {}),
-    ...(source === 'class' && note ? { note } : {})
+    ...(source === 'class' && note ? { note } : {}),
+    ...(propMod && running
+      ? {
+          propMod: {
+            module: propMod.module,
+            name: propMod.stats.name,
+            typeID: propMod.stats.typeID,
+            kind: propMod.stats.kind,
+            size: propMod.size,
+            source: propMod.source,
+            ...(propMod.note ? { note: propMod.note } : {}),
+            mass: running.mass,
+            maxVelocity: running.maxVelocity,
+            signatureRadius: running.signatureRadius,
+            alignTime: running.alignTime,
+            cycleTime: running.propModCycleTime ?? DEFAULT_PROP_MOD_CYCLE_TIME
+          }
+        }
+      : {})
   };
+}
+
+/**
+ * The numbers a ship flies now: its prop mod's mass, max velocity, signature radius and align time while the module
+ * runs, else its own.
+ *
+ * @param flight - The ship's flight.
+ * @param running - Whether its prop mod runs.
+ * @returns The flight as get_state's physics reports it.
+ */
+export function RunningFlight(flight: ShipFlight, running: boolean): ShipFlight {
+  const propMod = running ? flight.propMod : null;
+  return propMod ? { ...flight, mass: propMod.mass, maxVelocity: propMod.maxVelocity, signatureRadius: propMod.signatureRadius, alignTime: propMod.alignTime } : flight;
 }
 
 /**
