@@ -9,7 +9,7 @@ import { applyPropModOperation, PROP_MOD_OPERATIONS } from './prop-mods/operatio
 import { applyStagingOperation, STAGING_OPERATIONS } from './staging/operation';
 import { applyObjectOperation, OBJECT_OPERATIONS } from './objects/operations';
 import { applyAsteroidFieldOperation, ASTEROID_FIELD_OPERATIONS } from './asteroids/operations';
-import { ASTEROID_FIELDS_NOT_DRAWN_WARNING, diffAsteroidFields, normalizeAsteroidFields, type SceneAsteroidField, type SceneAsteroidFieldsDiff } from './asteroids/field';
+import { diffAsteroidFields, normalizeAsteroidFields, type SceneAsteroidField, type SceneAsteroidFieldsDiff } from './asteroids/field';
 import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneObjectsDiff } from './objects/object';
 import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
@@ -323,7 +323,6 @@ export function normalizeScene(input: unknown): NormalizedScene {
   const fields = normalizeAsteroidFields({ input: input['asteroidFields'], takenIds: new Set([...ids, ...objects.ids]) });
   problems.push(...fields.problems);
   warnings.push(...fields.warnings);
-  if (fields.fields) warnings.push(ASTEROID_FIELDS_NOT_DRAWN_WARNING);
   const target = scene.camera.target;
   if (target != null && !ids.has(target) && !objects.ids.has(target) && !fields.ids.has(target)) {
     problems.push(`camera.target "${target}" is not a ship, object or asteroid field id`);

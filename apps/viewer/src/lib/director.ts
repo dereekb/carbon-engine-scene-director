@@ -131,6 +131,8 @@ import {
   type PropModModule,
   type SceneCamera,
   type SceneCameraMode,
+  type SceneAsteroidField,
+  type SceneAsteroidFieldStateReport,
   type SceneDocument,
   type SceneLocation,
   type SceneShip,
@@ -240,6 +242,8 @@ import type { ToolHandler } from './link';
 import { ReadDressParts } from './celestials';
 import { LocationKey, LocationLookup } from './location';
 import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrders } from './objects';
+import { AsteroidFieldStateRow } from './asteroid-fields';
+import { SceneFields } from './scene-fields';
 import { ObjectForward, SceneObjects } from './scene-objects';
 import { LocationDressing } from './location-dressing';
 import { ModuleAudioPost } from './module-audio';
@@ -645,6 +649,7 @@ interface AppliedScene {
   readonly diff: ReturnType<typeof diffScenes>;
   readonly builds: SceneShip[];
   readonly objectBuilds: ReturnType<SceneObjects['Apply']>;
+  readonly fieldBuilds: ReturnType<SceneFields['Apply']>;
   readonly retried: number;
   readonly stopped: number;
   readonly arrivalKeys: ReturnType<Arrivals['Add']>[];
@@ -813,6 +818,10 @@ export class Director {
    * The scene's static objects as drawn (scene-objects.ts); their balls are the world's.
    */
   readonly objects: SceneObjects;
+  /**
+   * The scene's asteroid fields as drawn (scene-fields.ts): scenery, no balls.
+   */
+  readonly fields: SceneFields;
   /**
    * The location's stations and gates as order targets (`celestial:<id>`), each a static ball, and the location key
    * they were made for.
@@ -1091,15 +1100,21 @@ export class Director {
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
-      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
+      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.fields.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
       onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
     this.objects = new SceneObjects({
       engine,
-      retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
+      retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.fields.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
       onChange: () => this.onChange(),
       onBuilt: (id) => this.ObjectBuilt(id),
+      detachAudio: (build) => this.audio.Detached(build)
+    });
+    this.fields = new SceneFields({
+      engine,
+      retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
+      onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
     this.location = new LocationLookup({
@@ -1116,7 +1131,7 @@ export class Director {
       ? new ModuleEffects({
           engine,
           ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
+          retained: () => [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
@@ -1124,7 +1139,7 @@ export class Director {
       ? new ShipExplosions({
           engine,
           files: this.explosionFiles,
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
+          retained: () => [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ModuleEffectRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build),
           onHide: (id) => this.Hide(id),
           onSound: (id, event) => this.PostExplosionSound(id, event)
@@ -1144,7 +1159,7 @@ export class Director {
     this.warpEffectsDrawn = engine
       ? new WarpEffects({
           engine,
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.MissileRoots()],
+          retained: () => [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build),
           DrawnPosition: (id, now) => world.Curves(id)?.translation.GetValueAt__Ticks(now, vec3.create()) ?? null
         })
@@ -2924,7 +2939,7 @@ export class Director {
       : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
-      scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0 } : null,
+      scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0, asteroidFields: this.scene.asteroidFields?.length ?? 0 } : null,
       location: this.LocationState(),
       camera: this.engine ? { ...this.engine.camera.Get(), view: this.cinema.active ? 'cinema' : 'orbit', drawn: DrawnCameraReport(this.engine.DrawnCamera()) } : null,
       cinema: this.cinema.Report(this.clock.now),
@@ -2939,6 +2954,7 @@ export class Director {
       ...(this.arrivals.Report().length ? { arrivals: this.arrivals.Report() } : {}),
       distances,
       objects: this.ObjectRows(),
+      asteroidFields: this.FieldRows(),
       combat: this.SceneCombatState(),
       ...this.SceneMissilesState(),
       fleets: this.scene
@@ -2984,7 +3000,7 @@ export class Director {
     if (mode != null && !SCENE_CAMERA_MODES.includes(mode)) throw new Error(`mode must be one of ${SCENE_CAMERA_MODES.join(', ')}`);
     if (mode) camera.mode = mode;
     if (persist) return this.Edit([{ op: 'set_camera', camera }]);
-    if (camera.target && !this.live.has(camera.target) && !this.objects.Has(camera.target)) throw new Error(`no ship or object "${camera.target}"`);
+    if (camera.target && !this.live.has(camera.target) && !this.objects.Has(camera.target) && !this.fields.Has(camera.target)) throw new Error(`no ship, object or asteroid field "${camera.target}"`);
     if (camera.target && this.world.Arriving(camera.target)) throw new Error(`ship "${camera.target}" is arriving by warp; frame it once it lands (get_state arrivals), or play the warp-in shot`);
     this.ApplyCamera(camera);
     return { camera: this.engine?.camera.Get() ?? null };
@@ -3149,6 +3165,8 @@ export class Director {
     for (const doc of [...diff.removed, ...diff.rebuilt.filter(alive)]) this.Retire(doc.id);
     // Removed and rebuilt objects retire with the ships; added, rebuilt and failed ones queue.
     const objectBuilds = this.objects.Apply(diff.objects, scene);
+    // Removed fields retire now; added, rebuilt and failed ones queue; moved ones re-place.
+    const fieldBuilds = this.fields.Apply(diff.asteroidFields, scene);
     const stopped: string[] = [];
     const moduleEvents: ShipModuleEvent[] = [];
     if (restart) {
@@ -3192,7 +3210,7 @@ export class Director {
       stopped.push(...this.world.RemoveObject(doc.id));
     }
     this.scene = scene;
-    const cinema = CinemaReleases({ restart, cameraChanged: diff.camera, removed: [...diff.removed, ...diff.objects.removed].map((doc) => doc.id), subjects: this.cinema.Subjects() });
+    const cinema = CinemaReleases({ restart, cameraChanged: diff.camera, removed: [...diff.removed, ...diff.objects.removed, ...diff.asteroidFields.removed].map((doc) => doc.id), subjects: this.cinema.Subjects() });
     const subjectLeft = this.cinema.Subjects().some((id) => diff.removed.some((doc) => doc.id === id) || diff.objects.removed.some((doc) => doc.id === id));
     // A load or a removed subject forgets the shot; a camera change keeps it resumable.
     if (cinema === 'cut') this.cinema.Stop(this.clock.now, { cut: true, forget: true, note: 'a scene load cut the shot' });
@@ -3281,7 +3299,7 @@ export class Director {
     // Logi take the new auto-repair settings at once; their switches apply at the next boundary.
     this.SyncAutoRepair();
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
-    return { scene, restart, diff, builds, objectBuilds, retried: retried.length, stopped: stopped.length, arrivalKeys, callWarnings, simulation: SimulationChange(diff, previous) };
+    return { scene, restart, diff, builds, objectBuilds, fieldBuilds, retried: retried.length, stopped: stopped.length, arrivalKeys, callWarnings, simulation: SimulationChange(diff, previous) };
   }
 
   /**
@@ -3290,7 +3308,7 @@ export class Director {
    *
    * @returns The ship, object and arrival reports and the change counts.
    */
-  private async FinishApply({ scene, restart, diff, builds, objectBuilds, retried, stopped, arrivalKeys }: AppliedScene): Promise<object> {
+  private async FinishApply({ scene, restart, diff, builds, objectBuilds, fieldBuilds, retried, stopped, arrivalKeys }: AppliedScene): Promise<object> {
     this.onChange();
 
     // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order. Objects build
@@ -3298,16 +3316,20 @@ export class Director {
     for (const doc of builds) await this.Build(doc);
     for (const entry of objectBuilds) await this.objects.Build(entry);
     this.engine?.SetDrawReach(this.objects.Reach(scene), 'objects');
+    // Fields are scenery: they build last, and a rebuilt one keeps drawing until its new root is in.
+    for (const entry of fieldBuilds) await this.fields.Build(entry);
+    this.engine?.SetDrawReach(this.fields.Reach(scene), 'fields');
     // Built and (usually) answered: plan now, so the result says when they land.
     if (arrivalKeys.length) this.arrivals.Boundary(this.world.tick);
 
-    const reframe = ReframesAfterEdit({ restart, cameraChanged: diff.camera, following: this.cameraFollow.following, removed: [...diff.removed, ...diff.objects.removed].map((doc) => doc.id) });
+    const reframe = ReframesAfterEdit({ restart, cameraChanged: diff.camera, following: this.cameraFollow.following, removed: [...diff.removed, ...diff.objects.removed, ...diff.asteroidFields.removed].map((doc) => doc.id) });
     if (reframe && JSON.stringify(scene.camera) !== this.appliedCamera) this.ApplyCamera(scene.camera);
     this.appliedCamera = null;
     this.onChange();
     return {
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
       ...(scene.objects?.length || diff.objects.removed.length ? { objects: (scene.objects ?? []).map((doc) => this.ObjectReport(doc.id)) } : {}),
+      ...(scene.asteroidFields?.length || diff.asteroidFields.removed.length ? { asteroidFields: this.FieldRows() } : {}),
       ...(arrivalKeys.length ? { arrivals: this.arrivals.Report(arrivalKeys) } : {}),
       changes: {
         added: diff.added.length,
@@ -3318,7 +3340,8 @@ export class Director {
         regrouped: diff.regrouped.length,
         switched: diff.switched.length,
         stopped,
-        ...(scene.objects?.length || diff.objects.removed.length ? { objects: { added: diff.objects.added.length, rebuilt: diff.objects.rebuilt.length, moved: diff.objects.moved.length, removed: diff.objects.removed.length } } : {})
+        ...(scene.objects?.length || diff.objects.removed.length ? { objects: { added: diff.objects.added.length, rebuilt: diff.objects.rebuilt.length, moved: diff.objects.moved.length, removed: diff.objects.removed.length } } : {}),
+        ...(scene.asteroidFields?.length || diff.asteroidFields.removed.length ? { asteroidFields: { added: diff.asteroidFields.added.length, rebuilt: diff.asteroidFields.rebuilt.length, moved: diff.asteroidFields.moved.length, removed: diff.asteroidFields.removed.length } } : {})
       }
     };
   }
@@ -4393,7 +4416,7 @@ export class Director {
     this.turretsDrawn?.Remove(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
-    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
+    RetireShips([entry.ship], [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
   }
 
   /**
@@ -4426,7 +4449,7 @@ export class Director {
     this.turretsDrawn?.Remove(entry.id);
     if (ship && this.engine) {
       this.engine.RemoveShip(ship);
-      RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
+      RetireShips([ship], [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
     }
   }
 
@@ -4449,6 +4472,15 @@ export class Director {
    * The drawn missiles' and impacts' pooled roots, live or idle, for every retire's retained set: they are never
    * retired (missile-effects.ts).
    */
+  /**
+   * The static scenery's roots: the location dressing, the scene's objects and its asteroid fields.
+   *
+   * @returns The roots.
+   */
+  private SceneryRoots(): object[] {
+    return [...this.dressing.Roots(), ...this.objects.Roots(), ...this.fields.Roots()];
+  }
+
   private MissileRoots(): object[] {
     return this.missileDrawing?.Roots() ?? [];
   }
@@ -4831,6 +4863,18 @@ export class Director {
   }
 
   /**
+   * get_state.asteroidFields: one compact row per document field (no per-rock lists), with the nearest ships on the
+   * master balls.
+   */
+  private FieldRows(): SceneAsteroidFieldStateReport[] {
+    const ships = (this.scene?.ships ?? []).flatMap((doc) => {
+      const motion = this.world.Motion(doc.id);
+      return motion ? [{ id: doc.id, position: motion.position, radius: motion.physics.radius }] : [];
+    });
+    return (this.scene?.asteroidFields ?? []).map((field) => AsteroidFieldStateRow({ field, entry: this.fields.Entry(field.id), ships }));
+  }
+
+  /**
    * get_state.objects: one row per document object, with ship distances on the master balls.
    */
   private ObjectRows(): object[] {
@@ -4876,10 +4920,14 @@ export class Director {
     const ships = (this.scene?.ships ?? []).filter((doc) => !this.IsDead(doc.id));
     const objects = this.scene?.objects ?? [];
     const docs = camera.target ? ships.filter((doc) => doc.id === camera.target) : ships;
+    const fields = this.scene?.asteroidFields ?? [];
     const object = camera.target && !docs.length ? (objects.find((doc) => doc.id === camera.target) ?? null) : null;
+    // A field is framed, never followed: it has no ball.
+    const field = camera.target && !docs.length && !object ? (fields.find((doc) => doc.id === camera.target) ?? null) : null;
     let spheres: WorldSphere[] = docs.map((doc) => this.WorldSphere(doc, { landing: true }));
     if (object) spheres = [this.ObjectSphere(object)];
-    else if (!camera.target && !ships.length) spheres = objects.map((doc) => this.ObjectSphere(doc));
+    else if (field) spheres = [this.FieldSphere(field)];
+    else if (!camera.target && !ships.length) spheres = objects.length ? objects.map((doc) => this.ObjectSphere(doc)) : fields.map((doc) => this.FieldSphere(doc));
     if (spheres.length) {
       const centre = vec3.create();
       for (const sphere of spheres) vec3.add(centre, centre, sphere.centre);
@@ -5044,6 +5092,14 @@ export class Director {
       this.cinemaCelestials = { answer, list: answer.celestials.map((celestial) => ({ id: celestial.id, name: celestial.name, kind: celestial.kind, position: celestial.position, radius: celestial.radius ?? 0 })) };
     }
     return this.cinemaCelestials.list;
+  }
+
+  /**
+   * An asteroid field's world sphere: its envelope around its centre.
+   */
+  private FieldSphere(doc: SceneAsteroidField): WorldSphere {
+    const sphere = this.fields.Sphere(doc);
+    return { centre: vec3.fromValues(...sphere.centre), radius: sphere.radius };
   }
 
   /**

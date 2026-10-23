@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { catchSceneError } from '../fleets/fleets.spec-helper';
 import { normalizeScene } from '../scene';
 import { DARK_OCHRE_ROCKS, rockSet, VELDSPAR_ROCKS } from './asteroids.spec-helper';
-import { ASTEROID_FIELDS_NOT_DRAWN_WARNING, defaultAsteroidFieldSeed, defaultRockSize, diffAsteroidFields, normalizeAsteroidFields, type SceneAsteroidField } from './field';
+import { defaultAsteroidFieldSeed, defaultRockSize, diffAsteroidFields, normalizeAsteroidFields, type SceneAsteroidField } from './field';
 
 const VELDSPAR = { ore: 'Veldspar', type: 1230, faction: 'ore_veldspar', rocks: VELDSPAR_ROCKS };
 
@@ -106,12 +106,10 @@ describe('normalizeAsteroidFields', () => {
 describe('asteroidFields in a scene', () => {
   const field = { id: 'belt', ores: [VELDSPAR] };
 
-  it('round-trips, lets camera.target name a field, and warns it is not drawn yet', () => {
-    const { scene, warnings } = normalizeScene({ ships: [{ id: 'rifter', dna: 'mf4_t1:minmatarbase:minmatar' }], asteroidFields: [field], camera: { target: 'belt' } });
+  it('round-trips and lets camera.target name a field', () => {
+    const { scene } = normalizeScene({ ships: [{ id: 'rifter', dna: 'mf4_t1:minmatarbase:minmatar' }], asteroidFields: [field], camera: { target: 'belt' } });
     expect(scene.camera.target).toBe('belt');
-    expect(warnings).toContain(ASTEROID_FIELDS_NOT_DRAWN_WARNING);
     expect(normalizeScene(scene).scene).toEqual(scene);
-    expect(normalizeScene({}).warnings).not.toContain(ASTEROID_FIELDS_NOT_DRAWN_WARNING);
     expect(catchSceneError(() => normalizeScene({ ships: [{ id: 'belt', dna: 'mf4_t1:minmatarbase:minmatar' }], asteroidFields: [field] })).problems).toEqual(['asteroidFields[0].id "belt" is a ship\'s or object\'s id; ids are unique across ships, objects and asteroid fields']);
   });
 });

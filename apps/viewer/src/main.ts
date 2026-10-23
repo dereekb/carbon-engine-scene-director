@@ -26,6 +26,7 @@ import { Director } from './lib/director';
 import { Engine } from './lib/engine';
 import { HubLink } from './lib/link';
 import { LocationText } from './lib/location';
+import { AsteroidFieldsText } from './lib/asteroid-fields';
 import { ObjectsText } from './lib/objects';
 import { TimelineText } from './lib/timeline';
 import { TimeControl, TimeText } from './lib/time-control';
@@ -99,6 +100,13 @@ class Overlay {
     if (dressed) rows.push(['dressing', dressed]);
     const objectsText = ObjectsText((scene?.objects ?? []).map((doc) => ({ status: director?.objects.Entry(doc.id)?.status ?? 'queued' })));
     if (objectsText) rows.push(['objects', objectsText]);
+    const fieldsText = AsteroidFieldsText(
+      (scene?.asteroidFields ?? []).map((doc) => {
+        const entry = director?.fields.Entry(doc.id);
+        return { status: entry?.status ?? 'queued', rocks: { placed: entry?.expansion?.placed ?? 0 } };
+      })
+    );
+    if (fieldsText) rows.push(['fields', fieldsText]);
     const timeline = TimelineText(director?.timeline.Summary());
     if (timeline) rows.push(['timeline', timeline]);
     for (const fleet of scene?.fleets ?? []) {

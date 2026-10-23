@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`, `time-control.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `state-capture.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts`, `destiny-warp-in.spec.ts` and `destiny-missile.spec.ts` cover `destiny.ts`' tackle, accuracy, arrivals and missiles on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
@@ -91,6 +91,18 @@ move them (`sd-destiny`).
 The ClientBall's velocity becomes `EveSpaceObject2.worldVelocity` (`UpdateWorldTransform`), `EveShip2.UpdateSyncronous`
 sets `speed.value` from it, and `EveBoosterSet2Renderable.CalculateIntensity` divides it by `boosters.maxVel` (runtime
 default 250 m/s for every hull). `Director.DriveBoosters` sets that per ship each frame: see `sd-destiny` (`boosters`).
+
+## Asteroid fields (`asteroid-fields.ts`, `scene-fields.ts`)
+
+The field composer writes runtime value formats directly: a meshless SOF root holding an `EveChildContainer` placement
+of `EveChildMesh`es whose meshes are the rock's SOF `Tr2Mesh` retyped to `Tr2InstancedMesh` (`boundsMethod` 2,
+`maxInstanceSize`) with a `Tr2RuntimeInstanceData` of `SOF_INSTANCE_LAYOUT` rows packed as `packInstanceMatrix` packs
+them, and `SPACE_OBJECT_INSTANCED_ATTACHMENT=SOIA_ENABLED` on every area effect: SOF's own `CreateLayoutInstancedMesh`
+shape (EveSOF.js). The spec pins our side; the pin-bump checklist for the runtime's side is in `sd-asteroid-fields`.
+Rock templates come from `BuildShipValues` (cached per DNA for the page session), roots hydrate through
+`HydrateSofObject` inside `PageAudio.Detached` and retire through `RetireShips` (`Tr2InstancedMesh` and
+`Tr2RuntimeInstanceData` are in `SHIP_RESOURCE_TYPES`); the director's `SceneryRoots()` (dressing, objects, fields)
+joins every retained set.
 
 ## Module effects (`module-effects.ts`)
 

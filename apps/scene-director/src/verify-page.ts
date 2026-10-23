@@ -15,6 +15,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import {
   DEFAULT_UNIVERSE,
+  MAX_SCENE_DISTANCE,
   formationSpacing,
   toFollowTolerance,
   type FleetGroupCommandReport,
@@ -25,6 +26,7 @@ import {
   type MapSystemAnswer,
   type SceneDocument,
   type SceneLocation,
+  type SceneAsteroidFieldStateReport,
   type SceneObjectStateReport,
   type SceneVector,
   type ShipFleetMembership,
@@ -507,6 +509,8 @@ interface ViewerState {
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
+  readonly asteroidFields?: SceneAsteroidFieldStateReport[];
+  readonly scene?: Maybe<{ readonly asteroidFields?: number }>;
   readonly cinema?: CinemaStateReport;
   readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly repaired?: number; readonly kills: { readonly ship: string; readonly by: string; readonly module: string; readonly weapon: string; readonly tick: number }[] };
   readonly missiles?: MissilesState;
@@ -541,6 +545,16 @@ interface HardpointListingResult {
   readonly subject: Maybe<{ readonly centre: number[]; readonly radius: number; readonly teams?: string[] }>;
   readonly hardpoints: { readonly name: string; readonly eye?: number[]; readonly look?: number[]; readonly note?: string }[];
   readonly warnings: string[];
+}
+
+interface AddAsteroidFieldResult {
+  readonly added: { readonly id: string; readonly position: SceneVector; readonly radius: number; readonly count: number; readonly placed: number; readonly envelope: number; readonly digest: string };
+  readonly ores: { readonly ore?: string; readonly models: { readonly small: number; readonly medium: number; readonly large: number } }[];
+  readonly warnings: string[];
+}
+
+interface FieldChanges {
+  readonly changes: { readonly asteroidFields?: { readonly added: number; readonly rebuilt: number; readonly moved: number; readonly removed: number } };
 }
 
 interface AddObjectsResult {
@@ -3598,6 +3612,97 @@ try {
       const start = ShipIn(first, 'rifter').targetDistance ?? 0;
       const later = await WaitFor('the CNAP approach', 30, (polled) => ((ShipIn(polled, 'rifter').targetDistance ?? Infinity) < start - 2000 ? null : `targetDistance ${ShipIn(polled, 'rifter').targetDistance}`));
       return `${state.location?.targets?.length} targets; CNAP ${Math.round(start)} -> ${Math.round(ShipIn(later, 'rifter').targetDistance ?? 0)} m`;
+    });
+  }
+
+  const FIELD_SCENE = { name: 'verify-fields', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', stats: { maxVelocity: 2000, agility: 1 } }] };
+  const fieldRow = (state: ViewerState, id: string): Maybe<SceneAsteroidFieldStateReport> => (state.asteroidFields ?? []).find((field) => field.id === id) ?? null;
+  const fieldSettled = (id: string, digest?: string) => (polled: ViewerState) => {
+    const row = fieldRow(polled, id);
+    return row && ['validated', 'ready'].includes(row.status) && (digest == null || row.digest === digest) ? null : `status ${row?.status ?? 'none'} ${row?.error ?? ''} digest ${row?.digest ?? ''}`;
+  };
+  let fieldAdded = false;
+  await Check('add_asteroid_field resolves Veldspar and Dark Ochre and validates the rocks', async () => {
+    await call('load_scene', { scene: FIELD_SCENE });
+    const result = await call<AddAsteroidFieldResult>('add_asteroid_field', { id: 'veld', ores: ['Veldspar', 'Dark Ochre'], count: 150, radius: 25000, near: { ship: 'rifter', range: 10000 } }).catch(SkipWithoutSde);
+    Expect(result.ores.length === 2 && result.ores.every((ore) => ore.models.small === 4 && ore.models.medium === 4 && ore.models.large === 4), JSON.stringify(result.ores));
+    Expect(result.added.placed === 150, `placed ${result.added.placed}`);
+    const state = await WaitFor('the field to validate', 180, fieldSettled('veld'));
+    const row = fieldRow(state, 'veld');
+    Expect(row?.rocks.placed === result.added.placed && row.rocks.requested === 150, JSON.stringify(row?.rocks));
+    Expect(row?.digest === result.added.digest, `page digest ${row?.digest}, hub ${result.added.digest}`);
+    Expect(row && row.models.total > 0 && row.models.built === row.models.total && row.models.failed === 0, JSON.stringify(row?.models));
+    Expect(row && row.distance + row.envelope <= MAX_SCENE_DISTANCE, `distance ${row?.distance} + envelope ${row?.envelope}`);
+    Expect(state.scene?.asteroidFields === 1, `scene.asteroidFields ${state.scene?.asteroidFields}`);
+    fieldAdded = true;
+    return `${row?.status}: ${row?.rocks.placed} rocks, ${row?.models.built} models, digest ${row?.digest}`;
+  });
+
+  if (fieldAdded) {
+    await Check('add_asteroid_field refuses a non-asteroid and a field past the extent; nothing changes', async () => {
+      const before = await call<SceneDocument>('get_scene');
+      const refusal = (args: Record<string, unknown>): Promise<string> =>
+        call('add_asteroid_field', args).then(
+          () => 'none',
+          (failure: unknown) => (ErrorProblems(failure) ?? []).join(' ') + ErrorMessage(failure)
+        );
+      const mineral = await refusal({ ores: ['Tritanium'] });
+      Expect(/not an asteroid/u.test(mineral), `Tritanium: ${mineral}`);
+      const far = await refusal({ ores: ['Veldspar'], radius: 20000, position: [0, 0, 9990000] });
+      Expect(/10,000 km/u.test(far), `far: ${far}`);
+      const after = await call<SceneDocument>('get_scene');
+      Expect(JSON.stringify(after.asteroidFields) === JSON.stringify(before.asteroidFields), 'the fields changed');
+    });
+
+    await Check('update_asteroid_field moves a field without rebuilding it and rebuilds on a seed change', async () => {
+      const digest = fieldRow(await call<ViewerState>('get_state'), 'veld')?.digest;
+      const moved = await call<FieldChanges>('patch_scene', { operations: [{ op: 'update_asteroid_field', id: 'veld', set: { position: [0, 0, 80000], rotation: [30, 0, 0] } }] });
+      Expect(JSON.stringify(moved.changes.asteroidFields) === JSON.stringify({ added: 0, rebuilt: 0, moved: 1, removed: 0 }), JSON.stringify(moved.changes.asteroidFields));
+      const still = fieldRow(await call<ViewerState>('get_state'), 'veld');
+      Expect(still?.digest === digest && JSON.stringify(still?.position) === '[0,0,80000]' && ['validated', 'ready'].includes(still?.status ?? ''), JSON.stringify({ status: still?.status, digest: still?.digest, position: still?.position }));
+      const rebuilt = await call<FieldChanges>('patch_scene', { operations: [{ op: 'update_asteroid_field', id: 'veld', set: { seed: 7 } }] });
+      Expect(JSON.stringify(rebuilt.changes.asteroidFields) === JSON.stringify({ added: 0, rebuilt: 1, moved: 0, removed: 0 }), JSON.stringify(rebuilt.changes.asteroidFields));
+      const state = await WaitFor('the rebuilt field', 120, (polled) => fieldSettled('veld')(polled) ?? (fieldRow(polled, 'veld')?.digest === digest ? 'the digest did not change' : null));
+      return `digest ${digest} -> ${fieldRow(state, 'veld')?.digest}`;
+    });
+
+    await Check('a field off an asteroid belt centres on it', async () => {
+      const set = await call<SetLocationResult>('set_location', { celestial: 'Perimeter II - Asteroid Belt 1' }).catch(SkipWithoutSde);
+      const result = await call<AddAsteroidFieldResult>('add_asteroid_field', { id: 'belt', ores: ['Veldspar'], count: 60, near: { celestial: 'Perimeter II - Asteroid Belt 1' } });
+      const offset = set.location.anchor?.offset ?? [0, 0, 0];
+      const position = result.added.position;
+      const fromBelt = Math.hypot(position[0] + offset[0], position[1] + offset[1], position[2] + offset[2]);
+      Expect(fromBelt <= 1 && result.added.radius === 44425, `${fromBelt} m from the belt, radius ${result.added.radius}`);
+      await WaitFor('the belt field to validate', 120, fieldSettled('belt', result.added.digest));
+      return `radius ${result.added.radius} m, ${result.added.placed} rocks`;
+    });
+
+    await Check('fields round-trip through scene files and frame_camera frames one', async () => {
+      const before = await call<SceneDocument>('get_scene');
+      const digest = fieldRow(await call<ViewerState>('get_state'), 'belt')?.digest;
+      await call('save_scene', { name: 'verify-fields', store: 'disk' });
+      await call('open_scene', { name: 'verify-fields', store: 'disk' });
+      const after = await call<SceneDocument>('get_scene');
+      Expect(JSON.stringify(after.asteroidFields) === JSON.stringify(before.asteroidFields), 'the fields changed');
+      await WaitFor('the reopened fields', 120, (polled) => fieldSettled('veld')(polled) ?? fieldSettled('belt', digest)(polled));
+      await call('frame_camera', { target: 'belt' });
+      const unknown = await call('frame_camera', { target: 'no-such-field' }).then(
+        () => 'none',
+        (failure: unknown) => ErrorMessage(failure)
+      );
+      Expect(/no ship, object or asteroid field/u.test(unknown), `unknown target: ${unknown}`);
+      return `${after.asteroidFields?.length} fields`;
+    });
+
+    await Check('remove_asteroid_field clears camera.target and the field entry', async () => {
+      await call('frame_camera', { target: 'belt', persist: true });
+      Expect((await call<SceneDocument>('get_scene')).camera.target === 'belt', 'camera.target is not the field');
+      const removed = await call<FieldChanges>('patch_scene', { operations: [{ op: 'remove_asteroid_field', id: 'belt' }] });
+      Expect(removed.changes.asteroidFields?.removed === 1, JSON.stringify(removed.changes.asteroidFields));
+      const scene = await call<SceneDocument>('get_scene');
+      Expect(scene.camera.target == null, `camera.target ${scene.camera.target}`);
+      const state = await call<ViewerState>('get_state');
+      Expect(!fieldRow(state, 'belt') && state.scene?.asteroidFields === 1, JSON.stringify((state.asteroidFields ?? []).map((field) => field.id)));
     });
   }
 

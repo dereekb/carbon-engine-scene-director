@@ -2,15 +2,15 @@
 
 > The document's `asteroidFields`, the seeded expansion into rocks, the three ops, ore names resolved to SOF rock sets,
 > and `add_asteroid_field`. Fetch before touching `packages/scene/src/lib/asteroids/`, `hub/asteroid-data.ts`,
-> `hub/asteroid-fields.ts`, or before adding a field with the tools. The document and the diff: `sd-scene-document`;
+> `hub/asteroid-fields.ts`, `apps/viewer/src/lib/asteroid-fields.ts` / `scene-fields.ts`, or before adding a field with
+> the tools. The document and the diff: `sd-scene-document`;
 > `near` / `facing` and `ScenePlaces`: `sd-staging`; belts and other celestials of the location: `sd-locations`;
 > authored objects (the pattern this copies): `sd-objects`. Plan:
 > `~/.claude/plans/asteroid-fields-seeded-ore-belts-in-cjs-scene-1-drawn-as-sof-rocks.md`.
 
-**Status (2026-10-23, A1)**: fields are validated, stored, expanded and reported by the hub. **The page does not draw
-them yet**: `normalizeScene` warns `ASTEROID_FIELDS_NOT_DRAWN_WARNING` while a document has fields. A2 (the instanced
-drawing, `get_state`, `frame_camera`, verify-page) and A3 (the real-GPU check and tuning) are continuations; the plan's
-§5 and §6 hold their design.
+**Status (2026-10-23, A2)**: fields are validated, stored and expanded by the hub, and **drawn by the page** as one
+instanced SOF root per field (proven on the real GPU), listed in `get_state.asteroidFields`, framed by `frame_camera`
+and checked by verify-page `--only field`. A3 (the real-GPU cost check and tuning) is the plan's §6.
 
 ## Files
 
@@ -23,6 +23,10 @@ drawing, `get_state`, `frame_camera`, verify-page) and A3 (the real-GPU check an
 | `staging/draft.ts` | `StagingDraft.fields`: field ids are taken ids for every generated ship, object, composition and field id |
 | `apps/scene-director/src/lib/hub/asteroid-data.ts` | `AsteroidData`: an ore name → asteroid type and group → SOF faction; a faction → its rock DNAs from the SDE `graphics` table |
 | `hub/asteroid-fields.ts` | `AsteroidFieldTools`: `add_asteroid_field` |
+| `apps/viewer/src/lib/asteroid-fields.ts` | pure, node-tested: `FieldDrawPlan` (groups per model and cell), `PackInstance`, `FIELD_INSTANCE_LAYOUT`, `RockTemplateOf`, `FieldRootValues` (the instanced root's values), `FieldSphere`, `FieldReach`, `AsteroidFieldStateRow`, `AsteroidFieldsText`; spec fixture `asteroid-fields.spec-helper.ts` |
+| `apps/viewer/src/lib/scene-fields.ts` | `SceneFields`: Apply / Build / Retire, the per-DNA template cache, hydrate-then-swap, `?fields=` |
+| `apps/viewer/src/lib/director.ts` | `this.fields`, `SceneryRoots()`, the Apply wiring, `FieldRows()`, field camera targets |
+| `apps/scene-director/src/verify-page.ts` | `--only field`: six checks |
 | `hub/scene-places.ts` | `ResolvePlace({ beltCentred })` and `ResolvedPlace.celestial` (shared with staging and objects) |
 | specs | `asteroids/*.spec.ts` (the pinned digest is in `expand.spec.ts`), `hub/asteroid-data.spec.ts` (fixture `asteroid-data.testing.ts`, ids captured live), `hub/asteroid-fields.spec.ts`, `hub.spec.ts` |
 
@@ -145,12 +149,65 @@ node bin/scene-director.js call add_asteroid_field '{"ores":["Veldspar",{"ore":"
   models each, 199 placed (the default field is near its packing limit at 200; A3 retunes the defaults); the Perimeter
   belt disc (arc 180, 300 rocks, radius 44,425) → 287 placed.
 
-## A2 / A3 (planned, see the plan)
+## The page (A2)
 
-- One root SOF object per field on fixed curves; one `EveChildMesh` per rock DNA holding a `Tr2InstancedMesh` and a
-  `Tr2RuntimeInstanceData` of that model's rocks (SOF's `SOF_INSTANCE_LAYOUT` rows, `packInstanceMatrix` packing), the
-  rock's own `quadenvironmentv5` material plus `SPACE_OBJECT_INSTANCED_ATTACHMENT=SOIA_ENABLED`; SOF builds each DNA
-  once per page session. A spike on the real GPU comes first (fallbacks: `quadinstancedv5`, then one object per rock
-  capped at 200).
-- Pin-bump checklist (once A2 lands): `SOF_INSTANCE_LAYOUT`, `packInstanceMatrix`, the `Tr2InstancedMesh` and
-  `Tr2RuntimeInstanceData` fields, `SOIA_ENABLED` still in `quadenvironmentv5`, `SOIA_SHARED` still absent.
+- **One meshless root per field** (the first template's root type, `EveStation2`; no mesh, controllers, observers,
+  locators or impact overlay; bounding sphere = the envelope) on fixed curves (`CreateStaticCurves` / `PlaceStatic` at
+  the field position and `DocumentRotation(rotation)`), hydrated by `HydrateSofObject` inside `PageAudio.Detached`,
+  then `Engine.AddObject`. Its one `EveChildContainer` (`alwaysOn`, `origin: 1`, `isPlacementRoot`) holds an
+  `EveChildMesh` per **(DNA, cell)** draw group: `{ name: dna, mesh, castShadow, reflectionMode, minScreenSize: 2.5 }`.
+- **The mesh** is the rock template's SOF `Tr2Mesh` values cloned and retyped `Tr2InstancedMesh`: `boundsMethod: 2`
+  (DYNAMIC_SCALED: the runtime widens the instance box by `maxInstanceSize` × the geometry radius), `instanceMeshIndex:
+  0`, `minBounds` / `maxBounds` zero, `maxInstanceSize` = the group's largest rock radius, and an
+  `instanceGeometryResource` `Tr2RuntimeInstanceData { layout: FIELD_INSTANCE_LAYOUT, rows, explicitBoundingBox: true,
+  aabbMin, aabbMax }` (the rocks' centres' box, as SOF's `translationBounds`). Every area effect keeps its options and
+  gains `SPACE_OBJECT_INSTANCED_ATTACHMENT=SOIA_ENABLED` (the rock's own `quadenvironmentv5` material). A row is
+  `PackInstance(position, quaternion, radius)`: `M = T·R·S`, `transformN = [mN, mN+4, mN+8, mN+12]`, last copies, bone 0.
+- **Templates**: `RockTemplateOf(BuildShipValues(dna).values)` (`{ mesh, castShadow, reflectionMode, rootType,
+  inheritProperties }`), cached per DNA for the page session over the shared SOF queue and shared by every field; a
+  failure is forgotten and retried on the next build. Only the DNAs of placed rocks build (`models.total`).
+- **Edits**: a move re-places the curves; a rebuild keeps the old root drawn on the same curves until the new one is in
+  the scene, then removes and retires it (`RetireShips` with every other root retained); a removal retires at once. A
+  failed field is retried on the next apply. Fields build after the objects; `SetDrawReach(FieldReach, 'fields')`
+  (the farthest `|centre| + 2 × envelope`).
+- **Cells**: `FIELD_CELL_SIZE` (`Infinity`: one child per model). The runtime picks a child's LOD by its nearest
+  instance and frustum-culls the child whole, so a finite size splits each model's rocks by cell (A3 tunes it).
+- **Switches**: `?fields=off` builds the templates but draws nothing (status `off`; the fps baseline);
+  `?fields=noshadow` composes `castShadow: false`. Without a renderer (headless) the root is composed but not
+  hydrated: `validated`.
+- **get_state**: `scene.asteroidFields` (count) and `asteroidFields[]` rows (`SceneAsteroidFieldStateReport`): `id`,
+  `name`, `status` (queued, building, ready, validated, off, failed + `error`), the field keys, `rocks { requested,
+  placed, bySize, byOre: [{ ore, rocks }] }`, `models { total, built, failed, failedDnas? }`, `cells`, `envelope`,
+  `distance`, `digest` (the page's own expansion: verify-page compares it with the tool's) and `nearestShips`. No
+  per-rock lists. A patch result carries the rows and `changes.asteroidFields { added, rebuilt, moved, removed }`.
+- **Camera**: `frame_camera { target: <field> }` and the document's `camera.target` frame the envelope sphere; a field
+  is never followed (no ball). With no ships and no objects the camera fits the fields. Removed field ids release a
+  cinema subject or a follow like objects (`ReframesAfterEdit`, `CinemaReleases`). Fields are not alt-click picked.
+- **Overlay**: a `fields` row, `"1 · 293 rocks · 1 ready"`.
+- **verify-page `--only field`** (headless, temp stores, `SkipWithoutSde`): Veldspar + Dark Ochre (24 models, 150
+  placed, page digest = tool digest); Tritanium and a field past the extent refused with nothing changed; a move keeps
+  the digest (`moved: 1`), a seed change rebuilds (`rebuilt: 1`, new digest); a belt centres the field (radius 44,425);
+  save / open round-trip and `frame_camera` (an unknown id is refused); `remove_asteroid_field` clears `camera.target`.
+
+### The spike (real GPU, 2026-10-23)
+
+Windows Chrome, NVIDIA (lovelace), 1600×900, private hub on 5537: one DNA (`rock_01_m_v1a_whiteyellow:ore_veldspar:
+asteroid`), 20 instances over 10 km. **Pass**: lit, textured rocks at their instance transforms, scaled and turned;
+`gpuErrors` 0 and no shader or permutation error in `page_log`, on the default tier and `?tier=hi`. `?tier=lo` draws
+an all-white frame **with fields off too** (the lo tier's post process; `?tier=lo&post=off` draws the rocks), so that
+is not the fields'. No fallback was needed: `quadinstancedv5` and one object per rock are unused. Then the Perimeter
+belt disc (Veldspar, Scordite, Dark Ochre; 293 of 300 placed, 36 models) built and drew at 56–60 fps with digest equal
+to the hub's; moving the camera onto the field for the first time stalled the frame (1 fps for a few seconds) while the
+models' geometry and textures loaded.
+
+### Pin-bump checklist (runtime)
+
+On a runtime pin bump re-check, against the new `EveSOF.js` and classes:
+1. `SOF_INSTANCE_LAYOUT` still equals `FIELD_INSTANCE_LAYOUT` (the spec pins ours).
+2. `packInstanceMatrix` still packs `transformN = [mN, mN+4, mN+8, mN+12]` with `lastTransform*` copies.
+3. `CreateLayoutInstancedMesh` still writes the same `Tr2InstancedMesh` fields (`boundsMethod: 2`,
+   `instanceGeometryResource`, `instanceMeshIndex`, `minBounds`, `maxBounds`, `maxInstanceSize`) and the same
+   `Tr2RuntimeInstanceData` fields (`layout`, `rows`, `explicitBoundingBox`, `aabbMin`, `aabbMax`).
+4. `quadenvironmentv5`'s dx11 containers still carry `SPACE_OBJECT_INSTANCED_ATTACHMENT` with `SOIA_ENABLED`, and
+   whether `SOIA_SHARED` has appeared (it would open `EveChildInstancedMeshes` with per-instance culling and LOD).
+5. Re-run the spike: one field on the real GPU, `gpuErrors` 0.

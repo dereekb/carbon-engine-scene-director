@@ -43,8 +43,8 @@
 - `asteroidFields?` (`asteroids/field.ts`): seeded fields of SOF rock DNAs (`id`, `name?`, `position`, `rotation`,
   `shape`, `radius`, `innerRadius?`, `thickness?`, `arc?`, `count`, `size`, `seed`, `ores`); shape, radius, count, size
   and the seed are written in. **Ids are unique across ships, objects and fields**, and every id generator skips field
-  ids. The whole field (centre + radius + largest rock) must fit the extent. `camera.target` may name a field. Not drawn
-  yet (A1: `normalizeScene` warns while there are fields). Detail: `sd-asteroid-fields`.
+  ids. The whole field (centre + radius + largest rock) must fit the extent. `camera.target` may name a field (framed by
+  its envelope, never followed). The page draws each field instanced (`scene-fields.ts`). Detail: `sd-asteroid-fields`.
 - **The scene extent** (`extent.ts`, the user's rule of 2026-10-22, "just like the game"): every ship and object
   document position is **refused past `MAX_SCENE_DISTANCE` (10,000 km)** from the origin (`readScenePosition`), and
   placements past `LARGE_SCENE_DISTANCE` (2,000 km) warn (`largeSceneWarning`). Live orders are not bounded: a goto
@@ -126,7 +126,7 @@ Without a timeline in it, normalizing it never projects, and cue-added ids never
 | `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild (a `targets` or `autoRepair` edit flags `fleets` only: no re-follow) |
 | `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |
 | `objects` (`SceneObjectsDiff`: `added` / `removed` / `rebuilt` / `moved` / `resized`) | `SceneObjects.Apply` builds, retires or re-places the models; `DestinyWorld` adds, re-adds (moved, resized, rebuilt) or `RemoveObject`s the static ball, which halts ships flying at it (`sd-destiny`) |
-| `asteroidFields` (`SceneAsteroidFieldsDiff`: `added` / `removed` / `rebuilt` (any rock key) / `moved` (position, rotation only); a name change is none) | nothing yet (A1); A2 builds, re-places or retires the field's instanced root |
+| `asteroidFields` (`SceneAsteroidFieldsDiff`: `added` / `removed` / `rebuilt` (any rock key) / `moved` (position, rotation only); a name change is none) | `SceneFields.Apply` / `Build`: build an added field's instanced root (after the objects), re-place a moved one's curves, rebuild a changed one (the new root hydrates before the old leaves) or retire a removed one; removed field ids join `ReframesAfterEdit` / `CinemaReleases`; the result's `changes.asteroidFields` counts them |
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 | `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |

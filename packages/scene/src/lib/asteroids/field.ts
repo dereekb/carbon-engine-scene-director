@@ -79,11 +79,6 @@ export const RING_THICKNESS_RATIO = 1 / 6;
 export const ASTEROID_FIELD_NEAREST_SHIPS = 3;
 
 /**
- * The warning normalizeScene adds while the page does not draw fields yet.
- */
-export const ASTEROID_FIELDS_NOT_DRAWN_WARNING = 'asteroidFields are validated and stored; the page draws them from the next release';
-
-/**
  * One ore's rock models, by size: SOF DNAs (`<hull>:<faction>:asteroid`).
  */
 export interface SceneAsteroidRocks {

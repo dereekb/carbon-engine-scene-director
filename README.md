@@ -56,6 +56,9 @@ What works today:
 - **Objects**: stations, stargates, Upwell structures, large collidable objects and
   wrecks placed by EVE type name, static in the scene and order targets for ships,
   as are the location's own stations and gates. A scene spans 10,000 km at most.
+- **Asteroid fields**: seeded belts of EVE ore rocks (by ore name, as a sphere,
+  disc or ring, off a belt, a celestial, a ship or a point), drawn instanced so
+  hundreds of rocks cost a few draws.
 - **Cinematic camera**: shots on hardpoints generated from the drawn ships, fleets
   and engagements, timed moves and waypoint fly-throughs over moving hulls, a
   letterbox and a clean HUD, directed by Claude over MCP: hardpoint listing,
@@ -169,7 +172,7 @@ connected tab.
 | `stage_engagement` | hub | two sides facing each other at a range around a point or a celestial |
 | `search_objects` | hub | EVE types to place: stations, gates, structures, LCOs, wrecks, with their SOF DNA and radius |
 | `add_objects` | hub | static objects by type name or id at a place off a ship, object or celestial, singly or in a formation |
-| `add_asteroid_field` | hub | a seeded field of EVE ore rocks (sphere, disc or ring) at a place off a ship, object or celestial; an asteroid belt centres it (stored and validated; drawing comes next) |
+| `add_asteroid_field` | hub | a seeded field of EVE ore rocks (sphere, disc or ring) at a place off a ship, object or celestial; an asteroid belt centres it, drawn instanced |
 | `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location and its targets, objects |
 | `order_ship` | page | a live movement order on a point, ship, object or `celestial:<id>`, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
@@ -204,7 +207,7 @@ Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/t
 
 Metres and degrees, Y up; `rotation` is `[yaw, pitch, roll]`. A ship may also
 name its EVE `type`, override `stats`, and fit a `propMod`; the document may hold
-`fleets`, static `objects` and a `location`. Unknown fields are reported as warnings and dropped.
+`fleets`, static `objects`, seeded `asteroidFields` and a `location`. Unknown fields are reported as warnings and dropped.
 Edits are diffed against the current document, so the page rebuilds, moves or
 retunes only the ships an edit changes. Orders and prop mod switches are live
 only: a save or reload starts from the document's placements.

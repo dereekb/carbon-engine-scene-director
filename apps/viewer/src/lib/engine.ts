@@ -170,9 +170,9 @@ interface FramePump {
 }
 
 /**
- * What asks the camera's back clip to reach far: the location dressing, or the scene's objects.
+ * What asks the camera's back clip to reach far: the location dressing, the scene's objects, or its asteroid fields.
  */
-export type DrawReachSource = 'dressing' | 'objects';
+export type DrawReachSource = 'dressing' | 'objects' | 'fields';
 
 export class Engine {
   private readonly reaches = new Map<DrawReachSource, number>();
