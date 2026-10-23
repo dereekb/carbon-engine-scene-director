@@ -50,6 +50,11 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 - **SDE.** tools-core runs with `--no-sde-auto-prepare` and answers only for the exact `builds.sde` it reports
   (`/eve/latest/build`). Prepare it once: `node bin/cjs-sde-prepare.js --build <n> --cache <its cache>` (Node 22, about
   a minute). The specs' fixtures are SDE build 3632936.
+- **Audio library.** tools-core also runs with `--no-audio-auto-prepare`, so when EVE's build moves (a TQ update) the
+  page's audio fails with "the hub's /audio/library answered 404: … not prepared for eve build <n>" until it is
+  prepared: `node bin/cjs-tools-prefetch.js audio --build <n> --cache <its cache>` (Node 22; ~4 min and ~3.5 GB for
+  3646012 on 2026-10-23). A hub reads the build once at its start, so one started before the move keeps asking for the
+  old build's library (and keeps working) until restarted.
 - **Degraded map index** (`GET map` → `index.degraded`, no `mapIndex` derivation): systems are found but stations on
   moons are named after their planet. Fix: `node bin/cjs-sde-prepare.js --build <n> --refresh` in tools-core.
 - tools-core quirks the hub works around are in `sd-locations` (map) and `sd-ship-stats` (`dna/resolve`).

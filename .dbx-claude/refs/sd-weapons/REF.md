@@ -187,7 +187,11 @@ turrets fire only at a locked target. No hostility check, and no pilot delay on 
   either is in warp, or its set is not mounted. Otherwise `ShipTurrets.Fire`: `SetTargetObject` on the shot's own
   target (a queued shot of an old target still draws there), `SetShotMissed(missed)`, `EnterStateFiring()`.
 - **Settle**: after a turret's `off`, its set returns to TARGETING (or IDLE without a target) once its queued shots
-  drew and its last burst ran (`fx.GetFiringDuration()` after the draw).
+  drew and its last burst ran (`fx.GetFiringDuration()` after the draw). `Director.Shots` queues a boundary's shots
+  (`ShotQueue.Add`) **before** `combat.Resolve`: a kill in Resolve stops the guns on the victim (`shots.Off`), and an
+  `Add` after it cleared those stops (a weapon that fires again is not stopped), leaving every set that shot the victim
+  FIRING on the dead hull (`aim: firing`, `renderer.turrets.firing` stuck) once no target followed. Found and fixed in
+  the fleet targeting T3 GPU check (2026-10-23).
 - The queue, the counts and `OnShot` run without a renderer too (headless shot counts; W4's sounds).
 - **Shots at a dying ship** (death `explode`, `sd-combat`): the boundary's shots after the killing one are `overkill`
   and still draw; every target on it clears, so no later shots are raised. Queued shots at it keep drawing (its ball

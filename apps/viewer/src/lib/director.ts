@@ -2177,8 +2177,8 @@ export class Director {
   }
 
   /**
-   * Turns a boundary's turret cycle starts into shots: Combat rules decide and apply each one, the OnShot listeners see
-   * it, then it queues to draw one tick after its exact start. A stopped turret settles once its last burst has run.
+   * Turns a boundary's turret cycle starts into shots: each queues to draw one tick after its exact start, Combat rules
+   * decide and apply it, then the OnShot listeners see it. A stopped turret settles once its last burst has run.
    *
    * @param events - The module events.
    */
@@ -2193,7 +2193,11 @@ export class Director {
       KindOf: (id): Maybe<ShotTargetKind> => this.targets.KindOf(id),
       SurfaceDistance: (a, b) => this.world.SurfaceDistance(a, b)
     });
-    // Combat rules roll and apply them in their fixed order first: the listeners see `missed` and `outcome`.
+    // Queued before Combat rules resolve them (the queue holds the same objects, so draws see `missed`): a kill in
+    // Resolve stops the guns on the victim (`shots.Off`), and queueing after would clear those stops, leaving the sets
+    // FIRING on the dead hull with no target.
+    if (shots.length) this.shots.Add(shots, this.clock.now);
+    // Combat rules roll and apply them in their fixed order before the listeners: they see `missed` and `outcome`.
     if (shots.length) this.combat.Resolve(shots, shots[0].tick);
     for (const shot of shots) {
       for (const listener of [...this.shotListeners]) {
@@ -2204,7 +2208,6 @@ export class Director {
         }
       }
     }
-    if (shots.length) this.shots.Add(shots, this.clock.now);
     for (const event of events) if (event.kind === 'off' && turret(event.ship, event.module)) this.shots.Off(event.ship, event.module);
   }
 

@@ -5,8 +5,8 @@ What a fleet, wing or squad shoots at, called the way an EVE FC calls it. Code: 
 `describeFleetGroup`, shared by `orders.ts` and `targets.ts`), `fleets/orders.ts` (the `targets` order type), the
 page lever `apps/viewer/src/lib/fleet-targets.ts` (`FleetTargets`, node-tested) and its Director wiring. Plan: `~/.claude/plans/fleet-targeting-lever-called-primaries-and-a-target-queue-per-fleet-wing-or-squa.md`.
 
-**Status: T2 in** (the document, the order, the call rules; the page lever: members lock, pre-lock and shoot the call,
-own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary`). The real-GPU look is slice T3.
+**Status: delivered** (the document, the order, the call rules; the page lever: members lock, pre-lock and shoot the
+call, own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary`; the real-GPU look, below).
 
 ## The document: `targets` on fleets, wings and squads
 
@@ -204,6 +204,42 @@ The four checks (`--only called`) pass:
 The earlier combat and fleet checks run unchanged (spot-checked: engage / cease_fire, set_target's lock time, a dead
 squad lead and FC). tools-core moved to SDE build 3646012 on 2026-10-23: it answers only for its reported build, so it
 was prepared once (`cjs-sde-prepare --build 3646012`, `sd-dev-env`).
+
+## Real-GPU evidence (2026-10-23, dbxpc, Windows Chrome, NVIDIA Lovelace, 1600 × 900)
+
+The `windows-chrome` check on a private hub (5521, temp scenes and fleets dirs), tools-core SDE 3646012. Driver and
+artifacts: `.scratch/targeting-gpu/` on dbxpc (`focus.mjs`, a hub controller; `run2` before the fix below, `run3`
+after). `stage_engagement` at 6 km: blue `Punisher` × 6 and red `Rifter` × 6, each a fleet with its first ship as FC,
+default weapons fits (42 turret sets mounted, failed 0, unplaced 0), death `explode`. Calls: blue
+`set: ["red-fc", "red-dps-01", "red-dps-02"]`; red `set: ["blue-dps-01", "blue-dps-02"]` with `delay: 0.5` (`delay` is
+`order_fleet`'s own argument: inside the order it is refused, "order_fleet.order.delay is not a targets order field").
+`frame_camera` on the blue primary at 2.5 km (yaw 60, pitch -12), re-framed on each new primary.
+
+- **Focus fire**: all six blue pilots took `red-fc` (called) at the order tick. Every blue beam converges on one hull
+  (`run3/004`), the misses overshooting past it; `red-fc`'s explosion at 0.5 s (`005`) and filling the frame at 3 s
+  (`007`, with `blue-dps-01`'s going off at the blue line); the beams re-converged on `red-dps-01` (`010`). Kills at
+  +12, +31 and +65 s after the call; then `called.primary` null, the targets cleared and the guns idled.
+- **Switch latency** (kill tick → the first `lastHits` row on the next primary): **+1 tick** on every switch, every
+  live member on the same tick, in both runs (blue `red-fc` → `red-dps-01` and `red-dps-01` → `red-dps-02`; red
+  `blue-dps-01` → `blue-dps-02`). No visible pause beyond a cycle, so no "retarget at the kill" follow-up. get_state's
+  `called.primary` turned over at kill + 2 ticks in every switch (polled at 2 Hz), a tick after the guns.
+- **Red's staggered response**: the order answered `red-fc` at once and `respondsIn` 1, 2, 4, 4, 5 s for the others;
+  each took the call at the order tick + its `respondsIn` + at most 1 tick. The delay is the order's only: at
+  `blue-dps-01`'s kill all five live red ships fired on `blue-dps-02` at +1 tick.
+- **fps**: `run3` mean 55.1, min 10 (one 0.5 s sample about 5 s after the first two kills, the first explosions after
+  a cache-bypassing reload; then 32, then ≥ 41); `run2` (warm) mean 53.1, min 39. `gpuErrors` 0, `page_log` errors 0
+  (its one warning: tools-core's audio library was not prepared for build 3646012, so the runs had no audio; prepared
+  after them, `sd-dev-env` → Audio library), `renderer.turrets`
+  failed 0 and no errors, every explosion `waiting → playing → done` with no error. 639 shots, 267 hits at 6 km.
+- **Formation while firing**: blue (FC alive) stayed in formation throughout, with a one-tick dip at each kill as the
+  slots re-laid out (5/5 → 1/4 → 4/4). Red lost its FC in the first exchange: under the stand-in it dipped to 0/N for
+  2–4 ticks after each re-layout and re-dipped once a few seconds later (`run3` ticks 42–44, 47–50, 61–63, 67–68,
+  95–97, 100–103; `run2` alike).
+- **Found and fixed**: a gun whose target died on its own shot's boundary never settled, so with no next target its
+  set stayed FIRING on the dead hull (`run2`'s end: `renderer.turrets` targeting 25 / firing 25 with every target null;
+  the K3 combat runs' final states show the same). `Director.Shots` now queues a boundary's shots before
+  `combat.Resolve` (`sd-weapons` → Settle). After the fix (`run3`) each side's sets idled 3 ticks after its list ran
+  out, ending at targeting 0 / firing 0 with every mount `idle`.
 
 ## Specs
 

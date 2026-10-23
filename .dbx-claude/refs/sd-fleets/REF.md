@@ -182,8 +182,8 @@ authority: the FC for the fleet, a wing commander their wing, a squad commander 
 object prunes it; a kill never edits it. Each member takes the nearest call in its chain (squad, wing, fleet; the FC the
 fleet's only, logi their own squad's only): every member without its own target locks it, pre-locks the next two and
 fires, moving on at the boundary after the primary dies, warps off or is removed. Own targets (set_target, engage,
-switch_modules) win; cease_fire holds (unlock stands down) until the group calls again. Status: T2 in (the real-GPU look
-is T3).
+switch_modules) win; cease_fire holds (unlock stands down) until the group calls again. Status: delivered (real-GPU
+evidence 2026-10-23: the guns re-converge on the next primary 1 tick after the kill).
 
 ## Arriving fleets (`warpIn`)
 
