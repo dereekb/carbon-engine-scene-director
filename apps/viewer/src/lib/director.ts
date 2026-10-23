@@ -170,7 +170,7 @@ import {
   type ShipStatsInput
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
-import { CombatRules, type ShipCombatReport } from './combat';
+import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
 import { type LockEvent, type LockTargeting, ShipLocks, type ShipLockReport } from './locks';
 import { TICKS_PER_SECOND, type SceneClock } from './clock';
 import { PageAudio } from './audio';
@@ -214,6 +214,7 @@ import { ModuleAudioPost } from './module-audio';
 import { ModuleEffects, type ModuleEffectsReport } from './module-effects';
 import { ModuleFxCommands } from './module-fx';
 import { ShipModules, type CapacitorLanding, type ShipModuleEvent, type TargetingModule } from './modules';
+import { MissileFlightId, MissileFlights, type MissileFlightsReport } from './missile-flights';
 import { ShotQueue, WeaponShotsOf } from './shots';
 import { ShipTargets, type ShipTargetReport } from './targets';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
@@ -431,7 +432,11 @@ export interface SetTargetResult {
      */
     readonly turrets: number;
     /**
-     * Its running turrets that follow the change: a new target at their first cycle once it is locked, none at their
+     * The ship's launchers, when it fits any.
+     */
+    readonly launchers?: number;
+    /**
+     * Its running weapons (turrets and launchers) that follow the change: a new target at their first cycle once it is locked, none at their
      * cycle end.
      */
     readonly retargeted: number;
@@ -752,6 +757,19 @@ export class Director {
   private readonly shots: ShotQueue;
   private readonly shotListeners = new Set<ShotListener>();
   /**
+   * The launches and their ends (missile-flights.ts): DestinyWorld flies the missiles, the book reports and times them.
+   */
+  private readonly missiles: MissileFlights;
+  /**
+   * The missile hits drained at this boundary (MissileArrivals), resolved with its turret shots in one Resolve (Shots).
+   */
+  private missileHits: WeaponShot[] = [];
+  /**
+   * Resolved missile hits by flight id, until their drawn detonation is due (DriveMissiles): a fatal one starts the
+   * victim's explosion there.
+   */
+  private readonly missileHitShots = new Map<string, WeaponShot>();
+  /**
    * Per fitted ship: the module specs last given to the activation layer; per ship: the module states and the incoming
    * target effects its flight was computed with (FlownKey).
    */
@@ -865,6 +883,7 @@ export class Director {
       }
     });
     this.shots = new ShotQueue(world.master.tickInterval / 1000);
+    this.missiles = new MissileFlights(world.master.tickInterval / 1000);
     this.capacitor = new CapacitorModel(world.master.tickInterval / 1000);
     this.locks = new ShipLocks({
       SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
@@ -910,7 +929,10 @@ export class Director {
       this.SyncFleetTargets(boundary);
       this.LockEvents(this.locks.Boundary(boundary, this.WantedLocks()));
       this.Engagements(boundary);
+      this.MissileArrivals(boundary);
       this.ModuleEvents(this.modules.Boundary(boundary));
+      // Missile hits with no turret shot at this boundary resolve on their own.
+      if (this.missileHits.length) this.Shots([]);
       // Arriving groups plan once ready; their warp-ins start at this boundary at the earliest.
       this.arrivals.Boundary(boundary);
     });
@@ -1153,9 +1175,9 @@ export class Director {
       }
       const { modules, unmatched } = selectFittedModules({ modules: resolved.modules }, command.modules);
       for (const selector of unmatched) skipped.push({ id, module: selector, reason: 'it fits no module matching it' });
-      // Turrets fire at the ship's target: a switch's target becomes it first, as set_target would.
-      const aimsTurrets = command.state === 'active' && command.target != null && command.target !== id && modules.some((module) => module.weapon === 'turret');
-      if (aimsTurrets && command.target && this.targets.KindOf(command.target) && !this.world.InWarp(id) && !this.world.InWarp(command.target)) {
+      // Weapons (turrets and launchers) fire at the ship's target: a switch's target becomes it first, as set_target would.
+      const aimsWeapons = command.state === 'active' && command.target != null && command.target !== id && modules.some((module) => module.weapon != null);
+      if (aimsWeapons && command.target && this.targets.KindOf(command.target) && !this.world.InWarp(id) && !this.world.InWarp(command.target)) {
         this.SetShipTarget(id, command.target);
         this.fleetTargets.Own(id);
       }
@@ -1165,9 +1187,9 @@ export class Director {
         if (typeof result === 'string') skipped.push({ id, module: module.key, reason: result });
         else switched.push(result);
       }
-      // Turrets switched on wait for the lock on the ship's target (EVE's pre-activation): make sure it is asked for.
+      // Weapons switched on wait for the lock on the ship's target (EVE's pre-activation): make sure it is asked for.
       const aim = this.targets.Of(id);
-      if (aim && command.state === 'active' && modules.some((module) => module.weapon === 'turret')) this.RequestLock(id, aim);
+      if (aim && command.state === 'active' && modules.some((module) => module.weapon != null)) this.RequestLock(id, aim);
       if (switched.length) ships.push({ id, modules: switched });
     }
     this.onChange();
@@ -1208,14 +1230,16 @@ export class Director {
         skipped.push({ id, reason });
         continue;
       }
-      const turrets = (this.fittings.get(id)?.modules ?? []).filter((module) => module.weapon === 'turret');
-      const retargeted = this.modules.Running(id).filter((spec) => spec.activation.weapon === 'turret').length;
+      const fitted = this.fittings.get(id)?.modules ?? [];
+      const turrets = fitted.filter((module) => module.weapon === 'turret');
+      const launchers = fitted.filter((module) => module.weapon === 'launcher');
+      const retargeted = this.modules.Running(id).filter((spec) => spec.activation.weapon != null).length;
       const previous = this.SetShipTarget(id, target ?? null);
       // A target given here is the ship's own: it wins over its groups' calls until it clears.
       if (target) this.fleetTargets.Own(id);
       if (!target) this.engagements.delete(id);
       const lock = target ? this.LockState(id, target, this.locks.Of(id).some((held) => held.target === target) ? null : this.RequestLock(id, target)) : null;
-      ships.push({ id, target: target ?? null, ...(previous && previous !== target ? { previous } : {}), turrets: turrets.length, retargeted: previous === (target ?? null) ? 0 : retargeted, ...(lock ? { lock } : {}) });
+      ships.push({ id, target: target ?? null, ...(previous && previous !== target ? { previous } : {}), turrets: turrets.length, ...(launchers.length ? { launchers: launchers.length } : {}), retargeted: previous === (target ?? null) ? 0 : retargeted, ...(lock ? { lock } : {}) });
     }
     // A cleared own target hands the ship its group's call at once.
     if (!target && ships.length) this.SyncFleetTargets();
@@ -1237,13 +1261,13 @@ export class Director {
   }
 
   /**
-   * Arms the selected ships' weapons on a target: it becomes their target and they lock it, and their matching turrets
-   * switch active, wait for the lock and fire. Each boundary an engaged ship's matching turrets back online switch active
+   * Arms the selected ships' weapons on a target: it becomes their target and they lock it, and their matching weapons
+   * switch active, wait for the lock and fire. Each boundary an engaged ship's matching weapons back online switch active
    * again (Engagements), so they fire again after a lost lock or on a new set_target. It ends on cease_fire, set_target
    * null, the ship's death or removal, or a load; it survives the target's death (the guns hold for a new target).
    *
-   * @param input - The engage arguments: target, modules (default ["turret"]) and a selection.
-   * @returns The tick, each armed ship's lock and switched turrets, what was skipped with why, and team warnings.
+   * @param input - The engage arguments: target, modules (default ["turret", "launcher"]) and a selection.
+   * @returns The tick, each armed ship's lock and switched weapons, what was skipped with why, and team warnings.
    * @throws {SceneError} When the command is invalid, names an unknown ship, fleet, wing or squad, or a target that is no
    *   live ship or object in the scene.
    */
@@ -1264,7 +1288,7 @@ export class Director {
     const warnings: string[] = [];
     for (const id of selected.ships) {
       const resolved = this.fittings.get(id);
-      const turrets = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, command.modules).modules.filter((module) => module.weapon === 'turret') : [];
+      const weapons = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, command.modules).modules.filter((module) => module.weapon != null) : [];
       let reason: Maybe<string> = null;
       if (target === id) reason = 'it cannot engage itself';
       else if (this.combat.IsDestroyed(id)) reason = 'it was destroyed';
@@ -1272,7 +1296,7 @@ export class Director {
       else if (kind === 'ship' && this.world.InWarp(target)) reason = `its target "${target}" is in warp`;
       else if (!resolved?.dogma) reason = resolved ? `its fit has not resolved: ${resolved.note ?? 'waiting for the hub'}` : 'its weapons have not resolved yet';
       else if (!this.LockTargeting(id)) reason = 'it has no targeting numbers (no EVE dogma for its hull)';
-      else if (!turrets.length) reason = `it fits no turret matching ${command.modules.join(', ')}`;
+      else if (!weapons.length) reason = `it fits no weapon matching ${command.modules.join(', ')}`;
       if (reason) {
         skipped.push({ id, reason });
         continue;
@@ -1283,7 +1307,7 @@ export class Director {
       this.fleetTargets.Rearm([id]);
       this.engagements.set(id, { modules: command.modules });
       const modules: EngageResult['ships'][number]['modules'] = [];
-      for (const module of turrets) {
+      for (const module of weapons) {
         const refusal = this.modules.Switch(id, module.key, 'active', { boundary: this.world.tick, target });
         if (refusal) skipped.push({ id, module: module.key, reason: refusal });
         else modules.push({ module: module.key, name: module.name, state: this.modules.CycleState(id, module.key) ?? 'online' });
@@ -1296,11 +1320,11 @@ export class Director {
   }
 
   /**
-   * Ends the selected ships' engagements: their engaged turrets switch online and stop at their cycle end. `unlock`
+   * Ends the selected ships' engagements: their engaged weapons switch online and stop at their cycle end. `unlock`
    * also clears their targets (as set_target null), and the lock sweep drops the locks.
    *
    * @param input - The cease_fire arguments: unlock and a selection.
-   * @returns The tick, each ship's stopped turrets, and what was skipped with why.
+   * @returns The tick, each ship's stopped weapons, and what was skipped with why.
    * @throws {SceneError} When the command is invalid or names an unknown ship, fleet, wing or squad.
    */
   CeaseFire(input: unknown): CeaseFireResult {
@@ -1317,16 +1341,16 @@ export class Director {
       // A fleet member holds (keeps the call and its locks, unarmed) or stands down from the call (unlock).
       const held = this.fleetTargets.Hold(id, command.unlock ? 'stand-down' : 'hold') ? (command.unlock ? ('stand-down' as const) : ('hold' as const)) : null;
       const resolved = this.fittings.get(id);
-      const turrets = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, engagement?.modules ?? DEFAULT_ENGAGE_MODULES).modules.filter((module) => module.weapon === 'turret') : [];
+      const weapons = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, engagement?.modules ?? DEFAULT_ENGAGE_MODULES).modules.filter((module) => module.weapon != null) : [];
       const modules: string[] = [];
-      for (const module of turrets) {
+      for (const module of weapons) {
         const state = this.modules.CycleState(id, module.key);
         if (state !== 'activating' && state !== 'active' && state !== 'reactivating') continue;
         if (!this.modules.Switch(id, module.key, 'online', { boundary: this.world.tick })) modules.push(module.key);
       }
       const unlocked = command.unlock && this.targets.Of(id) != null;
       if (unlocked) this.SetShipTarget(id, null);
-      if (!engagement && !armed.has(id) && !modules.length && !unlocked) skipped.push({ id, reason: 'it is not engaged and its turrets are not firing' });
+      if (!engagement && !armed.has(id) && !modules.length && !unlocked) skipped.push({ id, reason: 'it is not engaged and its weapons are not firing' });
       else ships.push({ id, modules, ...(unlocked ? { unlocked: true as const } : {}), ...(held ? { held } : {}) });
     }
     if (command.unlock) this.SyncFleetTargets();
@@ -1453,6 +1477,21 @@ export class Director {
     for (const post of this.turretSounds.Due(now)) {
       // A ship that left (or not built into the world yet) posts nothing: its emitter is released with it.
       if (this.world.Curves(post.ship)) this.audio.Post({ ship: post.ship, tick: post.tick, events: post.events, placement: this.AudioPlacement(post.ship, now) });
+    }
+  }
+
+  /**
+   * Plays the missiles' drawn moments due by `now` (MissileFlights.Due): without a renderer a fatal hit starts its
+   * victim's explosion at the hit's draw time. Runs after DriveTurrets and before DriveExplosions.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  DriveMissiles(now: number): void {
+    for (const due of this.missiles.Due(now)) {
+      if (due.kind !== 'hit') continue;
+      const shot = this.missileHitShots.get(due.flight.id);
+      this.missileHitShots.delete(due.flight.id);
+      if (shot?.fatal) this.ExplosionStarts(shot.target, due.at);
     }
   }
 
@@ -1635,6 +1674,7 @@ export class Director {
       distances,
       objects: this.ObjectRows(),
       combat: this.SceneCombatState(),
+      ...this.SceneMissilesState(),
       fleets: this.scene
         ? toFleetReports(this.LiveFleets()?.scene ?? this.scene).map((report) => ({
             ...report,
@@ -1737,6 +1777,10 @@ export class Director {
       this.ForgetTarget(doc.id);
       this.locks.Remove(doc.id);
       this.combat.Remove(doc.id);
+      // Its missiles go with it; those at it are lost through Destiny.
+      this.world.RemoveMissilesOf(doc.id);
+      this.missiles.Forget(doc.id);
+      for (const [flight, shot] of this.missileHitShots) if (shot.ship === doc.id) this.missileHitShots.delete(flight);
       this.engagements.delete(doc.id);
       this.fleetTargets.Forget(doc.id);
       this.rechargeSynced.delete(doc.id);
@@ -1780,6 +1824,10 @@ export class Director {
       this.targets.Clear();
       this.locks.Clear();
       this.combat.Clear();
+      this.world.ClearMissiles();
+      this.missiles.Clear();
+      this.missileHits = [];
+      this.missileHitShots.clear();
       this.engagements.clear();
       this.fleetTargets.Clear();
       this.rechargeSynced.clear();
@@ -2161,6 +2209,8 @@ export class Director {
     }
     for (const id of repaired) this.SyncImpactState(id);
     for (const landing of this.modules.CapacitorLandings(events)) this.LandCapacitor(landing);
+    // Launched before the shots resolve: a kill in Resolve then loses the new missiles on the victim like the rest.
+    this.Launches(events);
     this.Shots(events);
     const commands = ModuleFxCommands(events);
     const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
@@ -2177,8 +2227,63 @@ export class Director {
   }
 
   /**
-   * Turns a boundary's turret cycle starts into shots: each queues to draw one tick after its exact start, Combat rules
-   * decide and apply it, then the OnShot listeners see it. A stopped turret settles once its last burst has run.
+   * Turns a boundary's launcher cycle starts with a target into missiles: DestinyWorld launches each from its ship's
+   * centre one tick after its exact start (the drawn frame, the turret draw rule), with its flight time from there,
+   * and the flight book records it (or counts the refusal on the launcher's row; the cycle still ran).
+   *
+   * @param events - The module events.
+   */
+  private Launches(events: readonly ShipModuleEvent[]): void {
+    const tickSeconds = this.world.master.tickInterval / 1000;
+    for (const event of events) {
+      if (event.kind !== 'cycle' || !event.target) continue;
+      const spec = this.modules.Spec(event.ship, event.module);
+      const targetKind = this.targets.KindOf(event.target);
+      if (spec?.activation.weapon !== 'launcher' || !targetKind) continue;
+      const numbers = spec.missile;
+      if (!numbers) {
+        this.missiles.Refused(event.ship, event.module, 'no EVE dogma for its missile');
+        continue;
+      }
+      const at = event.at ?? event.tick;
+      const id = MissileFlightId(event.ship, event.module, event.activation, event.cycle);
+      const launchedAt = at + 1;
+      const physics = { mass: numbers.mass, agility: numbers.agility, maxVelocity: numbers.velocity, radius: numbers.radius };
+      const refusal = this.world.LaunchMissile({ id, owner: event.ship, target: event.target, physics, launchedAt, expiresAt: launchedAt + numbers.flightTime / tickSeconds });
+      if (refusal) {
+        this.missiles.Refused(event.ship, event.module, refusal);
+        continue;
+      }
+      const { charge } = numbers;
+      this.missiles.Add({ id, ship: event.ship, module: event.module, typeID: spec.typeID, name: spec.name, ...(charge ? { charge } : {}), target: event.target, targetKind, cycle: event.cycle, activation: event.activation, tick: event.tick, at, numbers }, this.clock.now);
+    }
+  }
+
+  /**
+   * Drains DestinyWorld's missile ends at a boundary, right before its module events: hits wait for that boundary's
+   * Resolve with its turret shots (Shots), expiries and losses are recorded at once (CombatRules.Expire). A missile's
+   * end found after the evolve into tick k is drained at boundary k, the window its turret twins are raised in.
+   *
+   * @param boundary - The master tick.
+   */
+  private MissileArrivals(boundary: number): void {
+    const now = this.clock.now;
+    for (const event of this.world.TakeMissileEvents()) {
+      const end = this.missiles.End(event, now, boundary);
+      if (!end?.finishes) continue;
+      const shot = this.missiles.ShotOf(end.flight, event.at, boundary);
+      if (end.kind === 'hit') {
+        this.missileHits.push(shot);
+        this.missileHitShots.set(end.flight.id, shot);
+      } else this.combat.Expire(shot, end.why ?? MISSILE_EXPIRED_NOTE, boundary);
+    }
+    this.missiles.Prune(boundary);
+  }
+
+  /**
+   * Turns a boundary's turret cycle starts into shots: each queues to draw one tick after its exact start, then with
+   * the boundary's missile hits (MissileArrivals) Combat rules decide and apply them in one sorted Resolve, then the
+   * OnShot listeners see them. A stopped turret settles once its last burst has run.
    *
    * @param events - The module events.
    */
@@ -2197,6 +2302,7 @@ export class Director {
     // Resolve stops the guns on the victim (`shots.Off`), and queueing after would clear those stops, leaving the sets
     // FIRING on the dead hull with no target.
     if (shots.length) this.shots.Add(shots, this.clock.now);
+    shots.push(...this.missileHits.splice(0));
     // Combat rules roll and apply them in their fixed order before the listeners: they see `missed` and `outcome`.
     if (shots.length) this.combat.Resolve(shots, shots[0].tick);
     for (const shot of shots) {
@@ -2268,7 +2374,7 @@ export class Director {
    * @returns The refusal, or null.
    */
   private RequestLock(id: string, target: string, requestedAt = this.world.tick): Maybe<string> {
-    const wanted = new Set([target, ...(this.modules.TurretAims().get(id) ?? [])]);
+    const wanted = new Set([target, ...(this.modules.WeaponAims().get(id) ?? [])]);
     return this.locks.Request(id, target, requestedAt, wanted);
   }
 
@@ -2291,7 +2397,7 @@ export class Director {
    * (its call's next queued targets) while it is under its lock limit, so the sweep never has to choose.
    */
   private WantedLocks(): Map<string, Set<string>> {
-    const wanted = this.modules.TurretAims();
+    const wanted = this.modules.WeaponAims();
     for (const doc of this.scene?.ships ?? []) {
       const target = this.IsDead(doc.id) ? null : this.targets.Of(doc.id);
       if (target) wanted.set(doc.id, new Set([target, ...(wanted.get(doc.id) ?? [])]));
@@ -2353,29 +2459,29 @@ export class Director {
         this.engagements.delete(id);
         continue;
       }
-      this.ArmTurrets(id, engagement.modules, boundary);
+      this.ArmWeapons(id, engagement.modules, boundary);
     }
     // Members following a call are armed like an engagement: calling a primary makes them shoot it.
     for (const id of this.fleetTargets.Armed()) {
       if (this.engagements.has(id) || this.world.Curves(id) == null || this.combat.IsDestroyed(id)) continue;
-      this.ArmTurrets(id, DEFAULT_ENGAGE_MODULES, boundary);
+      this.ArmWeapons(id, DEFAULT_ENGAGE_MODULES, boundary);
     }
   }
 
   /**
-   * Switches a ship's selected turrets that are back online active at its target.
+   * Switches a ship's selected weapons (turrets and launchers) that are back online active at its target.
    *
    * @param id - The ship.
    * @param selectors - The module selectors (engage's modules).
    * @param boundary - The master tick.
    */
-  private ArmTurrets(id: string, selectors: readonly string[], boundary: number): void {
+  private ArmWeapons(id: string, selectors: readonly string[], boundary: number): void {
     const target = this.targets.Of(id);
     const resolved = this.fittings.get(id);
     if (!target || !resolved?.dogma || this.world.InWarp(id)) return;
     const { modules } = selectFittedModules({ modules: resolved.modules }, selectors);
     for (const module of modules) {
-      if (module.weapon !== 'turret' || this.modules.CycleState(id, module.key) !== 'online') continue;
+      if (module.weapon == null || this.modules.CycleState(id, module.key) !== 'online') continue;
       this.modules.Switch(id, module.key, 'active', { boundary, target });
     }
   }
@@ -2484,7 +2590,7 @@ export class Director {
     } else if (state === 'offline' && (module.slot === 'rig' || module.slot === 'subsystem')) {
       result = `${module.slot === 'rig' ? 'rigs' : 'subsystems'} are always online`;
     } else {
-      const target = module.weapon === 'turret' ? (this.targets.Of(id) ?? command.target) : command.target;
+      const target = module.weapon != null ? (this.targets.Of(id) ?? command.target) : command.target;
       const refusal = this.modules.Switch(id, module.key, state, { boundary: this.world.tick, target, delay });
       const live = refusal === null ? this.modules.State(id, module.key, this.world.tick) : null;
       result = live
@@ -2525,8 +2631,20 @@ export class Director {
     if (module.weapon) {
       const mount = this.WeaponMount(id, module);
       if (mount) row = { ...row, mount };
-      const combat = this.modules.Spec(id, module.key)?.combat;
-      if (combat) row = { ...row, combat: { damage: Object.fromEntries(Object.entries(combat.damage).map(([type, amount]) => [type, Round(amount, 2)])), volley: Round(combat.volley, 2), dps: Round(combat.dps, 1) } };
+      const spec = this.modules.Spec(id, module.key);
+      const combat = spec?.combat;
+      const damage = (vector: Readonly<Record<string, number>>) => Object.fromEntries(Object.entries(vector).map(([type, amount]) => [type, Round(amount, 2)]));
+      if (combat) row = { ...row, combat: { damage: damage(combat.damage), volley: Round(combat.volley, 2), dps: Round(combat.dps, 1) } };
+      const missile = spec?.missile;
+      if (missile) {
+        const { lower, upper, upperChance, mean } = missile.range;
+        const range = { lower: Math.round(lower), upper: Math.round(upper), upperChance: Round(upperChance, 3), mean: Math.round(mean) };
+        row = { ...row, combat: { damage: damage(missile.damage), volley: Round(missile.volley, 2), dps: Round(missile.dps, 1), velocity: Round(missile.velocity, 1), flightTime: Round(missile.flightTime, 3), range } };
+        const inFlight = this.missiles.InFlightOf(id, module.key);
+        if (inFlight) row = { ...row, inFlight };
+        const refused = this.missiles.RefusalOf(id, module.key);
+        if (refused) row = { ...row, note: row.note ? `${row.note}; its last missile was not launched: ${refused}` : `its last missile was not launched: ${refused}` };
+      }
     }
     return row;
   }
@@ -3426,6 +3544,7 @@ export class Director {
     locks?: ShipLockReport[];
     engaged?: { readonly modules: readonly string[] };
     combat?: ShipCombatReport & { readonly paperDps: number };
+    missiles?: { readonly launched: number; readonly inFlight: number };
     destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string };
   } & Partial<ShipFleetMembership> &
     Omit<Partial<ShipMotion>, 'propMod'> {
@@ -3510,6 +3629,7 @@ export class Director {
     locks?: ShipLockReport[];
     engaged?: { readonly modules: readonly string[] };
     combat?: ShipCombatReport & { readonly paperDps: number };
+    missiles?: { readonly launched: number; readonly inFlight: number };
     destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string; readonly explosion?: ShipExplosionReport & { readonly removesAt: number; readonly gone: boolean } };
   } {
     const tick = this.world.tick;
@@ -3519,16 +3639,29 @@ export class Director {
     const combat = this.combat.Report(id, tick);
     const kill = this.combat.KillOf(id);
     const paperDps = this.modules
-      .TurretKeys(id)
-      .map((key) => this.modules.Spec(id, key)?.combat?.dps ?? 0)
+      .WeaponKeys(id)
+      .map((key) => {
+        const spec = this.modules.Spec(id, key);
+        return spec?.combat?.dps ?? spec?.missile?.dps ?? 0;
+      })
       .reduce((sum, dps) => sum + dps, 0);
+    const missiles = this.missiles.Counts(id);
     return {
       ...(targeting ? { targeting: { scanResolution: Round(targeting.scanResolution, 2), maxTargetRange: Math.round(targeting.maxTargetRange), maxLocks: targeting.maxLocks } } : {}),
       ...(locks.length ? { locks } : {}),
       ...(engaged ? { engaged: { modules: engaged.modules } } : {}),
       ...(combat ? { combat: { ...combat, paperDps: Round(paperDps, 1) } } : {}),
+      ...(missiles.launched || missiles.inFlight ? { missiles } : {}),
       ...(kill ? { destroyed: { tick: kill.tick, by: kill.by, module: kill.module, weapon: kill.weapon, mode: kill.mode, ...this.DeathState(id) } } : {})
     };
+  }
+
+  /**
+   * The scene's missiles for get_state (MissileFlights.Report): omitted until a launch (or a refused one) after a load.
+   */
+  private SceneMissilesState(): { missiles?: MissileFlightsReport } {
+    const report = this.missiles.Report(this.world.tick, (id) => this.world.Missile(id));
+    return report.launched || report.refused ? { missiles: report } : {};
   }
 
   /**

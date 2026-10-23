@@ -5,10 +5,11 @@
  * - SetFit gives a ship its modules (their activation: moduleActivationOf); states carry over by (key, type id), and a
  *   running module that vanished stops at once (`refitted`). Modules beyond their group's maxGroupOnline start offline.
  * - Switch asks one module for a state now or after a pilot delay. Refused: activating a module that cannot run yet
- *   (launchers, MJDs, cloaks, cynos, bubbles, smartbombs, ECM bursts, passive modules), beyond maxGroupActive, in warp,
- *   a targeted module without a target ship, on itself, on a ship in warp, beyond its reach (`activation.reach`:
- *   optimal + 2 × falloff; Infinity for turrets), or already running on another target. A turret's target may also be
- *   an authored object, and a running turret given another target retargets at its next cycle (Retarget).
+ *   (bomb launchers, launchers without missiles, MJDs, cloaks, cynos, bubbles, smartbombs, ECM bursts, passive
+ *   modules), beyond maxGroupActive, in warp, a targeted module without a target ship, on itself, on a ship in warp,
+ *   beyond its reach (`activation.reach`: optimal + 2 × falloff; Infinity for weapons), or already running on another
+ *   target. A weapon's (turret's or launcher's) target may also be an authored object, and a running weapon given
+ *   another target retargets at its next cycle (Retarget).
  * - Boundary advances every cycle at a tick boundary. A running targeted module whose target drifts out of reach stops
  *   at its cycle end; one whose target is removed (Remove) or enters warp (OnWarpEnter) stops at once. Entering warp
  *   stops a ship's own modules that are not warp safe, and its targeted ones, at once.
@@ -18,15 +19,15 @@
  *   cycle start (kept while it stops, null once off). Targeting / TargetIndex list them per target, for the target's
  *   flight (webs, painters, points, scrams); CapacitorLandings turns cycle starts into neut, nos and transmitter
  *   transfers (capacitor.ts applies them).
- * - Locks (locks.ts, through the port's LockHold): a turret activated before its lock completes waits in `activating`
- *   with the lock note (EVE's pre-activation); a running turret whose lock is lost stops at its cycle end; a pending
+ * - Locks (locks.ts, through the port's LockHold): a weapon activated before its lock completes waits in `activating`
+ *   with the lock note (EVE's pre-activation); a running weapon whose lock is lost stops at its cycle end; a pending
  *   retarget switches at the first cycle start once the new target is locked. Without LockHold nothing waits.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type ModuleActivation, type TurretCombatNumbers } from '@scene-director/scene';
+import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type MissileCombatNumbers, type ModuleActivation, type TurretCombatNumbers } from '@scene-director/scene';
 import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleReport, type ModuleCycleRequest, type ModuleCycleState } from './module-cycle';
 
 /**
@@ -43,7 +44,7 @@ export interface ShipModulesPort {
   InWarp(id: string): boolean;
   HasShip(id: string): boolean;
   /**
-   * Whether an authored object is in the world (a turret's target may be one).
+   * Whether an authored object is in the world (a weapon's target may be one).
    */
   HasObject(id: string): boolean;
   /**
@@ -51,7 +52,7 @@ export interface ShipModulesPort {
    */
   readonly tickSeconds: number;
   /**
-   * Why a turret must wait for its lock on a target (ShipLocks.Hold); null once locked. Absent: turrets never wait.
+   * Why a weapon must wait for its lock on a target (ShipLocks.Hold); null once locked. Absent: weapons never wait.
    */
   LockHold?(ship: string, target: string): Maybe<string>;
 }
@@ -72,6 +73,10 @@ export interface ShipModuleSpec {
    * A turret's damage, tracking and ranges from the same live evaluation (turretCombatNumbersOf); null without dogma.
    */
   readonly combat?: Maybe<TurretCombatNumbers>;
+  /**
+   * A launcher's missile numbers from the same live evaluation (missileCombatNumbersOf); null without dogma.
+   */
+  readonly missile?: Maybe<MissileCombatNumbers>;
 }
 
 /**
@@ -139,7 +144,7 @@ export interface CapacitorLanding {
 export interface ShipModuleLiveState extends ModuleCycleReport {
   readonly target?: string;
   /**
-   * A running turret's next target: it retargets at its next cycle.
+   * A running weapon's next target: it retargets at its next cycle.
    */
   readonly nextTarget?: string;
   readonly targetDistance?: number;
@@ -164,7 +169,7 @@ interface ModuleEntry {
   readonly cycle: ModuleCycle;
   target: Maybe<string>;
   /**
-   * A running turret's next target, taken at its next cycle start; null stops it at its cycle end instead.
+   * A running weapon's next target, taken at its next cycle start; null stops it at its cycle end instead.
    */
   retarget?: string;
   effectiveness: Maybe<number>;
@@ -258,7 +263,7 @@ export class ShipModules {
     if (entry && refusal === null) {
       if (request === 'active' && entry.spec.activation.targeted) {
         const aim = options.target ?? entry.retarget ?? entry.target;
-        if (IsTurret(entry) && entry.cycle.running && entry.target && aim && aim !== entry.target) entry.retarget = aim;
+        if (IsWeapon(entry) && entry.cycle.running && entry.target && aim && aim !== entry.target) entry.retarget = aim;
         else entry.target = aim;
         if (entry.retarget === entry.target) delete entry.retarget;
         entry.effectiveness = this.Effectiveness(id, entry);
@@ -270,18 +275,18 @@ export class ShipModules {
   }
 
   /**
-   * A ship's target changed: its running and starting turrets follow it. A running turret takes a new target at its
+   * A ship's target changed: its running and starting weapons follow it. A running weapon takes a new target at its
    * next cycle start; a starting one at once; null stops them at their cycle end.
    *
    * @param id - The ship id.
    * @param target - The new target (a ship or object), or null.
    * @param boundary - The master tick now.
-   * @returns The `off` events of turrets that could not start on it.
+   * @returns The `off` events of weapons that could not start on it.
    */
   Retarget(id: string, target: Maybe<string>, boundary: number): ShipModuleEvent[] {
     const events: ShipModuleEvent[] = [];
     for (const [key, entry] of this.ships.get(id) ?? []) {
-      if (!IsTurret(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
+      if (!IsWeapon(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
       if (target == null) {
         delete entry.retarget;
         if (entry.cycle.running) entry.cycle.StopAtCycleEnd(boundary, 'its target was cleared');
@@ -319,7 +324,7 @@ export class ShipModules {
           }
           entry.effectiveness = this.Effectiveness(id, entry);
         }
-        const hold = entry.target && IsTurret(entry) ? this.LockHold(id, entry.target) : null;
+        const hold = entry.target && IsWeapon(entry) ? this.LockHold(id, entry.target) : null;
         if (hold && entry.cycle.state === 'active') entry.cycle.StopAtCycleEnd(boundary, `it lost its lock on "${entry.target}"`);
         const cycled = entry.cycle.Boundary(boundary, hold ? { hold } : undefined);
         const next = entry.retarget === undefined || this.LockHold(id, entry.retarget) ? -1 : cycled.findIndex((event) => event.kind === 'cycle');
@@ -380,7 +385,7 @@ export class ShipModules {
   }
 
   /**
-   * A module's spec (a turret's combat numbers).
+   * A module's spec (a turret's combat numbers, a launcher's missile numbers).
    *
    * @param id - The ship id.
    * @param key - The module key.
@@ -391,16 +396,16 @@ export class ShipModules {
   }
 
   /**
-   * What every ship's turrets aim at while running, stopping or waiting to start, a pending retarget included: the
-   * locks the lock sweep keeps.
+   * What every ship's weapons (turrets and launchers) aim at while running, stopping or waiting to start, a pending
+   * retarget included: the locks the lock sweep keeps.
    *
    * @returns The targets by ship id.
    */
-  TurretAims(): Map<string, Set<string>> {
+  WeaponAims(): Map<string, Set<string>> {
     const aims = new Map<string, Set<string>>();
     for (const [id, modules] of this.ships) {
       for (const entry of modules.values()) {
-        if (!IsTurret(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
+        if (!IsWeapon(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
         const set = aims.get(id) ?? new Set<string>();
         if (entry.target) set.add(entry.target);
         if (entry.retarget) set.add(entry.retarget);
@@ -411,13 +416,13 @@ export class ShipModules {
   }
 
   /**
-   * A ship's turrets, whatever their state.
+   * A ship's weapons (turrets and launchers), whatever their state.
    *
    * @param id - The ship id.
    * @returns Their keys, in fit order.
    */
-  TurretKeys(id: string): string[] {
-    return [...(this.ships.get(id) ?? [])].flatMap(([key, entry]) => (IsTurret(entry) ? [key] : []));
+  WeaponKeys(id: string): string[] {
+    return [...(this.ships.get(id) ?? [])].flatMap(([key, entry]) => (IsWeapon(entry) ? [key] : []));
   }
 
   /**
@@ -490,7 +495,7 @@ export class ShipModules {
     const index = new Map<string, TargetingModule[]>();
     for (const [from, modules] of this.ships) {
       for (const entry of modules.values()) {
-        if (!entry.target || !entry.cycle.running || !entry.spec.activation.targeted || IsTurret(entry)) continue;
+        if (!entry.target || !entry.cycle.running || !entry.spec.activation.targeted || IsWeapon(entry)) continue;
         const list = index.get(entry.target) ?? [];
         list.push({ from, spec: entry.spec, effectiveness: entry.effectiveness ?? 1, applied: entry.applied ?? entry.effectiveness ?? 1 });
         index.set(entry.target, list);
@@ -554,15 +559,15 @@ export class ShipModules {
     } else if (this.port.InWarp(id)) {
       refusal = `ship "${id}" is in warp`;
     } else if (activation.targeted) {
-      const turret = IsTurret(entry);
+      const weapon = IsWeapon(entry);
       const aim = target ?? (running ? (entry.retarget ?? entry.target) : null);
       const distance = aim ? this.port.SurfaceDistance(id, aim) : null;
       const { reach } = activation;
-      if (!aim) refusal = turret ? 'it needs a target: set_target or switch_modules target' : 'it needs a target: a ship id';
+      if (!aim) refusal = weapon ? 'it needs a target: set_target or switch_modules target' : 'it needs a target: a ship id';
       else if (aim === id) refusal = 'it cannot target its own ship';
-      else if (!this.Targetable(entry, aim)) refusal = turret ? `no ship or object "${aim}"` : `no ship "${aim}" (a targeted module runs on a ship, not an object)`;
+      else if (!this.Targetable(entry, aim)) refusal = weapon ? `no ship or object "${aim}"` : `no ship "${aim}" (a targeted module runs on a ship, not an object)`;
       else if (this.port.InWarp(aim)) refusal = `its target "${aim}" is in warp`;
-      else if (!turret && running && entry.target && entry.target !== aim) refusal = `it is running on "${entry.target}"; switch it online first`;
+      else if (!weapon && running && entry.target && entry.target !== aim) refusal = `it is running on "${entry.target}"; switch it online first`;
       else if (distance == null || distance > reach) refusal = `"${aim}" is out of range: ${Math.round(distance ?? 0)} m, it reaches ${Math.round(reach)} m`;
     }
     if (refusal === null && !running && activation.maxGroupActive > 0) {
@@ -581,10 +586,10 @@ export class ShipModules {
   }
 
   /**
-   * Whether a module may run on a target: a ship, or for a turret an authored object too.
+   * Whether a module may run on a target: a ship, or for a weapon an authored object too.
    */
   private Targetable(entry: ModuleEntry, target: string): boolean {
-    return this.port.HasShip(target) || (IsTurret(entry) && this.port.HasObject(target));
+    return this.port.HasShip(target) || (IsWeapon(entry) && this.port.HasObject(target));
   }
 
   private LockHold(id: string, target: string): Maybe<string> {
@@ -598,7 +603,8 @@ export class ShipModules {
 
   private Effectiveness(id: string, entry: ModuleEntry): Maybe<number> {
     const distance = entry.target ? this.port.SurfaceDistance(id, entry.target) : null;
-    return distance == null ? null : falloffEffectiveness({ distance, range: entry.spec.activation.range, falloff: entry.spec.activation.falloff });
+    // A launcher has no falloff curve: its missiles apply by EVE's missile formula at impact.
+    return distance == null || entry.spec.activation.weapon === 'launcher' ? null : falloffEffectiveness({ distance, range: entry.spec.activation.range, falloff: entry.spec.activation.falloff });
   }
 
   private StopTargeting(target: string, boundary: number, why: string): ShipModuleEvent[] {
@@ -628,10 +634,11 @@ export class ShipModules {
 }
 
 /**
- * Whether a module is a turret: it fires at its ship's target, a ship or an object, at any range.
+ * Whether a module is a weapon (a turret or a launcher): it fires at its ship's target, a ship or an object, at any
+ * range.
  */
-function IsTurret(entry: ModuleEntry): boolean {
-  return entry.spec.activation.weapon === 'turret';
+function IsWeapon(entry: ModuleEntry): boolean {
+  return entry.spec.activation.weapon != null;
 }
 
 /**

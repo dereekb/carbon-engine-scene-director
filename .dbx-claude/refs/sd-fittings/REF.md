@@ -366,8 +366,10 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   event: the director compares the live states instead (below).
 - **What runs** (`moduleActivationOf`, from the ship evaluated with its live states, so skills, hull bonuses and triage
   apply): category 1 and 2 default effects activate; cycle = the default effect's duration (10 s when it has none).
-  Turrets run (`weapon: 'turret'`, `sd-weapons`); refused: launchers (`LAUNCHER_REFUSAL`, the Missiles entry), MJD 1189, MJFG 1533, cloaks 330, cynos 658, bubbles 899, smartbombs 72, ECM
-  bursts 80, passive modules. Webs, painters, points, scrams, neuts, nos and cap transmitters act on their target
+  Turrets and launchers run (`weapon`, `sd-weapons`: a launcher is `targeted` though its `useMissiles` is category 1,
+  reach Infinity); refused: bomb launchers 862, a launcher without a missile loaded (`NO_MISSILE_REFUSAL`, "it has no
+  missiles loaded"), MJD 1189, MJFG 1533, cloaks 330, cynos 658, bubbles 899, smartbombs 72, ECM bursts 80, passive
+  modules. Webs, painters, points, scrams, neuts, nos and cap transmitters act on their target
   (`activation.targetEffect`, "Target effects"). Without effect, with a `note`: sensor dampeners and ECM (`locks are not
   modelled yet`), weapon disruptors (`weapons are not modelled yet`), cap boosters (`cap boosters do not refill the live
   capacitor yet`), command bursts; any other targeted module with neither `repair` nor `targetEffect` notes `cycles

@@ -10,6 +10,7 @@ import type { DogmaShip } from './dogma';
 import type { DogmaBundle } from './dogma-bundle';
 import { moduleNumbersOf, type ModuleNumbers } from './defense';
 import { moduleTargetEffectOf, type ModuleTargetEffect } from './target-effects';
+import { isMissileCharge } from '../weapons/default-missiles';
 
 /**
  * Groups that cannot be activated yet, with why.
@@ -21,7 +22,8 @@ export const UNACTIVATABLE_GROUPS: Readonly<Record<number, string>> = {
   658: 'cynosural fields are not modelled yet',
   899: 'warp disruption field generators are not modelled yet',
   72: 'smartbombs are not modelled yet',
-  80: 'ECM bursts are not modelled yet'
+  80: 'ECM bursts are not modelled yet',
+  862: 'bomb launchers are not modelled yet'
 };
 
 /**
@@ -41,9 +43,9 @@ export const EFFECTLESS_CATEGORIES: Readonly<Partial<Record<ModuleCategory, stri
 export const TARGET_EFFECTLESS_NOTE = 'cycles without effect on its target yet';
 
 /**
- * Why a missile launcher cannot be activated yet.
+ * Why a launcher without a missile loaded cannot be activated.
  */
-export const LAUNCHER_REFUSAL = 'missile launchers fire in the Missiles entry';
+export const NO_MISSILE_REFUSAL = 'it has no missiles loaded';
 
 /**
  * Seconds per cycle for an activatable module without a duration.
@@ -70,8 +72,8 @@ export interface ModuleActivation extends Omit<ModuleNumbers, 'cycleTime'> {
    */
   readonly weapon?: WeaponKind;
   /**
-   * Metres it may run at: moduleReach for a targeted module, Infinity for a turret (EVE refuses no turret by range:
-   * shots beyond falloff miss) and for an untargeted module.
+   * Metres it may run at: moduleReach for a targeted module, Infinity for a weapon (EVE refuses no turret or launcher
+   * by range: shots beyond falloff miss, missiles past their range expire) and for an untargeted module.
    */
   readonly reach: number;
   /**
@@ -125,11 +127,12 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
   const category = moduleCategoryOf(type.groupID, type.effects);
   const weapon = weaponKindOf(type.effects);
   let refusal: Maybe<string> = null;
-  if (weapon === 'launcher') refusal = LAUNCHER_REFUSAL;
-  else if (UNACTIVATABLE_GROUPS[type.groupID]) refusal = UNACTIVATABLE_GROUPS[type.groupID];
+  if (UNACTIVATABLE_GROUPS[type.groupID]) refusal = UNACTIVATABLE_GROUPS[type.groupID];
+  else if (weapon === 'launcher' && !(module.charge && isMissileCharge(module.charge))) refusal = NO_MISSILE_REFUSAL;
   else if (!effect || (effect.category !== 1 && effect.category !== 2)) refusal = 'it is passive: it is only online or offline';
   const flight = Boolean(effect?.modifiers.some((modifier) => modifier.domain === 'shipID' && SHIP_FLIGHT_ATTRIBUTES.has(modifier.modifiedAttributeID)));
-  const targeted = effect?.category === 2;
+  // A launcher's useMissiles is category 1 in the SDE, yet it fires at the ship's target like a turret.
+  const targeted = effect?.category === 2 || weapon === 'launcher';
   const targetEffect = targeted ? moduleTargetEffectOf(ship, bundle, key) : null;
   const note = EFFECTLESS_CATEGORIES[category] ?? (targeted && !weapon && !numbers.repair && !targetEffect ? TARGET_EFFECTLESS_NOTE : null);
   return {
@@ -138,7 +141,7 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
     groupID: type.groupID,
     refusal,
     ...(weapon ? { weapon } : {}),
-    reach: weapon === 'turret' || effect?.category !== 2 ? Number.POSITIVE_INFINITY : moduleReach(numbers),
+    reach: weapon || effect?.category !== 2 ? Number.POSITIVE_INFINITY : moduleReach(numbers),
     targeted,
     warpSafe: effect?.warpSafe === true,
     cycleTime: numbers.cycleTime ?? DEFAULT_MODULE_CYCLE_TIME,

@@ -55,6 +55,7 @@ const NEUT: Partial<ModuleActivation> = {
 };
 
 const TURRET: Partial<ModuleActivation> = { category: 'weapon', weapon: 'turret', groupID: 55, targeted: true, warpSafe: false, cycleTime: 2.5, range: 1000, falloff: 20_000 };
+const LAUNCHER: Partial<ModuleActivation> = { category: 'weapon', weapon: 'launcher', groupID: 510, targeted: true, warpSafe: false, cycleTime: 6, range: null, falloff: null };
 
 /**
  * A world of points on a line: distances are |x_a - x_b|, no radii.
@@ -327,7 +328,7 @@ describe('DestinyWorld.OnBoundary', () => {
       expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
       expect(Run(modules, 1, 3)).toEqual([]);
       expect(modules.State('logi', 'high-0', 3)).toMatchObject({ state: 'activating', target: 'fc', note: 'waiting for its lock on "fc"' });
-      expect(modules.TurretAims().get('logi')).toEqual(new Set(['fc']));
+      expect(modules.WeaponAims().get('logi')).toEqual(new Set(['fc']));
       port.locked.add('logi>fc');
       const events = modules.Boundary(4);
       expect(Kinds(events)).toEqual(['logi:high-0:on1@4', 'logi:high-0:cycle1@4']);
@@ -356,13 +357,63 @@ describe('DestinyWorld.OnBoundary', () => {
       modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
       Run(modules, 0, 0);
       modules.Retarget('logi', 'punisher', 1);
-      expect(modules.TurretAims().get('logi')).toEqual(new Set(['fc', 'punisher']));
+      expect(modules.WeaponAims().get('logi')).toEqual(new Set(['fc', 'punisher']));
       const before = [1, 2, 3, 4, 5].flatMap((tick) => modules.Boundary(tick));
       expect(before.filter((event) => event.kind === 'cycle').map((event) => event.target)).toEqual(['fc', 'fc']);
       port.locked.add('logi>punisher');
       const after = [6, 7, 8].flatMap((tick) => modules.Boundary(tick));
       expect(after.filter((event) => event.kind === 'cycle').map((event) => event.target)).toEqual(['punisher']);
       expect(modules.Spec('logi', 'high-0')?.key).toBe('high-0');
+    });
+
+    it('holds a launcher for its lock, cycles it on its rate of fire at any range, retargets it at its next cycle start, and keeps it out of Targeting', () => {
+      const port = new LockPort();
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', LAUNCHER)], 0);
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0 })).toBe('it needs a target: set_target or switch_modules target');
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'far' })).toBeNull();
+      expect(Run(modules, 1, 2)).toEqual([]);
+      expect(modules.State('logi', 'high-0', 2)).toMatchObject({ state: 'activating', target: 'far', note: 'waiting for its lock on "far"' });
+      expect(modules.WeaponAims().get('logi')).toEqual(new Set(['far']));
+      expect(modules.WeaponKeys('logi')).toEqual(['high-0']);
+      port.locked.add('logi>far');
+      expect(Kinds(modules.Boundary(3))).toEqual(['logi:high-0:on1@3', 'logi:high-0:cycle1@3']);
+      expect(Run(modules, 4, 9)).toEqual(['logi:high-0:end1@9', 'logi:high-0:cycle2@9']);
+      expect(modules.Targeting('far')).toEqual([]);
+      modules.Retarget('logi', 'fc', 10);
+      port.locked.add('logi>fc');
+      const retargeted = [10, 11, 12, 13, 14, 15].flatMap((tick) => modules.Boundary(tick));
+      expect(retargeted.filter((event) => event.kind === 'cycle').map((event) => `${event.cycle}:${event.target}`)).toEqual(['3:fc']);
+      modules.Retarget('logi', null, 16);
+      expect(modules.State('logi', 'high-0', 16)).toMatchObject({ state: 'stopping', note: 'stopping: its target was cleared' });
+      expect(Run(modules, 16, 21)).toEqual(['logi:high-0:end3@21', 'logi:high-0:off3@21']);
+    });
+
+    it('stops a launcher at its cycle end on a lost lock, and at once when its target warps or is removed', () => {
+      const port = new LockPort();
+      port.locked.add('logi>fc');
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', LAUNCHER)], 0);
+      modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+      Run(modules, 0, 0);
+      port.locked.delete('logi>fc');
+      expect(Run(modules, 1, 1)).toEqual([]);
+      expect(modules.State('logi', 'high-0', 1)).toMatchObject({ state: 'stopping', note: 'stopping: it lost its lock on "fc"' });
+      expect(Run(modules, 2, 6)).toEqual(['logi:high-0:end1@6', 'logi:high-0:off1@6']);
+      port.locked.add('logi>fc');
+      modules.Switch('logi', 'high-0', 'active', { boundary: 7, target: 'fc' });
+      Run(modules, 7, 7);
+      port.warping.add('fc');
+      expect(Kinds(modules.OnWarpEnter('fc', 8))).toEqual(['logi:high-0:off1@8 (its target entered warp)']);
+      port.warping.delete('fc');
+      modules.Switch('logi', 'high-0', 'active', { boundary: 9, target: 'fc' });
+      Run(modules, 9, 9);
+      expect(Kinds(modules.Remove('fc', 10))).toEqual(['logi:high-0:off1@10 (its target is gone)']);
+      modules.Switch('logi', 'high-0', 'active', { boundary: 11, target: 'far' });
+      port.locked.add('logi>far');
+      Run(modules, 11, 11);
+      port.warping.add('logi');
+      expect(Kinds(modules.OnWarpEnter('logi', 12))).toEqual(['logi:high-0:off1@12 (entered warp)']);
     });
 
     it('names why the modules on a removed ship stop', () => {

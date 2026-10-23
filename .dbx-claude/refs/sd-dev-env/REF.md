@@ -80,7 +80,8 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 `npx nx run scene-director:verify-page` (`apps/scene-director/src/verify-page.ts`) drives the real page in headless
 Chromium through the hub's tools, against a running tools-core: boot, the hub link, SOF builds from real EVE data,
 edits, storage and reload, prop mod audio events (launched with `--autoplay-policy=no-user-gesture-required`; it sees
-events posted, it cannot hear them). It uses temp file stores.
+events posted, it cannot hear them). It uses temp file stores. `--only <text>` runs the checks whose label contains the
+text (`a|b` for either), each loading its own scene.
 
 **Headless Chromium in this WSL has no WebGPU adapter** (Dawn finds SwiftShader but cannot create its context
 provider). Do not sink time into headless GPU.

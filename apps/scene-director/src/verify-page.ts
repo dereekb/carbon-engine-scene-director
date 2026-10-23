@@ -114,6 +114,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly locks?: ShipLockState[];
   readonly engaged?: { readonly modules: string[] };
   readonly combat?: ShipCombatState;
+  readonly missiles?: { readonly launched: number; readonly inFlight: number };
   readonly destroyed?: {
     readonly tick: number;
     readonly by: string;
@@ -149,6 +150,34 @@ interface CombatRowState {
   readonly quality: number;
   readonly damage: number;
   readonly layer?: 'shield' | 'armor' | 'structure';
+  readonly note?: string;
+  readonly missile?: true;
+}
+
+/**
+ * get_state's scene-level `missiles` (the viewer's missile-flights.ts MissileFlightsReport).
+ */
+interface MissilesState {
+  readonly inFlight: number;
+  readonly launched: number;
+  readonly hits: number;
+  readonly expired: number;
+  readonly lost: number;
+  readonly refused: number;
+  readonly flights: {
+    readonly id: string;
+    readonly ship: string;
+    readonly module: string;
+    readonly charge?: string;
+    readonly target: string;
+    readonly state: 'flying' | 'lost' | 'hit' | 'expired';
+    readonly launchedAt: number;
+    readonly age: number;
+    readonly expiresIn?: number;
+    readonly distance?: number;
+    readonly speed?: number;
+    readonly why?: string;
+  }[];
 }
 
 /**
@@ -220,7 +249,8 @@ interface ShipModuleRowState {
   readonly charge?: string;
   readonly mount?: { readonly locator?: string; readonly state: string; readonly models?: number; readonly error?: string };
   readonly prop?: true;
-  readonly combat?: { readonly damage: Record<string, number>; readonly volley: number; readonly dps: number };
+  readonly combat?: { readonly damage: Record<string, number>; readonly volley: number; readonly dps: number; readonly velocity?: number; readonly flightTime?: number; readonly range?: { readonly lower: number; readonly upper: number; readonly upperChance: number; readonly mean: number } };
+  readonly inFlight?: number;
   readonly note?: string;
 }
 
@@ -240,7 +270,7 @@ interface SwitchModulesResult {
 interface SetTargetResult {
   readonly tick: number;
   readonly target: Maybe<string>;
-  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly source?: 'own' | 'called'; readonly turrets: number; readonly retargeted: number; readonly lock?: Maybe<ShipLockState> }[];
+  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly source?: 'own' | 'called'; readonly turrets: number; readonly launchers?: number; readonly retargeted: number; readonly lock?: Maybe<ShipLockState> }[];
   readonly skipped: { readonly id: string; readonly reason: string }[];
 }
 
@@ -399,6 +429,7 @@ interface ViewerState {
   readonly objects?: SceneObjectStateReport[];
   readonly cinema?: CinemaStateReport;
   readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly kills: { readonly ship: string; readonly by: string; readonly module: string; readonly weapon: string; readonly tick: number }[] };
+  readonly missiles?: MissilesState;
 }
 
 /**
@@ -666,7 +697,7 @@ function Delay(ms: number): Promise<void> {
 
 const toolsCore = new ToolsCore({ url: Option('--tools-core', DEFAULT_TOOLS_CORE) });
 /**
- * `--only <text>` runs only the checks whose label contains the text (any case), after the tab connects.
+ * `--only <text>` runs only the checks whose label contains the text (any case; `a|b` for either), after the tab connects.
  */
 const ONLY = Option('--only', '').toLowerCase();
 const CONNECT_CHECK = 'the tab connects to the hub';
@@ -731,7 +762,7 @@ function NotInFormation(state: ViewerState, ids: readonly string[]): Maybe<strin
  * @param action - The check; its string result is reported as detail.
  */
 async function Check(label: string, action: () => Promise<string | void>): Promise<void> {
-  if (ONLY && label !== CONNECT_CHECK && !label.toLowerCase().includes(ONLY)) return;
+  if (ONLY && label !== CONNECT_CHECK && !ONLY.split('|').some((text) => label.toLowerCase().includes(text))) return;
   try {
     const detail = await action();
     results.push(detail ? `ok    ${label} - ${detail}` : `ok    ${label}`);
@@ -1452,15 +1483,6 @@ try {
     return `${Shots(firing)} shots at the Astrahus ${target?.distance} m off (surface to surface); a celestial is refused`;
   });
 
-  await Check('launchers are refused', async () => {
-    await LoadTurretScene(true);
-    const bare = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
-    Expect(bare.skipped.length === 3 && bare.skipped.every((skip) => skip.reason === 'it needs a target: set_target or switch_modules target'), JSON.stringify(bare.skipped));
-    const launchers = await call<SwitchModulesResult>('switch_modules', { ships: ['caracal-01'], modules: ['launcher'], state: 'active', target: 'punisher' });
-    Expect(!launchers.ships.length && launchers.skipped.length === 5 && launchers.skipped.every((skip) => skip.reason === 'missile launchers fire in the Missiles entry'), JSON.stringify(launchers));
-    return "the Caracal's 5 default launchers refused with the Missiles note; turrets without a target refused";
-  });
-
   await Check('turrets are not refused by range: they wait for the lock', async () => {
     await LoadTurretScene();
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'far' });
@@ -1678,6 +1700,137 @@ try {
     // Headless draws no hull, so no damage controller loads the hull's fires: only the real GPU sees that leak.
     const drawn = gone.renderer.available ? '' : " (no renderer: the hull's damage effects never load)";
     return `killed by ${kill?.by} (${kill?.module}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(stopped, 'orbiter').orderNote}; order_ship refused (${refused}); sounds ${Show(sounds)}; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} ball gone at tick ${gone.simulation.tick} (removesAt ${ShipIn(gone, 'rifter').destroyed?.explosion?.removesAt}); gameObjects − emitters ${after}${drawn}`;
+  });
+
+  // Missiles (sd-combat → Missiles in the page): a default-fit Caracal's 5 Heavy Missile Launcher II with Scourge.
+  const Caracal = (id: string, position: SceneVector) => ({ id, dna: 'cc1_t1:caldaribase:caldari', type: 'Caracal', position });
+  const HEAVY_CYCLE = 6.1965;
+  const HEAVY_VELOCITY = 9675;
+  const Launchers = (state: ViewerState, id: string): ShipModuleRowState[] => ShipIn(state, id).fit?.modules.filter((module) => module.combat?.flightTime != null) ?? [];
+  const Flights = (state: ViewerState, ship?: string) => (state.missiles?.flights ?? []).filter((flight) => ship == null || flight.ship === ship);
+  // The missiles from `ship` that lost their target (or their ship) with `why`.
+  const LostFlights = (state: ViewerState, ship: string, why: RegExp) => Flights(state, ship).filter((flight) => flight.state === 'lost' && why.test(flight.why ?? ''));
+
+  await Check('launchers fire missiles on their cycle', async () => {
+    await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [15000, 0, 0])], { death: 'flag' });
+    const bare = await call<SwitchModulesResult>('switch_modules', { ships: ['caracal'], modules: ['launcher'], state: 'active' });
+    Expect(!bare.ships.length && bare.skipped.length === 5 && bare.skipped.every((skip) => skip.reason === 'it needs a target: set_target or switch_modules target'), Show(bare));
+    const set = await call<SetTargetResult>('set_target', { ships: ['caracal'], target: 'punisher' });
+    Expect(set.ships[0]?.launchers === 5 && set.ships[0]?.turrets === 0 && set.ships[0]?.lock?.state === 'waiting', Show(set));
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['caracal'], modules: ['launcher'], state: 'active' });
+    Expect(on.ships[0]?.modules.length === 5 && !on.skipped.length, Show(on));
+    await WaitFor('the launchers wait for the lock', 5, (polled) => (Launchers(polled, 'caracal').every((row) => row.state === 'activating' && /lock/u.test(row.note ?? '') && row.effectiveness == null) ? null : Show(Launchers(polled, 'caracal').map((row) => [row.state, row.note, row.effectiveness]))));
+    const first = await WaitFor('the first volley launches after the lock', 30, (polled) => ((polled.missiles?.launched ?? 0) >= 5 ? null : Show({ missiles: polled.missiles, launchers: Launchers(polled, 'caracal').map((row) => [row.state, row.note]) })));
+    const flying = Flights(first, 'caracal').filter((flight) => flight.state === 'flying');
+    Expect(flying.length > 0 && flying.every((flight) => flight.target === 'punisher' && (flight.expiresIn ?? 0) > 0 && flight.charge === 'Scourge Heavy Missile'), Show(first.missiles));
+    const start = first.simulation.seconds;
+    const launched = first.missiles?.launched ?? 0;
+    const later = await WaitFor('20 s of launches', 40, (polled) => (polled.simulation.seconds - start >= 20 ? null : 'waiting'));
+    const rows = Launchers(later, 'caracal');
+    Expect(rows.length === 5 && rows.every((row) => row.state === 'active' && Math.abs((row.cycleTime ?? 0) - HEAVY_CYCLE) < 0.05 && row.combat?.velocity === HEAVY_VELOCITY), Show(rows));
+    const elapsed = later.simulation.seconds - start;
+    const more = (later.missiles?.launched ?? 0) - launched;
+    const expected = (5 * elapsed) / HEAVY_CYCLE;
+    Expect(Math.abs(more - expected) <= 5 && ShipIn(later, 'caracal').missiles?.launched === later.missiles?.launched, Show({ more, expected, missiles: ShipIn(later, 'caracal').missiles }));
+    await call<SwitchModulesResult>('switch_modules', { ships: ['caracal'], modules: ['launcher'], state: 'online' });
+    const stopped = await WaitFor('the launchers stop at their cycle end', 15, (polled) => (Launchers(polled, 'caracal').every((row) => row.state === 'online' || row.state === 'reactivating') ? null : Show(Launchers(polled, 'caracal').map((row) => row.state))));
+    const quiet = await WaitFor('no launch after the stop', 20, (polled) => (polled.simulation.seconds - stopped.simulation.seconds >= 8 ? null : 'waiting'));
+    Expect(quiet.missiles?.launched === stopped.missiles?.launched, Show({ stopped: stopped.missiles?.launched, after: quiet.missiles?.launched }));
+    return `5 launchers waited for the lock, then ${more} launches in ${Math.round(elapsed * 10) / 10} s (expected ${Math.round(expected * 10) / 10} at ${rows[0]?.cycleTime} s); none after the stop (${quiet.missiles?.launched} launched)`;
+  });
+
+  await Check("missiles hit through EVE's formula", async () => {
+    await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [15000, 0, 0])], { death: 'flag' });
+    await call<EngageResult>('engage', { ships: ['caracal'], target: 'punisher', modules: ['launcher'] });
+    const launched = await WaitFor('the first launch', 30, (polled) => (Flights(polled, 'caracal').length ? null : Show(ShipIn(polled, 'caracal').locks)));
+    const launchTick = Math.min(...Flights(launched, 'caracal').map((flight) => flight.launchedAt));
+    const distance = ShipIn(launched, 'caracal').target?.distance ?? 0;
+    const hit = await WaitFor('missile hits land', 30, (polled) => ((ShipIn(polled, 'caracal').combat?.lastHits ?? []).filter((row) => row.missile).length >= 3 ? null : Show({ missiles: polled.missiles?.flights.slice(0, 5), combat: ShipIn(polled, 'caracal').combat })));
+    const rows = (ShipIn(hit, 'caracal').combat?.lastHits ?? []).filter((row) => row.missile);
+    const firstHit = Math.min(...rows.map((row) => row.tick));
+    const quality = 37 / 105;
+    const volley = Launchers(hit, 'caracal')[0]?.combat?.volley ?? 0;
+    const kinetic = ShipIn(hit, 'punisher').defense?.shield.resists.kinetic ?? 0;
+    const expected = volley * quality * (1 - kinetic / 100);
+    Expect(
+      rows.every((row) => row.result === 'hits' && Math.abs(row.chance - quality) < 0.001 && Math.abs(row.quality - quality) < 0.001 && row.layer === 'shield' && Math.abs(row.damage - expected) < 0.2),
+      Show({ rows, expected })
+    );
+    // The flight takes about distance / 9,675 m/s from the launch, plus the launch tick and the drain at the next boundary.
+    const flight = firstHit - launchTick;
+    Expect(flight >= Math.floor(distance / HEAVY_VELOCITY) && flight <= Math.ceil(distance / HEAVY_VELOCITY) + 2, Show({ launchTick, firstHit, distance }));
+    const caracal = ShipIn(hit, 'caracal').combat;
+    const punisher = ShipIn(hit, 'punisher').combat;
+    Expect(caracal != null && punisher != null && Math.abs(caracal.dealt - punisher.taken) < 0.01, Show({ dealt: caracal?.dealt, taken: punisher?.taken }));
+    return `launched at tick ${launchTick} at ${distance} m, first hit at ${firstHit}; quality ${rows[0]?.quality} (37 / 105); ${rows[0]?.damage} HP per missile into the shield (volley ${volley}, kinetic resist ${kinetic} %); dealt ${caracal?.dealt} = taken ${punisher?.taken}`;
+  });
+
+  await Check('a missile that cannot reach its target expires without damage', async () => {
+    // 11,250 m/s with Navigation V: faster than the heavy missile.
+    const fast = { ...Punisher('punisher', [15000, 0, 0]), stats: { maxVelocity: 9000 } };
+    await LoadCombatScene([Caracal('caracal', [0, 0, 0]), fast], { death: 'flag' });
+    await call<EngageResult>('engage', { ships: ['caracal'], target: 'punisher', modules: ['launcher'] });
+    await WaitFor('the first volley', 30, (polled) => ((polled.missiles?.launched ?? 0) >= 5 ? null : Show(ShipIn(polled, 'caracal').locks)));
+    await call('order_ship', { id: 'punisher', order: { type: 'direction', direction: [1, 0, 0] } });
+    const expired = await WaitFor('a volley runs out of flight time', 40, (polled) => (Flights(polled, 'caracal').some((flight) => flight.state === 'expired') ? null : Show({ missiles: polled.missiles && { ...polled.missiles, flights: polled.missiles.flights.slice(0, 5) }, speed: ShipIn(polled, 'punisher').speed })));
+    const taken = ShipIn(expired, 'punisher').combat?.taken ?? 0;
+    const after = await WaitFor('the rest settle', 15, (polled) => (polled.simulation.seconds - expired.simulation.seconds >= 6 ? null : 'waiting'));
+    const misses = ShipIn(after, 'caracal').combat?.misses ?? 0;
+    Expect(misses > 0 && (ShipIn(after, 'punisher').combat?.taken ?? 0) === taken && (after.missiles?.expired ?? 0) > 0, Show({ misses, taken, after: ShipIn(after, 'punisher').combat?.taken, missiles: after.missiles?.expired }));
+    const noted = (ShipIn(after, 'caracal').combat?.lastHits ?? []).filter((row) => row.note === 'it ran out of flight time');
+    Expect(
+      noted.every((row) => row.result === 'misses' && row.damage === 0),
+      Show(noted)
+    );
+    return `the fleeing Punisher (${ShipIn(expired, 'punisher').speed} m/s) outran ${after.missiles?.expired} missiles: ${misses} misses, its taken stayed ${taken} HP`;
+  });
+
+  await Check('missiles at a dead or warping target are lost', async () => {
+    const loaded = await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Rifter('rifter', [50000, 0, 0]), Punisher('p1', [50000, 0, 2000]), Punisher('p2', [50000, 0, -2000]), Punisher('runner', [0, 0, 50000])]);
+    // Far enough that a volley is always flying (≈ one cycle of flight), within the Caracal's lock range.
+    const range = Math.min((ShipIn(loaded, 'caracal').targeting?.maxTargetRange ?? 50000) - 5000, 60000);
+    await Move('rifter', [range, 0, 0]);
+    await Move('p1', [range, 0, 2000]);
+    await Move('p2', [range, 0, -2000]);
+    await Move('runner', [0, 0, range]);
+    await call<EngageResult>('engage', { ships: ['caracal'], target: 'rifter' });
+    await WaitFor('missiles fly at the Rifter', 30, (polled) => (Flights(polled, 'caracal').some((flight) => flight.state === 'flying') ? null : Show(ShipIn(polled, 'caracal').locks)));
+    await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
+    const dead = await WaitFor('missiles at the dead Rifter are lost', 60, (polled) => (ShipIn(polled, 'rifter').destroyed && LostFlights(polled, 'caracal', /its target was destroyed/u).length ? null : Show({ destroyed: ShipIn(polled, 'rifter').destroyed, flights: Flights(polled, 'caracal').slice(0, 6) })));
+    const taken = ShipIn(dead, 'rifter').combat?.taken ?? 0;
+    await call<EngageResult>('engage', { ships: ['caracal'], target: 'runner' });
+    await WaitFor('missiles fly at the runner', 30, (polled) => (Flights(polled, 'caracal').some((flight) => flight.state === 'flying' && flight.target === 'runner') ? null : Show(ShipIn(polled, 'caracal').locks)));
+    await call('order_ship', { id: 'runner', order: { type: 'warp', point: [0, 0, 2_000_000] } });
+    const warped = await WaitFor('missiles at the warping runner are lost', 40, (polled) => (LostFlights(polled, 'caracal', /its target entered warp/u).length ? null : Show({ mode: ShipIn(polled, 'runner').mode, flights: Flights(polled, 'caracal').slice(0, 6) })));
+    const overkill = (ShipIn(dead, 'caracal').combat?.lastHits ?? []).filter((row) => row.result === 'overkill');
+    Expect((ShipIn(warped, 'rifter').combat?.taken ?? 0) === taken, Show({ taken, after: ShipIn(warped, 'rifter').combat?.taken }));
+    return `${LostFlights(dead, 'caracal', /destroyed/u).length} lost at the dead Rifter (${overkill.length} overkill rows in the last 3), its taken stayed ${taken} HP; ${LostFlights(warped, 'caracal', /warp/u).length} lost as the runner warped`;
+  });
+
+  await Check('a shooter that warps loses its missiles', async () => {
+    const loaded = await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [50000, 0, 0])], { death: 'flag' });
+    await Move('punisher', [Math.min((ShipIn(loaded, 'caracal').targeting?.maxTargetRange ?? 50000) - 5000, 60000), 0, 0]);
+    await call<EngageResult>('engage', { ships: ['caracal'], target: 'punisher' });
+    await WaitFor('missiles fly', 30, (polled) => (Flights(polled, 'caracal').some((flight) => flight.state === 'flying') ? null : Show(ShipIn(polled, 'caracal').locks)));
+    await call('order_ship', { id: 'caracal', order: { type: 'warp', point: [0, 0, -2_000_000] } });
+    const gone = await WaitFor('its missiles vanish as it enters warp', 40, (polled) =>
+      LostFlights(polled, 'caracal', /its ship entered warp/u).length && !Flights(polled, 'caracal').some((flight) => flight.state === 'flying') ? null : Show({ mode: ShipIn(polled, 'caracal').mode, flights: Flights(polled, 'caracal').slice(0, 6) })
+    );
+    return `${LostFlights(gone, 'caracal', /warp/u).length} missiles vanished as the Caracal entered warp; ${gone.missiles?.inFlight} in flight`;
+  });
+
+  await Check('missiles kill like turrets, and engage arms launchers by default', async () => {
+    const loaded = await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Rifter('rifter', [8000, 0, 0])]);
+    const objects = (loaded.audio?.gameObjects ?? 0) - (loaded.audio?.emitters ?? 0);
+    const engaged = await call<EngageResult>('engage', { ships: ['caracal'], target: 'rifter' });
+    Expect(engaged.ships[0]?.modules.length === 5 && !engaged.skipped.length, Show(engaged));
+    const dead = await WaitFor('the missile kill', 90, (polled) => (ShipIn(polled, 'rifter').destroyed ? null : Show(ShipIn(polled, 'rifter').defense?.structure)));
+    const kill = ShipIn(dead, 'rifter').destroyed;
+    Expect(kill?.by === 'caracal' && /^high-\d$/u.test(kill.module) && kill.weapon === 'Heavy Missile Launcher II' && kill.mode === 'explode', Show(kill));
+    const gone = await WaitFor('the ball leaves after the linger', 40, (polled) => (ShipIn(polled, 'rifter').destroyed?.explosion?.gone && ShipIn(polled, 'rifter').position == null ? null : Show(ShipIn(polled, 'rifter').destroyed?.explosion)));
+    const after = (gone.audio?.gameObjects ?? 0) - (gone.audio?.emitters ?? 0);
+    Expect(after === objects && !gone.audio?.foreign, `audio game objects − emitters: ${objects} before, ${after} after`);
+    return `engage armed 5 launchers by default; killed by ${kill?.by} ${kill?.module} (${kill?.weapon}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} gone at tick ${gone.simulation.tick}; gameObjects − emitters ${after}`;
   });
 
   // An FC, a wing commander and a squad of two whose lead the squad anchors on; two Punishers kill the lead, then the FC.

@@ -148,7 +148,8 @@ Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ targe
   (the target and turret aims always fit, so the sweep never has to choose). Not `ShipLocks.Keep`: a Keep is sticky,
   and at the limit it can block the primary's own lock.
 - **`Engagements(boundary)`**: the engaged ships, then `fleetTargets.Armed()` not engaged on their own, with
-  `DEFAULT_ENGAGE_MODULES` (`ArmTurrets`): turrets back online switch active at the called target.
+  `DEFAULT_ENGAGE_MODULES` (`["turret", "launcher"]`, `ArmWeapons`): turrets and launchers back online switch active
+  at the called target.
 - **`Apply`**: `Clear()` in the restart branch, `Forget` for removed ships, `SyncFleetTargets()` after
   `following.Reconcile` and before the store write (tool results see it; ball-less ships are skipped by `CanTarget`).
   **`Destroy`** → `Forget`.
@@ -164,7 +165,7 @@ Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ targe
   follows fleet "b"'s call on "r1" (cease_fire holds its fire; order_fleet targets drop or clear ends the call)`. Null
   on an own target clears it, then `SyncFleetTargets()`; the row becomes `{ target: <the call>, source: "called" }`.
   set_target does not lift a hold: it aims, it does not open fire.
-- **`Engage`**: `Own` + `Rearm`. **`SwitchModules`** with a turret `target`: `Own`.
+- **`Engage`**: `Own` + `Rearm`. **`SwitchModules`** with a weapon (turret or launcher) `target`: `Own`.
 - **`CeaseFire`**: an armed called member counts as engaged (no "not engaged" skip). Each member `Hold`s (`hold`, or
   `stand-down` with `unlock`; row `held`); unlock clears the target as before, then `SyncFleetTargets()`.
   `switch_modules { modules: ["turret"], state: "online" }` on an armed member is undone at the next boundary, as on an

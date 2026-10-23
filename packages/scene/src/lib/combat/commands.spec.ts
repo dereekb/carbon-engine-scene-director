@@ -4,8 +4,8 @@ import { CELESTIAL_TARGET_REFUSAL } from '../weapons/target';
 import { normalizeCeaseFireCommand, normalizeEngageCommand } from './commands';
 
 describe('normalizeEngageCommand', () => {
-  it('reads the target, the selection and the modules, turrets by default', () => {
-    expect(normalizeEngageCommand({ ships: ['a', 'b'], target: ' punisher ' })).toEqual({ ships: ['a', 'b'], target: 'punisher', modules: ['turret'] });
+  it('reads the target, the selection and the modules, turrets and launchers by default', () => {
+    expect(normalizeEngageCommand({ ships: ['a', 'b'], target: ' punisher ' })).toEqual({ ships: ['a', 'b'], target: 'punisher', modules: ['turret', 'launcher'] });
     expect(normalizeEngageCommand({ fleet: 'red', wing: 'w1', target: 'blue-fc', modules: [' high-0 ', 'turret'] })).toEqual({ fleet: 'red', wing: 'w1', target: 'blue-fc', modules: ['high-0', 'turret'] });
     expect(normalizeEngageCommand({ fleet: 'red', squad: 's1', target: 'astrahus' })).toMatchObject({ fleet: 'red', squad: 's1', target: 'astrahus' });
   });

@@ -13,8 +13,8 @@ mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weap
 **Missiles** (`~/.claude/plans/missiles-launchers-fire-destiny-pursued-evemissiles-that-hit-through-eve-s-missi.md`):
 **M1 is in** (default missiles, launcher charges, the `/missile` route; the numbers: `sd-combat` → Missiles); **M2a is
 in** (Destiny missile balls, the flight book, missile hits and expiry rows: `sd-destiny` → Missile balls, `sd-combat` →
-Missiles in the page; not wired yet); M2b (the page fires them, headless) and M3 (drawn, real GPU) are to come, so
-launchers are still refused activation. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
+Missiles in the page); **M2b is in** (2026-10-23: launchers run and the page fires them, headless: Launchers fire,
+below); M3 (drawn, real GPU) is to come: no missile draws yet. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
 ## Files
@@ -172,7 +172,7 @@ turrets fire only at a locked target. No hostility check, and no pilot delay on 
   turrets that follow the change; `lock`: its lock on the target, or `{ refused }`).
 - **Activation**: `moduleActivationOf` lets turrets (`weapon: 'turret'`) run: targeted, `reach` Infinity (EVE refuses
   no turret by range: it waits for its lock, and shots past falloff miss: `sd-combat`), rate of fire = the dogma `speed` with skills. Launchers
-  keep `LAUNCHER_REFUSAL` ("missile launchers fire in the Missiles entry"). Selectors `turret` / `launcher`.
+  run too (Launchers fire, below). Selectors `turret` / `launcher`.
 - **`switch_modules` on turrets**: a given `target` becomes the ship's target first (as `set_target`, and it may be an
   object); without one, the ship's target; neither: "it needs a target: set_target or switch_modules target". Other
   targeted modules still need an explicit ship target. Every existing rule holds (no activation in warp, a stop at
@@ -251,8 +251,37 @@ fleet, a Punisher ordered to orbit the TFI at 2 km with the TFI on it.
   Rifter's three guns: `cycleTime` equals ship_stats', shots over 12 s ≈ 3 × elapsed / cycleTime, none after the
   stop; the scene gives the ship `type: 'Rifter'` and its `mf4_t1` DNA: a DNA-only ship flies the lowest type id on its
   hull, and the `mf1_t1` the older checks use is the Slasher's, with other traits), "weapons follow a new target and stop when it is cleared", "a removed or warping target clears and stops the
-  guns", "turrets fire at an object" (an Astrahus; a celestial refused), "launchers are refused" (a Caracal's
-  defaults), "turrets are not refused by range" (150 km, effectiveness 0).
+  guns", "turrets fire at an object" (an Astrahus; a celestial refused), "turrets are not refused by range" (150 km,
+  effectiveness 0). The launcher checks: Launchers fire, below.
+
+## Launchers fire (missiles M2b, headless; drawing is M3)
+
+- **Activation** (`moduleActivationOf`, `sd-fittings`): a launcher (`weapon: 'launcher'`) runs `targeted` (its
+  `useMissiles` is category 1 in the SDE), `reach` Infinity (missiles past their range expire), cycle = its rate of
+  fire (attribute 51), not warp safe. Refused: bomb launchers (group 862 in `UNACTIVATABLE_GROUPS`, "bomb launchers are
+  not modelled yet") and a launcher whose charge is no missile or none (`NO_MISSILE_REFUSAL`, "it has no missiles
+  loaded": probe and interdiction launchers, a fit without the charge). No falloff `effectiveness` on its row.
+- **`ShipModules`**: `IsWeapon` (turrets and launchers) gates what `IsTurret` did: the ship's target (an authored
+  object allowed), `LockHold`, `Retarget` at the next cycle start, `Untarget`, the "it needs a target: set_target or
+  switch_modules target" text, and the exclusion from `Targeting` / `TargetIndex` (a launcher is no target effect).
+  `WeaponAims` / `WeaponKeys` replaced `TurretAims` / `TurretKeys`. Specs carry `missile` (`missileCombatNumbersOf`)
+  beside a turret's `combat` (`ShipModuleSpecsOf`).
+- **The director** (`sd-combat` → Missiles in the page): every turret filter became "a weapon" (`SwitchModules`' aim
+  and lock request, `SetTarget`'s counts, `Engage`, `CeaseFire`, `ArmWeapons`, `paperDps`, `WantedLocks`), so launchers
+  take any target the ship has: `set_target`, `engage`, a `switch_modules` target, a fleet's called primary.
+  `DEFAULT_ENGAGE_MODULES` is `["turret", "launcher"]`. `set_target` rows add `launchers` (omitted at 0) and
+  `retargeted` counts both kinds; engage skips "it fits no weapon matching …", cease_fire "its weapons are not firing".
+- **get_state**: launcher rows `combat { damage (per missile), volley, dps, velocity, flightTime, range { lower, upper,
+  upperChance, mean } }`, `inFlight`, and the note "its last missile was not launched: …" after a refused launch; per
+  ship `missiles { launched, inFlight }` (omitted at 0); scene `missiles` (`MissileFlights.Report`, omitted until a
+  launch or refusal after a load).
+- verify-page (headless, 2026-10-23, SDE 3646012): "launchers fire missiles on their cycle" (a default-fit Caracal
+  `cc1_t1:caldaribase:caldari` and a Punisher 15 km off: the 5 launchers wait for the lock, 15 launches in 20.1 s
+  against 16.2 expected at 6.1965 s, none after the stop; the row's `cycleTime` is rounded to 6.2), "missiles hit
+  through EVE's formula", "a missile that cannot reach its target expires without damage", "missiles at a dead or
+  warping target are lost", "a shooter that warps loses its missiles", "missiles kill like turrets, and engage arms
+  launchers by default" (evidence: `sd-combat` → Missiles in the page). Every turret, combat and fleet targeting check
+  re-ran unchanged (seed 1: 40 shots, the kill 15 ticks after engage by p2 high-0, dealt [824.6, 748]).
 
 ## Sounds (W4)
 

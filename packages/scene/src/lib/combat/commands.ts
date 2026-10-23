@@ -11,7 +11,7 @@ import { CELESTIAL_TARGET_REFUSAL } from '../weapons/target';
 /**
  * The weapons an engagement arms when the command names none.
  */
-export const DEFAULT_ENGAGE_MODULES: readonly string[] = ['turret'];
+export const DEFAULT_ENGAGE_MODULES: readonly string[] = ['turret', 'launcher'];
 
 export interface EngageCommand extends FleetSelection {
   /**
@@ -19,7 +19,7 @@ export interface EngageCommand extends FleetSelection {
    */
   readonly target: string;
   /**
-   * Module selectors for the weapons to arm (as switch_modules); default `["turret"]`.
+   * Module selectors for the weapons to arm (as switch_modules); default `["turret", "launcher"]`.
    */
   readonly modules: readonly string[];
 }
@@ -35,9 +35,9 @@ const ENGAGE_KEYS = new Set<string>(['target', 'modules', ...FLEET_SELECTION_KEY
 const CEASE_FIRE_KEYS = new Set<string>(['unlock', ...FLEET_SELECTION_KEYS]);
 
 /**
- * Validates an engage command: `target` (a ship or object id), optional `modules` (selectors, default `["turret"]`)
- * and a selection (exactly one of `ships` and `fleet`, a fleet narrowed by `wing` or `squad`). Unknown keys are
- * problems; a celestial target is refused.
+ * Validates an engage command: `target` (a ship or object id), optional `modules` (selectors, default `["turret",
+ * "launcher"]`) and a selection (exactly one of `ships` and `fleet`, a fleet narrowed by `wing` or `squad`). Unknown
+ * keys are problems; a celestial target is refused.
  *
  * @param input - The candidate command.
  * @param where - Where it sits, for messages.

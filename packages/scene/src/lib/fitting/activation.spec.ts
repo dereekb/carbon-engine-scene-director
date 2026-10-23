@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { EFFECTLESS_CATEGORIES, falloffEffectiveness, LAUNCHER_REFUSAL, moduleActivationOf, moduleReach } from './activation';
+import { EFFECTLESS_CATEGORIES, falloffEffectiveness, moduleActivationOf, moduleReach, NO_MISSILE_REFUSAL } from './activation';
 import { evaluateShipDogma } from './dogma';
-import { DOGMA_FIXTURE, fixtureTypeID, GUARDIAN_ID, REVELATION_ID, RIFTER_ID } from './fitting.spec-helper';
+import { parseEftFit } from './eft';
+import { DOGMA_FIXTURE, fixtureAnswer, fixtureTypeID, GUARDIAN_ID, REVELATION_ID, RIFTER_ID } from './fitting.spec-helper';
+import { toDogmaModules, typeEftFit } from './typed-fit';
 
 function activations(hullTypeID: number, ...names: string[]) {
   const ship = evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID, modules: names.map((name, index) => ({ key: `m-${index}`, typeID: fixtureTypeID(name), state: 'online' })) });
@@ -43,15 +45,26 @@ describe('moduleActivationOf', () => {
     expect(plate?.reach).toBe(Number.POSITIVE_INFINITY);
   });
 
-  it('runs a turret on its target at any range, on its rate of fire, and refuses a launcher', () => {
-    const [gun, launcher] = activations(RIFTER_ID, '200mm AutoCannon II', 'Heavy Missile Launcher II');
+  it('runs a turret on its target at any range, on its rate of fire', () => {
+    const [gun] = activations(RIFTER_ID, '200mm AutoCannon II');
     expect(gun).toMatchObject({ category: 'weapon', weapon: 'turret', refusal: null, targeted: true, warpSafe: false, reach: Number.POSITIVE_INFINITY });
     expect(gun?.note).toBeUndefined();
     expect(gun?.range).toBeGreaterThan(0);
     expect(gun?.falloff).toBeGreaterThan(0);
     expect(gun?.cycleTime).toBeGreaterThan(0);
     expect(gun?.cycleTime).toBeLessThan(5);
-    expect(launcher).toMatchObject({ category: 'weapon', weapon: 'launcher', refusal: LAUNCHER_REFUSAL });
+  });
+
+  it('runs a launcher on its target at any range, on its rate of fire, and refuses bomb launchers and launchers without missiles', () => {
+    const text = ['[Caracal, test]', '[Empty Low slot]', '', '[Empty Med slot]', '', 'Heavy Missile Launcher II, Scourge Heavy Missile', 'Heavy Missile Launcher II', 'Bomb Launcher I'].join('\n');
+    const fitting = typeEftFit(parseEftFit(text), { answer: fixtureAnswer, bundle: DOGMA_FIXTURE });
+    const ship = evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: fixtureTypeID(fitting.hull), modules: toDogmaModules(fitting) });
+    const [launcher, empty, bombs] = ['high-0', 'high-1', 'high-2'].map((key) => moduleActivationOf(ship, DOGMA_FIXTURE, key));
+    expect(launcher).toMatchObject({ category: 'weapon', weapon: 'launcher', refusal: null, targeted: true, warpSafe: false, reach: Number.POSITIVE_INFINITY });
+    expect(launcher?.cycleTime).toBeCloseTo(6.1965, 4);
+    expect(launcher?.note).toBeUndefined();
+    expect(empty).toMatchObject({ weapon: 'launcher', refusal: NO_MISSILE_REFUSAL });
+    expect(bombs?.refusal).toBe('bomb launchers are not modelled yet');
   });
 });
 

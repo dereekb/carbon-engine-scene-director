@@ -250,6 +250,7 @@ async function Start(): Promise<void> {
     liveDirector?.DriveModuleEffects(now);
     liveDirector?.DriveWarpEffects(now);
     liveDirector?.DriveTurrets(now);
+    liveDirector?.DriveMissiles(now);
     liveDirector?.DriveExplosions(now);
     // The scene update copies effect templates (a burning hull's fires, per damage locator): with the audio seams
     // detached, so the copies' emitters stay inert. No page audio is posted inside engine.Frame (sd-runtime → Audio).

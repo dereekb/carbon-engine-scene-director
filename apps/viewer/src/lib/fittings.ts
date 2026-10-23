@@ -42,6 +42,7 @@ import {
   defaultMissileOf,
   missileDamageTypeOf,
   mergeDogmaBundles,
+  missileCombatNumbersOf,
   moduleActivationOf,
   normalizePropModName,
   parseEftFit,
@@ -682,7 +683,8 @@ export function ShipModuleSpecsOf(resolved: ResolvedShipFitting, lookup: FitLook
   return resolved.modules.flatMap((module): ShipModuleSpec[] => {
     const activation = module.prop || module.typeID == null ? null : moduleActivationOf(ship, dogma.bundle, module.key);
     const combat = activation?.weapon === 'turret' ? turretCombatNumbersOf(ship, dogma.bundle, module.key) : null;
-    return activation && module.typeID != null ? [{ key: module.key, name: module.name, typeID: module.typeID, offline: module.offline === true, activation, ...(combat ? { combat } : {}) }] : [];
+    const missile = activation?.weapon === 'launcher' ? missileCombatNumbersOf(ship, dogma.bundle, module.key) : null;
+    return activation && module.typeID != null ? [{ key: module.key, name: module.name, typeID: module.typeID, offline: module.offline === true, activation, ...(combat ? { combat } : {}), ...(missile ? { missile } : {}) }] : [];
   });
 }
 
@@ -730,10 +732,28 @@ export interface ShipModuleRowState {
    */
   readonly mount?: TurretMountReport;
   /**
-   * A turret's damage per shot by type, volley and paper DPS (turretCombatNumbersOf, rounded).
+   * A turret's damage per shot by type, volley and paper DPS (turretCombatNumbersOf, rounded); a launcher's per missile,
+   * with the missile's velocity (m/s), flight time (s) and range (m: EVE's whole-tick lower and upper, the upper's
+   * chance, the mean) (missileCombatNumbersOf).
    */
-  readonly combat?: { readonly damage: Readonly<Record<string, number>>; readonly volley: number; readonly dps: number };
+  readonly combat?: ShipModuleCombatRow;
+  /**
+   * A launcher's missiles still flying.
+   */
+  readonly inFlight?: number;
   readonly note?: string;
+}
+
+/**
+ * A weapon row's combat numbers in get_state.
+ */
+export interface ShipModuleCombatRow {
+  readonly damage: Readonly<Record<string, number>>;
+  readonly volley: number;
+  readonly dps: number;
+  readonly velocity?: number;
+  readonly flightTime?: number;
+  readonly range?: { readonly lower: number; readonly upper: number; readonly upperChance: number; readonly mean: number };
 }
 
 /**

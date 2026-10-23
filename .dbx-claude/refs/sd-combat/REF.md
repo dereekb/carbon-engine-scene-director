@@ -19,8 +19,8 @@ pinned `referenceRadius` (below, Real-GPU evidence). The plan is **delivered**.
 **M1 is in** (2026-10-23): EVE's missile rules and numbers in `packages/scene` (Missiles, below), the evaluator's
 missile effects (`sd-fittings`), default missiles and the `/missile` route (`sd-weapons`), `ship_stats` launcher rows.
 **M2a is in** (2026-10-23): Destiny missile balls (`sd-destiny` → Missile balls), the flight book and missile hits /
-expiry rows in Combat rules (Missiles in the page, below), node-tested but **not wired**: launchers are still refused
-activation. M2b (activation, the director, tools, get_state, verify-page) and M3 (drawn, real GPU) are to come.
+expiry rows in Combat rules (Missiles in the page, below). **M2b is in** (2026-10-23): launchers run and the director
+fires, resolves and reports missiles, headless (`sd-weapons` → Launchers fire). M3 (drawn, real GPU) is to come.
 
 ## Files (K1)
 
@@ -34,7 +34,7 @@ activation. M2b (activation, the director, tools, get_state, verify-page) and M3
 | `combat/weapon-numbers.ts` | `TurretCombatNumbers`, `turretCombatNumbersOf(ship, bundle, key)`, `ShipWeapons` (`turrets`, `launchers`), `shipWeaponsOf` (turrets and launchers summed), `TURRET_COMBAT_ATTRIBUTES`, `NO_CHARGE_DAMAGE_NOTE` |
 | `combat/explosions.ts` | `SHIP_EXPLOSIONS`, `SHIP_EXPLOSION_TIMINGS` (captured), `explosionDurationBound`, `shipExplosionOf`, `MAX_LOCAL_BLASTS` (8), `EXPLOSION_REFERENCE_RADII`, `TITAN_EXPLOSION_REFERENCE_RADIUS` |
 | `combat/document.ts` | `SceneCombat`, `COMBAT_DEATH_MODES`, `DEFAULT_COMBAT_SEED` (1), `DEFAULT_COMBAT_DEATH` (`explode`), `normalizeSceneCombat`, `sceneCombatOf`, `COMBAT_OPERATIONS` / `applyCombatOperation` (`set_combat`) |
-| `combat/commands.ts` | `normalizeEngageCommand` (`{ selection, target, modules = ["turret"] }`, a celestial refused), `normalizeCeaseFireCommand` (`{ selection, unlock }`) |
+| `combat/commands.ts` | `normalizeEngageCommand` (`{ selection, target, modules = DEFAULT_ENGAGE_MODULES ["turret", "launcher"] }`, a celestial refused), `normalizeCeaseFireCommand` (`{ selection, unlock }`) |
 | `combat/kill.ts` | `ShotOutcome`, `ShipKill`, `ShipKillReport`: the plain data the page will report and the timeline, time control and automatic camera read |
 | `hub/ship-stats-tool.ts` | turret rows' `damage` / `volley` / `dps` / `tracking` / `signatureResolution` / `explosion` / `spool`, and `weapons` on the stats |
 
@@ -149,7 +149,7 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 | `viewer/locks.ts` | `ShipLocks` over `ShipLocksPort` (`SurfaceDistance`, `InWarp`, `IsTargetable`, `Targeting`, `SignatureOf`, `tickSeconds`): `Request`, `Keep` / `Release`, `Boundary(tick, wanted)`, `IsLocked`, `Hold`, `Of` / `On`, `Remove`, `OnWarpEnter`, `Clear`, `Report` |
 | `viewer/combat.ts` | `CombatRules` over `CombatPort` (`Accuracy`, `Speed`, `Weapon`, `SignatureOf`, `KindOf`): `SetCombat`, `Recharge`, `Resolve`, `IsDestroyed`, `KillOf`, `Kills`, `Totals`, `Report`, `Attackers`, `Remove`, `Clear`; `DPS_WINDOW_SECONDS` (20), `COMBAT_ROWS` (3) |
 | `viewer/module-cycle.ts` | the gate `Boundary(boundary, { hold })` and `activations` (every event carries `activation`) |
-| `viewer/modules.ts` | port `LockHold?`, the lost-lock stop, the lock-gated retarget, `Remove(id, boundary, why)`, `Spec`, `TurretAims`, `TurretKeys`; specs carry `combat` (`ShipModuleSpecsOf`) |
+| `viewer/modules.ts` | port `LockHold?`, the lost-lock stop, the lock-gated retarget, `Remove(id, boundary, why)`, `Spec`, `WeaponAims`, `WeaponKeys` (turrets and launchers); specs carry `combat` / `missile` (`ShipModuleSpecsOf`) |
 | `viewer/damage.ts` | `ApplyHit`, `Recharge`, `Destroyed` (`capacitor.ts`' `CapacitorFractionAfter` is `passiveRecharge` too: one formula) |
 | `viewer/destiny.ts` | `Accuracy(source, target, numbers)`: the master park's `GetAccuracy` (`destiny-accuracy.spec.ts`) |
 | `viewer/director.ts` | the wiring below, `Engage` / `CeaseFire`, `OnKill`, get_state |
@@ -224,7 +224,7 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
 - get_state `destroyed.explosion`: `{ state: waiting | playing | done | failed, file, scale?, localBlasts?,
   wreckSwitchTime?, totalDuration?, removesAt, gone }`.
 
-## Missiles in the page (M2a: built and spec'd, wired in M2b)
+## Missiles in the page (M2a built and spec'd, M2b wired)
 
 | File | Holds |
 |---|---|
@@ -256,6 +256,36 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
   `Counts(ship)` `{ launched, inFlight }`, `InFlightOf(ship, module)`, `Report(boundary, world.Missile)`: `{ inFlight,
   launched, hits, expired, lost, refused, flights }` (at most 40 rows, flying first, soonest end first: `{ id, ship,
   module, charge, target, state: flying | lost | hit | expired, launchedAt, age, expiresIn, distance, speed, why }`).
+
+### The wiring (M2b, `director.ts`)
+
+- **Launches** (`Launches(events)`, in `ModuleOutputs` right before `Shots`, so a kill in that Resolve loses the new
+  missiles too): every launcher `cycle` event with a live target kind → `world.LaunchMissile({ id: MissileFlightId,
+  owner, target, physics: { mass, agility, maxVelocity: velocity, radius }, launchedAt: at + 1, expiresAt: launchedAt +
+  flightTime / tickSeconds })` (the drawn frame, the turret draw rule: a first cycle at the boundary flies ceil(T)
+  whole ticks; `sd-destiny` → Missile balls) → `MissileFlights.Add`, or `Refused` with DestinyWorld's reason (no
+  `missile` numbers: "no EVE dogma for its missile"). Turret `cycle` events still become turret shots (`WeaponShotsOf`).
+- **Ends** (`MissileArrivals(boundary)`, after `Engagements`, before `ModuleEvents`): `TakeMissileEvents()` → `End` →
+  for a finishing hit, `ShotOf(flight, event.at, boundary)` waits in `missileHits` for that boundary's `Shots`, which
+  appends it to the turret shots (not to `ShotQueue`: nothing draws yet) for ONE `Resolve` and the `OnShot` listeners;
+  a boundary with no turret event resolves them with `Shots([])`. Losses and expiries go to `combat.Expire(ShotOf(…),
+  why ?? MISSILE_EXPIRED_NOTE, boundary)` at once. Then `Prune(boundary)`. `LoseMissileTargets`' events from a kill
+  inside `Resolve` drain one boundary later.
+- **`DriveMissiles(now)`** (`main.ts`, after `DriveTurrets`, before `DriveExplosions`): takes `Due(now)`; a hit whose
+  resolved shot was `fatal` starts the victim's explosion at the hit's `drawAt` (`ExplosionStarts`, first caller wins).
+  M3 draws launches, detonations and vanishes here and posts their sounds.
+- **Death**: `world.Destroy` loses the missiles at the victim; the dead shooter's own missiles vanish on the next evolve
+  ("its ship was destroyed"). **Removal**: `world.RemoveMissilesOf(id)`, `MissileFlights.Forget(id)`. **Load**:
+  `world.ClearMissiles()`, `MissileFlights.Clear()`.
+- Evidence (headless, 2026-10-23, SDE 3646012): a Caracal's Scourge Heavy at a Punisher 14,764 m off at rest launched
+  at tick 58 and hit at 60; every hit `quality` = `chance` = 0.352 (37 / 105), 43.3 HP per missile into the shield
+  (volley 204.88, kinetic resist 40 %), dealt 216.6 = taken 216.6. A Punisher with `maxVelocity` 9000 (11,242 m/s)
+  fleeing straight away outran a volley: 5 expired, 5 misses ("it ran out of flight time"), its taken unchanged. At
+  ~60 km two Punishers killed a Rifter under the Caracal's fire: 10 flights `lost` ("its target was destroyed",
+  overkill rows), no damage after the kill; a Punisher warping off: 5 lost ("its target entered warp"). The Caracal
+  warping: 5 vanished ("its ship entered warp"). A Caracal `engage` (no `modules`) armed its 5 launchers and killed a
+  Rifter at 8 km 53 ticks later (`destroyed.by` caracal, `module` high-0, `weapon` Heavy Missile Launcher II); the
+  explosion played and the ball left; audio game objects − emitters unchanged.
 
 ## Locks and the gate (`locks.ts`)
 
@@ -297,8 +327,9 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
   overlays re-armed when the shield moved > 0.1 %), `SyncFleetTargets(boundary)` (the fleet targeting lever: members
   take their groups' next live called targets, locks asked at `boundary − 1`; `sd-fleets` doc `targets`),
   `locks.Boundary(boundary, WantedLocks())` (wanted: targets, turret aims, then called members' pre-locks under
-  `maxLocks`), `Engagements(boundary)` (an engaged ship's matching turrets back `online` switch active again, then
-  `fleetTargets.Armed()` members with `["turret"]`), `ModuleEvents(modules.Boundary(boundary))`. `Shots` resolves the
+  `maxLocks`), `Engagements(boundary)` (an engaged ship's matching weapons back `online` switch active again, then
+  `fleetTargets.Armed()` members with `DEFAULT_ENGAGE_MODULES`: `ArmWeapons`), `MissileArrivals(boundary)`,
+  `ModuleEvents(modules.Boundary(boundary))`, then `Shots([])` when missile hits are left. `Shots` resolves the
   boundary's shots before the `OnShot` listeners (the hook's contract is unchanged) and `SyncImpactState` follows the
   damage. A destroyed ship is no target: `ShipTargets` and `ShipModules` `HasShip` and the locks' `IsTargetable` are
   `world.Curves(id) != null && !combat.IsDestroyed(id)`. On a kill (`Killed`) every target on it clears
@@ -368,11 +399,12 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 - **`set_target`** starts the lock (its answer's `lock`: `{ state, lockTime?, readyIn?, note? }` or `{ refused }`); a
   null target ends the ship's engagement. **`switch_modules`** turrets wait for the lock on the ship's target.
 - **`engage`** `{ selection, target, modules? }`: the target becomes each ship's target and its lock starts, the
-  matching turrets switch active (they wait for the lock), and the engagement keeps them firing (`Engagements`). It
+  matching weapons (default turrets and launchers) switch active (they wait for the lock), and the engagement keeps
+  them firing (`Engagements`). It
   ends on `cease_fire`, `set_target` null, removal or a load, and survives the target's death. Skipped: itself, in
-  warp, target in warp, destroyed, fit unresolved, no targeting numbers, no matching turret. A `warning` when shooter
+  warp, target in warp, destroyed, fit unresolved, no targeting numbers, no matching weapon ("it fits no weapon matching …"). A `warning` when shooter
   and target share a team (no hostility check).
-- **`cease_fire`** `{ selection, unlock? }`: ends the engagement, its turrets switch online (cycle end); `unlock` also
+- **`cease_fire`** `{ selection, unlock? }`: ends the engagement, its weapons switch online (cycle end; missiles in flight fly on); `unlock` also
   clears the target (the sweep drops the lock).
 - **get_state** per ship: `targeting` `{ scanResolution, maxTargetRange, maxLocks }`, `locks`, `engaged`, `combat`
   `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, paperDps }` (once it fired or was
@@ -397,9 +429,9 @@ re-trigger from their kills' times. Missiles add no randomness.
   before the lock sweep (not `OnKill`, which runs inside `Shots` and would re-enter ShipModules for no earlier first
   shot); `Director.OnPrimary(listener)` reports each group's primary change for the automatic camera.
 - Logi auto-repair: `DamageModel.Fractions` / `Report`, `CombatRules.Report(id).dps.taken`, `Attackers(id)`.
-- Missiles (M2a in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
-  `applyLayeredDamage`; M2b wires them (launches from launcher cycle events, `MissileArrivals` at each boundary before
-  `ModuleEvents`, the hits in that boundary's `Resolve`, then `OnShot`).
+- Missiles (M2a and M2b in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
+  `applyLayeredDamage`, wired (M2b: Missiles in the page → The wiring); hits reach `OnShot` with `missile` set, kills
+  `OnKill`; no launch hook yet.
 
 ## Verify-page (K2)
 

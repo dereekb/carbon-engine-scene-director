@@ -25,10 +25,12 @@ What works today:
   guns for its hull and race (with a charge) when it has no fit; `set_target` points
   them at a ship or object, and they fire once per weapon cycle with the game's
   firing effects and impacts, and the turrets' deploy and pack sounds (firing and
-  impact sounds wait on a PTADPCM decoder).
+  impact sounds wait on a PTADPCM decoder). Launchers fire a missile each cycle that
+  flies as a Destiny ball to its target (drawn missiles come next).
 - **Combat**: `set_target` and `engage` lock on EVE's lock time; each turret shot rolls
   EVE's hit chance through Destiny's `GetAccuracy` and does EVE damage through shield,
-  armor and hull; a ship at 0 hull plays the client's death explosion and leaves the
+  armor and hull, and each missile hits through EVE's missile damage formula (or runs
+  out of flight time); a ship at 0 hull plays the client's death explosion and leaves the
   scene, its fleet falling back as on a removal (a load revives it).
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
@@ -151,9 +153,9 @@ connected tab.
 | `order_ship` | page | a live movement order on a point, ship, object or `celestial:<id>`, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
 | `switch_modules` | page | fitted modules active, online or offline on EVE's timing (hardeners, reps, remote reps on a target, siege, guns firing at the ship's target, ...) |
-| `set_target` | page | gives ships, a fleet, a wing or a squad a ship or object to lock, aim and fire their turrets at (null clears it) |
-| `engage` | page | arms ships' turrets on a target: they lock it and keep firing until `cease_fire` |
-| `cease_fire` | page | ends ships' engagements (their turrets stop at their cycle end); `unlock` drops the targets |
+| `set_target` | page | gives ships, a fleet, a wing or a squad a ship or object to lock, aim and fire their turrets and launchers at (null clears it) |
+| `engage` | page | arms ships' turrets and launchers on a target: they lock it and keep firing until `cease_fire` |
+| `cease_fire` | page | ends ships' engagements (their turrets and launchers stop at their cycle end); `unlock` drops the targets |
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, and called targets (a primary and a queue the group focuses fire on) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
