@@ -1,5 +1,5 @@
 import type { Maybe } from '@dereekb/util';
-import { isPlainObject, type JsonObject, readNumber, readString, readVector, reportUnknownKeys } from '../json';
+import { isPlainObject, type JsonObject, readId, readNumber, readString, readVector, reportUnknownKeys } from '../json';
 import { DEFAULT_FORMATION_RADIUS, type FleetOperationContext } from '../fleets';
 import type { FleetComposition } from '../compositions/composition';
 import { expandFleetComposition } from '../compositions/expand';
@@ -24,7 +24,7 @@ export const DEFAULT_ENGAGEMENT_RANGE = 20_000;
 export const ENGAGEMENT_TEAMS = ['blue', 'red'] as const;
 
 const ENGAGEMENT_KEYS = new Set<string>(['op', 'sides', 'range', 'center', 'near', 'heading', 'radii']);
-const SIDE_KEYS = new Set<string>(['composition', 'ships', 'team', 'fleet', 'name', 'formation', 'spacing', 'prefix', 'warpIn']);
+const SIDE_KEYS = new Set<string>(['composition', 'ships', 'team', 'fleet', 'name', 'personality', 'formation', 'spacing', 'prefix', 'warpIn']);
 
 /**
  * A side that makes free ships in a formation.
@@ -47,6 +47,10 @@ interface EngagementSide {
    * The explicit fleet id of a fleet side.
    */
   readonly fleet: Maybe<string>;
+  /**
+   * A fleet side's personality, over its composition's.
+   */
+  readonly personality: Maybe<string>;
   readonly free: Maybe<FreeSide>;
   /**
    * The side lands from warp at its placements, flying in along its heading.
@@ -114,7 +118,7 @@ interface ReadSideContext {
 
 function readSide(value: unknown, context: ReadSideContext): EngagementSide {
   const { index, where, problems, warnings } = context;
-  const fallback: EngagementSide = { where, team: ENGAGEMENT_TEAMS[index], composition: null, fleet: null, free: null, warpIn: null };
+  const fallback: EngagementSide = { where, team: ENGAGEMENT_TEAMS[index], composition: null, fleet: null, personality: null, free: null, warpIn: null };
   if (!isPlainObject(value)) {
     problems.push(`${where} must be an object { composition | ships, team?, fleet?, name? }`);
     return fallback;
@@ -127,6 +131,8 @@ function readSide(value: unknown, context: ReadSideContext): EngagementSide {
   let fleet: Maybe<string> = null;
   if (typeof fleetValue === 'string') fleet = fleetValue;
   else if (fleetValue != null && fleetValue !== false) problems.push(`${where}.fleet must be a fleet id, or false for free ships in a formation`);
+  const personality = value['personality'] == null ? null : readId(value['personality'], `${where}.personality`, problems);
+  if (free && personality) problems.push(`${where}.personality needs a fleet: free ships (fleet: false) have no FC to run one`);
   for (const key of ['formation', 'spacing', 'prefix']) if (!free && value[key] != null) problems.push(`${where}.${key} needs fleet: false (free ships in a formation); a fleet side flies its formation around its FC`);
   const warpIn = readWarpIn(value['warpIn'], { where: `${where}.warpIn`, problems, warnings, draft: {}, fromRefused: 'an engagement side flies in along its heading, facing the other side' });
 
@@ -155,7 +161,7 @@ function readSide(value: unknown, context: ReadSideContext): EngagementSide {
       composition = readComposition(toShipListComposition({ id: fleet ?? toIdSlug(team, 'side'), name, lines: lines.lines }), { where: `${where}.ships`, problems, warnings });
     }
   }
-  return { where, team, composition, fleet, free: freeSide, warpIn };
+  return { where, team, composition, fleet, personality, free: freeSide, warpIn };
 }
 
 function readComposition(input: unknown, context: Pick<ReadSideContext, 'where' | 'problems' | 'warnings'>): Maybe<FleetComposition> {
@@ -214,7 +220,7 @@ function placeSide(side: EngagementSide, input: PlaceSideInput): void {
     pushStagedShips(document, ships);
     if (side.warpIn && ships.length) context.arrivals?.push({ where: side.where, group: ships[0].id, leader: ships[0].id, ships: ships.map((ship) => ship.id), lane, landing: 'document', stagger: side.warpIn.stagger, together: side.warpIn.together });
   } else if (side.composition) {
-    const expanded = expandFleetComposition({ composition: side.composition, position, heading, fleet: side.fleet, team: side.team, existing: toExpandExisting(draft), where: side.where });
+    const expanded = expandFleetComposition({ composition: side.composition, position, heading, fleet: side.fleet, team: side.team, personality: side.personality, existing: toExpandExisting(draft), where: side.where });
     problems.push(...expanded.problems);
     warnings.push(...expanded.warnings);
     if (expanded.fleet) {

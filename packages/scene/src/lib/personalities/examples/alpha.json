@@ -1,0 +1,9 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "alpha",
+  "name": "Alpha",
+  "description": "Alpha strike: fast-reacting pilots all fire on one called target with nothing queued, taking the one with the least HP left. Pick it for artillery or other high-volley fleets that kill a target in a few volleys.",
+  "command": { "ability": [0.7, 0.9] },
+  "pilots": { "reaction": [0.85, 1] },
+  "targeting": { "prefer": "weakest", "queue": 0 }
+}

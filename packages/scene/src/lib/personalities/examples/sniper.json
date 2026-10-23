@@ -1,0 +1,9 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "sniper",
+  "name": "Sniper",
+  "description": "Opens fire on sight and holds at its guns' full reach without prop mods, picking off the most damaged logi first with a longer queue. Pick it for long-range railgun, artillery or missile fleets (Ferox) against a fleet that cannot close fast.",
+  "engage": "on-sight",
+  "targeting": { "priority": ["logi", "ewar", "fc", "dps", "tackle", "boost", "support"], "prefer": "damaged", "reach": "falloff", "queue": 3 },
+  "movement": { "stance": "snipe", "range": "falloff", "propMods": "never" }
+}

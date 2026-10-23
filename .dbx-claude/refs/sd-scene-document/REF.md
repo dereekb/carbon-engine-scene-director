@@ -24,9 +24,13 @@
 - **Units are EVE's**: metres, degrees, **Y up**. `rotation` is `[yaw, pitch, roll]`. Yaw 0 faces +Z, 90 faces +X.
 - Ship fields: `id` (ship-id pattern), `dna` (SOF `hull:faction:race[:commands]`), `name?`, `team?` (the side, for
   hostility; independent of fleets), `position`, `rotation`, `type?`, `stats?`, `propMod?`, `fit?` (EFT text or a key
-  of `fits`: `sd-fittings`), `pilot?` (reserved: stored, unused), `orders?` (reserved: stored, not played).
-- Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `objects?`, `fits?` (EFT text by key;
-  omitted when empty), `combat?` (`{ seed?, death? }`: the seed every shot's roll is keyed by, an integer 0 … 2³² − 1,
+  of `fits`: `sd-fittings`), `pilot?` (`{ command?, reaction? }` in [0, 1], higher better: FC ability and how fast
+  it answers fleet orders, `personalities/pilots.ts`; a pilot name and other keys are reserved, stored with a warning;
+  stored for fleet personalities, not acted on yet), `orders?` (reserved: stored, not played).
+- Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?` (`fleets[].personality?` names a built-in
+  or a `personalities` key), `objects?`, `fits?` (EFT text by key; omitted when empty), `personalities?` (custom
+  `cjs-fleet-personality/1` templates by key, never a built-in name; each resolves through `extends` to `line`;
+  `personalities/`; normalized before fleets so the fleets' names check), `combat?` (`{ seed?, death? }`: the seed every shot's roll is keyed by, an integer 0 … 2³² − 1,
   default 1; `death` `"explode"` (default) or `"flag"`; omitted when empty; `combat/document.ts`, `sd-combat`),
   `location?`, `timeline?` (reserved).
 - Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
@@ -57,6 +61,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | prop mods | `set_prop_mods` | `prop-mods/operation.ts` (`sd-ship-stats`) |
 | staging | `add_ships`, `stage_engagement` | `staging/operation.ts` (`sd-staging`) |
 | fits | `set_fits { fits: { key: text \| null } }` (merged; `null` deletes a key no ship uses) | `fitting/operation.ts` (`sd-fittings`) |
+| personalities | `set_personalities { personalities: { key: template \| null } }` (merged; `null` deletes a key no fleet uses; a fleet picks one with `update_fleet set { personality }`) | `personalities/document.ts` |
 | combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 
@@ -81,7 +86,7 @@ branch of `applyOperation` in `scene.ts`.
 | `rebuilt` | DNA changed: rebuild that ship; it keeps flying |
 | `moved` | placement changed: put that ship at rest there (ends its order) |
 | `relabelled` | name/team only |
-| `retuned` | `type`, `stats`, `pilot`, `propMod.module` or the resolved fit text (`fitTextOf`) changed: new flight numbers, no rebuild; a fitted ship re-resolves its fit and flies the table path until it lands (`sd-fittings`) |
+| `retuned` | `type`, `stats`, `pilot` (but its `command` / `reaction`, `pilotFlightPart`), `propMod.module` or the resolved fit text (`fitTextOf`) changed: new flight numbers, no rebuild; a fitted ship re-resolves its fit and flies the table path until it lands (`sd-fittings`) |
 | `switched` | `propMod.active` changed: switch at once (no cycle wait). A ship can be in `retuned` too |
 | `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild (a `targets` or `autoRepair` edit flags `fleets` only: no re-follow) |
 | `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |

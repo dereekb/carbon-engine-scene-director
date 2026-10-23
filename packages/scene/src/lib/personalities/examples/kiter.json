@@ -1,0 +1,8 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "kiter",
+  "name": "Kiter",
+  "description": "Keeps the enemy at its guns' full reach and backs off inside it with prop mods on, killing tackle first. Pick it for fast long-point fleets against slower brawlers.",
+  "targeting": { "priority": ["tackle", "ewar", "logi", "dps", "fc", "boost", "support"], "prefer": "nearest", "reach": "falloff" },
+  "movement": { "stance": "kite", "range": "falloff", "propMods": "always" }
+}

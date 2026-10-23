@@ -5,6 +5,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { DNA_PATTERN, isPlainObject, type JsonObject, readNumber, readOptionalString, readShipType, reportUnknownKeys } from '../json';
+import { normalizeShipPilot, type SceneShipPilot } from '../personalities/pilots';
 import { readSquadRole, type SquadRole } from '../fleets';
 import { FLEET_COMPOSITION_SCHEMA, MAX_FLEET_SHIPS } from '../compositions/composition';
 import { readPropModModule, type PropModModule } from '../stats/prop-mods';
@@ -68,9 +69,13 @@ export interface StagingShipLine {
    * text in its `fits` (`<prefix>/<fit name slug>`).
    */
   readonly fit?: string;
+  /**
+   * The pilot's traits (personalities/pilots.ts) each of the line's ships carries.
+   */
+  readonly pilot?: SceneShipPilot;
 }
 
-const LINE_KEYS = new Set<string>(['hull', 'dna', 'radius', 'count', 'name', 'role', 'propMod', 'fit']);
+const LINE_KEYS = new Set<string>(['hull', 'dna', 'radius', 'count', 'name', 'role', 'propMod', 'fit', 'pilot']);
 
 export interface ReadStagingShipLineInput {
   readonly record: JsonObject;
@@ -83,8 +88,8 @@ export interface ReadStagingShipLineInput {
 }
 
 /**
- * Reads a line's hull (else its fit's hull), dna, radius, count, name, propMod and fit from a record (unknown keys are
- * the caller's).
+ * Reads a line's hull (else its fit's hull), dna, radius, count, name, propMod, fit and pilot from a record (unknown
+ * keys are the caller's; the scene's check warns on a pilot's reserved keys).
  *
  * @param input - The record, where it sits, the resolving tool and where problems go.
  * @returns The line (fields with problems are dropped).
@@ -103,6 +108,8 @@ export function readStagingShipLine(input: ReadStagingShipLineInput): StagingShi
   if (count != null && !Number.isInteger(count)) problems.push(`${where}.count must be a whole number`);
   const name = record['name'] == null ? null : readOptionalString(record['name'], `${where}.name`, problems);
   const propMod = record['propMod'] == null ? null : readPropModModule(record['propMod'], `${where}.propMod`, problems);
+  const pilot = normalizeShipPilot({ input: record['pilot'], where: `${where}.pilot` });
+  problems.push(...pilot.problems);
   return {
     ...(hull === '' || hull == null ? {} : { hull }),
     dna,
@@ -110,7 +117,8 @@ export function readStagingShipLine(input: ReadStagingShipLineInput): StagingShi
     ...(count == null ? {} : { count }),
     ...(name ? { name } : {}),
     ...(propMod == null ? {} : { propMod }),
-    ...(fit ? { fit } : {})
+    ...(fit ? { fit } : {}),
+    ...(pilot.pilot == null ? {} : { pilot: pilot.pilot })
   };
 }
 
@@ -136,7 +144,7 @@ export interface NormalizedStagingShipLines {
 }
 
 /**
- * Validates a ship list: a non-empty array of lines (hull?, dna, radius?, count?, name?, role?, propMod?, fit?), at most
+ * Validates a ship list: a non-empty array of lines (hull?, dna, radius?, count?, name?, role?, propMod?, fit?, pilot?), at most
  * MAX_FLEET_SHIPS ships in all.
  *
  * @param config - The candidate, where it sits and the resolving tool.
@@ -323,6 +331,7 @@ function compositionShip(line: StagingShipLine, options: { readonly fits: Readon
     ...(line.radius == null ? {} : { radius: line.radius }),
     ...(named && line.name ? { name: line.name } : {}),
     ...(line.propMod == null ? {} : { propMod: line.propMod }),
-    ...(line.fit && fits.has(line.fit) ? { fit: fits.get(line.fit) } : {})
+    ...(line.fit && fits.has(line.fit) ? { fit: fits.get(line.fit) } : {}),
+    ...(line.pilot == null ? {} : { pilot: structuredClone(line.pilot) })
   };
 }

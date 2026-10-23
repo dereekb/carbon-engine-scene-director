@@ -62,6 +62,10 @@ export interface ExpandFleetCompositionInput {
    */
   readonly team?: Maybe<string>;
   /**
+   * The fleet's personality, over the composition's.
+   */
+  readonly personality?: Maybe<string>;
+  /**
    * What the scene already holds.
    */
   readonly existing: ExpandFleetCompositionExisting;
@@ -140,7 +144,7 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
   }
   if (!slots || !fleetId || problems.length) return { fleet: null, ships: [], fits: {}, problems, warnings };
 
-  const fleet = toSceneFleet({ composition, fleetId, slots });
+  const fleet = toSceneFleet({ composition, fleetId, slots, personality: input.personality ?? composition.personality });
   const radii = new Map(slots.all.map((slot) => [slot.id, slot.ship.radius ?? DEFAULT_FORMATION_RADIUS]));
   const positions = layoutFleetFormation({ fleet, origin: position, heading, radiusOf: (ship) => radii.get(ship) ?? DEFAULT_FORMATION_RADIUS });
   const fits = toSceneFits({ composition, fleetId, slots: slots.all, existing: existing.fits });
@@ -155,7 +159,8 @@ export function expandFleetComposition(input: ExpandFleetCompositionInput): Expa
       rotation: [heading, 0, 0],
       ...(type == null ? {} : { type }),
       ...shipPropMod(slot.ship, composition),
-      ...(slot.ship.fit && fits.keys.has(slot.ship.fit) ? { fit: fits.keys.get(slot.ship.fit) as string } : {})
+      ...(slot.ship.fit && fits.keys.has(slot.ship.fit) ? { fit: fits.keys.get(slot.ship.fit) as string } : {}),
+      ...(slot.ship.pilot == null ? {} : { pilot: structuredClone(slot.ship.pilot) })
     };
   });
 
@@ -237,8 +242,8 @@ function toSlots(composition: FleetComposition, fleetId: string): FleetSlots {
   return { commander, wings, all };
 }
 
-function toSceneFleet(input: { readonly composition: FleetComposition; readonly fleetId: string; readonly slots: FleetSlots }): SceneFleet {
-  const { composition, fleetId, slots } = input;
+function toSceneFleet(input: { readonly composition: FleetComposition; readonly fleetId: string; readonly slots: FleetSlots; readonly personality?: Maybe<string> }): SceneFleet {
+  const { composition, fleetId, slots, personality } = input;
   const leads = new Map<string, string>();
   for (const wing of slots.wings) for (const { squad, slots: members } of wing.squads) if (members.length) leads.set(squad.id, members[0].id);
 
@@ -246,6 +251,7 @@ function toSceneFleet(input: { readonly composition: FleetComposition; readonly 
     id: fleetId,
     ...(composition.name ? { name: composition.name } : {}),
     commander: slots.commander.id,
+    ...(personality ? { personality } : {}),
     wings: composition.wings.map((wing, wingIndex) => ({
       id: wing.id,
       ...(wing.name ? { name: wing.name } : {}),

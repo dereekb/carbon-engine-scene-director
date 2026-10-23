@@ -4,9 +4,10 @@ import { readSquadRole } from '../fleets';
 import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, type CompositionAnchor, type CompositionShip, type CompositionShipLine, type CompositionSquad, type CompositionWing, FLEET_COMPOSITION_SCHEMA, type FleetComposition, MAX_FLEET_SHIPS } from './composition';
 import { MAX_FIT_LENGTH } from '../fitting/eft';
 import { readEftHeader } from './eft';
+import { normalizeShipPilot } from '../personalities/pilots';
 
-const COMPOSITION_KEYS = new Set<string>(['schema', 'id', 'name', 'description', 'source', 'commander', 'wings', 'fits']);
-const SHIP_KEYS = new Set<string>(['hull', 'dna', 'radius', 'name', 'propMod', 'fit']);
+const COMPOSITION_KEYS = new Set<string>(['schema', 'id', 'name', 'description', 'source', 'personality', 'commander', 'wings', 'fits']);
+const SHIP_KEYS = new Set<string>(['hull', 'dna', 'radius', 'name', 'propMod', 'fit', 'pilot']);
 const LINE_KEYS = new Set<string>([...SHIP_KEYS, 'count']);
 const WING_KEYS = new Set<string>(['id', 'name', 'squads']);
 const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'anchor', 'ships']);
@@ -91,6 +92,7 @@ function normalizeComposition(input: JsonObject, where: string, report: Report):
     const value = readOptionalString(input[key], `${where}.${key}`, problems);
     if (value) composition[key] = value;
   }
+  if (input['personality'] != null) composition.personality = readId(input['personality'], `${where}.personality`, problems);
 
   const commander = input['commander'];
   if (isPlainObject(commander)) composition.commander = normalizeShip(commander, `${where}.commander`, { report, fits: fits ?? {}, line: false });
@@ -214,6 +216,10 @@ function normalizeShip(input: JsonObject, where: string, context: ShipContext): 
     else problems.push(`${where}.count must be an integer in [1, ${MAX_FLEET_SHIPS}]`);
   }
   if (input['fit'] != null) ship.fit = readString(input['fit'], `${where}.fit`, problems);
+  const pilot = normalizeShipPilot({ input: input['pilot'], where: `${where}.pilot` });
+  problems.push(...pilot.problems);
+  report.warnings.push(...pilot.warnings);
+  if (pilot.pilot != null) ship.pilot = pilot.pilot;
   checkShipHull(ship, where, context);
   return ship;
 }

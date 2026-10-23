@@ -5,7 +5,7 @@ import { toFleetAnchors } from './membership';
 import { readSceneAutoRepair } from '../logi/auto-repair';
 import { readCalledTargets } from './targets';
 
-const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'autoRepair', 'wings']);
+const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'personality', 'targets', 'autoRepair', 'wings']);
 const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'autoRepair', 'squads']);
 const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home', 'targets', 'autoRepair']);
 const ANCHOR_KEYS = new Set<string>(['ship', 'range']);
@@ -21,6 +21,11 @@ export interface NormalizeFleetsInput {
    * one fleet against ship ids only.
    */
   readonly targetIds?: ReadonlySet<string>;
+  /**
+   * The names a fleet's `personality` may take: the built-ins and the document's `personalities` keys. Unchecked
+   * when absent: add_ships normalizes one fleet alone.
+   */
+  readonly personalityNames?: ReadonlySet<string>;
 }
 
 export interface NormalizedFleets {
@@ -39,6 +44,10 @@ interface Report {
    * NormalizeFleetsInput.targetIds.
    */
   readonly targetIds?: ReadonlySet<string>;
+  /**
+   * NormalizeFleetsInput.personalityNames.
+   */
+  readonly personalityNames?: ReadonlySet<string>;
 }
 
 /**
@@ -71,14 +80,15 @@ interface Claims {
  * - a wing commander sits in one of its own wing's squads or in none, and commands one wing; a squad commander is
  *   one of its squad's members;
  * - anchors are ships of the same fleet, and every anchor chain ends at the fleet commander;
- * - called targets (`targets`, fleets/targets.ts) name ships or objects (against targetIds when given), none twice.
+ * - called targets (`targets`, fleets/targets.ts) name ships or objects (against targetIds when given), none twice;
+ * - a fleet's personality names a built-in or a document template (against personalityNames when given).
  *
  * @param config - The candidate fleets and the scene's ship ids.
  * @returns The normalized fleets with every problem and warning found.
  */
 export function normalizeFleets(config: NormalizeFleetsInput): NormalizedFleets {
-  const { input, shipIds, targetIds } = config;
-  const report: Report = { problems: [], warnings: [], targetIds };
+  const { input, shipIds, targetIds, personalityNames } = config;
+  const report: Report = { problems: [], warnings: [], targetIds, personalityNames };
   const fleets: SceneFleet[] = [];
 
   if (input != null && !Array.isArray(input)) report.problems.push('fleets must be an array');
@@ -108,9 +118,11 @@ function normalizeFleet(input: unknown, where: string, report: Report): Maybe<Sc
   const id = readId(input['id'], `${where}.id`, report.problems);
   const name = readOptionalString(input['name'], `${where}.name`, report.problems);
   const commander = readString(input['commander'], `${where}.commander`, report.problems);
+  const personality = input['personality'] == null ? null : readId(input['personality'], `${where}.personality`, report.problems);
+  if (personality && report.personalityNames && !report.personalityNames.has(personality)) report.problems.push(`${where}.personality "${personality}" is not a built-in personality or a key of personalities`);
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
   const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
-  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), wings: [] };
+  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(personality ? { personality } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), wings: [] };
 
   const wingIds = new Set<string>();
   const squadIds = new Set<string>();

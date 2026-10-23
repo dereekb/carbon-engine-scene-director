@@ -1,0 +1,11 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "line",
+  "name": "Line",
+  "description": "The balanced default: calls logi, then ewar and tackle, takes the nearest of each, fights at its guns' full reach and opens fire once a target is in range. Pick it when no other personality fits.",
+  "command": { "ability": [0.5, 0.8], "backups": 2, "succession": ["most-able", "chain", "anyone"], "handover": 30 },
+  "pilots": { "reaction": [0.5, 0.85] },
+  "engage": "in-range",
+  "targeting": { "priority": ["logi", "ewar", "tackle", "dps", "fc", "boost", "support"], "prefer": "nearest", "reach": "falloff", "queue": 2, "switch": "on-kill", "freeFire": true },
+  "movement": { "stance": "brawl", "range": "falloff", "propMods": "closing" }
+}

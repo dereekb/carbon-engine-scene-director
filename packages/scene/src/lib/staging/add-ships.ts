@@ -26,9 +26,9 @@ const OVERLAP_EXAMPLES = 3;
  */
 const SLOT_MOVE_TOLERANCE = 1;
 
-const ADD_SHIPS_KEYS = new Set<string>(['op', 'dna', 'hull', 'radius', 'count', 'formation', 'spacing', 'position', 'near', 'heading', 'facing', 'team', 'name', 'prefix', 'stats', 'propMod', 'fleet', 'radii', 'warpIn']);
+const ADD_SHIPS_KEYS = new Set<string>(['op', 'dna', 'hull', 'radius', 'count', 'formation', 'spacing', 'position', 'near', 'heading', 'facing', 'team', 'name', 'prefix', 'stats', 'propMod', 'pilot', 'fleet', 'radii', 'warpIn']);
 const NEAR_KEYS = new Set<string>(['ship', 'object', 'celestial', 'range', 'direction']);
-const NEW_FLEET_KEYS = new Set<string>(['new', 'id', 'name', 'squad']);
+const NEW_FLEET_KEYS = new Set<string>(['new', 'id', 'name', 'personality', 'squad']);
 const JOIN_KEYS = new Set<string>(['id', 'squad', 'wing']);
 const SQUAD_SPEC_KEYS = new Set<string>(['id', 'name', 'role', 'anchor']);
 
@@ -239,7 +239,9 @@ export function placeFreeShips(input: PlaceFreeShipsInput): SceneShip[] {
       ...(line.hull == null ? {} : { type: line.hull }),
       ...(template.stats ? { stats: structuredClone(template.stats) } : {}),
       ...(propMod ? { propMod: structuredClone(propMod) } : {}),
-      ...(line.fit ? { fit: line.fit } : {})
+      ...(line.fit ? { fit: line.fit } : {}),
+      ...(line.pilot == null ? {} : { pilot: structuredClone(line.pilot) }),
+      ...(line.pilot == null ? {} : { pilot: structuredClone(line.pilot) })
     };
   });
 
@@ -377,8 +379,9 @@ type FleetMode = { readonly mode: 'free' } | { readonly mode: 'new'; readonly sp
 
 /**
  * Applies `{ op: "add_ships", dna, hull?, radius?, count?, formation?, spacing?, position? | near?, heading? | facing?,
- * team?, name?, prefix?, stats?, propMod?, fleet?, radii?, warpIn? }`: `count` ships of one hull, free in a formation,
- * as a new fleet, into a fleet's squad, or as a new squad of a fleet (the sd-staging ref). With `warpIn` they are
+ * team?, name?, prefix?, stats?, propMod?, pilot?, fleet?, radii?, warpIn? }`: `count` ships of one hull, free in a
+ * formation, as a new fleet (`fleet: { new: true, personality? }`), into a fleet's squad, or as a new squad of a fleet
+ * (the sd-staging ref); `pilot` rides on every ship. With `warpIn` they are
  * recorded in the context's arrivals: the page lands them from warp at their placements, or (joining a fleet) at
  * their live formation slots. Pure and synchronous: the add_ships tool resolves hull names, celestials and radii
  * first.
@@ -550,6 +553,7 @@ function addNewFleet(input: NewFleetInput): void {
   const before = problems.length;
   const fleetId = spec['id'] == null ? null : readId(spec['id'], `${at}.id`, problems);
   const name = spec['name'] == null ? null : readOptionalString(spec['name'], `${at}.name`, problems);
+  const personality = spec['personality'] == null ? null : readId(spec['personality'], `${at}.personality`, problems);
   const squad = readSquadSpec(spec['squad'], `${at}.squad`, context);
   if (problems.length > before) return;
 
@@ -561,7 +565,7 @@ function addNewFleet(input: NewFleetInput): void {
   warnings.push(...normalized.warnings);
   if (!normalized.composition) return;
 
-  const expanded = expandFleetComposition({ composition: normalized.composition, position, heading: normalizeHeading(heading), fleet: fleetId || null, team: template.team, existing: toExpandExisting(draft), where: at });
+  const expanded = expandFleetComposition({ composition: normalized.composition, position, heading: normalizeHeading(heading), fleet: fleetId || null, team: template.team, personality, existing: toExpandExisting(draft), where: at });
   problems.push(...expanded.problems);
   warnings.push(...expanded.warnings);
   if (!expanded.fleet) return;

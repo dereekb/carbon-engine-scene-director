@@ -151,21 +151,24 @@ describe('ship flight fields', () => {
     expect(error.problems).toEqual(['ships[0].stats.mass must be a positive number (kg)', 'ships[0].stats.maxVelocity must be a number of 0 or more (m/s)', 'ships[1].stats must be an object of mass, maxVelocity, agility and signatureRadius']);
   });
 
-  it('pilot is reserved: stored with a warning, never interpreted', () => {
+  it('pilot holds command and reaction; a pilot name and other keys are stored with a warning', () => {
     const { scene, warnings } = normalizeScene({
       ships: [
-        { ...guardian, pilot: { skills: { Navigation: 4 } } },
+        { ...guardian, pilot: { command: 0.8, reaction: 0.5, skills: { Navigation: 4 } } },
         { id: 'p', dna: guardian.dna, pilot: 'fc' },
-        { id: 'q', dna: guardian.dna, pilot: null }
+        { id: 'q', dna: guardian.dna, pilot: null },
+        { id: 'r', dna: guardian.dna, pilot: { reaction: 1 } }
       ]
     });
-    expect(scene.ships[0].pilot).toEqual({ skills: { Navigation: 4 } });
+    expect(scene.ships[0].pilot).toEqual({ command: 0.8, reaction: 0.5, skills: { Navigation: 4 } });
     expect(scene.ships[1].pilot).toBe('fc');
     expect(scene.ships[2].pilot).toBeUndefined();
-    expect(warnings).toEqual(['ships[0].pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot', 'ships[1].pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot']);
+    expect(scene.ships[3].pilot).toEqual({ reaction: 1 });
+    expect(warnings).toEqual(['ships[0].pilot.skills is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot', 'ships[1].pilot is reserved for the character system and is stored but not used yet; ships fly with the max-skills pilot']);
     for (const pilot of [3, '', [1]]) {
-      expect(catchSceneError(() => normalizeScene({ ships: [{ ...guardian, pilot }] })).problems).toEqual(['ships[0].pilot must be an object or a pilot name']);
+      expect(catchSceneError(() => normalizeScene({ ships: [{ ...guardian, pilot }] })).problems).toEqual(['ships[0].pilot must be an object of command and reaction (0..1) or a pilot name']);
     }
+    expect(catchSceneError(() => normalizeScene({ ships: [{ ...guardian, pilot: { reaction: -1 } }] })).problems).toEqual(['ships[0].pilot.reaction must be a finite number in [0, 1]']);
   });
 
   it('update_ship replaces stats as a whole and null clears type, stats and pilot', () => {
@@ -188,6 +191,8 @@ describe('ship flight fields', () => {
     expect(diff.rebuilt.map((ship) => ship.id)).toEqual(['b']);
     expect(diff.moved).toEqual([]);
     expect(diffScenes(after, applySceneOperations(after, [{ op: 'update_ship', id: 'g', set: { pilot: 'fc' } }]).scene).retuned.map((ship) => ship.id)).toEqual(['g']);
+    const traits = applySceneOperations(after, [{ op: 'update_ship', id: 'g', set: { pilot: { command: 1, reaction: 0.2 } } }]).scene;
+    expect(diffScenes(after, traits).retuned).toEqual([]);
   });
 
   it('keeps propMod, and the diff retunes a module change and switches an active change', () => {

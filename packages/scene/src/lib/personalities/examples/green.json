@@ -1,0 +1,9 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "green",
+  "name": "Green",
+  "description": "An inexperienced fleet: a slow, unsure FC with no backups, slow pilots, no free fire and a long hesitation when the FC dies. Pick it to show a new or outmatched fleet.",
+  "command": { "ability": [0.1, 0.4], "backups": 0, "handover": 90 },
+  "pilots": { "reaction": [0.1, 0.5] },
+  "targeting": { "freeFire": false }
+}

@@ -1,0 +1,7 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "headhunter",
+  "name": "Headhunter",
+  "description": "Hunts the enemy FC, then boosts and the other commanders, switching the moment a better head comes into reach. Pick it to break an enemy fleet by its command.",
+  "targeting": { "priority": ["fc", "boost", "logi", "ewar", "tackle", "dps", "support"], "prefer": "commander", "switch": "on-better" }
+}

@@ -124,6 +124,12 @@ export interface SceneFleet {
    */
   commander: string;
   /**
+   * The fleet's personality (personalities/personality.ts): a built-in name or a key of the document's
+   * `personalities`. The page's brain runs a personality fleet's fight: calls, succession, movement and prop mods.
+   * Omitted: the fleet does only what it is told.
+   */
+  personality?: string;
+  /**
    * The group's opening called targets: ship or authored-object ids in kill order (fleets/targets.ts), the call a load
    * starts with; order_fleet's targets order then calls live. The first live entry is its primary, the live entries
    * after it its queue. Omitted when it calls none.

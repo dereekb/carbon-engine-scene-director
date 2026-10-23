@@ -1,0 +1,9 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "brawler",
+  "name": "Brawler",
+  "description": "Charges on sight, closes to its guns' optimal with prop mods on and focuses the nearest, tackle first. Pick it for short-range armor or blaster fleets (TFIs) against a fleet it can catch.",
+  "engage": "on-sight",
+  "targeting": { "priority": ["tackle", "logi", "dps", "ewar", "fc", "boost", "support"], "prefer": "nearest", "reach": "optimal" },
+  "movement": { "stance": "brawl", "range": "optimal", "propMods": "always" }
+}

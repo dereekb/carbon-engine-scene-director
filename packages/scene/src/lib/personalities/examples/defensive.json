@@ -1,0 +1,9 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "defensive",
+  "name": "Defensive",
+  "description": "Holds its ground without prop mods and opens fire only once shot at, calling whoever does the most damage. Pick it for a fleet guarding something or waiting to be engaged.",
+  "engage": "when-attacked",
+  "targeting": { "prefer": "dangerous" },
+  "movement": { "stance": "hold", "propMods": "never" }
+}

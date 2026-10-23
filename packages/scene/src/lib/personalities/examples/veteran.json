@@ -1,0 +1,9 @@
+{
+  "schema": "cjs-fleet-personality/1",
+  "id": "veteran",
+  "name": "Veteran",
+  "description": "An elite fleet: a sharp FC with three backups, fast pilots, a quick handover and calls that switch to a better target at once. Pick it to show a seasoned fleet.",
+  "command": { "ability": [0.85, 1], "backups": 3, "handover": 10 },
+  "pilots": { "reaction": [0.8, 1] },
+  "targeting": { "switch": "on-better" }
+}

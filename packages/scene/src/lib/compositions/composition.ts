@@ -1,4 +1,5 @@
 import type { SquadRole } from '../fleets';
+import type { SceneShipPilot } from '../personalities/pilots';
 
 /**
  * A fleet composition: a doctrine fleet written once (an FC, wings, and squads of hull lines with counts, roles
@@ -61,6 +62,10 @@ export interface CompositionShip {
    * mod is applied when the line names none.
    */
   fit?: string;
+  /**
+   * The pilot's traits (personalities/pilots.ts), given to each of the line's ships.
+   */
+  pilot?: SceneShipPilot;
 }
 
 export interface CompositionShipLine extends CompositionShip {
@@ -120,6 +125,11 @@ export interface FleetComposition {
    * Where the doctrine comes from, usually a URL.
    */
   source?: string;
+  /**
+   * The fleet's personality (a built-in name or a template the scene embeds; personalities/personality.ts), which
+   * becomes its scene fleet's `personality`.
+   */
+  personality?: string;
   /**
    * The fleet commander, in EVE's fleet commander slot (in no squad).
    */

@@ -16,3 +16,4 @@ export * from './lib/weapons';
 export * from './lib/combat';
 export * from './lib/arrivals';
 export * from './lib/logi';
+export * from './lib/personalities';

@@ -97,7 +97,9 @@ of overlap; mixed lists use the largest radius.
 
 Free ships and joins: `<prefix>-<nn>` after the highest number already used with the prefix (≥ 2 digits). Prefix =
 `prefix`, else the name/hull slug (`tempest-fleet-issue`), or `<fleet>-<squad>` when joining. Names `<name or hull> <n>`.
-`type` = canonical SDE name; `team`, `stats`, `propMod` go on every ship. A line's `fit` (EFT text; the hull defaults to
+`type` = canonical SDE name; `team`, `stats`, `propMod`, `pilot` go on every ship (`add_ships { pilot }`, a ship
+line's `pilot`); `fleet: { new: true, personality? }` and a fleet side's `personality` set the new fleet's
+personality (a free side refuses one). A line's `fit` (EFT text; the hull defaults to
 its header's) goes on every ship too, kept once in the scene's `fits`: `<fleet id>/<fit name slug>` for a new fleet or a
 fleet side, `<id prefix>/<fit name slug>` for free ships and joins; the returned `template` carries it in its `fits`
 (`sd-fittings`). New fleets take composition ids. **Ship ids
@@ -110,7 +112,7 @@ skip object ids** (ids are unique across both), and a ship id an object holds is
   `C + f·(range/2 + front_B)`, so fronts are exactly `range` apart around `C` (TFIs vs 8 Ferox + 2 Scimitar at 20 km:
   FCs 20,465 m apart).
 - A side is a `composition` (inline/saved/built-in; always a fleet) or `ships: [{ hull, count?, role?, name?, propMod?,
-  fit?, dna?, radius? }]`: a fleet (FC = first ship, lines = squads in `wing-1`, ids their roles `dps`, `dps-2`), or with
+  fit?, pilot?, dna?, radius? }]`: a fleet (FC = first ship, lines = squads in `wing-1`, ids their roles `dps`, `dps-2`), or with
   `fleet: false` free ships in `formation` (ids `<team>-01`…). Fleet ids: side's `fleet`, else composition id, else team.
 - Result `engagement` lists per side: team, fleet, commander, ships, lead.
 
