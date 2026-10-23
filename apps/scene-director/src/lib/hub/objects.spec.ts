@@ -2,10 +2,10 @@ import { applySceneOperations, findTool, normalizeScene, type SceneDocument, Sce
 import { beforeAll, describe, expect, it } from 'vitest';
 import { Locations } from './locations';
 import { MakeFakeMapData } from './map-data.testing';
-import { ASTRAHUS_DNA, MakeFakeObjectData, RUINED_GATE_DNA, WRECK_DNA } from './object-data.testing';
+import { ASTRAHUS_DNA, MakeFakeObjectData, OBJECT_ROUTES, RESOURCES, RUINED_GATE_DNA, TITAN_WRECK_DNA, WRECK_DNA } from './object-data.testing';
 import { ObjectTools } from './objects';
 import type { SavedScenesPage } from './saved-scenes';
-import { MakeFakeShipData, SDE, SHIP_ROUTES, TFI_DNA } from './ship-data.testing';
+import { type Answer, MakeFakeShipData, SDE, SHIP_ROUTES, TFI_DNA } from './ship-data.testing';
 import { ToolError, type ToolArgs } from './tool-call';
 
 const CNAP = 'Jita IV - Moon 4 - Caldari Navy Assembly Plant';
@@ -52,8 +52,8 @@ class FakePage implements SavedScenesPage {
   }
 }
 
-function MakeTools(page: SavedScenesPage = NO_PAGE): ObjectTools {
-  return new ObjectTools({ objectData: MakeFakeObjectData().objectData, shipData: MakeFakeShipData(ROUTES).shipData, mapData: MakeFakeMapData().mapData, page });
+function MakeTools(page: SavedScenesPage = NO_PAGE, routes: Record<string, Answer> = OBJECT_ROUTES): ObjectTools {
+  return new ObjectTools({ objectData: MakeFakeObjectData(routes).objectData, shipData: MakeFakeShipData(ROUTES).shipData, mapData: MakeFakeMapData().mapData, page });
 }
 
 async function Refused(action: Promise<unknown>): Promise<string> {
@@ -85,11 +85,48 @@ describe('add_objects', () => {
     expect(result['added'].map((added: { id: string }) => added.id)).toEqual(['astra', 'minmatar-frigate-wreck-01', 'minmatar-frigate-wreck-02', 'minmatar-frigate-wreck-03']);
     const astra = page.scene.objects?.[0];
     expect(astra).toEqual({ id: 'astra', dna: ASTRAHUS_DNA, type: 'Astrahus', name: 'Astrahus', position: [75250, 0, 0], rotation: [90, 0, 0], radius: 45000 });
-    expect(page.scene.objects?.[1]).toMatchObject({ dna: WRECK_DNA, radius: 14, position: [75250 - 48014, 0, 0] });
+    expect(page.scene.objects?.[1]).toMatchObject({ dna: WRECK_DNA, radius: 70, position: [75250 - 48070, 0, 0] });
     expect(result['types']).toEqual([
       { type: 'astrahus', typeID: 35832, name: 'Astrahus', group: 'Citadel', category: 'Structure', dna: ASTRAHUS_DNA, radius: 45000, dnaFrom: 'sde', radiusFrom: 'sde' },
-      { type: 'Minmatar Frigate Wreck', typeID: 26550, name: 'Minmatar Frigate Wreck', group: 'Wreck', category: 'Celestial', dna: WRECK_DNA, radius: 14, dnaFrom: 'sde', radiusFrom: 'sde' }
+      { type: 'Minmatar Frigate Wreck', typeID: 26550, name: 'Minmatar Frigate Wreck', group: 'Wreck', category: 'Celestial', dna: WRECK_DNA, radius: 70, dnaFrom: 'sde', radiusFrom: 'sof', sdeRadius: 14 }
     ]);
+  });
+
+  it("spaces, places and orbits titan wrecks on their model's radius, not the SDE's 14 m", async () => {
+    const result = (await MakeTools().AddObjects({
+      scene: { name: 'x' },
+      objects: [
+        { type: 'Astrahus', id: 'astra', position: [0, 0, 100000] },
+        { type: 'Minmatar Titan Wreck', count: 3, near: { object: 'astra', range: 5000 } }
+      ]
+    })) as Record<string, any>;
+    const wrecks = (result['scene'] as SceneDocument).objects?.filter((object) => object.dna === TITAN_WRECK_DNA) ?? [];
+    expect(wrecks).toHaveLength(3);
+    expect(wrecks.every((wreck) => wreck.radius === 10891)).toBe(true);
+    expect(wrecks[0].position).toEqual([0, 0, 100000 + 45000 + 5000 + 10891]);
+    for (const [index, wreck] of wrecks.entries()) {
+      for (const other of wrecks.slice(index + 1)) expect(Math.hypot(...wreck.position.map((value, axis) => value - other.position[axis]))).toBeGreaterThanOrEqual(32772);
+    }
+    expect(result['types'][1]).toMatchObject({ typeID: 26556, radius: 10891, radiusFrom: 'sof', sdeRadius: 14 });
+  });
+
+  it('warns of ships inside a titan wreck and of a spacing under two radii', async () => {
+    const inside = (await MakeTools().AddObjects({ scene: TFI_SCENE, type: 'Minmatar Titan Wreck', id: 'wreck', position: [8000, 0, 0] })) as Record<string, any>;
+    expect(inside['warnings'].join('\n')).toMatch(/wreck overlaps ships "tfi" \(inside its 10,891 m radius\)/u);
+    const packed = (await MakeTools().AddObjects({ scene: { name: 'x' }, type: 'Minmatar Titan Wreck', count: 2, spacing: 5000, position: [0, 0, 500000] })) as Record<string, any>;
+    expect(packed['warnings'].join('\n')).toMatch(/spacing 5000 m is under two radii \(21782 m\), so the objects overlap/u);
+  });
+
+  it('adds a wreck with no radius, and says why, when its SOF hull cannot be read', async () => {
+    const routes = { ...OBJECT_ROUTES, [`/eve/${RESOURCES}/sof/hulls/mt1_t1_wreck`]: { status: 501, json: { error: 'SOF service is not configured' } } };
+    const result = (await MakeTools(NO_PAGE, routes).AddObjects({ scene: { name: 'x' }, type: 'Minmatar Titan Wreck', position: [0, 0, 500000] })) as Record<string, any>;
+    const wreck = (result['scene'] as SceneDocument).objects?.[0];
+    expect(wreck?.dna).toBe(TITAN_WRECK_DNA);
+    expect(wreck).not.toHaveProperty('radius');
+    expect(result['types'][0]).toMatchObject({ radius: null, radiusFrom: 'none' });
+    const warnings = result['warnings'].join('\n');
+    expect(warnings).toMatch(/placeholder radius and its model's \(SOF hull "mt1_t1_wreck"\) could not be read \(tools-core answered 501 for the SOF hull "mt1_t1_wreck" \(SOF service is not configured\)\)/u);
+    expect(warnings).toMatch(/no radius; the page uses the SOF bounding radius once built/u);
   });
 
   it('takes a numeric type with its name, a top-level line, and returns a passed scene unloaded', async () => {

@@ -182,6 +182,7 @@ function applyAddObjects(operation: JsonObject, context: FleetOperationContext):
   const radii = readStagingRadii(operation['radii'], `${where}.radii`, problems);
   const place = readObjectPlace(operation, { read: { where, tool: 'add_objects', draft, problems, warnings }, radii, leadRadius: radius ?? 0 });
   if (problems.length > before || !place) return;
+  if (spacing != null && radius != null && count > 1 && spacing < 2 * radius) warnings.push(`${where}: spacing ${spacing} m is under two radii (${2 * radius} m), so the objects overlap`);
 
   const position = place.position ?? [0, 0, 0];
   const rotation = place.rotation ?? [0, 0, 0];
@@ -205,7 +206,7 @@ function applyAddObjects(operation: JsonObject, context: FleetOperationContext):
     ...(radius == null ? {} : { radius })
   }));
   draftObjects(document).push(...structuredClone(added));
-  if (radius == null) warnings.push(`${where}: no radius; the page uses the SOF bounding radius once built (spacing assumed ${DEFAULT_OBJECT_RADIUS} m). The add_objects tool fills the SDE radius from a type`);
+  if (radius == null) warnings.push(`${where}: no radius; the page uses the SOF bounding radius once built (spacing assumed ${DEFAULT_OBJECT_RADIUS} m). The add_objects tool fills it from a type`);
   warnOverlaps(added, draft, context);
   warnLarge(
     added.map((object) => object.position),

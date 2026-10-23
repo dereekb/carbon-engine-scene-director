@@ -256,7 +256,7 @@ interface CinemaStateReport {
 
 interface AddObjectsResult {
   readonly added: { readonly id: string; readonly position: SceneVector; readonly radius?: number }[];
-  readonly types: { readonly typeID: number; readonly radius: number; readonly radiusFrom: string }[];
+  readonly types: { readonly typeID: number; readonly radius: number; readonly radiusFrom: string; readonly sdeRadius?: number }[];
   readonly scene: SceneDocument;
   readonly warnings: string[];
 }
@@ -1903,9 +1903,9 @@ try {
   await Check('search_objects finds structures, wrecks and LCOs', async () => {
     const astrahus = await call<{ items: { typeID: number; dna?: string }[] }>('search_objects', { query: 'Astrahus' }).catch(SkipWithoutSde);
     Expect(astrahus.items[0]?.typeID === 35832 && astrahus.items[0]?.dna === 'cm1_t1:upwell:generic', JSON.stringify(astrahus.items[0]));
-    const wrecks = await call<{ items: { typeID: number; dna?: string }[] }>('search_objects', { query: 'Frigate Wreck', group: 'wreck' });
+    const wrecks = await call<{ items: { typeID: number; dna?: string; radius?: number; radiusFrom?: string }[] }>('search_objects', { query: 'Frigate Wreck', group: 'wreck' });
     Expect(
-      wrecks.items.some((item) => item.typeID === 26550 && item.dna === 'wreck_s:genericbase:generic'),
+      wrecks.items.some((item) => item.typeID === 26550 && item.dna === 'wreck_s:genericbase:generic' && item.radius === 70 && item.radiusFrom === 'sof'),
       JSON.stringify(wrecks.items.slice(0, 5))
     );
     const ruin = await call<{ items: { typeID: number }[] }>('search_objects', { query: 'Ruined Stargate' });
@@ -1928,12 +1928,19 @@ try {
     }).catch(SkipWithoutSde);
     const ids = result.added.map((added) => added.id);
     Expect(JSON.stringify(ids) === JSON.stringify(['astra', 'minmatar-frigate-wreck-01', 'minmatar-frigate-wreck-02', 'minmatar-frigate-wreck-03', 'minmatar-frigate-wreck-04', 'minmatar-frigate-wreck-05']), JSON.stringify(ids));
-    Expect(result.types[0]?.radius === 45000 && result.types[1]?.radius === 14 && result.types.every((type) => type.radiusFrom === 'sde'), JSON.stringify(result.types));
+    Expect(result.types[0]?.radius === 45000 && result.types[0]?.radiusFrom === 'sde', JSON.stringify(result.types));
+    Expect(result.types[1]?.radius === 70 && result.types[1]?.radiusFrom === 'sof' && result.types[1]?.sdeRadius === 14, JSON.stringify(result.types));
     const astra = result.added[0];
     Expect(Math.abs(Math.hypot(...astra.position) - (31 + 30000 + 45000)) <= 1, `astra at ${JSON.stringify(astra.position)}`);
     const state = await WaitFor('the objects to validate', 90, (polled) => ((polled.objects ?? []).length === 6 && (polled.objects ?? []).every((object) => ['validated', 'ready'].includes(object.status)) ? null : JSON.stringify((polled.objects ?? []).map((object) => object.status))));
     const row = (state.objects ?? [])[0];
     Expect(row?.nearestShips[0]?.id === 'rifter' && Math.abs((row?.nearestShips[0]?.distance ?? 0) - 30000) <= 2, JSON.stringify(row?.nearestShips));
+    // The hub read the wreck's SOF hull on the resource build: the same number the page's SOF build measures.
+    const wrecks = (state.objects ?? []).slice(1);
+    Expect(
+      wrecks.every((wreck) => wreck.radius === 70 && wreck.radiusFrom === 'document' && wreck.sofRadius === 70),
+      JSON.stringify(wrecks.map((wreck) => ({ id: wreck.id, radius: wreck.radius, radiusFrom: wreck.radiusFrom, sofRadius: wreck.sofRadius })))
+    );
     objectsPlaced = true;
     return `astra sofRadius ${row?.sofRadius} m, radius ${row?.radius} m`;
   });
@@ -1951,6 +1958,17 @@ try {
   });
 
   if (objectsPlaced) {
+    await Check("add_objects gives a titan wreck its model's radius, not the SDE's 14 m", async () => {
+      const result = await call<AddObjectsResult>('add_objects', { type: 'Minmatar Titan Wreck', id: 'titan-wreck', position: [0, 0, -400000] });
+      Expect(result.added[0]?.radius === 10891 && result.types[0]?.radiusFrom === 'sof' && result.types[0]?.sdeRadius === 14, JSON.stringify({ added: result.added, types: result.types }));
+      const titan = (polled: ViewerState) => (polled.objects ?? []).find((object) => object.id === 'titan-wreck');
+      const state = await WaitFor('the titan wreck to validate', 90, (polled) => (['validated', 'ready'].includes(titan(polled)?.status ?? '') ? null : `status ${titan(polled)?.status}`));
+      const row = titan(state);
+      Expect(row?.radius === 10891 && row.sofRadius === 10891, JSON.stringify({ radius: row?.radius, radiusFrom: row?.radiusFrom, sofRadius: row?.sofRadius }));
+      await call('patch_scene', { operations: [{ op: 'remove_object', id: 'titan-wreck' }] });
+      return `radius ${row?.radius} m, sofRadius ${row?.sofRadius} m`;
+    });
+
     await Check('ships orbit, keep at range on and approach an object', async () => {
       const distanceTo = (polled: ViewerState): number => ShipIn(polled, 'rifter').targetDistance ?? Infinity;
       await call('order_ship', { id: 'rifter', order: { type: 'orbit', target: 'astra', range: 5000 } });

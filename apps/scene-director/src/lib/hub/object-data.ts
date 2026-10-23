@@ -1,6 +1,10 @@
 /**
  * EVE object types for the objects tools (`add_objects`, `search_objects`): a type name or id resolved through
- * tools-core to its type id, name, group, category, SDE radius and SOF DNA, and a name search over the SDE's types.
+ * tools-core to its type id, name, group, category, SOF DNA and ball radius, and a name search over the SDE's types.
+ *
+ * The ball radius is the type's SDE radius (EVE's overview rule), unless the SDE has none or gives a wreck its 14 m
+ * placeholder: then it is the type's SOF hull bounding radius, read on the hub's pinned resource build (the model the
+ * page draws, and the number its SOF build measures).
  *
  * ShipData refuses anything that is not a ship, so objects resolve here, on ShipData's pinned SDE build (MapData is
  * the precedent for a second tools-core client). tools-core's `dna/resolve` answers 500 for a type with no graphic
@@ -31,7 +35,24 @@ const CLOSE_NAMES = 5;
 
 const SEARCH_HINT = 'search_objects lists types that can';
 
+/**
+ * The SDE's Wreck group (category Celestial).
+ */
+export const WRECK_GROUP_ID = 186;
+
+/**
+ * The radius (metres) the SDE gives generic, capital and many structure wrecks: a placeholder, not a size (a 14 m
+ * Minmatar Titan Wreck draws 10,891 m).
+ */
+export const WRECK_PLACEHOLDER_RADIUS = 14;
+
 type JsonObject = Record<string, unknown>;
+
+/**
+ * Where a type's ball radius came from: its SDE radius, its SOF hull's bounding radius (the SDE has none, or gives a
+ * wreck its placeholder), or nowhere (that read failed).
+ */
+export type ObjectTypeRadiusSource = 'sde' | 'sof' | 'none';
 
 export interface ObjectDataOptions {
   /**
@@ -42,6 +63,10 @@ export interface ObjectDataOptions {
    * The hub's pinned SDE build: `() => shipData.SdeBuild()`.
    */
   readonly sdeBuild: () => Promise<string>;
+  /**
+   * The hub's pinned resource build, which the SOF routes take (never the SDE build): `() => toolsCore.ResolveBuild()`.
+   */
+  readonly resourceBuild: () => Promise<string>;
   readonly fetch?: typeof fetch;
 }
 
@@ -64,9 +89,18 @@ export interface ResolvedObjectType {
   readonly categoryID: Maybe<number>;
   readonly graphicID: number;
   /**
-   * The SDE radius, metres; null when the type has none.
+   * The ball radius, metres: the SDE radius, else the SOF hull's bounding radius; null when neither.
    */
   readonly radius: Maybe<number>;
+  readonly radiusFrom: ObjectTypeRadiusSource;
+  /**
+   * The SDE's own radius, metres; null when the type has none.
+   */
+  readonly sdeRadius: Maybe<number>;
+  /**
+   * Why the type has no radius, when its SOF hull could not be read.
+   */
+  readonly radiusNote?: string;
   readonly dna: string;
   readonly published: boolean;
   readonly sdeBuild: string;
@@ -96,7 +130,14 @@ export interface ObjectSearchItem {
   readonly name: string;
   readonly group: Maybe<string>;
   readonly category: Maybe<string>;
+  /**
+   * The radius add_objects gives the type.
+   */
   readonly radius?: number;
+  /**
+   * Present when the radius is the model's (the SOF hull's bounding radius), not the SDE's.
+   */
+  readonly radiusFrom?: 'sof';
   readonly dna?: string;
   readonly published: boolean;
 }
@@ -127,6 +168,15 @@ interface Answer {
 /**
  * One `sde/types?query=` row.
  */
+/**
+ * A type's ball radius and where it came from.
+ */
+interface BallRadiusAnswer {
+  readonly radius: Maybe<number>;
+  readonly from: ObjectTypeRadiusSource;
+  readonly note?: string;
+}
+
 interface SearchRow {
   readonly typeID: number;
   readonly name: string;
@@ -139,17 +189,19 @@ interface SearchRow {
 export class ObjectData implements ObjectDataApi {
   private readonly url: string;
   private readonly sdeBuild: () => Promise<string>;
+  private readonly resourceBuild: () => Promise<string>;
   private readonly fetchImpl: typeof fetch;
   private readonly cache = new Map<string, Promise<unknown>>();
 
-  constructor({ url, sdeBuild, fetch: fetchImpl = globalThis.fetch }: ObjectDataOptions) {
+  constructor({ url, sdeBuild, resourceBuild, fetch: fetchImpl = globalThis.fetch }: ObjectDataOptions) {
     this.url = url.replace(/\/$/u, '');
     this.sdeBuild = sdeBuild;
+    this.resourceBuild = resourceBuild;
     this.fetchImpl = fetchImpl;
   }
 
   /**
-   * Resolves a type name or id to its SOF DNA, SDE radius, group and category.
+   * Resolves a type name or id to its SOF DNA, ball radius, group and category.
    *
    * @param lookup - The type.
    * @returns The type.
@@ -194,7 +246,8 @@ export class ObjectData implements ObjectDataApi {
         dropped += 1;
         continue;
       }
-      items.push({ typeID: row.typeID, name: row.name, ...named(row), ...(row.radius == null ? {} : { radius: row.radius }), ...(dna ? { dna } : {}), published: row.published });
+      const sized: BallRadiusAnswer = dna ? await this.BallRadius({ groupID: row.groupID, radius: row.radius, dna }) : { radius: row.radius, from: 'sde' };
+      items.push({ typeID: row.typeID, name: row.name, ...named(row), ...(sized.radius == null ? {} : { radius: sized.radius }), ...(sized.from === 'sof' ? { radiusFrom: 'sof' as const } : {}), ...(dna ? { dna } : {}), published: row.published });
     }
     const notes = [];
     if (placeable && dropped) notes.push(`${dropped} matching type(s) have no SOF graphic and were left out (placeable: false lists them)`);
@@ -214,19 +267,64 @@ export class ObjectData implements ObjectDataApi {
     if (graphicID == null) throw new ShipDataError('invalid', `${label} has no graphic, so it cannot be placed; ${SEARCH_HINT}`);
     const dna = await this.IdDnaText(typeID);
     if (!dna) throw new ShipDataError('invalid', `${label} has graphic ${graphicID} but no SOF DNA: it is not a space object the page can build (set_location's dressing draws stars, planets and moons); ${SEARCH_HINT}`);
+    const groupID = ReadId(type['groupID']);
+    const sdeRadius = ReadPositive(type['radius']);
+    const sized = await this.BallRadius({ groupID, radius: sdeRadius, dna });
     return {
       typeID,
       name,
       group,
-      groupID: ReadId(type['groupID']),
+      groupID,
       category: ReadName(type['categoryName']),
       categoryID: ReadId(type['categoryID']),
       graphicID,
-      radius: ReadPositive(type['radius']),
+      radius: sized.radius,
+      radiusFrom: sized.from,
+      sdeRadius,
+      ...(sized.note ? { radiusNote: sized.note } : {}),
       dna,
       published: type['published'] === true,
       sdeBuild: await this.sdeBuild()
     };
+  }
+
+  /**
+   * A type's ball radius: its SDE radius (EVE's overview rule), unless the SDE has none or gives a wreck its
+   * WRECK_PLACEHOLDER_RADIUS; then its SOF hull's bounding radius, the model the page draws. A failed read leaves none.
+   */
+  private async BallRadius(input: { readonly groupID: Maybe<number>; readonly radius: Maybe<number>; readonly dna: string }): Promise<BallRadiusAnswer> {
+    const { groupID, radius, dna } = input;
+    const placeholder = radius != null && radius <= WRECK_PLACEHOLDER_RADIUS && IsWreckType({ groupID, dna });
+    let sized: BallRadiusAnswer = { radius, from: 'sde' };
+    if (radius == null || placeholder) {
+      const hull = SofHull(dna);
+      const why = placeholder ? `the SDE gives this wreck a ${WRECK_PLACEHOLDER_RADIUS} m placeholder radius` : 'the SDE has no radius for it';
+      let failure: Maybe<string> = null;
+      let sof: Maybe<number> = null;
+      try {
+        sof = await this.SofRadius(hull);
+        if (sof == null) failure = `tools-core has no bounding radius for SOF hull "${hull}"`;
+      } catch (error) {
+        failure = ErrorMessage(error);
+      }
+      sized = sof != null ? { radius: sof, from: 'sof' } : { radius: null, from: 'none', note: `${why} and its model's (SOF hull "${hull}") could not be read (${failure}); it goes in with no radius, and the page takes the model's once built` };
+    }
+    return sized;
+  }
+
+  /**
+   * A SOF hull's bounding radius in whole metres (at least 1), read on the resource build: the record the page's SOF
+   * build reads. Null when tools-core has no such hull (cached) or it has no bounding sphere; any other failure throws,
+   * uncached, so the next lookup retries.
+   */
+  private async SofRadius(hull: string): Promise<Maybe<number>> {
+    return this.Cached(`sof:${hull}`, async () => {
+      const answer = await this.GetAnswer(`sof/hulls/${encodeURIComponent(hull)}`, `the SOF hull "${hull}"`, this.resourceBuild);
+      if (answer.status !== 200 && answer.status !== 404) throw new ShipDataError('unavailable', `tools-core answered ${answer.status} for the SOF hull "${hull}" (${AnswerError(answer)})`);
+      const sphere = answer.status === 200 ? answer.json['boundingSphere'] : null;
+      const radius = Array.isArray(sphere) ? ReadPositive(sphere[3]) : null;
+      return radius == null ? null : Math.max(1, Math.round(radius));
+    });
   }
 
   private async TypeByName(name: string): Promise<ResolvedObjectType> {
@@ -347,11 +445,11 @@ export class ObjectData implements ObjectDataApi {
   }
 
   /**
-   * GETs a route of the pinned build: the status and body, never throwing for a status (only for an unreachable
-   * tools-core).
+   * GETs a route of a pinned build (the SDE build unless told otherwise): the status and body, never throwing for a
+   * status (only for an unreachable tools-core).
    */
-  private async GetAnswer(route: string, what: string): Promise<Answer> {
-    const build = await this.sdeBuild();
+  private async GetAnswer(route: string, what: string, pinned: () => Promise<string> = this.sdeBuild): Promise<Answer> {
+    const build = await pinned();
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.url}/eve/${build}/${route}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
@@ -360,6 +458,27 @@ export class ObjectData implements ObjectDataApi {
     }
     return { status: response.status, json: ReadObject(await response.json().catch(() => null)) };
   }
+}
+
+/**
+ * A DNA's SOF hull, lower case.
+ *
+ * @param dna - The SOF DNA.
+ * @returns The hull.
+ */
+export function SofHull(dna: string): string {
+  return dna.split(':')[0].toLowerCase();
+}
+
+/**
+ * Whether a type is a wreck: the SDE's Wreck group, or a SOF wreck hull (`wreck_s`, `wreck_m`, `wreck_l`,
+ * `<hull>_wreck`), which also names the wrecks the SDE files as large collidable objects or structures.
+ *
+ * @param input - The type's group and SOF DNA.
+ * @returns Whether it is a wreck.
+ */
+export function IsWreckType(input: { readonly groupID: Maybe<number>; readonly dna: Maybe<string> }): boolean {
+  return input.groupID === WRECK_GROUP_ID || (input.dna != null && /^wreck_|_wreck$/u.test(SofHull(input.dna)));
 }
 
 /**

@@ -1,14 +1,15 @@
 /**
  * The objects tools, answered by the hub: `add_objects` places static EVE objects (stations, gates, Upwell structures,
  * large collidable objects, wrecks) by type name or id, and `search_objects` finds types to place. The hub resolves
- * every name first (types to SOF DNA and SDE radius through ObjectData, celestials of the scene's location to scene
+ * every name first (types to SOF DNA and a radius through ObjectData: the SDE's, or the model's where the SDE has none
+ * or a wreck placeholder; celestials of the scene's location to scene
  * points and ship radii through ScenePlaces), then sends one pure `add_objects` op per line in one patch_scene.
  */
 
 import type { Maybe } from '@dereekb/util';
 import { type SceneDocument, SceneError } from '@scene-director/scene';
 import type { MapDataApi } from './map-data';
-import type { ObjectDataApi, ResolvedObjectType } from './object-data';
+import { type ObjectDataApi, type ObjectTypeRadiusSource, type ResolvedObjectType, SofHull } from './object-data';
 import type { SavedScenesPage } from './saved-scenes';
 import { IsRecord, ScenePlaces, Without } from './scene-places';
 import type { ShipDataApi } from './ship-data';
@@ -33,7 +34,15 @@ export interface ObjectTypeReport {
   readonly dna: string;
   readonly radius: Maybe<number>;
   readonly dnaFrom: 'given' | 'sde';
-  readonly radiusFrom: 'given' | 'sde' | 'none';
+  /**
+   * `sof` when the radius is the model's (the SOF hull's bounding radius): the SDE has none, or gives a wreck its 14 m
+   * placeholder.
+   */
+  readonly radiusFrom: 'given' | ObjectTypeRadiusSource;
+  /**
+   * The SDE's radius, when the model's replaced it.
+   */
+  readonly sdeRadius?: number;
 }
 
 /**
@@ -149,6 +158,7 @@ export class ObjectTools {
       if (line['dna'] == null) operation['dna'] = resolved.dna;
       else if (SofHull(String(line['dna'])) !== SofHull(resolved.dna)) warnings.push(`${at}: dna "${String(line['dna'])}" is not ${resolved.name}'s SOF hull (${resolved.dna}); kept as given`);
       if (line['radius'] == null && resolved.radius != null) operation['radius'] = resolved.radius;
+      if (line['radius'] == null && resolved.radiusNote) warnings.push(`${at}: ${resolved.radiusNote}`);
       if (typeof type === 'string') operation['type'] = resolved.name;
       else if (line['name'] == null && line['id'] == null && line['prefix'] == null) operation['name'] = resolved.name;
       const key = TypeKey(type as number | string);
@@ -211,21 +221,11 @@ function TypeReport(input: { readonly type: number | string; readonly resolved: 
     dna: line['dna'] == null ? resolved.dna : String(line['dna']),
     radius: typeof line['radius'] === 'number' ? line['radius'] : resolved.radius,
     dnaFrom: line['dna'] == null ? 'sde' : 'given',
-    radiusFrom: RadiusFrom(line['radius'], resolved.radius)
+    radiusFrom: line['radius'] != null ? 'given' : resolved.radiusFrom,
+    ...(line['radius'] == null && resolved.radiusFrom === 'sof' && resolved.sdeRadius != null ? { sdeRadius: resolved.sdeRadius } : {})
   };
-}
-
-function RadiusFrom(given: unknown, sde: Maybe<number>): ObjectTypeReport['radiusFrom'] {
-  let from: ObjectTypeReport['radiusFrom'] = 'sde';
-  if (given != null) from = 'given';
-  else if (sde == null) from = 'none';
-  return from;
 }
 
 function TypeKey(type: number | string): string {
   return typeof type === 'number' ? `id:${type}` : `name:${type.trim().toLowerCase()}`;
-}
-
-function SofHull(dna: string): string {
-  return dna.split(':')[0].toLowerCase();
 }

@@ -28,8 +28,9 @@
 - Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `objects?`, `fits?` (EFT text by key;
   omitted when empty), `location?`, `timeline?` (reserved).
 - Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
-  `position`, `rotation`, `radius?` (the SDE radius order ranges use; without it the page takes the SOF bounding radius
-  once built, else 1,000 m). **Ids are unique across ships and objects**; ship-id and composition-id generators skip
+  `position`, `rotation`, `radius?` (the radius order ranges use: add_objects fills the type's SDE radius, or its SOF
+  bounding radius where the SDE has none or gives a wreck its 14 m placeholder; without one the page takes the SOF
+  bounding radius once built, else 1,000 m). **Ids are unique across ships and objects**; ship-id and composition-id generators skip
   object ids. Detail: `sd-objects`.
 - **The scene extent** (`extent.ts`, the user's rule of 2026-10-22, "just like the game"): every ship and object
   document position is **refused past `MAX_SCENE_DISTANCE` (10,000 km)** from the origin (`readScenePosition`), and

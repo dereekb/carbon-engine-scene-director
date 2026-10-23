@@ -100,7 +100,8 @@ re-anchors them in the same edit, and `Steer` halts any whose anchor or FC ball 
 ball counter: mass `OBJECT_BALL_MASS`, **not free, not massive, not interactive**, at rest. Nothing collides: ships are
 non-massive too (a level-3 follow-up covers collisions). Calling it again for a known id re-places (`PlaceObject`) and
 resizes (`SetObjectRadius`) the ball; an id a ship holds throws. The radius is `ObjectBallRadius` (`objects.ts`): the
-document's SDE radius, else the SOF bounding radius once built, else 1,000 m. `Director.Apply` adds missing balls and
+document's radius (add_objects fills the SDE's, or a wreck's model radius: `sd-objects`), else the SOF bounding radius
+once built, else 1,000 m. `Director.Apply` adds missing balls and
 re-adds moved, resized and rebuilt ones before the store write, so an order arriving meanwhile always finds the ball.
 
 `RemoveObject(id)` mirrors `RemoveShip`: a pending order on the object is dropped and its ship halted, an applied

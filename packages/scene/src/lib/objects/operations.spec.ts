@@ -7,7 +7,7 @@ const ASTRA = 'cm1_t1:upwell:generic';
 const WRECK = 'wreck_s:genericbase:generic';
 const RIFTER = 'mf4_t1:minmatarbase:minmatar';
 const ASTRAHUS = { op: 'add_objects', type: 'Astrahus', dna: ASTRA, radius: 45000 };
-const WRECKS = { op: 'add_objects', type: 'Minmatar Frigate Wreck', dna: WRECK, radius: 14 };
+const WRECKS = { op: 'add_objects', type: 'Minmatar Frigate Wreck', dna: WRECK, radius: 70 };
 const BASE = { name: 'objects', ships: [{ id: 'rifter', dna: RIFTER, rotation: [90, 0, 0] }] };
 
 function scene(input: unknown = BASE): SceneDocument {
@@ -61,7 +61,7 @@ describe('add_objects', () => {
   it('places off a ship and an object, surface to surface, with their yaw', () => {
     const { scene: after } = apply(scene(), { ...ASTRAHUS, id: 'astra', near: { ship: 'rifter', range: 30000 }, radii: { rifter: 31 } }, { ...WRECKS, id: 'wreck', near: { object: 'astra', range: 3000, direction: 'behind' } });
     expect(object(after, 'astra')).toMatchObject({ position: [75031, 0, 0], rotation: [90, 0, 0] });
-    expect(object(after, 'wreck')).toMatchObject({ position: [75031 - 48014, 0, 0], rotation: [90, 0, 0] });
+    expect(object(after, 'wreck')).toMatchObject({ position: [75031 - 48070, 0, 0], rotation: [90, 0, 0] });
     expect(problems(scene(), { ...ASTRAHUS, near: { ship: 'rifter', object: 'x' } })[0]).toMatch(/give ship or object, not both/u);
     expect(problems(scene(), { ...ASTRAHUS, near: { ship: 'rifter', direction: 'sun' } })[0]).toMatch(/sun/u);
   });
@@ -83,7 +83,7 @@ describe('add_objects', () => {
   it('lays out formations with the default spacing, at most 100 a line', () => {
     const { scene: after } = apply(scene(), { ...WRECKS, count: 3, formation: 'line', position: [0, 0, 5000] });
     const xs = (after.objects ?? []).map((added) => added.position[0]);
-    expect(xs).toEqual([0, 142, -142]);
+    expect(xs).toEqual([0, 310, -310]);
     expect(problems(scene(), { ...WRECKS, count: 101 })[0]).toMatch(/count must be a finite number in \[1, 100\]/u);
   });
 
@@ -97,10 +97,17 @@ describe('add_objects', () => {
     const { warnings } = apply(scene(), { ...ASTRAHUS, id: 'astra', position: [1000, 0, 0] }, { op: 'add_objects', dna: WRECK, position: [3e6, 0, 0] });
     expect(warnings).toEqual([
       'operations[0]: astra overlaps ships "rifter" (inside its 45,000 m radius); place it elsewhere',
-      'operations[1]: no radius; the page uses the SOF bounding radius once built (spacing assumed 1000 m). The add_objects tool fills the SDE radius from a type',
+      'operations[1]: no radius; the page uses the SOF bounding radius once built (spacing assumed 1000 m). The add_objects tool fills it from a type',
       'operations[1]: 1 object is more than 2,000 km from the scene origin; scenes rarely use more than 2,000 km (the limit is 10,000 km)'
     ]);
     expect(problems(scene(), { ...ASTRAHUS, position: [0, 0, 12e6] })[0]).toMatch(/objects\[0\]\.position is 12,000 km from the scene origin/u);
+  });
+
+  it('warns when a spacing is under two radii', () => {
+    const titans = { op: 'add_objects', dna: WRECK, radius: 10891, position: [0, 0, 500000] };
+    expect(apply(scene(), { ...titans, count: 2, spacing: 5000 }).warnings).toContain('operations[0]: spacing 5000 m is under two radii (21782 m), so the objects overlap');
+    expect(apply(scene(), { ...titans, count: 1, spacing: 5000 }).warnings.join('\n')).not.toMatch(/under two radii/u);
+    expect(apply(scene(), { ...titans, count: 2, spacing: 21782 }).warnings.join('\n')).not.toMatch(/under two radii/u);
   });
 });
 

@@ -107,7 +107,7 @@ export interface HubOptions {
   readonly mapData?: MapDataApi;
   /**
    * EVE object types, for the objects tools (add_objects, search_objects); read from `toolsCore.url` on ShipData's
-   * pinned SDE build when omitted.
+   * pinned SDE build, and SOF hulls on toolsCore's pinned resource build, when omitted.
    */
   readonly objectData?: ObjectDataApi;
   /**
@@ -175,7 +175,7 @@ export class Hub implements ToolCaller {
     this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
     this.dogmaData = dogmaData ?? new DogmaData({ sde: this.shipData instanceof ShipData ? this.shipData.sde : new SdeClient({ url: toolsCore.url }) });
     this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
-    this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild() });
+    this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), resourceBuild: () => this.toolsCore.ResolveBuild() });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
     const page = {
       Connected: () => this.pages.length > 0,

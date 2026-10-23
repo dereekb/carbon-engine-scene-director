@@ -32,8 +32,9 @@ export interface SceneObject {
    */
   rotation: SceneVector;
   /**
-   * The type's SDE radius in metres: the Destiny ball's radius, which order ranges are measured on (EVE's overview
-   * rule). Without it the page uses the SOF bounding radius once built, else DEFAULT_OBJECT_RADIUS.
+   * The Destiny ball's radius in metres, which order ranges are measured on. The add_objects tool fills the type's SDE
+   * radius (EVE's overview rule), or its SOF bounding radius where the SDE has none or gives a wreck its 14 m
+   * placeholder. Without it the page uses the SOF bounding radius once built, else DEFAULT_OBJECT_RADIUS.
    */
   radius?: number;
 }

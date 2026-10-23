@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { ASTRAHUS_DNA, MakeFakeObjectData, OBJECT_ROUTES, WRECK_DNA } from './object-data.testing';
+import { IsWreckType } from './object-data';
+import { ASTRAHUS_DNA, MakeFakeObjectData, OBJECT_ROUTES, RESOURCES, TITAN_WRECK_DNA, WRECK_DNA } from './object-data.testing';
 import { type Answer, SDE } from './ship-data.testing';
 
 async function Failure(action: Promise<unknown>): Promise<{ readonly failure: string; readonly message: string }> {
@@ -14,8 +15,52 @@ async function Failure(action: Promise<unknown>): Promise<{ readonly failure: st
 describe('ObjectData.Type', () => {
   it('resolves a name, any case, and an id', async () => {
     const { objectData } = MakeFakeObjectData();
-    expect(await objectData.Type({ type: 'astrahus' })).toEqual({ typeID: 35832, name: 'Astrahus', group: 'Citadel', groupID: 1657, category: 'Structure', categoryID: 65, graphicID: 21137, radius: 45000, dna: ASTRAHUS_DNA, published: true, sdeBuild: SDE });
-    expect(await objectData.Type({ type: 26550 })).toMatchObject({ name: 'Minmatar Frigate Wreck', group: 'Wreck', radius: 14, dna: WRECK_DNA, published: false });
+    expect(await objectData.Type({ type: 'astrahus' })).toEqual({ typeID: 35832, name: 'Astrahus', group: 'Citadel', groupID: 1657, category: 'Structure', categoryID: 65, graphicID: 21137, radius: 45000, radiusFrom: 'sde', sdeRadius: 45000, dna: ASTRAHUS_DNA, published: true, sdeBuild: SDE });
+    expect(await objectData.Type({ type: 26550 })).toMatchObject({ name: 'Minmatar Frigate Wreck', group: 'Wreck', radius: 70, radiusFrom: 'sof', sdeRadius: 14, dna: WRECK_DNA, published: false });
+  });
+
+  it("gives a wreck with the SDE's 14 m placeholder its SOF hull's radius, read on the resource build", async () => {
+    const { objectData, calls } = MakeFakeObjectData();
+    expect(await objectData.Type({ type: 'Minmatar Titan Wreck' })).toMatchObject({ typeID: 26556, radius: 10891, radiusFrom: 'sof', sdeRadius: 14, dna: TITAN_WRECK_DNA });
+    expect(calls).toContain(`/eve/${RESOURCES}/sof/hulls/mt1_t1_wreck`);
+    expect(calls.filter((call) => call.startsWith(`/eve/${SDE}/sof/`))).toEqual([]);
+  });
+
+  it('keeps real SDE radii, wrecks included, with no SOF read', async () => {
+    const { objectData, calls } = MakeFakeObjectData();
+    expect(await objectData.Type({ type: 40644 })).toMatchObject({ name: 'Astrahus Wreck', radius: 45000, radiusFrom: 'sde', sdeRadius: 45000 });
+    expect(await objectData.Type({ type: 16737 })).toMatchObject({ name: 'Ruined Stargate', radius: 5991, radiusFrom: 'sde' });
+    expect(calls.filter((call) => call.includes('/sof/hulls/'))).toEqual([]);
+  });
+
+  it('gives a type with no SDE radius its SOF hull radius', async () => {
+    expect(await MakeFakeObjectData().objectData.Type({ type: 2110 })).toMatchObject({ name: 'Minmatar Carrier Wreckage', radius: 1719, radiusFrom: 'sof', sdeRadius: null });
+  });
+
+  it('leaves no radius when the SOF read fails, says why, and retries; a missing hull is not asked twice', async () => {
+    const route = `/eve/${RESOURCES}/sof/hulls/wreck_s`;
+    const routes: Record<string, Answer> = { ...OBJECT_ROUTES, [route]: 'network-error' };
+    const { objectData, calls } = MakeFakeObjectData(routes);
+    const failed = await objectData.Type({ type: 26550 });
+    expect(failed).toMatchObject({ radius: null, radiusFrom: 'none', sdeRadius: 14 });
+    expect(failed.radiusNote).toMatch(/14 m placeholder radius and its model's \(SOF hull "wreck_s"\) could not be read/u);
+    routes[route] = OBJECT_ROUTES[route];
+    expect(await objectData.Type({ type: 26550 })).toMatchObject({ radius: 70, radiusFrom: 'sof' });
+    expect(calls.filter((call) => call === route)).toHaveLength(2);
+
+    delete routes[`/eve/${RESOURCES}/sof/hulls/mt1_t1_wreck`];
+    const missing = await objectData.Type({ type: 26556 });
+    expect(missing).toMatchObject({ radius: null, radiusFrom: 'none' });
+    expect(missing.radiusNote).toMatch(/tools-core has no bounding radius for SOF hull "mt1_t1_wreck"/u);
+    await objectData.Type({ type: 26556 });
+    expect(calls.filter((call) => call.endsWith('/sof/hulls/mt1_t1_wreck'))).toHaveLength(1);
+  });
+
+  it('reads each SOF hull once', async () => {
+    const { objectData, calls } = MakeFakeObjectData();
+    expect((await objectData.Type({ type: 26550 })).radius).toBe(70);
+    expect((await objectData.Type({ type: 26506 })).radius).toBe(70);
+    expect(calls.filter((call) => call.endsWith('/sof/hulls/wreck_s'))).toHaveLength(1);
   });
 
   it('says a type has no graphic, by name and by id', async () => {
@@ -56,6 +101,15 @@ describe('ObjectData.Type', () => {
   });
 });
 
+describe('IsWreckType', () => {
+  it('takes the Wreck group, or a SOF wreck hull in any group', () => {
+    expect(IsWreckType({ groupID: 186, dna: null })).toBe(true);
+    expect(IsWreckType({ groupID: 319, dna: 'uwfr01_t1_wreck:upwell:generic' })).toBe(true);
+    expect(IsWreckType({ groupID: 226, dna: WRECK_DNA })).toBe(true);
+    expect(IsWreckType({ groupID: 1657, dna: ASTRAHUS_DNA })).toBe(false);
+  });
+});
+
 describe('ObjectData.Search', () => {
   it('ranks name matches and drops description-only rows', async () => {
     const answer = await MakeFakeObjectData().objectData.Search({ query: 'Astrahus' });
@@ -72,5 +126,14 @@ describe('ObjectData.Search', () => {
     expect(placeable.note).toMatch(/1 matching type\(s\) have no SOF graphic/u);
     expect((await objectData.Search({ query: 'Tritanium', placeable: false })).items).toEqual([{ typeID: 34, name: 'Tritanium', group: 'Mineral', category: 'Material', published: true }]);
     expect((await objectData.Search({ query: 'Astrahus', limit: 500 })).items).toHaveLength(2);
+  });
+
+  it('shows the radius add_objects gives each type', async () => {
+    const { items } = await MakeFakeObjectData().objectData.Search({ query: 'Wreck' });
+    const byName = (name: string) => items.find((item) => item.name === name);
+    expect(byName('Minmatar Frigate Wreck')).toMatchObject({ radius: 70, radiusFrom: 'sof' });
+    expect(byName('Minmatar Titan Wreck')).toMatchObject({ radius: 10891, radiusFrom: 'sof' });
+    expect(byName('Astrahus Wreck')).toMatchObject({ radius: 45000 });
+    expect(byName('Astrahus Wreck')).not.toHaveProperty('radiusFrom');
   });
 });
