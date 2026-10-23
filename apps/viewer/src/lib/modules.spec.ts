@@ -328,7 +328,7 @@ describe('DestinyWorld.OnBoundary', () => {
       expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
       expect(Run(modules, 1, 3)).toEqual([]);
       expect(modules.State('logi', 'high-0', 3)).toMatchObject({ state: 'activating', target: 'fc', note: 'waiting for its lock on "fc"' });
-      expect(modules.WeaponAims().get('logi')).toEqual(new Set(['fc']));
+      expect(modules.LockAims().get('logi')).toEqual(new Set(['fc']));
       port.locked.add('logi>fc');
       const events = modules.Boundary(4);
       expect(Kinds(events)).toEqual(['logi:high-0:on1@4', 'logi:high-0:cycle1@4']);
@@ -357,7 +357,7 @@ describe('DestinyWorld.OnBoundary', () => {
       modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
       Run(modules, 0, 0);
       modules.Retarget('logi', 'punisher', 1);
-      expect(modules.WeaponAims().get('logi')).toEqual(new Set(['fc', 'punisher']));
+      expect(modules.LockAims().get('logi')).toEqual(new Set(['fc', 'punisher']));
       const before = [1, 2, 3, 4, 5].flatMap((tick) => modules.Boundary(tick));
       expect(before.filter((event) => event.kind === 'cycle').map((event) => event.target)).toEqual(['fc', 'fc']);
       port.locked.add('logi>punisher');
@@ -374,7 +374,7 @@ describe('DestinyWorld.OnBoundary', () => {
       expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'far' })).toBeNull();
       expect(Run(modules, 1, 2)).toEqual([]);
       expect(modules.State('logi', 'high-0', 2)).toMatchObject({ state: 'activating', target: 'far', note: 'waiting for its lock on "far"' });
-      expect(modules.WeaponAims().get('logi')).toEqual(new Set(['far']));
+      expect(modules.LockAims().get('logi')).toEqual(new Set(['far']));
       expect(modules.WeaponKeys('logi')).toEqual(['high-0']);
       port.locked.add('logi>far');
       expect(Kinds(modules.Boundary(3))).toEqual(['logi:high-0:on1@3', 'logi:high-0:cycle1@3']);
@@ -414,6 +414,54 @@ describe('DestinyWorld.OnBoundary', () => {
       Run(modules, 11, 11);
       port.warping.add('logi');
       expect(Kinds(modules.OnWarpEnter('logi', 12))).toEqual(['logi:high-0:off1@12 (entered warp)']);
+    });
+
+    it('holds a remote repairer for its lock, starts it the boundary its lock completes and stops it at its cycle end on a lost lock, while a web runs unlocked', () => {
+      const port = new LockPort();
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', REMOTE_REP), Spec('mid-0', WEB)], 0);
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
+      expect(modules.Switch('logi', 'mid-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
+      expect(Run(modules, 0, 1)).toEqual(['logi:mid-0:on1@0', 'logi:mid-0:cycle1@0']);
+      expect(modules.State('logi', 'high-0', 1)).toMatchObject({ state: 'activating', target: 'fc', note: 'waiting for its lock on "fc"' });
+      expect(modules.LockAims().get('logi')).toEqual(new Set(['fc']));
+      port.locked.add('logi>fc');
+      expect(Kinds(modules.Boundary(2))).toEqual(['logi:high-0:on1@2', 'logi:high-0:cycle1@2']);
+      port.locked.delete('logi>fc');
+      modules.Boundary(3);
+      expect(modules.State('logi', 'high-0', 3)).toMatchObject({ state: 'stopping', note: 'stopping: it lost its lock on "fc"' });
+      const stopped = [4, 5, 6, 7].flatMap((tick) => modules.Boundary(tick)).filter((event) => event.module === 'high-0');
+      expect(Kinds(stopped)).toEqual(['logi:high-0:end1@7', 'logi:high-0:off1@7']);
+      expect(modules.RepairLandings(stopped)).toEqual([{ ship: 'fc', layer: 'armor', amount: 300, from: 'logi', module: 'high-0' }]);
+      expect(modules.CycleState('logi', 'mid-0')).toBe('active');
+    });
+
+    it('retargets a running remote repairer at its next cycle start once locked only with the retarget option, and resumes a stopping one onto a new target', () => {
+      const port = new LockPort();
+      port.locked.add('logi>fc');
+      port.x.set('punisher', 2000);
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', REMOTE_REP), Spec('low-0')], 0);
+      modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+      Run(modules, 0, 0);
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 1, target: 'punisher' })).toBe('it is running on "fc"; switch it online first');
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 1, target: 'punisher', retarget: true })).toBeNull();
+      expect(modules.State('logi', 'high-0', 1)).toMatchObject({ state: 'active', target: 'fc', nextTarget: 'punisher' });
+      expect(modules.LockAims().get('logi')).toEqual(new Set(['fc', 'punisher']));
+      expect(modules.RemoteRepairers('logi')).toEqual([{ key: 'high-0', spec: expect.objectContaining({ key: 'high-0' }), state: 'active', target: 'fc', retarget: 'punisher' }]);
+      const Rows = (events: readonly ShipModuleEvent[]): string[] => events.filter((event) => event.kind === 'end' || event.kind === 'cycle').map((event) => `${event.kind}${event.cycle}:${event.target}${event.retargeted ? ' retargeted' : ''}`);
+      expect(Rows([1, 2, 3, 4, 5].flatMap((tick) => modules.Boundary(tick)))).toEqual(['end1:fc', 'cycle2:fc']);
+      port.locked.add('logi>punisher');
+      const moved = [6, 7, 8, 9, 10].flatMap((tick) => modules.Boundary(tick));
+      expect(Rows(moved)).toEqual(['end2:fc', 'cycle3:punisher retargeted']);
+      expect(modules.RepairLandings(moved)).toEqual([{ ship: 'fc', layer: 'armor', amount: 300, from: 'logi', module: 'high-0' }]);
+      modules.Switch('logi', 'high-0', 'online', { boundary: 11 });
+      expect(modules.CycleState('logi', 'high-0')).toBe('stopping');
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 11, target: 'fc', retarget: true })).toBeNull();
+      const resumed = [11, 12, 13, 14, 15].flatMap((tick) => modules.Boundary(tick));
+      expect(Rows(resumed)).toEqual(['end3:punisher', 'cycle4:fc retargeted']);
+      expect(modules.RepairLandings(resumed)).toEqual([{ ship: 'punisher', layer: 'armor', amount: 300, from: 'logi', module: 'high-0' }]);
+      expect(modules.RemoteRepairers('logi')).toEqual([{ key: 'high-0', spec: expect.objectContaining({ key: 'high-0' }), state: 'active', target: 'fc' }]);
     });
 
     it('names why the modules on a removed ship stop', () => {

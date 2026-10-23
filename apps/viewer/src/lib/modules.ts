@@ -9,7 +9,8 @@
  *   modules), beyond maxGroupActive, in warp, a targeted module without a target ship, on itself, on a ship in warp,
  *   beyond its reach (`activation.reach`: optimal + 2 × falloff; Infinity for weapons), or already running on another
  *   target. A weapon's (turret's or launcher's) target may also be an authored object, and a running weapon given
- *   another target retargets at its next cycle (Retarget).
+ *   another target retargets at its next cycle (Retarget). A running remote repairer retargets the same way only with
+ *   the `retarget` option (auto-repair.ts passes it); a manual switch is refused until it is switched online.
  * - Boundary advances every cycle at a tick boundary. A running targeted module whose target drifts out of reach stops
  *   at its cycle end; one whose target is removed (Remove) or enters warp (OnWarpEnter) stops at once. Entering warp
  *   stops a ship's own modules that are not warp safe, and its targeted ones, at once.
@@ -19,9 +20,11 @@
  *   cycle start (kept while it stops, null once off). Targeting / TargetIndex list them per target, for the target's
  *   flight (webs, painters, points, scrams); CapacitorLandings turns cycle starts into neut, nos and transmitter
  *   transfers (capacitor.ts applies them).
- * - Locks (locks.ts, through the port's LockHold): a weapon activated before its lock completes waits in `activating`
- *   with the lock note (EVE's pre-activation); a running weapon whose lock is lost stops at its cycle end; a pending
- *   retarget switches at the first cycle start once the new target is locked. Without LockHold nothing waits.
+ * - Locks (locks.ts, through the port's LockHold): a lock-gated module (a weapon or a remote repairer, IsLockGated)
+ *   activated before its lock completes waits in `activating` with the lock note (EVE's pre-activation); a running one
+ *   whose lock is lost stops at its cycle end; a pending retarget switches at the first cycle start once the new target
+ *   is locked, and that cycle's event carries `retargeted` (module-fx.ts restarts the beam on it). LockAims lists the
+ *   locks they need. Webs, scrams, points, neuts, nos and transmitters run unlocked. Without LockHold nothing waits.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
@@ -52,7 +55,8 @@ export interface ShipModulesPort {
    */
   readonly tickSeconds: number;
   /**
-   * Why a weapon must wait for its lock on a target (ShipLocks.Hold); null once locked. Absent: weapons never wait.
+   * Why a lock-gated module (a weapon, a remote repairer) must wait for its lock on a target (ShipLocks.Hold); null
+   * once locked. Absent: nothing waits.
    */
   LockHold?(ship: string, target: string): Maybe<string>;
 }
@@ -93,6 +97,10 @@ export interface ShipModuleEvent extends ModuleCycleEvent {
    */
   readonly effectGuid?: string;
   readonly cycleTime: number;
+  /**
+   * On the first `cycle` after a retarget: the module now runs on a new target (a beam restarts on it).
+   */
+  readonly retargeted?: boolean;
 }
 
 /**
@@ -139,12 +147,26 @@ export interface CapacitorLanding {
 }
 
 /**
+ * A remote repairer on a ship, for auto-repair.ts.
+ */
+export interface RemoteRepairerState {
+  readonly key: string;
+  readonly spec: ShipModuleSpec;
+  readonly state: ModuleCycleState;
+  readonly target: Maybe<string>;
+  /**
+   * Its next target, taken at its next cycle start once locked.
+   */
+  readonly retarget?: string;
+}
+
+/**
  * A module's state in get_state (beside its key and name).
  */
 export interface ShipModuleLiveState extends ModuleCycleReport {
   readonly target?: string;
   /**
-   * A running weapon's next target: it retargets at its next cycle.
+   * A running weapon's or remote repairer's next target: it retargets at its next cycle.
    */
   readonly nextTarget?: string;
   readonly targetDistance?: number;
@@ -162,6 +184,11 @@ export interface SwitchModuleOptions {
    * Whole ticks.
    */
   readonly delay?: number;
+  /**
+   * A lock-gated module running or stopping on another target takes this one at its next cycle start once locked,
+   * instead of being refused (weapons always do). Auto-repair passes it; a manual switch_modules does not.
+   */
+  readonly retarget?: boolean;
 }
 
 interface ModuleEntry {
@@ -169,7 +196,7 @@ interface ModuleEntry {
   readonly cycle: ModuleCycle;
   target: Maybe<string>;
   /**
-   * A running weapon's next target, taken at its next cycle start; null stops it at its cycle end instead.
+   * A running lock-gated module's next target, taken at its next cycle start once locked.
    */
   retarget?: string;
   effectiveness: Maybe<number>;
@@ -256,15 +283,17 @@ export class ShipModules {
     if (!entry) {
       refusal = `ship "${id}" fits no module ${key}`;
     } else if (request === 'active') {
-      refusal = this.ActivationRefusal(id, entry, options.target ?? null);
+      refusal = this.ActivationRefusal(id, entry, options.target ?? null, options.retarget === true);
     } else if (request === 'online' && entry.cycle.state === 'offline') {
       refusal = this.OnlineRefusal(id, entry);
     }
     if (entry && refusal === null) {
       if (request === 'active' && entry.spec.activation.targeted) {
         const aim = options.target ?? entry.retarget ?? entry.target;
-        if (IsWeapon(entry) && entry.cycle.running && entry.target && aim && aim !== entry.target) entry.retarget = aim;
-        else entry.target = aim;
+        if (Retargets(entry, options.retarget === true) && entry.cycle.running && entry.target && aim) {
+          if (aim === entry.target) delete entry.retarget;
+          else entry.retarget = aim;
+        } else entry.target = aim;
         if (entry.retarget === entry.target) delete entry.retarget;
         entry.effectiveness = this.Effectiveness(id, entry);
       }
@@ -324,7 +353,7 @@ export class ShipModules {
           }
           entry.effectiveness = this.Effectiveness(id, entry);
         }
-        const hold = entry.target && IsWeapon(entry) ? this.LockHold(id, entry.target) : null;
+        const hold = entry.target && IsLockGated(entry) ? this.LockHold(id, entry.target) : null;
         if (hold && entry.cycle.state === 'active') entry.cycle.StopAtCycleEnd(boundary, `it lost its lock on "${entry.target}"`);
         const cycled = entry.cycle.Boundary(boundary, hold ? { hold } : undefined);
         const next = entry.retarget === undefined || this.LockHold(id, entry.retarget) ? -1 : cycled.findIndex((event) => event.kind === 'cycle');
@@ -335,7 +364,7 @@ export class ShipModules {
           entry.target = entry.retarget;
           delete entry.retarget;
           entry.effectiveness = this.Effectiveness(id, entry);
-          events.push(...this.Events(id, key, entry, cycled.slice(next)));
+          events.push(...this.Events(id, key, entry, cycled.slice(next)).map((event, index) => (index === 0 ? { ...event, retargeted: true } : event)));
         }
         if (!entry.cycle.running && !entry.cycle.engaged) this.Untarget(entry);
       }
@@ -396,16 +425,16 @@ export class ShipModules {
   }
 
   /**
-   * What every ship's weapons (turrets and launchers) aim at while running, stopping or waiting to start, a pending
-   * retarget included: the locks the lock sweep keeps.
+   * What every ship's lock-gated modules (turrets, launchers, remote repairers) aim at while running, stopping or
+   * waiting to start, a pending retarget included: the locks the lock sweep keeps.
    *
    * @returns The targets by ship id.
    */
-  WeaponAims(): Map<string, Set<string>> {
+  LockAims(): Map<string, Set<string>> {
     const aims = new Map<string, Set<string>>();
     for (const [id, modules] of this.ships) {
       for (const entry of modules.values()) {
-        if (!IsWeapon(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
+        if (!IsLockGated(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
         const set = aims.get(id) ?? new Set<string>();
         if (entry.target) set.add(entry.target);
         if (entry.retarget) set.add(entry.retarget);
@@ -423,6 +452,16 @@ export class ShipModules {
    */
   WeaponKeys(id: string): string[] {
     return [...(this.ships.get(id) ?? [])].flatMap(([key, entry]) => (IsWeapon(entry) ? [key] : []));
+  }
+
+  /**
+   * A ship's remote repairers that can run (no activation refusal), whatever their state.
+   *
+   * @param id - The ship id.
+   * @returns Them, in fit order.
+   */
+  RemoteRepairers(id: string): RemoteRepairerState[] {
+    return [...(this.ships.get(id) ?? [])].flatMap(([key, entry]) => (entry.spec.activation.repair?.remote && entry.spec.activation.targeted && !entry.spec.activation.refusal ? [{ key, spec: entry.spec, state: entry.cycle.state, target: entry.target, ...(entry.retarget ? { retarget: entry.retarget } : {}) }] : []));
   }
 
   /**
@@ -550,7 +589,7 @@ export class ShipModules {
     return landings;
   }
 
-  private ActivationRefusal(id: string, entry: ModuleEntry, target: Maybe<string>): Maybe<string> {
+  private ActivationRefusal(id: string, entry: ModuleEntry, target: Maybe<string>, retarget: boolean): Maybe<string> {
     const { activation } = entry.spec;
     let refusal: Maybe<string> = null;
     const running = entry.cycle.running || entry.cycle.engaged;
@@ -567,7 +606,7 @@ export class ShipModules {
       else if (aim === id) refusal = 'it cannot target its own ship';
       else if (!this.Targetable(entry, aim)) refusal = weapon ? `no ship or object "${aim}"` : `no ship "${aim}" (a targeted module runs on a ship, not an object)`;
       else if (this.port.InWarp(aim)) refusal = `its target "${aim}" is in warp`;
-      else if (!weapon && running && entry.target && entry.target !== aim) refusal = `it is running on "${entry.target}"; switch it online first`;
+      else if (!Retargets(entry, retarget) && running && entry.target && entry.target !== aim) refusal = `it is running on "${entry.target}"; switch it online first`;
       else if (distance == null || distance > reach) refusal = `"${aim}" is out of range: ${Math.round(distance ?? 0)} m, it reaches ${Math.round(reach)} m`;
     }
     if (refusal === null && !running && activation.maxGroupActive > 0) {
@@ -639,6 +678,22 @@ export class ShipModules {
  */
 function IsWeapon(entry: ModuleEntry): boolean {
   return entry.spec.activation.weapon != null;
+}
+
+/**
+ * Whether a module runs only on a locked target (ShipModulesPort.LockHold): a weapon or a remote repairer. Webs, scrams,
+ * points, neuts, nos and transmitters run unlocked.
+ */
+function IsLockGated(entry: ModuleEntry): boolean {
+  return IsWeapon(entry) || entry.spec.activation.repair?.remote === true;
+}
+
+/**
+ * Whether a running module given another target takes it at its next cycle start: a weapon always, a remote repairer
+ * with the `retarget` switch option.
+ */
+function Retargets(entry: ModuleEntry, retarget: boolean): boolean {
+  return IsWeapon(entry) || (retarget && IsLockGated(entry));
 }
 
 /**

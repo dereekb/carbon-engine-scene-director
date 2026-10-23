@@ -376,7 +376,7 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   without effect on its target yet`.
 - **Group limits**: activation beyond the evaluated `maxGroupActive` (763) is refused; modules beyond `maxGroupOnline`
   (978) start offline with a note, and onlining one is refused.
-- **Targeted modules** (default effect category 2) need `target`: another ship in the scene, no lock. Distance is
+- **Targeted modules** (default effect category 2) need `target`: another ship in the scene. Distance is
   surface to surface on the EVE radii (`DestinyWorld.SurfaceDistance`). Refused beyond `activation.reach`
   (`moduleReach`: optimal + 2 × falloff; Infinity for turrets and untargeted modules), on its own ship, on a ship in
   warp, or while running on another target. **Turrets** differ (`sd-weapons`): their target is the ship's
@@ -387,6 +387,19 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   target is gone` / `entered warp`). Each running targeted module keeps `applied`, its effectiveness at its latest
   cycle start (`on` carries cycle 1); a stopping one keeps its cycle's effect until `off`. `Targeting(target)` /
   `TargetIndex()` list the running targeted modules on a ship (turrets excluded) with `applied`.
+- **Remote repairers lock** (logi L2): they are lock-gated like weapons (`IsLockGated`: a weapon, or
+  `activation.repair.remote`). Switched on before the lock completes they wait in `activating` with the lock note; a
+  lost lock stops them at their cycle end; ships without targeting numbers repair unlocked. `SwitchModules` requests
+  the lock on the switch's target for switched remote repairers. `LockAims()` (was `WeaponAims`) lists what every
+  lock-gated module running, stopping or engaged aims at, a pending retarget included: the director's `WantedLocks` and
+  `RequestLock` keep those locks. Webs, scrams, points, neuts, nos, transmitters and EWAR still run unlocked.
+- **The retarget option** (`SwitchModuleOptions.retarget`, auto-repair only): a lock-gated module running or stopping
+  on another target takes the new one at its next cycle start once locked (`entry.retarget`, the weapon path; a
+  stopping one resumes, so the old cycle still lands on the old target). Without it a remote repairer on another
+  target is refused (`it is running on "x"; switch it online first`). The first `cycle` event on the new target carries
+  `retargeted: true`; `ModuleFxCommands` turns it into `start`, so `ModuleEffects.Start` discards the old beam and
+  draws one to the new target, and `ModuleAudioPost` posts the start sounds. `RemoteRepairers(id)` lists a ship's
+  remote repairers that can run (`{ key, spec, state, target, retarget? }`, fit order).
 - **Warp**: entering proper warp (`OnWarp` enter) stops at once every running module that is not warp safe and every
   targeted one, plus every module targeting the ship. The prop mod already did this in DestinyWorld.
 - **The prop mod** stays DestinyWorld's: `switch_modules` on the `prop: true` module calls `PropModRefusal` /
@@ -434,7 +447,10 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   through Destiny, 650.7 m/s; `switch_prop_mods` off reads `stopping` in its row; offline refused); "remote reps take a
   target and stop when it is removed" (two Large Remote Armor Repairer II on a TFI 3 km off: refused without a target,
   then `incoming` on the TFI, stopped with `its target is gone` on `remove_ship`). The Guardian's Large RAR II reaches
-  57.6 km optimal + 16.8 km falloff in this build (14.4 km base, +300 % Amarr Cruiser V).
+  57.6 km optimal + 16.8 km falloff in this build (14.4 km base, +300 % Amarr Cruiser V). Since logi L2 the same check
+  sees the reps wait in `activating` with `waiting for its lock on "tfi"` while the lock is `locking` (lockTime 1.937
+  s), run once locked 2 ticks later, and the TFI's `combat.repairs.lastReceived` shows two rows from `logi` 6 ticks
+  after activation with `nominal` 512 and `amount` 0 (full armor).
 
 ## Target effects (webs, painters, points, scrams, capacitor warfare)
 

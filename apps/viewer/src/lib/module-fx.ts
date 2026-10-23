@@ -1,7 +1,9 @@
 /**
  * Module events → module effect commands: which client effect (effects.ts) starts, replays or stops on which ship.
  *
- * - `start` when a module starts (its first cycle), `cycle` at every later cycle start, `stop` when it stops.
+ * - `start` when a module starts (its first cycle), `cycle` at every later cycle start, `stop` when it stops. A cycle
+ *   that retargeted (`retargeted`: a remote repairer moved on by auto-repair) starts again, so its beam restarts on the
+ *   new target with the start sounds.
  * - An overlay plays on the module's ship; a beam runs from the ship to its target; the web's trigger plays at the
  *   target. A beam or trigger without a target, and a module whose effect the page does not draw, give no command.
  * - Commands are keyed `<ship>|<module>`: module-effects.ts keeps one live effect per key.
@@ -70,7 +72,7 @@ export function ModuleFxKey(ship: string, module: string): string {
 
 function FxOp(event: ShipModuleEvent): Maybe<ModuleFxOp> {
   let op: Maybe<ModuleFxOp> = null;
-  if (event.kind === 'on') op = 'start';
+  if (event.kind === 'on' || (event.kind === 'cycle' && event.retargeted)) op = 'start';
   else if (event.kind === 'cycle' && event.cycle > 1) op = 'cycle';
   else if (event.kind === 'off') op = 'stop';
   return op;

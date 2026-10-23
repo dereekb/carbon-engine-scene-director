@@ -193,6 +193,17 @@ interface ShipCombatState {
   readonly lastHits: CombatRowState[];
   readonly lastTaken: CombatRowState[];
   readonly paperDps: number;
+  readonly repairs?: ShipRepairsState;
+}
+
+/**
+ * A ship's repair tallies in get_state (the viewer's combat.ts ShipRepairReport).
+ */
+interface ShipRepairsState {
+  readonly received: number;
+  readonly given: number;
+  readonly hps: { readonly received: number; readonly given: number };
+  readonly lastReceived: { readonly tick: number; readonly from: string; readonly module: string; readonly layer: string; readonly amount: number; readonly nominal: number }[];
 }
 
 /**
@@ -428,7 +439,7 @@ interface ViewerState {
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
   readonly cinema?: CinemaStateReport;
-  readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly kills: { readonly ship: string; readonly by: string; readonly module: string; readonly weapon: string; readonly tick: number }[] };
+  readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly repaired?: number; readonly kills: { readonly ship: string; readonly by: string; readonly module: string; readonly weapon: string; readonly tick: number }[] };
   readonly missiles?: MissilesState;
 }
 
@@ -2185,18 +2196,38 @@ try {
     Expect(!untargeted.ships.length && untargeted.skipped.length === 2 && untargeted.skipped.every((skip) => /needs a target/.test(skip.reason)), JSON.stringify(untargeted));
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['remote-armor-repairer'], state: 'active', target: 'tfi' });
     Expect(on.ships[0]?.modules.length === 2 && on.ships[0].modules.every((module) => module.state === 'activating' && module.target === 'tfi'), JSON.stringify(on));
-    const running = await WaitFor('both reps run on the TFI', 10, (polled) => {
+    // Remote reps wait for the Guardian's lock on the TFI (1.937 s at SDE 3632936, so 2 ticks) in activating.
+    const held = await WaitFor('both reps wait in activating for the lock on the TFI', 5, (polled) => {
+      const rows = ['high-0', 'high-1'].map((key) => ModuleRow(polled, 'logi', key));
+      const lock = (ShipIn(polled, 'logi').locks ?? []).find((entry) => entry.target === 'tfi');
+      return rows.every((row) => row.state === 'activating' && /waiting for its lock on "tfi"/u.test(row.note ?? '')) && lock?.state === 'locking' ? null : `${JSON.stringify(rows)}, lock ${JSON.stringify(lock)}`;
+    });
+    const lock = (ShipIn(held, 'logi').locks ?? []).find((entry) => entry.target === 'tfi');
+    Expect(Math.abs((lock?.lockTime ?? 0) - 1.937) < 0.01, `lock time ${JSON.stringify(lock)}`);
+    const running = await WaitFor('both reps run on the TFI once locked', 10, (polled) => {
       const rows = ['high-0', 'high-1'].map((key) => ModuleRow(polled, 'logi', key));
       const incoming = ShipIn(polled, 'tfi').defense?.incoming ?? [];
-      return rows.every((row) => row.state === 'active' && row.target === 'tfi' && row.effectiveness === 1) && incoming.length === 2 ? null : `${JSON.stringify(rows)}, incoming ${JSON.stringify(incoming)}`;
+      const locked = (ShipIn(polled, 'logi').locks ?? []).some((entry) => entry.target === 'tfi' && entry.state === 'locked');
+      return locked && rows.every((row) => row.state === 'active' && row.target === 'tfi' && row.effectiveness === 1) && incoming.length === 2 ? null : `${JSON.stringify(rows)}, incoming ${JSON.stringify(incoming)}`;
     });
+    const activeAt = running.simulation.tick;
+    Expect(activeAt - held.simulation.tick <= 3, `active at tick ${activeAt}, held at ${held.simulation.tick}`);
     const incoming = ShipIn(running, 'tfi').defense?.incoming ?? [];
+    // The armor reps land at their 6 s cycle end; the TFI is at full armor, so each restores 0 of its nominal 512.
+    const landed = await WaitFor('the first rep cycle lands on the TFI', 10, (polled) => {
+      const rows = ShipIn(polled, 'tfi').combat?.repairs?.lastReceived ?? [];
+      return rows.length >= 2 ? null : `lastReceived ${JSON.stringify(rows)}`;
+    });
+    const repairs = ShipIn(landed, 'tfi').combat?.repairs;
+    const first = repairs?.lastReceived ?? [];
+    Expect(first.length >= 2 && first.slice(0, 2).every((row) => row.from === 'logi' && row.layer === 'armor' && row.nominal === 512 && row.amount === 0 && Math.abs(row.tick - (activeAt + 6)) <= 1), `activated by tick ${activeAt}: ${JSON.stringify(repairs)}`);
+    Expect(ShipIn(landed, 'logi').combat?.repairs?.given === 0, JSON.stringify(ShipIn(landed, 'logi').combat?.repairs));
     await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'tfi' }] });
     await WaitFor('the reps stop at once when their target is removed', 5, (polled) => {
       const rows = ['high-0', 'high-1'].map((key) => ModuleRow(polled, 'logi', key));
       return rows.every((row) => row.state !== 'active' && row.state !== 'stopping' && !row.target && /target is gone/.test(row.note ?? '')) ? null : JSON.stringify(rows);
     });
-    return `2 Large Remote Armor Repairer II on tfi (incoming ${JSON.stringify(incoming.map((repair) => repair.module))}); stopped with "its target is gone" on its removal`;
+    return `2 Large Remote Armor Repairer II on tfi after a ${lock?.lockTime} s lock (held at tick ${held.simulation.tick}, active by ${activeAt}; incoming ${JSON.stringify(incoming.map((repair) => repair.module))}); first landings ${JSON.stringify(first.slice(0, 2).map((row) => ({ tick: row.tick, amount: row.amount, nominal: row.nominal })))}; stopped with "its target is gone" on its removal`;
   });
 
   // Tackle: a Rifter with a web, a scram and a point at the origin; 3 km off it a Guardian with two neuts and a cap

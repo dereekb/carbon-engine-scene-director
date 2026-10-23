@@ -172,7 +172,8 @@ import {
   warpScrambleNoteOf,
   type DogmaIncomingModifier,
   type ModuleCategory,
-  type ShipStatsInput
+  type ShipStatsInput,
+  REMOTE_REPAIRER_CATEGORIES
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -1276,6 +1277,8 @@ export class Director {
       // Weapons switched on wait for the lock on the ship's target (EVE's pre-activation): make sure it is asked for.
       const aim = this.targets.Of(id);
       if (aim && command.state === 'active' && modules.some((module) => module.weapon != null)) this.RequestLock(id, aim);
+      // So do remote repairers, on the switch's target.
+      if (command.target && command.state === 'active' && switched.some((row) => REMOTE_REPAIRER_CATEGORIES.includes(modules.find((module) => module.key === row.module)?.category ?? 'prop'))) this.RequestLock(id, command.target);
       if (switched.length) ships.push({ id, modules: switched });
     }
     this.onChange();
@@ -2383,7 +2386,8 @@ export class Director {
     if (!events.length) return;
     const repaired = new Set<string>();
     for (const landing of this.modules.RepairLandings(events)) {
-      this.damage.Repair(landing.ship, landing.layer, landing.amount);
+      const restored = this.damage.Repair(landing.ship, landing.layer, landing.amount);
+      this.combat.RecordRepair({ ship: landing.ship, from: landing.from, module: landing.module, layer: landing.layer, amount: restored, nominal: landing.amount, tick: this.world.tick });
       repaired.add(landing.ship);
     }
     for (const id of repaired) this.SyncImpactState(id);
@@ -2548,14 +2552,14 @@ export class Director {
   }
 
   /**
-   * Asks for a ship's lock on a target, the locks its turrets still fire on kept (locks.ts).
+   * Asks for a ship's lock on a target, the locks its weapons and remote repairers still run on kept (locks.ts).
    *
    * @param id - The ship id.
    * @param target - The ship or object.
    * @returns The refusal, or null.
    */
   private RequestLock(id: string, target: string, requestedAt = this.world.tick): Maybe<string> {
-    const wanted = new Set([target, ...(this.modules.WeaponAims().get(id) ?? [])]);
+    const wanted = new Set([target, ...(this.modules.LockAims().get(id) ?? [])]);
     return this.locks.Request(id, target, requestedAt, wanted);
   }
 
@@ -2574,11 +2578,12 @@ export class Director {
   }
 
   /**
-   * Each ship's wanted locks at a boundary: its target and what its turrets aim at, then a called member's pre-locks
+   * Each ship's wanted locks at a boundary: its target and what its weapons and remote repairers aim at (LockAims), then
+   * a called member's pre-locks
    * (its call's next queued targets) while it is under its lock limit, so the sweep never has to choose.
    */
   private WantedLocks(): Map<string, Set<string>> {
-    const wanted = this.modules.WeaponAims();
+    const wanted = this.modules.LockAims();
     for (const doc of this.scene?.ships ?? []) {
       const target = this.IsDead(doc.id) ? null : this.targets.Of(doc.id);
       if (target) wanted.set(doc.id, new Set([target, ...(wanted.get(doc.id) ?? [])]));

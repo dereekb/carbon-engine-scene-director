@@ -268,7 +268,8 @@ fleet, a Punisher ordered to orbit the TFI at 2 km with the TFI on it.
 - **`ShipModules`**: `IsWeapon` (turrets and launchers) gates what `IsTurret` did: the ship's target (an authored
   object allowed), `LockHold`, `Retarget` at the next cycle start, `Untarget`, the "it needs a target: set_target or
   switch_modules target" text, and the exclusion from `Targeting` / `TargetIndex` (a launcher is no target effect).
-  `WeaponAims` / `WeaponKeys` replaced `TurretAims` / `TurretKeys`. Specs carry `missile` (`missileCombatNumbersOf`)
+  `WeaponAims` / `WeaponKeys` replaced `TurretAims` / `TurretKeys`; logi L2 renamed `WeaponAims` to `LockAims` (remote
+  repairers lock too: `IsLockGated`, `sd-fittings`). Specs carry `missile` (`missileCombatNumbersOf`)
   beside a turret's `combat` (`ShipModuleSpecsOf`).
 - **The director** (`sd-combat` → Missiles in the page): every turret filter became "a weapon" (`SwitchModules`' aim
   and lock request, `SetTarget`'s counts, `Engage`, `CeaseFire`, `ArmWeapons`, `paperDps`, `WantedLocks`), so launchers

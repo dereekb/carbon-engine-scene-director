@@ -9,10 +9,12 @@
 
 - **L1 in** (2026-10-23): the document field and its resolution, the selection math, the tool's pure half
   (`packages/scene`, node-tested).
-- **Not yet**: L2 (remote repairers lock their target, retarget at a cycle start with the beam restarting, repair
-  tallies in `CombatRules`, the accessors the controller needs), L3 (the page's `AutoRepair`, the `auto_repair` tool,
-  get_state `autoRepair` / `combat.repairs`, verify-page `logi:` checks), L4 (the real-GPU look). Today remote
-  repairers run only through `switch_modules`, without a lock (`sd-fittings`).
+- **L2 in** (2026-10-23): remote repairers wait for a lock on their target like weapons, retarget at a cycle start
+  with the `retarget` switch option (the beam restarts on the new target), and every repair landing is tallied in
+  `CombatRules` (get_state `combat.repairs`, scene `combat.repaired`). The accessors the controller needs are built
+  (Seams). The lock gate, `LockAims` and the retarget: `sd-fittings` (Targeted modules); the tallies: `sd-combat`.
+- **Not yet**: L3 (the page's `AutoRepair`, the `auto_repair` tool, get_state `autoRepair`, verify-page `logi:`
+  checks), L4 (the real-GPU look). Until L3, remote repairers run only through `switch_modules`.
 
 ## Files
 
@@ -103,9 +105,13 @@ Rifter puts ~103 HP/s into a bare Punisher (438 / 625 / 563 HP). Two Guardians o
 
 ## Seams
 
-- L2 adds the lock gate for remote repairers (`IsLockGated`), the `retarget` switch option (the module takes the new
-  target at its next cycle start once locked, so the old cycle lands on the old target) and the beam restart
-  (`retargeted` cycle → `start`), plus `CombatRules.RecordRepair` / `TakenSince`, `DamageModel.Health`,
-  `ShipLocks.Lockers`, `ShipModules.RemoteRepairers`.
+- L2 (built): the lock gate for remote repairers (`IsLockGated`), the `retarget` switch option (the module takes the
+  new target at its next cycle start once locked, so the old cycle lands on the old target; a stopping one resumes;
+  without it the manual refusal stands) and the beam restart (`retargeted` cycle → `start`), plus
+  `CombatRules.RecordRepair` / `TakenSince`, `DamageModel.Health`, `ShipLocks.Lockers` (locking or locked),
+  `ShipModules.RemoteRepairers` (`{ key, spec, state, target, retarget? }`). `SwitchModules` asks for the lock on a
+  switched remote repairer's target; L3's controller passes `retarget: true` and lets the boundary's lock sweep
+  (`LockAims`) start its locks. verify-page "remote reps take a target…" pins the lock (1.937 s Guardian → TFI) and the
+  first landing (6 ticks after activation, nominal 512, amount 0 on full armor).
 - L3's page controller runs `chooseRepairTargets` per fleet in the boundary listener, before the lock sweep.
 - Missiles' damage feeds `takenWindow` through `CombatRules`, so pressure includes it with no change here.

@@ -16,7 +16,10 @@
  * - Every shot gets `missed` and `outcome`; the killing one `fatal`. Structure at 0 records a ShipKill (onKill); the
  *   ship is then flagged destroyed: it takes no more damage until a load and its kill is not repeated.
  * - Tallies per ship: dealt and taken, a 20 s trailing DPS window, shots, hits and misses, the 3 latest rows fired and
- *   taken, and per victim the contributors.
+ *   taken, and per victim the contributors. TakenSince reads the taken window (auto-repair's pressure).
+ * - Repair tallies (RecordRepair, from each local or remote repair landing): HP received and (remote) given, 20 s HP/s
+ *   windows, and the 3 latest rows received with the HP restored and the cycle's nominal HP (a landing on a full layer
+ *   restores 0).
  * - Recharge runs the passive shield recharge at each boundary, before the shots.
  *
  * Node-tested: it imports nothing from ./runtime.
@@ -153,6 +156,53 @@ export const MISSILE_EXPIRED_NOTE = 'it ran out of flight time';
 export const MISSILE_TARGET_DESTROYED = 'its target was destroyed';
 
 /**
+ * A repair landing, recorded by the director (ModuleOutputs).
+ */
+export interface RepairRecord {
+  /**
+   * The ship repaired.
+   */
+  readonly ship: string;
+  /**
+   * The ship whose module repaired (the ship itself for a local repairer).
+   */
+  readonly from: string;
+  readonly module: string;
+  readonly layer: DefenseLayerName;
+  /**
+   * HP restored (DamageModel.Repair's return, capped at the layer's max).
+   */
+  readonly amount: number;
+  /**
+   * The cycle's HP after falloff, before the cap.
+   */
+  readonly nominal: number;
+  readonly tick: number;
+}
+
+/**
+ * One repair landing in get_state's latest rows received.
+ */
+export interface RepairRow {
+  readonly tick: number;
+  readonly from: string;
+  readonly module: string;
+  readonly layer: DefenseLayerName;
+  readonly amount: number;
+  readonly nominal: number;
+}
+
+/**
+ * A ship's repairs in get_state: HP received and given, HP per second over the trailing DPS_WINDOW_SECONDS.
+ */
+export interface ShipRepairReport {
+  readonly received: number;
+  readonly given: number;
+  readonly hps: { readonly received: number; readonly given: number };
+  readonly lastReceived: readonly RepairRow[];
+}
+
+/**
  * A ship's combat in get_state.
  */
 export interface ShipCombatReport {
@@ -167,6 +217,10 @@ export interface ShipCombatReport {
   readonly misses: number;
   readonly lastHits: readonly CombatRow[];
   readonly lastTaken: readonly CombatRow[];
+  /**
+   * Once it received or gave a repair.
+   */
+  readonly repairs?: ShipRepairReport;
 }
 
 interface Tally {
@@ -182,6 +236,15 @@ interface Tally {
   readonly takenWindow: { readonly tick: number; readonly amount: number }[];
   readonly lastHits: CombatRow[];
   readonly lastTaken: CombatRow[];
+  repaired: number;
+  given: number;
+  /**
+   * Repair landings received and given (0 HP ones included).
+   */
+  repairLandings: number;
+  readonly repairedWindow: { readonly tick: number; readonly amount: number }[];
+  readonly givenWindow: { readonly tick: number; readonly amount: number }[];
+  readonly lastRepaired: RepairRow[];
   /**
    * Victim side: attacker → HP it took off, and the tick it last shot.
    */
@@ -209,6 +272,7 @@ export class CombatRules {
   private readonly spools = new Map<string, Spool>();
   private shots = 0;
   private hits = 0;
+  private repaired = 0;
 
   constructor(options: CombatRulesOptions) {
     this.port = options.port;
@@ -296,8 +360,45 @@ export class CombatRules {
   /**
    * Scene totals.
    */
-  Totals(): { readonly shots: number; readonly hits: number } {
-    return { shots: this.shots, hits: this.hits };
+  Totals(): { readonly shots: number; readonly hits: number; readonly repaired: number } {
+    return { shots: this.shots, hits: this.hits, repaired: Round(this.repaired, 1) };
+  }
+
+  /**
+   * Tallies a repair landing on its ship (received) and, for a remote one, its giver (given), 0 HP landings included
+   * (pre-reps).
+   *
+   * @param record - The landing.
+   */
+  RecordRepair(record: RepairRecord): void {
+    const { ship, from, module, layer, amount, nominal, tick } = record;
+    const victim = this.Tally(ship);
+    victim.repaired += amount;
+    victim.repairLandings += 1;
+    if (amount > 0) victim.repairedWindow.push({ tick, amount });
+    Latest(victim.lastRepaired, { tick, from, module, layer, amount: Round(amount, 1), nominal: Round(nominal, 1) });
+    this.Prune(victim, tick);
+    if (from !== ship) {
+      const giver = this.Tally(from);
+      giver.given += amount;
+      giver.repairLandings += 1;
+      if (amount > 0) giver.givenWindow.push({ tick, amount });
+      this.Prune(giver, tick);
+    }
+    this.repaired += amount;
+  }
+
+  /**
+   * HP a ship lost to shots over the trailing seconds (at most DPS_WINDOW_SECONDS): auto-repair's pressure.
+   *
+   * @param id - The ship id.
+   * @param boundary - The master tick now.
+   * @param seconds - The window.
+   * @returns The HP.
+   */
+  TakenSince(id: string, boundary: number, seconds: number): number {
+    const since = boundary - seconds / this.port.tickSeconds;
+    return (this.tallies.get(id)?.takenWindow ?? []).reduce((sum, row) => (row.tick > since ? sum + row.amount : sum), 0);
   }
 
   /**
@@ -320,7 +421,17 @@ export class CombatRules {
       hits: tally.hits,
       misses: tally.misses,
       lastHits: [...tally.lastHits],
-      lastTaken: [...tally.lastTaken]
+      lastTaken: [...tally.lastTaken],
+      ...(tally.repairLandings
+        ? {
+            repairs: {
+              received: Round(tally.repaired, 1),
+              given: Round(tally.given, 1),
+              hps: { received: window(tally.repairedWindow), given: window(tally.givenWindow) },
+              lastReceived: [...tally.lastRepaired]
+            }
+          }
+        : {})
     };
   }
 
@@ -341,7 +452,7 @@ export class CombatRules {
   }
 
   /**
-   * A ship left the scene: its tallies, spools and destroyed flag go (its kill stays in Kills).
+   * A ship left the scene: its tallies (repairs included), spools and destroyed flag go (its kill stays in Kills).
    */
   Remove(id: string): void {
     this.tallies.delete(id);
@@ -350,7 +461,7 @@ export class CombatRules {
   }
 
   /**
-   * A load: every kill, tally and spool goes; every ship is alive again.
+   * A load: every kill, tally (repairs included) and spool goes; every ship is alive again.
    */
   Clear(): void {
     this.tallies.clear();
@@ -359,6 +470,7 @@ export class CombatRules {
     this.spools.clear();
     this.shots = 0;
     this.hits = 0;
+    this.repaired = 0;
   }
 
   private Outcome(shot: WeaponShot): ShotOutcome {
@@ -515,7 +627,25 @@ export class CombatRules {
   private Tally(id: string): Tally {
     let tally = this.tallies.get(id);
     if (!tally) {
-      tally = { dealt: 0, taken: 0, shots: 0, hits: 0, misses: 0, dealtWindow: [], takenWindow: [], lastHits: [], lastTaken: [], contributors: new Map(), attackers: new Map() };
+      tally = {
+        dealt: 0,
+        taken: 0,
+        shots: 0,
+        hits: 0,
+        misses: 0,
+        dealtWindow: [],
+        takenWindow: [],
+        lastHits: [],
+        lastTaken: [],
+        repaired: 0,
+        given: 0,
+        repairLandings: 0,
+        repairedWindow: [],
+        givenWindow: [],
+        lastRepaired: [],
+        contributors: new Map(),
+        attackers: new Map()
+      };
       this.tallies.set(id, tally);
     }
     return tally;
@@ -523,14 +653,14 @@ export class CombatRules {
 
   private Prune(tally: Tally, boundary: number): void {
     const since = boundary - DPS_WINDOW_SECONDS / this.port.tickSeconds;
-    for (const window of [tally.dealtWindow, tally.takenWindow]) {
+    for (const window of [tally.dealtWindow, tally.takenWindow, tally.repairedWindow, tally.givenWindow]) {
       const stale = window.findIndex((row) => row.tick > since);
       window.splice(0, stale < 0 ? window.length : stale);
     }
   }
 }
 
-function Latest(rows: CombatRow[], row: CombatRow): void {
+function Latest<T>(rows: T[], row: T): void {
   rows.unshift(row);
   if (rows.length > COMBAT_ROWS) rows.length = COMBAT_ROWS;
 }

@@ -287,6 +287,17 @@ export class ShipLocks {
   }
 
   /**
+   * The locks started or done on a target (`locking` or `locked`): who EVE shows as targeting it. A `waiting` lock
+   * (requested, or out of range) does not count.
+   */
+  Lockers(target: string): Lock[] {
+    return [...this.ships].flatMap(([ship, locks]) => {
+      const entry = locks.get(target);
+      return entry && (entry.state === 'locking' || entry.state === 'locked') ? [{ ship, target, state: entry.state }] : [];
+    });
+  }
+
+  /**
    * A ship or object left the scene (or was destroyed): its own locks and every lock on it go.
    */
   Remove(id: string): void {

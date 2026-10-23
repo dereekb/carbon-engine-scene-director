@@ -33,6 +33,17 @@ describe('ModuleFxCommands', () => {
       ['start', 'logi|mid-1', 'trigger', 'tfi']
     ]);
   });
+
+  it('restarts a beam on its new target at a retargeted cycle, with the start sounds', () => {
+    const beam = { module: 'high-0', effectGuid: 'effects.RemoteArmourRepair', cycleTime: 6 };
+    const commands = ModuleFxCommands([Event('on', 1, { ...beam, target: 'tfi' }), Event('end', 1, { ...beam, target: 'tfi' }), Event('cycle', 2, { ...beam, target: 'b1', retargeted: true }), Event('cycle', 3, { ...beam, target: 'b1' })]);
+    expect(commands.map((command) => [command.op, command.key, command.target])).toEqual([
+      ['start', 'logi|high-0', 'tfi'],
+      ['start', 'logi|high-0', 'b1'],
+      ['cycle', 'logi|high-0', 'b1']
+    ]);
+    expect(ModuleAudioPost(commands[1], 'M').events).toEqual(['remote_shipeffect_switch_size_M', 'remote_shipeffect_switch_duration_6000', 'remote_armorrepair']);
+  });
 });
 
 describe('ModuleAudioPost', () => {

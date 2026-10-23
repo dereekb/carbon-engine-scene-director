@@ -148,10 +148,10 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 
 | File | Holds |
 |---|---|
-| `viewer/locks.ts` | `ShipLocks` over `ShipLocksPort` (`SurfaceDistance`, `InWarp`, `IsTargetable`, `Targeting`, `SignatureOf`, `tickSeconds`): `Request`, `Keep` / `Release`, `Boundary(tick, wanted)`, `IsLocked`, `Hold`, `Of` / `On`, `Remove`, `OnWarpEnter`, `Clear`, `Report` |
-| `viewer/combat.ts` | `CombatRules` over `CombatPort` (`Accuracy`, `Speed`, `Weapon`, `SignatureOf`, `KindOf`): `SetCombat`, `Recharge`, `Resolve`, `IsDestroyed`, `KillOf`, `Kills`, `Totals`, `Report`, `Attackers`, `Remove`, `Clear`; `DPS_WINDOW_SECONDS` (20), `COMBAT_ROWS` (3) |
+| `viewer/locks.ts` | `ShipLocks` over `ShipLocksPort` (`SurfaceDistance`, `InWarp`, `IsTargetable`, `Targeting`, `SignatureOf`, `tickSeconds`): `Request`, `Keep` / `Release`, `Boundary(tick, wanted)`, `IsLocked`, `Hold`, `Of` / `On`, `Lockers` (locking or locked only), `Remove`, `OnWarpEnter`, `Clear`, `Report` |
+| `viewer/combat.ts` | `CombatRules` over `CombatPort` (`Accuracy`, `Speed`, `Weapon`, `SignatureOf`, `KindOf`): `SetCombat`, `Recharge`, `Resolve`, `IsDestroyed`, `KillOf`, `Kills`, `Totals`, `Report`, `Attackers`, `TakenSince`, `RecordRepair`, `Remove`, `Clear`; `DPS_WINDOW_SECONDS` (20), `COMBAT_ROWS` (3) |
 | `viewer/module-cycle.ts` | the gate `Boundary(boundary, { hold })` and `activations` (every event carries `activation`) |
-| `viewer/modules.ts` | port `LockHold?`, the lost-lock stop, the lock-gated retarget, `Remove(id, boundary, why)`, `Spec`, `WeaponAims`, `WeaponKeys` (turrets and launchers); specs carry `combat` / `missile` (`ShipModuleSpecsOf`) |
+| `viewer/modules.ts` | port `LockHold?`, the lost-lock stop, the lock-gated retarget (`IsLockGated`: weapons and remote repairers; the `retarget` switch option), `Remove(id, boundary, why)`, `Spec`, `LockAims`, `WeaponKeys` (turrets and launchers), `RemoteRepairers`; specs carry `combat` / `missile` (`ShipModuleSpecsOf`) |
 | `viewer/damage.ts` | `ApplyHit`, `Recharge`, `Destroyed` (`capacitor.ts`' `CapacitorFractionAfter` is `passiveRecharge` too: one formula) |
 | `viewer/destiny.ts` | `Accuracy(source, target, numbers)`: the master park's `GetAccuracy` (`destiny-accuracy.spec.ts`) |
 | `viewer/director.ts` | the wiring below, `Engage` / `CeaseFire`, `OnKill`, get_state |
@@ -335,8 +335,9 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
 - **The gate** (`ModuleCycle.Boundary(boundary, { hold })`, through `ShipModulesPort.LockHold` = `ShipLocks.Hold`):
   an activating turret with a hold stays `activating` with the hold as its note (`waiting for its lock on "x" (1.6
   s)`): EVE's pre-activation. A running turret whose lock is lost stops at its cycle end (`it lost its lock on "x"`).
-  A pending retarget switches at the first cycle start once the new target is locked. Only turrets wait: remote reps,
-  webs, scrams and EWAR run without a lock.
+  A pending retarget switches at the first cycle start once the new target is locked. Weapons (turrets, launchers)
+  and remote repairers wait (`IsLockGated`; logi L2, `sd-logi`): webs, scrams, points, neuts, nos, transmitters and
+  EWAR run without a lock.
 
 ## Combat rules in the page (`combat.ts`)
 
@@ -352,11 +353,19 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
   `module`, `weapon`, `tick`, `at`, `mode`, contributors most first) and `onKill`; the ship is then destroyed for the
   rules: no more damage until a load, its kill not repeated. Repairs still land on it.
 - Tallies: dealt / taken, a 20 s trailing DPS window, shots / hits / misses, the 3 latest rows fired (`lastHits`) and
-  taken (`lastTaken`), contributors, `Attackers` (who shot it in the window). Scene totals: shots, hits.
+  taken (`lastTaken`), contributors, `Attackers` (who shot it in the window). Scene totals: shots, hits, repaired.
+  `TakenSince(id, boundary, seconds)` sums the taken window over the trailing seconds (≤ 20): auto-repair's pressure.
+- **Repair tallies** (logi L2): the director's `ModuleOutputs` calls `RecordRepair({ ship, from, module, layer, amount,
+  nominal, tick })` for every repair landing, local and remote: `amount` is `DamageModel.Repair`'s return (HP
+  restored, capped at max), `nominal` the cycle's HP after falloff. The victim gains `repaired`, a 20 s
+  `repairedWindow` and 3 `lastRepaired` rows; a remote giver gains `given` and `givenWindow`. A 0 HP landing on a full
+  layer is recorded (pre-reps show as `amount: 0`). `Report` adds `repairs { received, given, hps { received, given },
+  lastReceived }` once a ship received or gave one, so a logi that only repairs gets a `combat` block. `Clear` and
+  `Remove` forget them.
 - **Director wiring**: one `OnBoundary` listener, in order: `RemoveDead(boundary)`, `combat.Recharge(tick s)` (impact
   overlays re-armed when the shield moved > 0.1 %), `SyncFleetTargets(boundary)` (the fleet targeting lever: members
   take their groups' next live called targets, locks asked at `boundary − 1`; `sd-fleets` doc `targets`),
-  `locks.Boundary(boundary, WantedLocks())` (wanted: targets, turret aims, then called members' pre-locks under
+  `locks.Boundary(boundary, WantedLocks())` (wanted: `LockAims` (weapons and remote repairers), targets, then called members' pre-locks under
   `maxLocks`), `Engagements(boundary)` (an engaged ship's matching weapons back `online` switch active again, then
   `fleetTargets.Armed()` members with `DEFAULT_ENGAGE_MODULES`: `ArmWeapons`), `MissileArrivals(boundary)`,
   `ModuleEvents(modules.Boundary(boundary))`, then `Shots([])` when missile hits are left. `Shots` resolves the
@@ -427,7 +436,8 @@ shared part, a `globalExplosion` container, timing values). The client picks one
   `ship-stats-tool.spec.ts` (a default-fit Rifter text gives the table's numbers; a TFI's empty guns load Barrage L).
 - **`patch_scene`**: `set_combat`.
 - **`set_target`** starts the lock (its answer's `lock`: `{ state, lockTime?, readyIn?, note? }` or `{ refused }`); a
-  null target ends the ship's engagement. **`switch_modules`** turrets wait for the lock on the ship's target.
+  null target ends the ship's engagement. **`switch_modules`** turrets wait for the lock on the ship's target; remote
+  repairers for the lock on the switch's target (`SwitchModules` asks for it).
 - **`engage`** `{ selection, target, modules? }`: the target becomes each ship's target and its lock starts, the
   matching weapons (default turrets and launchers) switch active (they wait for the lock), and the engagement keeps
   them firing (`Engagements`). It
@@ -437,20 +447,20 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 - **`cease_fire`** `{ selection, unlock? }`: ends the engagement, its weapons switch online (cycle end; missiles in flight fly on); `unlock` also
   clears the target (the sweep drops the lock).
 - **get_state** per ship: `targeting` `{ scanResolution, maxTargetRange, maxLocks }`, `locks`, `engaged`, `combat`
-  `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, paperDps }` (once it fired or was
-  shot), `destroyed` `{ tick, by, module, weapon, mode }`; weapon rows `combat` `{ damage, volley, dps }` and the lock
-  note while held; scene `combat` `{ seed, death, shots, hits, kills }`.
+  `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, paperDps, repairs? }` (once it
+  fired, was shot or was repaired), `destroyed` `{ tick, by, module, weapon, mode }`; weapon rows `combat` `{ damage,
+  volley, dps }` and the lock note while held; scene `combat` `{ seed, death, shots, hits, repaired, kills }`.
 - **`Director.OnKill(listener)`**: for the fleet targeting lever and the automatic camera.
 
 ## State to snapshot (time control)
 
-Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies, kills, destroyed,
-spools), the `ModuleCycle` activation counters, `Director.engagements`, `FleetTargets` (own marks, called targets,
-holds, responses, the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders`
-(group key → list), and `Director.deaths` (kill, explosion
-choice, start, hidden, `removeTick`, gone), `DestinyWorld`'s missile entries and balls, and `MissileFlights` (the
-drawn missiles replay from the flights). The RNG is the document's seed, so a re-simulation rolls the same; explosions
-re-trigger from their kills' times. Missiles add no randomness.
+Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies with the repair
+tallies, kills, destroyed, spools, the scene's repaired total), a remote repairer's pending `retarget`, the
+`ModuleCycle` activation counters, `Director.engagements`, `FleetTargets` (own marks, called targets, holds, responses,
+the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders` (group key → list), and
+`Director.deaths` (kill, explosion choice, start, hidden, `removeTick`, gone), `DestinyWorld`'s missile entries and
+balls, and `MissileFlights` (the drawn missiles replay from the flights). The RNG is the document's seed, so a
+re-simulation rolls the same; explosions re-trigger from their kills' times. Missiles add no randomness.
 
 ## Seams
 
@@ -459,7 +469,9 @@ re-trigger from their kills' times. Missiles add no randomness.
   `ShipLocks.Keep`: sticky, and at the limit it can block the primary's own lock); the move-on is the boundary sync
   before the lock sweep (not `OnKill`, which runs inside `Shots` and would re-enter ShipModules for no earlier first
   shot); `Director.OnPrimary(listener)` reports each group's primary change for the automatic camera.
-- Logi auto-repair: `DamageModel.Fractions` / `Report`, `CombatRules.Report(id).dps.taken`, `Attackers(id)`.
+- Logi auto-repair (`sd-logi`; L2 accessors built): `DamageModel.Health(id)` (per layer `{ hp, max }`),
+  `CombatRules.TakenSince(id, boundary, 10)` (pressure), `ShipLocks.Lockers(target)` (yellow boxes),
+  `ShipModules.RemoteRepairers(id)` and `Incoming(id)`, the `retarget` switch option; the controller is L3.
 - Missiles (M2a and M2b in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
   `applyLayeredDamage`, wired (M2b: Missiles in the page → The wiring); hits reach `OnShot` with `missile` set, kills
   `OnKill`; no launch hook yet.

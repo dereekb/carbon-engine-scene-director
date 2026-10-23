@@ -34,6 +34,14 @@ describe('DamageModel', () => {
     expect(model.Fractions('fc')).toEqual({ shield: 0, armor: 0.75, structure: 1 });
   });
 
+  it("gives each layer's HP and max for auto-repair, null for an untracked ship", () => {
+    const model = new DamageModel();
+    expect(model.Health('fc')).toBeNull();
+    model.SetDefense('fc', Defense(1000));
+    model.Damage('fc', 'armor', 250);
+    expect(model.Health('fc')).toEqual({ shield: { hp: 500, max: 500 }, armor: { hp: 750, max: 1000 }, structure: { hp: 400, max: 400 } });
+  });
+
   it('reports repairs and incoming remote reps, and forgets a removed ship', () => {
     const model = new DamageModel();
     model.SetDefense('fc', Defense(1000));

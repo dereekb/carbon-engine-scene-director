@@ -137,4 +137,20 @@ describe('ShipLocks', () => {
     locks.Clear();
     expect(locks.Of('ferox')).toEqual([]);
   });
+
+  it('lists the lockers on a target, locking or locked, never waiting', () => {
+    const locks = new ShipLocks(new FakePort());
+    const wanted = Wanted({ rifter: ['punisher'], ferox: ['punisher'] });
+    locks.Request('rifter', 'punisher', 10);
+    locks.Request('ferox', 'punisher', 10);
+    expect(locks.Lockers('punisher')).toEqual([]);
+    locks.Boundary(11, wanted);
+    expect(locks.Lockers('punisher')).toEqual([
+      { ship: 'rifter', target: 'punisher', state: 'locking' },
+      { ship: 'ferox', target: 'punisher', state: 'locking' }
+    ]);
+    for (const tick of [12, 13, 14]) locks.Boundary(tick, wanted);
+    expect(locks.Lockers('punisher')).toContainEqual({ ship: 'rifter', target: 'punisher', state: 'locked' });
+    expect(locks.Lockers('rifter')).toEqual([]);
+  });
 });

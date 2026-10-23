@@ -200,7 +200,7 @@ describe('CombatRules', () => {
     expect(Math.abs(recent - last2)).toBeLessThan(2);
     expect(rules.Attackers('punisher', 50)).toEqual(['rifter']);
     expect(rules.Attackers('punisher', 100)).toEqual([]);
-    expect(rules.Totals()).toEqual({ shots: 5, hits: 5 });
+    expect(rules.Totals()).toEqual({ shots: 5, hits: 5, repaired: 0 });
   });
 });
 
@@ -287,5 +287,44 @@ describe('CombatRules missiles', () => {
     rules.Resolve([object, bare], 10);
     expect(object.outcome).toMatchObject({ result: 'hits', damage: 0, note: 'objects take no damage' });
     expect(bare.outcome).toMatchObject({ result: 'hits', damage: 0, note: 'no EVE dogma for its weapon: it does no damage' });
+  });
+
+  it('tallies repairs received and given with their 20 s windows and latest rows, 0 HP landings included, and forgets them', () => {
+    const { rules } = Rules();
+    rules.Resolve([Shot({ tick: 10, at: 10 })], 10);
+    expect(rules.Report('rifter', 10)?.repairs).toBeUndefined();
+    rules.RecordRepair({ ship: 'punisher', from: 'logi', module: 'high-0', layer: 'armor', amount: 300, nominal: 300, tick: 12 });
+    rules.RecordRepair({ ship: 'punisher', from: 'logi', module: 'high-1', layer: 'armor', amount: 0, nominal: 511.96, tick: 18 });
+    rules.RecordRepair({ ship: 'rifter', from: 'rifter', module: 'low-0', layer: 'armor', amount: 100, nominal: 100, tick: 18 });
+    expect(rules.Report('punisher', 18)?.repairs).toEqual({
+      received: 300,
+      given: 0,
+      hps: { received: 300 / DPS_WINDOW_SECONDS, given: 0 },
+      lastReceived: [
+        { tick: 18, from: 'logi', module: 'high-1', layer: 'armor', amount: 0, nominal: 512 },
+        { tick: 12, from: 'logi', module: 'high-0', layer: 'armor', amount: 300, nominal: 300 }
+      ]
+    });
+    expect(rules.Report('logi', 18)).toMatchObject({ dealt: 0, taken: 0, shots: 0, repairs: { received: 0, given: 300, hps: { received: 0, given: 15 }, lastReceived: [] } });
+    expect(rules.Report('rifter', 18)?.repairs).toMatchObject({ received: 100, given: 0 });
+    expect(rules.Report('punisher', 40)?.repairs).toMatchObject({ received: 300, hps: { received: 0, given: 0 } });
+    expect(rules.Totals()).toMatchObject({ shots: 1, repaired: 400 });
+    rules.Remove('logi');
+    expect(rules.Report('logi', 40)).toBeNull();
+    rules.Clear();
+    expect(rules.Totals().repaired).toBe(0);
+    expect(rules.Report('punisher', 40)).toBeNull();
+  });
+
+  it('sums the HP a ship took over the trailing seconds', () => {
+    const { rules } = Rules();
+    rules.Resolve([Shot({ tick: 10, at: 10 })], 10);
+    rules.Resolve([Shot({ tick: 25, at: 25, cycle: 2 })], 25);
+    const [second, first] = rules.Report('punisher', 25)?.lastTaken ?? [];
+    expect(first.damage).toBeGreaterThan(0);
+    expect(rules.TakenSince('punisher', 26, 10)).toBeCloseTo(second.damage, 0);
+    expect(rules.TakenSince('punisher', 26, 20)).toBeCloseTo(first.damage + second.damage, 0);
+    expect(rules.TakenSince('rifter', 26, 10)).toBe(0);
+    expect(rules.TakenSince('nobody', 26, 10)).toBe(0);
   });
 });
