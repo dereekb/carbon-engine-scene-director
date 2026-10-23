@@ -1,5 +1,6 @@
 import { SceneError } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
+import { MakeFakeDogmaData } from './dogma-data.testing';
 import { ShipDataError } from './ship-data';
 import { MakeFakeShipData, TFI_DNA } from './ship-data.testing';
 import { AnswerShipStats } from './ship-stats-tool';
@@ -127,5 +128,69 @@ describe('ship_stats', () => {
       expect(answer.propModNote).toMatch(/unreachable.*The built-in numbers of 500MN Microwarpdrive II \(SDE build 3632936\) were used\./su);
     }
     expect(((await Caught(AnswerShipStats(shipData, { stats, propMod: 'Some Odd MWD' }))) as ShipDataError).failure).toBe('unavailable');
+  });
+});
+
+const GUARDIAN_FIT = ['[Guardian, test]', 'Damage Control II', 'Domination Thermal Armor Hardener', 'Damage Control II /OFFLINE', '', '10MN Afterburner II', 'Not A Module', '', 'Large Remote Armor Repairer II', '', '', 'Nanite Repair Paste x10'].join('\n');
+
+describe('ship_stats with a fit', () => {
+  it('flies the fit by dogma: the hull from its header, keyed modules, defense, the prop mod as withPropMod', async () => {
+    const { shipData } = MakeFakeShipData();
+    const answer = await AnswerShipStats(shipData, { fit: GUARDIAN_FIT }, MakeFakeDogmaData());
+    expect(answer.hull).toMatchObject({ typeID: 11987, name: 'Guardian' });
+    expect(answer.fit?.modules.map((module) => [module.key, module.category, module.offline ?? false, module.prop ?? false])).toEqual([
+      ['low-0', 'damage-control', false, false],
+      ['low-1', 'hardener', false, false],
+      ['low-2', 'damage-control', true, false],
+      ['mid-0', 'prop', false, true],
+      ['mid-1', 'other', false, false],
+      ['high-0', 'remote-armor-repairer', false, false]
+    ]);
+    expect(answer.fit?.unknown).toEqual(['Not A Module']);
+    expect(answer.stats.math).toBe('dogma');
+    expect(answer.stats.propModActive).toBe(false);
+    expect(answer.stats.defense?.armor.resonances.em).toBeLessThan(0.5);
+    expect(answer.stats.capacitor?.capacity).toBeGreaterThan(0);
+    expect(answer.propMod).toMatchObject({ typeID: 12058 });
+    // The fit's online modules change no flight number, so the AB flies as the table path's Guardian.
+    expect(answer.withPropMod?.propModActive).toBe(true);
+    expect(answer.withPropMod?.maxVelocity).toBeCloseTo(650.701745, 3);
+    expect(answer.withPropMod?.mass).toBe(16_980_000);
+    expect(answer.withPropMod?.propModCycleTime).toBe(7.5);
+    expect(answer.trace).toBeUndefined();
+  });
+
+  it('runs the active modules by key, category or name, leaves offline ones off, and traces on request', async () => {
+    const { shipData } = MakeFakeShipData();
+    const dogmaData = MakeFakeDogmaData();
+    const answer = await AnswerShipStats(shipData, { fit: GUARDIAN_FIT, active: ['hardener', 'damage control ii', 'high-0'], trace: true }, dogmaData);
+    expect(answer.withActive?.modules).toEqual(['low-0', 'low-1', 'high-0']);
+    expect(answer.activeNote).toBe('left off: low-2 Damage Control II (offline)');
+    expect(answer.withActive?.stats.defense?.armor.resonances.thermal).toBeLessThan(answer.stats.defense?.armor.resonances.thermal ?? 0);
+    expect(answer.withActive?.stats.capacitor?.drain).toBeGreaterThan(0);
+    expect(answer.trace?.['armorThermalDamageResonance']?.map((step) => step.source)).toContain('Domination Thermal Armor Hardener (low-1)');
+    const unmatched = await Caught(AnswerShipStats(shipData, { fit: GUARDIAN_FIT, active: ['scram'] }, dogmaData));
+    expect(unmatched).toBeInstanceOf(ToolError);
+    expect((unmatched as ToolError).message).toMatch(/no fitted module matches "scram"/u);
+  });
+
+  it("without the fit lookups flies the hull with the fit's prop mod, with a note", async () => {
+    const { shipData } = MakeFakeShipData();
+    const answer = await AnswerShipStats(shipData, { fit: GUARDIAN_FIT });
+    expect(answer.stats.math).toBe('table');
+    expect(answer.stats.defense).toBeNull();
+    expect(answer.fit).toBeUndefined();
+    expect(answer.fitNote).toMatch(/need the SDE/u);
+    expect(answer.propMod).toMatchObject({ typeID: 12058 });
+    expect(answer.withPropMod?.maxVelocity).toBeCloseTo(650.701745, 3);
+  });
+
+  it('refuses a fit with a propMod, active without a fit, and text that is no fit', async () => {
+    const { shipData } = MakeFakeShipData();
+    const problems = async (args: Record<string, unknown>) => ((await Caught(AnswerShipStats(shipData, args, MakeFakeDogmaData()))) as SceneError).problems;
+    expect(await problems({ fit: GUARDIAN_FIT, propMod: 'mwd' })).toEqual(["propMod and fit do not go together: the fit's prop mod is the one it flies"]);
+    expect(await problems({ type: 'Guardian', active: ['all'] })).toEqual(['active needs a fit']);
+    expect(await problems({ type: 'Guardian', fit: 'Damage Control II' })).toEqual(['fit must be EFT text starting with "[Hull, Fit name]", at most 20000 characters']);
+    expect(await problems({ fit: GUARDIAN_FIT, trace: 'yes' })).toEqual(['trace must be true or false']);
   });
 });

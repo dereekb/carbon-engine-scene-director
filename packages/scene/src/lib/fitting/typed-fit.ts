@@ -181,3 +181,39 @@ export function fittingTypeIDs(fitting: ShipFitting): number[] {
 export function toDogmaModules(fitting: ShipFitting, state: (module: FittedModule, fallback: DogmaModuleState) => DogmaModuleState = (_module, fallback) => fallback): DogmaModuleInput[] {
   return fitting.modules.flatMap((module): DogmaModuleInput[] => (module.typeID == null ? [] : [{ key: module.key, typeID: module.typeID, state: state(module, module.offline ? 'offline' : 'online'), ...(module.charge?.typeID == null ? {} : { chargeTypeID: module.charge.typeID }) }]));
 }
+
+/**
+ * The selector that names every fitted module.
+ */
+export const ALL_MODULES_SELECTOR = 'all';
+
+export interface SelectFittedModulesResult {
+  /**
+   * The modules named, each once, in fit order.
+   */
+  readonly modules: FittedModule[];
+  /**
+   * The selectors that named no fitted module.
+   */
+  readonly unmatched: string[];
+}
+
+/**
+ * The fitted modules a list of selectors names. A selector is a module key (`mid-2`), a category keyword
+ * (`hardener`, MODULE_CATEGORIES), `all`, or a module's exact name in any case.
+ *
+ * @param fitting - The typed fit (its modules).
+ * @param selectors - The selectors.
+ * @returns The modules and the selectors that matched none.
+ */
+export function selectFittedModules(fitting: Pick<ShipFitting, 'modules'>, selectors: readonly string[]): SelectFittedModulesResult {
+  const picked = new Set<FittedModule>();
+  const unmatched: string[] = [];
+  for (const selector of selectors) {
+    const word = selector.trim().toLowerCase();
+    const matches = fitting.modules.filter((module) => word === ALL_MODULES_SELECTOR || module.key === word || module.category === word || module.name.toLowerCase() === word);
+    if (!matches.length) unmatched.push(selector);
+    for (const module of matches) picked.add(module);
+  }
+  return { modules: fitting.modules.filter((module) => picked.has(module)), unmatched };
+}

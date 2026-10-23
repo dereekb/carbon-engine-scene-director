@@ -3,12 +3,34 @@
  * values from tools-core's SDE, and the numbers it flies by with a pilot (every skill at
  * V unless told otherwise), optionally with a prop mod running. The math is the shared,
  * runtime-free `computeShipStats`, so the page computes the same numbers.
+ *
+ * With a `fit` (EFT text) the hub resolves its names and the dogma bundle (DogmaData) and
+ * the numbers come from the dogma evaluator: HP, resists, capacitor and targeting too, the
+ * fit's prop mod as `withPropMod`, and the `active` modules running as `withActive`.
  */
 
 import type { Maybe } from '@dereekb/util';
 import {
   computeShipStats,
   createPilotContext,
+  DEFENSE_ATTRIBUTES,
+  type DogmaBundle,
+  type DogmaModuleState,
+  type DogmaTraceStep,
+  dogmaShipStats,
+  eftTypeNames,
+  evaluateShipDogma,
+  type FittedModule,
+  type FitTypeAnswer,
+  fittingTypeIDs,
+  MAX_FIT_LENGTH,
+  mergeDogmaBundles,
+  parseEftFit,
+  readEftPropMod,
+  selectFittedModules,
+  type ShipFitting,
+  toDogmaModules,
+  typeEftFit,
   findBakedPropMod,
   findHullSizedPropMod,
   HULL_STAT_OVERRIDE_KEYS,
@@ -24,6 +46,7 @@ import {
   SceneError,
   type ShipStats
 } from '@scene-director/scene';
+import { type DogmaDataApi, MapLimited } from './dogma-data';
 import { type ResolvedHull, type ResolvedPropMod, ShipDataError, type ShipDataApi } from './ship-data';
 import { ErrorMessage, ToolError, type ToolArgs } from './tool-call';
 
@@ -63,7 +86,45 @@ export interface ShipStatsAnswer {
    * As flown by the pilot with the prop mod running.
    */
   readonly withPropMod?: ShipStats;
+  /**
+   * The typed fit, when one was given and its names resolved.
+   */
+  readonly fit?: FitSummary;
+  /**
+   * Why a given fit was not evaluated (no SDE): the stats are the hull's, with the fit's prop mod.
+   */
+  readonly fitNote?: string;
+  /**
+   * The fit with the `active` modules running.
+   */
+  readonly withActive?: { readonly modules: readonly string[]; readonly stats: ShipStats };
+  /**
+   * `active` modules that were left off (fitted /OFFLINE).
+   */
+  readonly activeNote?: string;
+  /**
+   * With `trace`: every dogma step behind the flight, HP, resonance and capacitor attributes (of `withActive` when
+   * given, else of `stats`), by attribute name.
+   */
+  readonly trace?: Readonly<Record<string, readonly DogmaTraceStep[]>>;
 }
+
+export interface FitSummary {
+  readonly name: string;
+  readonly hull: string;
+  readonly modules: readonly { readonly key: string; readonly name: string; readonly typeID: Maybe<number>; readonly slot: string; readonly category: string; readonly offline?: true; readonly charge?: string; readonly prop?: true }[];
+  readonly drones: readonly { readonly name: string; readonly quantity: number }[];
+  /**
+   * Names tools-core does not know; their lines play no part.
+   */
+  readonly unknown: readonly string[];
+  readonly warnings: readonly string[];
+}
+
+/**
+ * The attributes `trace` reports, beside the flight four: shield, armor and hull HP, their resonances, capacitor.
+ */
+const TRACE_ATTRIBUTE_IDS: readonly number[] = [4, 37, 70, 552, ...Object.values(DEFENSE_ATTRIBUTES).flatMap((layer) => [layer.hp, ...Object.values(layer.resonances)]), 482, 55];
 
 /**
  * A prop mod argument: a kind sized for the hull, a module type id or name, or explicit values.
@@ -76,19 +137,23 @@ interface ShipStatsArguments {
   readonly propMod: Maybe<PropModArgument>;
   readonly overrides: Maybe<HullStatOverrides>;
   readonly pilot: PilotContext;
+  readonly fit: Maybe<string>;
+  readonly active: Maybe<readonly string[]>;
+  readonly trace: boolean;
 }
 
 /**
  * Answers `ship_stats`.
  *
  * @param shipData - The SDE lookups.
- * @param args - Dna, type, propMod, stats and pilot.
- * @returns The hull, the pilot, the prop mod and the stats with and without it.
+ * @param args - Dna, type, propMod, stats, pilot, fit, active and trace.
+ * @param dogmaData - The fit lookups; without them a fit flies by its hull and prop mod.
+ * @returns The hull, the pilot, the prop mod and the stats with and without it (and with the active modules).
  * @throws {SceneError} When the arguments are invalid.
  * @throws {ShipDataError} When the hull or the prop mod cannot be resolved.
  */
-export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs): Promise<ShipStatsAnswer> {
-  const { dna, type, propMod: propModArgument, overrides, pilot } = ReadShipStatsArguments(args);
+export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs, dogmaData: Maybe<DogmaDataApi> = null): Promise<ShipStatsAnswer> {
+  const { dna, type, propMod: givenPropMod, overrides, pilot, fit, active, trace } = ReadShipStatsArguments(args);
   const complete = HULL_STAT_OVERRIDE_KEYS.every((key) => overrides?.[key] != null);
 
   let hull: Maybe<ResolvedHull> = null;
@@ -101,6 +166,24 @@ export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs): Pr
       note = `${error.message} The four stats were used instead.`;
     }
   }
+
+  let fitted: Maybe<ResolvedFit> = null;
+  let fitNote: Maybe<string> = null;
+  if (fit && hull && dogmaData) {
+    try {
+      fitted = await ResolveFit(dogmaData, { text: fit, hullTypeID: hull.typeID });
+    } catch (error) {
+      if (!(error instanceof ShipDataError && error.failure === 'unavailable')) throw error;
+      fitNote = `${error.message} The hull's values and the fit's prop mod were used instead.`;
+    }
+  } else if (fit) {
+    fitNote = "the fit's modules need the SDE; the hull's values and the fit's prop mod were used instead.";
+  }
+  const propModule = fitted?.fitting.modules.find((module) => module.prop) ?? null;
+  const fitPropMod = fit && !fitted ? readEftPropMod(fit) : null;
+  let propModArgument: Maybe<PropModArgument> = givenPropMod;
+  if (propModule?.typeID != null) propModArgument = { typeID: propModule.typeID };
+  else if (fitPropMod) propModArgument = { name: fitPropMod };
 
   let propMod: Maybe<PropModStats> = null;
   let propModNote: Maybe<string> = null;
@@ -120,6 +203,8 @@ export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs): Pr
     }
   };
 
+  if (fitted && hull) return AnswerFitted({ hull, overrides, pilot, propMod, propModNote, fitted, propModule, active, trace });
+
   return {
     hull: hull
       ? { typeID: hull.typeID, name: hull.name, group: hull.group, dna: hull.dna, resolvedFrom: hull.resolvedFrom, candidates: hull.candidates, sdeBuild: hull.sdeBuild, published: hull.published, ...(overrides ? { overrides } : {}) }
@@ -128,7 +213,92 @@ export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs): Pr
     propMod,
     ...(propModNote ? { propModNote } : {}),
     stats: compute(null),
-    ...(propMod ? { withPropMod: compute(propMod) } : {})
+    ...(propMod ? { withPropMod: compute(propMod) } : {}),
+    ...(fitNote ? { fitNote } : {})
+  };
+}
+
+interface ResolvedFit {
+  readonly fitting: ShipFitting;
+  readonly bundle: DogmaBundle;
+}
+
+/**
+ * Resolves a fit's names (one tools-core call per unique name, cached by DogmaData) and its dogma bundle: the hull,
+ * the fitted modules and charges, and every skill.
+ */
+async function ResolveFit(dogmaData: DogmaDataApi, input: { readonly text: string; readonly hullTypeID: number }): Promise<ResolvedFit> {
+  const parsed = parseEftFit(input.text);
+  const answers = new Map<string, FitTypeAnswer>();
+  await MapLimited(eftTypeNames(parsed), async (name) => {
+    try {
+      answers.set(name, await dogmaData.TypeByName(name, parsed.hull));
+    } catch (error) {
+      if (!(error instanceof ShipDataError && (error.failure === 'not-found' || error.failure === 'invalid'))) throw error;
+    }
+  });
+  const answer = (name: string): Maybe<FitTypeAnswer> => answers.get(name) ?? null;
+  const ids = fittingTypeIDs(typeEftFit(parsed, { answer }));
+  const bundle = mergeDogmaBundles(await dogmaData.Bundle([input.hullTypeID, ...ids]), await dogmaData.Skills());
+  return { fitting: typeEftFit(parsed, { answer, bundle }), bundle };
+}
+
+interface AnswerFittedInput {
+  readonly hull: ResolvedHull;
+  readonly overrides: Maybe<HullStatOverrides>;
+  readonly pilot: PilotContext;
+  readonly propMod: Maybe<PropModStats>;
+  readonly propModNote: Maybe<string>;
+  readonly fitted: ResolvedFit;
+  readonly propModule: Maybe<FittedModule>;
+  readonly active: Maybe<readonly string[]>;
+  readonly trace: boolean;
+}
+
+function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
+  const { hull, overrides, pilot, propMod, propModNote, fitted, propModule, active, trace } = input;
+  const { fitting, bundle } = fitted;
+  const evaluate = (running: ReadonlySet<FittedModule>) => {
+    try {
+      const ship = evaluateShipDogma({ bundle, hullTypeID: hull.typeID, overrides, pilot, modules: toDogmaModules(fitting, (module, fallback): DogmaModuleState => (fallback === 'online' && running.has(module) ? 'active' : fallback)) });
+      return { ship, stats: dogmaShipStats({ ship, bundle, overrides, propModKey: propModule?.key }) };
+    } catch (error) {
+      throw new ToolError(ErrorMessage(error));
+    }
+  };
+  const bare = evaluate(new Set());
+  let withActive: Maybe<{ readonly modules: FittedModule[]; readonly stats: ShipStats; readonly ship: ReturnType<typeof evaluate>['ship'] }> = null;
+  let activeNote: Maybe<string> = null;
+  if (active) {
+    const selected = selectFittedModules(fitting, active);
+    const unmatched = selected.unmatched.map((selector) => JSON.stringify(selector)).join(', ');
+    if (unmatched) throw new ToolError(`active: no fitted module matches ${unmatched} (use a module key such as "mid-0", a category such as "hardener", "all" or a module name; fit.modules lists them)`);
+    const offline = selected.modules.filter((module) => module.offline || module.typeID == null);
+    const leftOff = offline.map((module) => [module.key, module.name, module.offline ? '(offline)' : '(unknown)'].join(' ')).join(', ');
+    if (leftOff) activeNote = `left off: ${leftOff}`;
+    const running = selected.modules.filter((module) => !offline.includes(module));
+    const evaluated = evaluate(new Set(running));
+    withActive = { modules: running, stats: evaluated.stats, ship: evaluated.ship };
+  }
+  const traced = withActive?.ship ?? bare.ship;
+  return {
+    hull: { typeID: hull.typeID, name: hull.name, group: hull.group, dna: hull.dna, resolvedFrom: hull.resolvedFrom, candidates: hull.candidates, sdeBuild: hull.sdeBuild, published: hull.published, ...(overrides ? { overrides } : {}) },
+    pilot: pilot.name,
+    propMod,
+    ...(propModNote ? { propModNote } : {}),
+    stats: bare.stats,
+    ...(propModule && !propModule.offline ? { withPropMod: evaluate(new Set([propModule])).stats } : {}),
+    fit: {
+      name: fitting.name,
+      hull: fitting.hull,
+      modules: fitting.modules.map((module) => ({ key: module.key, name: module.name, typeID: module.typeID, slot: module.slot, category: module.category, ...(module.offline ? { offline: true as const } : {}), ...(module.charge ? { charge: module.charge.name } : {}), ...(module.prop ? { prop: true as const } : {}) })),
+      drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),
+      unknown: fitting.unknown,
+      warnings: fitting.warnings
+    },
+    ...(withActive ? { withActive: { modules: withActive.modules.map((module) => module.key), stats: withActive.stats } } : {}),
+    ...(activeNote ? { activeNote } : {}),
+    ...(trace ? { trace: Object.fromEntries(TRACE_ATTRIBUTE_IDS.flatMap((id) => (traced.trace(id).length ? [[bundle.attributes[id]?.name ?? String(id), traced.trace(id)]] : []))) } : {})
   };
 }
 
@@ -199,6 +369,28 @@ function ReadShipStatsArguments(args: ToolArgs): ShipStatsArguments {
 
   const propMod = ReadPropModArgument(args['propMod'], problems);
 
+  const fitValue = args['fit'];
+  let fit: Maybe<string> = null;
+  if (typeof fitValue === 'string' && fitValue.trim().startsWith('[') && fitValue.length <= MAX_FIT_LENGTH) {
+    fit = fitValue.trim();
+    const parsed = parseEftFit(fit);
+    problems.push(...parsed.problems.map((problem) => `fit: ${problem}`));
+    if (!dna && type == null && parsed.hull) type = parsed.hull;
+    if (propMod) problems.push("propMod and fit do not go together: the fit's prop mod is the one it flies");
+  } else if (fitValue != null) {
+    problems.push(`fit must be EFT text starting with "[Hull, Fit name]", at most ${MAX_FIT_LENGTH} characters`);
+  }
+
+  const activeValue = args['active'];
+  let active: Maybe<readonly string[]> = null;
+  const activeList = typeof activeValue === 'string' ? [activeValue] : activeValue;
+  if (Array.isArray(activeList) && activeList.length && activeList.every((entry) => typeof entry === 'string' && entry.trim())) active = activeList as string[];
+  else if (activeValue != null) problems.push('active must be a list of module selectors: module keys ("mid-0"), categories ("hardener"), "all" or module names');
+  if (active && fitValue == null) problems.push('active needs a fit');
+
+  const traceValue = args['trace'];
+  if (traceValue != null && typeof traceValue !== 'boolean') problems.push('trace must be true or false');
+
   const stats = normalizeHullStatOverrides({ input: args['stats'], where: 'stats' });
   problems.push(...stats.problems);
   const complete = HULL_STAT_OVERRIDE_KEYS.every((key) => stats.overrides?.[key] != null);
@@ -207,7 +399,7 @@ function ReadShipStatsArguments(args: ToolArgs): ShipStatsArguments {
   const pilot = ReadPilot(args['pilot'], problems);
 
   if (problems.length) throw new SceneError(problems);
-  return { dna, type, propMod, overrides: stats.overrides, pilot };
+  return { dna, type, propMod, overrides: stats.overrides, pilot, fit, active, trace: traceValue === true };
 }
 
 function ReadPropModArgument(value: unknown, problems: string[]): Maybe<PropModArgument> {

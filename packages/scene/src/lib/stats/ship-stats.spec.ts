@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { createPilotContext, type PilotContext } from './pilot';
+import { DOGMA_FIXTURE, fixtureHullStats, GUARDIAN_ID, REVELATION_ID, RIFTER_ID, TFI_ID } from '../fitting/fitting.spec-helper';
+import type { Maybe } from '@dereekb/util';
+import { createPilotContext, MAX_SKILLS_PILOT, type PilotContext } from './pilot';
 import { BAKED_PROP_MODS, findBakedPropMod, findHullSizedPropMod, HULL_SIZE_CLASSES, HULL_SIZED_PROP_MODS, normalizePropModName, propModKindOfName, type PropModStats, readPropModKind, readPropModModule, readRigSize, type RigSize } from './prop-mods';
 import { computeAlignTime, computeShipStats, type HullStats, normalizeHullStatOverrides } from './ship-stats';
 
@@ -240,5 +242,41 @@ describe('prop mod modules', () => {
     expect(readRigSize(3)).toBe(3);
     expect(readRigSize(5)).toBeNull();
     expect(readRigSize('3')).toBeNull();
+  });
+});
+
+describe('computeShipStats, the dogma path', () => {
+  const dogmaOf = (hullTypeID: number, propMod: Maybe<PropModStats> = null) => ({ bundle: DOGMA_FIXTURE, hullTypeID, modules: propMod ? [{ key: 'mid-0', typeID: propMod.typeID as number, state: 'active' as const }] : [], propModKey: propMod ? 'mid-0' : null });
+  const parity = [TFI_ID, GUARDIAN_ID, REVELATION_ID, RIFTER_ID].flatMap((hullTypeID) => [null, ...BAKED_PROP_MODS].flatMap((propMod) => [MAX_SKILLS_PILOT, UNTRAINED].map((pilot) => ({ label: `${DOGMA_FIXTURE.types[hullTypeID].name}, ${propMod?.name ?? 'bare'}, ${pilot.name}`, hullTypeID, propMod, pilot }))));
+
+  // Guards the SDE against the hard-coded skill table: re-check both when CCP rebalances.
+  it.each(parity)('$label equals the table path', ({ hullTypeID, propMod, pilot }) => {
+    const table = computeShipStats({ hull: fixtureHullStats(hullTypeID), propMod, pilot });
+    const dogma = computeShipStats({ hull: null, dogma: dogmaOf(hullTypeID, propMod), pilot });
+    const close = (actual: Maybe<number>, expected: Maybe<number>) => expect(Math.abs((actual as number) - (expected as number)) / Math.abs(expected as number)).toBeLessThan(1e-9);
+    for (const key of ['mass', 'maxVelocity', 'agility', 'signatureRadius', 'alignTime'] as const) close(dogma[key], table[key]);
+    if (propMod) close(dogma.propModCycleTime, table.propModCycleTime);
+    else expect(dogma.propModCycleTime).toBeNull();
+    expect([table.math, dogma.math]).toEqual(['table', 'dogma']);
+    expect(dogma.propModActive).toBe(propMod != null);
+    expect(dogma.pilot).toBe(pilot.name);
+  });
+
+  it('adds defense, capacitor and targeting; the table path has none', () => {
+    const table = computeShipStats({ hull: fixtureHullStats(RIFTER_ID) });
+    expect([table.defense, table.capacitor, table.targeting]).toEqual([null, null, null]);
+    const dogma = computeShipStats({ hull: null, dogma: dogmaOf(RIFTER_ID) });
+    expect(dogma.defense?.armor.hp).toBe(562.5);
+    expect(dogma.capacitor?.capacity).toBe(312.5);
+    expect(dogma.targeting?.maxTargetRange).toBeGreaterThan(0);
+    expect(dogma.radius).toBe(DOGMA_FIXTURE.types[RIFTER_ID].radius);
+  });
+
+  it('takes overrides as base values, traces them, and rejects bad ones', () => {
+    const stats = computeShipStats({ hull: null, overrides: { maxVelocity: 100 }, dogma: dogmaOf(GUARDIAN_ID) });
+    expect(stats.maxVelocity).toBeCloseTo(125, 9);
+    expect(stats.applied[0]).toEqual({ source: 'stats override', attribute: 'maxVelocity', from: 209, to: 100 });
+    expect(stats.applied.map((step) => step.source)).toContain('Navigation V');
+    expect(() => computeShipStats({ hull: null, overrides: { mass: -1 }, dogma: dogmaOf(GUARDIAN_ID) })).toThrow('overrides.mass must be a positive number (kg)');
   });
 });

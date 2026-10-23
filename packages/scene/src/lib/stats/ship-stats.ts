@@ -9,14 +9,21 @@
  * time constant is `mass × agility / 1e6` seconds, so align time is
  * `-ln(0.25) × mass × agility / 1e6` (exact; the server's warp waits for a whole tick).
  *
- * Not modelled: hull trait bonuses, rigs, implants, boosters, fleet command bursts, heat
- * (overloadSpeedFactorBonus), other modules and stacking penalties against them, and
- * server tick rounding. With one prop mod there is nothing to stack-penalize against, and
- * skills are exempt. Sources: EVE's typeDogma / dogmaEffects (ESI, 2026-10-21), Pyfa's
- * Effect6730 / Effect6731, EVE University's "Propulsion equipment".
+ * Not modelled on this table path: hull trait bonuses, rigs, implants, boosters, fleet
+ * command bursts, heat (overloadSpeedFactorBonus), other modules and stacking penalties
+ * against them, and server tick rounding. With one prop mod there is nothing to
+ * stack-penalize against, and skills are exempt. Sources: EVE's typeDogma / dogmaEffects
+ * (ESI, 2026-10-21), Pyfa's Effect6730 / Effect6731, EVE University's "Propulsion equipment".
+ *
+ * With `dogma` (a fit's modules and a dogma bundle) the numbers come from the dogma
+ * evaluator instead (fitting/dogma.ts), which also gives HP, resists, capacitor and
+ * targeting. For a bare hull or a lone prop mod both paths give the same numbers.
  */
 
 import type { Maybe } from '@dereekb/util';
+import { moduleNumbersOf, type ShipCapacitor, shipCapacitorOf, type ShipDefense, shipDefenseOf, type ShipTargeting, shipTargetingOf } from '../fitting/defense';
+import { DOGMA_ATTRIBUTES, type DogmaModuleInput, type DogmaShip, evaluateShipDogma } from '../fitting/dogma';
+import type { DogmaBundle } from '../fitting/dogma-bundle';
 import { MAX_SKILLS_PILOT, type PilotContext, readSkillLevel } from './pilot';
 import type { PropModStats } from './prop-mods';
 import { SHIP_SKILLS, type ShipSkill } from './skills';
@@ -157,10 +164,36 @@ export interface ShipStatsInput {
    */
   readonly pilot?: Maybe<PilotContext>;
   /**
-   * The prop mod running, if any.
+   * The prop mod running, if any. Ignored with `dogma` (the fit's prop module is its prop mod).
    */
   readonly propMod?: Maybe<PropModStats>;
+  /**
+   * The ship's fit for the dogma evaluator; `hull` is then ignored.
+   */
+  readonly dogma?: Maybe<ShipDogmaInput>;
 }
+
+/**
+ * A fitted ship for the dogma path of computeShipStats.
+ */
+export interface ShipDogmaInput {
+  readonly bundle: DogmaBundle;
+  readonly hullTypeID: number;
+  /**
+   * The fitted modules with their states (typed-fit's toDogmaModules).
+   */
+  readonly modules?: readonly DogmaModuleInput[];
+  /**
+   * The key of the ship's prop mod (the typed fit's `prop` module): its cycle is propModCycleTime and its running is
+   * propModActive.
+   */
+  readonly propModKey?: Maybe<string>;
+}
+
+/**
+ * Where a ShipStats' numbers came from: the skill table (a hull's published values) or the dogma evaluator (a fit).
+ */
+export type ShipStatsMath = 'table' | 'dogma';
 
 export type ShipStatsAttribute = HullStatOverrideKey | 'propModSpeedFactor' | 'propModDuration';
 
@@ -213,6 +246,19 @@ export interface ShipStats {
    */
   readonly pilot: string;
   readonly applied: readonly AppliedBonus[];
+  readonly math: ShipStatsMath;
+  /**
+   * HP, resists and EHP per layer; null on the table path.
+   */
+  readonly defense: Maybe<ShipDefense>;
+  /**
+   * The capacitor with the active modules running; null on the table path.
+   */
+  readonly capacitor: Maybe<ShipCapacitor>;
+  /**
+   * Lock range, scan resolution and locked targets; null on the table path.
+   */
+  readonly targeting: Maybe<ShipTargeting>;
 }
 
 const ROMAN_LEVELS = ['0', 'I', 'II', 'III', 'IV', 'V'] as const;
@@ -225,8 +271,16 @@ const ROMAN_LEVELS = ['0', 'I', 'II', 'III', 'IV', 'V'] as const;
  * @throws {RangeError} When a value is missing or out of range, naming the field.
  */
 export function computeShipStats(input: ShipStatsInput): ShipStats {
-  const { hull, overrides, propMod } = input;
+  const { hull, overrides, propMod, dogma } = input;
   const pilot = input.pilot ?? MAX_SKILLS_PILOT;
+  if (dogma) {
+    for (const key of HULL_STAT_OVERRIDE_KEYS) {
+      const value = overrides?.[key];
+      if (value != null && !isStatValue(key, value)) throw new RangeError(`overrides.${key} ${STAT_RULES[key].expectation}`);
+    }
+    const ship = evaluateShipDogma({ bundle: dogma.bundle, hullTypeID: dogma.hullTypeID, overrides, modules: dogma.modules, pilot });
+    return dogmaShipStats({ ship, bundle: dogma.bundle, overrides, propModKey: dogma.propModKey });
+  }
   const applied: AppliedBonus[] = [];
   if (propMod) checkPropMod(propMod);
   const values: Record<ShipStatsAttribute, number> = { ...readBaseValues({ hull, overrides, applied }), propModSpeedFactor: propMod?.speedFactor ?? 0, propModDuration: propMod?.duration ?? 0 };
@@ -268,7 +322,64 @@ export function computeShipStats(input: ShipStatsInput): ShipStats {
     propModActive: propMod != null,
     propModCycleTime: propMod?.duration == null ? null : values.propModDuration / 1000,
     pilot: pilot.name,
-    applied
+    applied,
+    math: 'table',
+    defense: null,
+    capacitor: null,
+    targeting: null
+  };
+}
+
+export interface DogmaShipStatsInput {
+  /**
+   * The evaluated ship (evaluateShipDogma).
+   */
+  readonly ship: DogmaShip;
+  readonly bundle: DogmaBundle;
+  /**
+   * The overrides it was evaluated with, for the `stats override` steps.
+   */
+  readonly overrides?: Maybe<HullStatOverrides>;
+  readonly propModKey?: Maybe<string>;
+}
+
+/**
+ * The stats of an evaluated ship: its flight numbers, defense, capacitor (with its active modules running) and
+ * targeting. `applied` lists the steps that made mass, maxVelocity, agility and signatureRadius; propModCycleTime is
+ * the prop module's cycle whatever its state.
+ *
+ * @param input - The evaluated ship, its bundle, the overrides and the prop mod's key.
+ * @returns The stats, `math: 'dogma'`.
+ */
+export function dogmaShipStats(input: DogmaShipStatsInput): ShipStats {
+  const { ship, bundle, overrides, propModKey } = input;
+  const applied: AppliedBonus[] = [];
+  const values = {} as Record<HullStatOverrideKey, number>;
+  for (const key of HULL_STAT_OVERRIDE_KEYS) {
+    const id = DOGMA_ATTRIBUTES[key];
+    const published = key === 'mass' ? (ship.hull.mass ?? ship.hull.attributes[id]) : ship.hull.attributes[id];
+    const override = overrides?.[key];
+    if (override != null && published != null && override !== published) applied.push({ source: 'stats override', attribute: key, from: published, to: override });
+    for (const step of ship.trace(id)) if (step.from !== step.to) applied.push({ source: step.source, attribute: key, from: step.from, to: step.to });
+    values[key] = ship.attribute(id);
+  }
+  const active = [...ship.modules].flatMap(([key, module]) => (module.state === 'active' ? [key] : []));
+  const prop = propModKey == null ? null : ship.modules.get(propModKey);
+  const radius = ship.attribute(DOGMA_ATTRIBUTES.radius);
+  const warpSpeedMultiplier = ship.attribute(DOGMA_ATTRIBUTES.warpSpeedMultiplier);
+  return {
+    ...values,
+    radius: radius > 0 ? radius : null,
+    warpSpeedMultiplier: warpSpeedMultiplier > 0 ? warpSpeedMultiplier : null,
+    alignTime: computeAlignTime(values.mass, values.agility),
+    propModActive: prop?.state === 'active',
+    propModCycleTime: prop && propModKey != null ? (moduleNumbersOf(ship, bundle, propModKey)?.cycleTime ?? null) : null,
+    pilot: ship.pilot,
+    applied,
+    math: 'dogma',
+    defense: shipDefenseOf(ship),
+    capacitor: shipCapacitorOf(ship, bundle, active),
+    targeting: shipTargetingOf(ship)
   };
 }
 

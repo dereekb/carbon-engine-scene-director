@@ -65,7 +65,7 @@ export interface EvaluateShipDogmaInput {
  */
 export interface DogmaTraceStep {
   /**
-   * `ship`, `module:<key>`, `charge:<key>` or `skill:<name> <level>`.
+   * `ship`, `<module name> (<key>)` (a charge: its name and its module's key) or `<skill name> <level>` (`Navigation V`).
    */
   readonly source: string;
   readonly effect: string;
@@ -81,6 +81,10 @@ export interface DogmaTraceStep {
 
 export interface DogmaShip {
   readonly hull: DogmaTypeRecord;
+  /**
+   * The pilot context's name.
+   */
+  readonly pilot: string;
   /**
    * A ship attribute, evaluated.
    */
@@ -152,6 +156,7 @@ export const DOGMA_ATTRIBUTES = {
   maxVelocity: 37,
   agility: 70,
   signatureRadius: 552,
+  warpSpeedMultiplier: 600,
   speedFactor: 20,
   speedBoostFactor: 567,
   massAddition: 796,
@@ -165,6 +170,8 @@ export const DOGMA_ATTRIBUTES = {
 const REQUIRED_SKILL_ATTRIBUTES = [182, 183, 184, 1285, 1289, 1290] as const;
 
 const SKILL_CATEGORY = 16;
+
+const SKILL_LEVEL_NAMES: readonly string[] = ['0', 'I', 'II', 'III', 'IV', 'V'];
 
 const OVERRIDE_ATTRIBUTES: Readonly<Record<keyof HullStatOverrides, number>> = { mass: 4, maxVelocity: 37, agility: 70, signatureRadius: 552 };
 
@@ -252,9 +259,9 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
   for (const typeID of skillIDs) {
     const type = bundle.types[typeID];
     if (!type) continue;
+    // A level-0 skill still runs: its pre-multiplications zero the hull's per-level trait bonuses.
     const level = pilot.skillLevel({ typeID, name: type.name });
-    if (level <= 0) continue;
-    const item = makeItem({ id: `skill:${typeID}`, label: `${type.name} ${level}`, type, located: false });
+    const item = makeItem({ id: `skill:${typeID}`, label: `${type.name} ${SKILL_LEVEL_NAMES[level] ?? level}`, type, located: false });
     item.base.set(DOGMA_ATTRIBUTES.skillLevel, level);
     skills.push(item);
   }
@@ -324,6 +331,7 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
 
   return {
     hull,
+    pilot: pilot.name,
     attribute: (attribute) => evaluate(ship, attributeId(attribute)),
     moduleAttribute: (key, attribute) => {
       const module = modules.get(key);

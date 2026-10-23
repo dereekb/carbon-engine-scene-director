@@ -16,6 +16,8 @@ What works today:
   orbit, warp and stop orders, with boosters that follow the ball speed.
 - **Prop mods**: every ship fits an MWD or AB that switches on or off for a ship,
   squad, wing or fleet on EVE's cycle timing, with the engine sound.
+- **Fits**: ships carry EFT fits, and `ship_stats` evaluates a fit with EVE's dogma
+  (HP, resists, capacitor and speed from the modules, hull traits and skills).
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.
@@ -119,7 +121,7 @@ connected tab.
 | `viewer_status` | hub | connected tabs, the URL to open, tools-core reachability, the saved scenes and fleets directories |
 | `page_log` | hub | the viewer's recent console output and errors |
 | `search_hulls` | hub | SOF hull, faction or race names |
-| `ship_stats` | hub | a hull's in-game flight numbers, published and with every skill at V, optionally with a prop mod |
+| `ship_stats` | hub | a hull's in-game flight numbers, published and with every skill at V, optionally with a prop mod; with an EFT fit, its HP, resists, capacitor and speed by dogma |
 | `search_map` / `get_system` | hub | CCP's static map: regions, systems, stars, planets, stations, stargates; one system with its celestials |
 | `set_location` | hub | puts the scene at a real EVE place, off a celestial named or by id |
 | `load_scene` / `get_scene` / `patch_scene` | page | replace, read or edit the scene by operation |

@@ -271,7 +271,7 @@ function ToAttributeRecord(attributeID: number, payload: JsonObject): DogmaAttri
  * @param map - The function.
  * @returns The results in order.
  */
-async function MapLimited<T, R>(items: readonly T[], map: (item: T) => Promise<R>): Promise<R[]> {
+export async function MapLimited<T, R>(items: readonly T[], map: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = Array.from({ length: items.length });
   let next = 0;
   const worker = async (): Promise<void> => {

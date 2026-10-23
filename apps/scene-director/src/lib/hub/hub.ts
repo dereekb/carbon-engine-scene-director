@@ -312,7 +312,7 @@ export class Hub implements ToolCaller {
         return { kind, total: matches.length, names: matches.slice(0, limit) };
       }
       case 'ship_stats':
-        return AnswerShipStats(this.shipData, args);
+        return AnswerShipStats(this.shipData, args, this.dogmaData);
       default:
         throw new ToolError(`hub tool "${name}" has no handler`);
     }
@@ -414,7 +414,7 @@ export class Hub implements ToolCaller {
     let status = 200;
     let body: unknown;
     try {
-      body = await AnswerShipStats(this.shipData, args);
+      body = await AnswerShipStats(this.shipData, args, this.dogmaData);
     } catch (error) {
       status = ShipStatsErrorStatus(error);
       body = { error: ErrorToJson(error), ...(error instanceof ShipDataError ? { failure: error.failure } : {}) };
