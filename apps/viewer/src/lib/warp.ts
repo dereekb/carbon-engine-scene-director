@@ -42,6 +42,25 @@ export interface WarpProfile {
 }
 
 /**
+ * The whole SetupWarpConstants record's distances too, for where a warp is at a time (WarpRemainingAt).
+ */
+export interface WarpProfileDistances extends WarpProfile {
+  /**
+   * The acceleration's exponential rate, 1/s (AU/s).
+   */
+  readonly accelRate: number;
+  readonly accelDistance: number;
+  readonly cruiseDistance: number;
+  readonly decelDistance: number;
+}
+
+/**
+ * Ticks Destiny's EntityWarpIn backdates a warp's start (its effect stamp), clamped at tick 0: an arriving ship starts
+ * its warp this far into the profile, already in warp.
+ */
+export const WARP_IN_BACKDATE_TICKS = 5;
+
+/**
  * In-warp phases: accelerating and cruising, then slowing out of warp.
  */
 export type InWarpPhase = 'warping' | 'exiting';
@@ -89,7 +108,22 @@ export function WarpLength(destination: ArrayLike<number>, range: number, from: 
 }
 
 /**
- * When a warp drops out: the first tick sample after warp start whose speed is under the exit speed.
+ * When a warp's speed falls under the exit speed, continuously: acceleration, cruise, then ln(top speed / exit speed)
+ * over the deceleration rate.
+ *
+ * @param profile - The warp's profile.
+ * @param maxVelocity - The ship's max velocity, m/s.
+ * @returns Seconds after warp start; Infinity for a max velocity of 0.
+ */
+export function WarpDropOutTime(profile: WarpProfile, maxVelocity: number): number {
+  const exitSpeed = Math.min(maxVelocity / 2, WARP_EXIT_SPEED);
+  return exitSpeed > 0 ? profile.accelDuration + profile.cruiseDuration + Math.log(profile.warpSpeed / exitSpeed) / profile.decelRate : Infinity;
+}
+
+/**
+ * When a warp drops out: the first tick sample after warp start whose speed is under the exit speed (WarpDropOutTime
+ * floored to the tick, plus one). The exit event comes after the evolve that samples it: at master tick effect stamp +
+ * this + 1.
  *
  * @param profile - The warp's profile.
  * @param maxVelocity - The ship's max velocity, m/s.
@@ -97,13 +131,49 @@ export function WarpLength(destination: ArrayLike<number>, range: number, from: 
  * @returns Seconds after warp start; Infinity for a max velocity of 0.
  */
 export function WarpExitTime(profile: WarpProfile, maxVelocity: number, dt = 1): number {
-  const exitSpeed = Math.min(maxVelocity / 2, WARP_EXIT_SPEED);
-  let time = Infinity;
-  if (exitSpeed > 0) {
-    const slow = profile.accelDuration + profile.cruiseDuration + Math.log(profile.warpSpeed / exitSpeed) / profile.decelRate;
-    time = (Math.floor(slow / dt) + 1) * dt;
-  }
-  return time;
+  const slow = WarpDropOutTime(profile, maxVelocity);
+  return Number.isFinite(slow) ? (Math.floor(slow / dt) + 1) * dt : Infinity;
+}
+
+/**
+ * Metres a warp still has to go at a time, by Destiny's WarpDistance: e^(accelRate·t) covered while accelerating, the
+ * top speed while cruising, then the exponential deceleration; 0 past it.
+ *
+ * @param profile - Destiny's whole profile (SetupWarpConstants).
+ * @param t - Seconds after warp start.
+ * @returns Metres to the landing, at least 0.
+ */
+export function WarpRemainingAt(profile: WarpProfileDistances, t: number): number {
+  const { accelDuration, cruiseDuration, decelRate, warpSpeed, accelRate, accelDistance, cruiseDistance, decelDistance } = profile;
+  const total = accelDistance + cruiseDistance + decelDistance;
+  const slowing = t - accelDuration - cruiseDuration;
+  let covered = total;
+  if (t < accelDuration) covered = Math.exp(accelRate * Math.max(0, t));
+  else if (t - accelDuration < cruiseDuration) covered = warpSpeed * (t - accelDuration) + accelDistance;
+  else if (slowing < Math.log(warpSpeed / decelRate) / decelRate + 1) covered = warpSpeed / decelRate - (warpSpeed / decelRate) * Math.exp(-decelRate * slowing) + accelDistance + cruiseDistance;
+  return Math.max(0, total - covered);
+}
+
+/**
+ * The ticks EntityWarpIn backdates a warp-in starting at a tick boundary.
+ *
+ * @param boundary - The master tick count at the boundary.
+ * @returns min(WARP_IN_BACKDATE_TICKS, boundary).
+ */
+export function WarpInBackdate(boundary: number): number {
+  return Math.max(0, Math.min(WARP_IN_BACKDATE_TICKS, boundary));
+}
+
+/**
+ * Ticks from the boundary a warp-in starts at to the tick its exit event reports: WarpExitTime + 1 − the backdate.
+ *
+ * @param profile - The warp's profile.
+ * @param maxVelocity - The ship's max velocity, m/s.
+ * @param backdate - WarpInBackdate of the start boundary.
+ * @returns Whole ticks (at least 1); Infinity for a max velocity of 0.
+ */
+export function WarpInExitTicks(profile: WarpProfile, maxVelocity: number, backdate: number): number {
+  return Math.max(1, WarpExitTime(profile, maxVelocity) + 1 - backdate);
 }
 
 /**

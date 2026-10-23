@@ -63,13 +63,59 @@ orders. The member keeps its follow, and `Steer` skips it until it, its leader, 
 finished their warps. Members under 150 km from their slot, unable to move, or in warp are skipped: **Destiny's
 `WarpTo` turns a destination within 100 km of the ball into a `GotoPoint`**, which the mode check would halt.
 
+## Warp-in (arrivals)
+
+A ship can **arrive** from warp instead of aligning: `DestinyWorld.Arrive(id, { from, landing, at, factor?, leader?,
+roll? })` (`ArrivalRefusal`, `ArrivalOf`, `Arriving`, `WarpProfile`; math in `warp.ts`: `WarpRemainingAt`,
+`WarpDropOutTime`, `WarpInBackdate`, `WarpInExitTicks`). Spec: `destiny-warp-in.spec.ts`. The page-level planner,
+the tools' `warpIn` and the reports come in the later phases of the fleet warp-in plan.
+
+- **Destiny's own NPC warp-in**: `CjsBallparkController.EntityWarpIn(id, x, y, z, factor)` (server fork `eadbdd1`,
+  typed in `carbonenginejs-server.d.ts`): `WarpTo` at range 0, then `RealWarp` at once (no align), the effect stamp
+  **backdated min(5, tick) ticks** (`WARP_IN_BACKDATE_TICKS`), the warp distance from where the ball is. It sets the
+  velocity to the *absolute* destination normalized × 1 AU/s (a native quirk; `WarpDistance` re-aims it every tick).
+  A point within 100 km becomes a goto. Deterministic, so both parks stay identical (checked every tick in the spec).
+- **Parking**: `Arrive` places the ship at rest at `from` at once (a placement: order, pending order, warp and
+  formation warp end; follow, prop mod and tackle stay), its legacy heading facing the landing (drawn rotation
+  [lane yaw, lane pitch, `roll`]). `at: null` waits **parked**; a tick waits **scheduled**; calling `Arrive` again
+  before the warp-in re-parks and re-schedules. Refused: no ship, destroyed, in proper warp (its own warp-in too),
+  non-finite points, max velocity 0 (it would never drop out), a lane under 150 km, a factor that is not a positive
+  int32.
+- **Start** (`ApplyArrivals`, at a due boundary after the formation warps, before `Steer`): for `at <= boundary`,
+  `WarpFactor` first (outside `Both`), then `SetSpeedFraction(1)` and `EntityWarpIn` on both parks. Both balls must be
+  in proper warp, else the ship is **placed at its landing** with `orderNote` `placed at its landing: …`. Then
+  `order` = `{ warp, point: landing, range: 0 }` and a warp entry with `arrival: true` and no align, so `TrackWarps`
+  handles it like any warp: the first evolve records the start (stamp = the backdated one), switches a running prop
+  mod off (`off: entered warp`) and emits `enter`; the exit resets the ball non-massive and emits `exit`. Both events
+  and `get_state`'s `warp` carry `arrival: true`.
+- **Timing** (measured, spec-pinned): the first evolve puts the ball at `WarpRemainingAt(profile, backdate)` from the
+  landing (a Rifter over 3,000 km: 260 km out after a 4-tick backdate, so a short lane shows the ship; the planner
+  must pick a lane long enough to keep it ≥ 2,000 km out then). The exit event comes at master tick
+  **at + WarpExitTime + 1 − backdate** (`WarpInExitTicks`), exactly. A Rifter over 1,000,000 km: ~114,000 km out on
+  its first tick, lands ~15 ticks after the start.
+- **While arriving** (parked, scheduled or warping): `OrderRefusal` refuses it (`ship "x" is arriving by warp; it
+  takes orders once it lands, in about N s`) and any order at it (`target "x" is arriving by warp`);
+  `PropModRefusal(on)` refuses (`switch its prop mod on once it lands`); `SetPropModActive(on)` and a due activation
+  leave it off (`not switched on: arriving by warp`); `WarpInFormation` refuses an arriving ship or leader;
+  `Steer` leaves it alone. `WarpUnfinished` counts an arrival not landed, so formation warps wait for it too.
+- **Landing and the wait rule**: the exit sets the arrival `landed` (`landedAt`). A follower then **holds, stopped**
+  (`FollowHold` names the ship) until its group's `leader`, its anchor and its frame ship have no unfinished warp or
+  arrival, then its arrival clears and it follows (a chained logi waits for its lead). A ship without a follow keeps
+  its `landed` arrival until its next order (`Order` clears it), a placement or a new `Arrive`. A follower whose
+  anchor or FC is still arriving (even one present on grid) holds as it does for a warping one, so nobody flies
+  off-grid after a parked FC.
+- **Endings**: `PlaceShip` ends an arrival at once; `RemoveShip` drops it; `Destroy` drops one not yet warping.
+- **Reporting**: `ShipMotion.arrival` / `ArrivalOf` = `{ state: parked | scheduled | warping | landed, from, landing,
+  startsIn? (ticks to its boundary, 0 = the next), landsIn? (s to the exit event: from the profile while scheduled,
+  from the warp while warping), landedAt?, leader? }`.
+
 ## Reporting and hooks
 
 - `get_state` per warping ship: `warp` = `phase`, `landing`, `warpSpeed` (AU/s), `alignTicks` (aligning), `distance`
   (from warp start), `remaining`, `progress` (0..1), `landsIn` (s, in warp). `order` stays the warp order through
   landing; `mode` is `warp` until it lands.
 - `DestinyWorld.OnWarp(listener)` reports `enter` / `exit` after the tick they happen in (where warp began or the exit
-  point, the direction, the landing, the warp speed), for warp-in effects to come. The client's effects are
+  point, the direction, the landing, the warp speed, `arrival: true` for a warp-in), for warp-in effects to come. The client's effects are
   `res:/fisfx/jump/warp/warp_out_start.black`, `warp_out.black` (leaving), `warp_in_glow.black` /
   `warp_in_noglow.black` (arriving); playing them needs a real-GPU check.
 - **Far away**: Destiny simulates any distance in float64, but the page draws relative to the scene origin in float32:

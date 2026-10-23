@@ -19,7 +19,7 @@
 | `apps/viewer/src/lib/steering.ts` | Follow the FC's steering math (`sd-fleets`) |
 | `packages/scene/src/lib/orders.ts` | `order_ship` request normalization (`normalizeShipOrderRequest`) |
 | `apps/viewer/src/lib/carbonenginejs-server.d.ts` | the server's types |
-| specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only) |
+| specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `destiny-warp-in.spec.ts` (arrivals), `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only). New DestinyWorld specs share `destiny.spec-helper.ts` (`Harness` with `Ticks` / `Until` / `Sample`, the Rifter, Guardian and TFI fixtures, `BallStates` for lockstep) |
 
 ## The two parks (must stay in lockstep)
 
@@ -53,7 +53,7 @@
   `OnBoundary` listeners (the fitted modules' cycles, `sd-fittings`; a siege or triage module's, a web's or a painter's
   `SetPhysics` and a point's or scram's `SetTackle` land here with the re-fly, so a point landing on the boundary a
   warp would begin wins) → pending orders (`ApplyOrder`; a delayed one waits for its boundary) → formation warps (`ApplyFormationWarps`, sd-fleets
-  sub-doc `orders`) → `Steer` (following) → evolve.
+  sub-doc `orders`) → arrivals (`ApplyArrivals`, sub-doc `warp` "Warp-in") → `Steer` (following) → evolve.
 - **Pilot delay**: `Order(id, order, { delay })`, `WarpInFormation(…, { delay })` and `SwitchPropMod(id, on, { delay })`
   take whole ticks (a fleet order's per-pilot response, `toPilotDelays`). A delayed order stays `pendingOrder` with
   `respondsIn` until its boundary; a new order replaces it. A formation warp also waits for its leader's own pending

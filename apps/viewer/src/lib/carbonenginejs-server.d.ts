@@ -205,6 +205,15 @@ declare module '@carbonenginejs/server/destiny' {
      * @throws {RangeError} For a warp factor that is not an int32.
      */
     WarpTo(id: DestinyInt64, x: number, y: number, z: number, minRange?: number, warpFactor?: number): void;
+    /**
+     * An NPC's warp-in: WarpTo the point at range 0, then proper warp at once (no align), the effect stamp backdated 5
+     * ticks (clamped at 0) and the warp distance from where the ball is. The velocity is set to the absolute
+     * destination normalized × 1 AU/s (a native quirk; WarpDistance re-aims it every tick). A point within 100 km
+     * becomes a GotoPoint and no warp.
+     *
+     * @throws {RangeError} For a warp factor that is not an int32.
+     */
+    EntityWarpIn(id: DestinyInt64, x: number, y: number, z: number, warpFactor: number): void;
     SetBallMassive(id: DestinyInt64, flag: boolean): void;
     SetupWarpConstants(warpFactor: number, warpDistance: number, out: Partial<WarpConstants>): WarpConstants;
   }
