@@ -60,6 +60,11 @@
  *   state) applies at once, like a placement. Entering proper warp switches a running module off; it stays off after
  *   landing. Steer and the orders read the master ball's live max velocity, so following and orders need nothing more.
  *   OnPropMod reports every on and off after the tick (or the call) that made it.
+ * - Tackle (SetTackle: the director's reasons, from the target's warp scramble status and the scrams on it). A ship
+ *   that cannot warp is refused warp orders; a pending or delayed warp is dropped at its boundary; a warp still
+ *   aligning is cancelled into a direction order along it (a formation-warp member drops its formation warp and
+ *   follows again). A ship whose microwarpdrive is blocked has it switched off at once and refused switching on; it
+ *   stays off when the scram ends. Tackle is module state: a placement keeps it.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -178,9 +183,9 @@ export interface ShipPropModReport {
 }
 
 /**
- * Why a prop mod changed: a live switch, the document's state, or entering warp.
+ * Why a prop mod changed: a live switch, the document's state, entering warp, or a warp scrambler.
  */
-export type PropModCause = 'switch' | 'document' | 'warp';
+export type PropModCause = 'switch' | 'document' | 'warp' | 'tackle';
 
 /**
  * A prop mod starting (on) or stopping (off).
@@ -207,6 +212,22 @@ export interface PropModSwitchResult {
   readonly stopsAt?: number;
   readonly stopsIn?: number;
 }
+
+/**
+ * What tackle stops a ship doing (SetTackle): the director's reasons, null for what it may do.
+ */
+export interface ShipTackle {
+  /**
+   * Why it cannot warp (its warp scramble status is above 0); null when it can.
+   */
+  readonly warp: Maybe<string>;
+  /**
+   * Why its prop mod cannot run (a warp scrambler on its microwarpdrive); null when it can.
+   */
+  readonly propMod: Maybe<string>;
+}
+
+const FREE: ShipTackle = { warp: null, propMod: null };
 
 /**
  * Cruiser-class physics, for a ship added without any.
@@ -570,6 +591,10 @@ interface ShipEntry {
    */
   formationWarp: Maybe<Omit<FormationWarp, 'delay'> & { readonly at: number; applied: boolean }>;
   prop: PropModEntry;
+  /**
+   * What tackle stops it doing; a placement keeps it.
+   */
+  tackle: ShipTackle;
 }
 
 interface PropModEntry {
@@ -662,7 +687,8 @@ export class DestinyWorld {
         warp: null,
         held: null,
         formationWarp: null,
-        prop: { state: 'off', since: null, stopAt: null, note: null, queued: null }
+        prop: { state: 'off', since: null, stopAt: null, note: null, queued: null },
+        tackle: FREE
       });
     }
     this.PlaceShip(doc);
@@ -671,7 +697,7 @@ export class DestinyWorld {
   /**
    * Puts a ship at rest at a placement, facing along its rotation, ending its order (a warp too, with no exit event).
    * Its followers chase it there. A ship following its fleet keeps following and flies back to its slot from there.
-   * Its prop mod keeps its state: that is module state, not motion.
+   * Its prop mod and its tackle keep their state: that is module state, not motion.
    *
    * @param doc - The document ship.
    */
@@ -896,8 +922,8 @@ export class DestinyWorld {
    * @param id - The ship id.
    * @param order - A normalized order.
    * @returns The reason, or null when Order takes it: no ship (or a target that is itself or has no ball), a ship in
-   *   proper warp (any order), and for a warp a max velocity of 0, a target in warp, or a landing under
-   *   MIN_WARP_DISTANCE away.
+   *   proper warp (any order), and for a warp a tackled ship (SetTackle), a max velocity of 0, a target in warp, or a
+   *   landing under MIN_WARP_DISTANCE away.
    */
   OrderRefusal(id: string, order: ShipOrder): Maybe<string> {
     const entry = this.ships.get(id);
@@ -919,7 +945,8 @@ export class DestinyWorld {
       const destination: SceneVector = 'point' in order ? order.point : [targetBall?.x ?? 0, targetBall?.y ?? 0, targetBall?.z ?? 0];
       const range = order.range + (targetBall ? ball.radius + targetBall.radius : 0);
       const length = WarpLength(destination, range, [ball.x, ball.y, ball.z]);
-      if (!(ball.maxVelocity > 0)) refusal = `ship "${id}" cannot warp: its max velocity is 0`;
+      if (entry.tackle.warp) refusal = `ship "${id}" cannot warp: ${entry.tackle.warp}`;
+      else if (!(ball.maxVelocity > 0)) refusal = `ship "${id}" cannot warp: its max velocity is 0`;
       else if (targetBall?.IsWarping()) refusal = `target "${target}" is in warp`;
       else if (length < MIN_WARP_DISTANCE) refusal = `ship "${id}" would land ${Round(Math.max(0, length) / 1000, 10)} km away; EVE warps only ${MIN_WARP_DISTANCE / 1000} km or more, so use goto`;
     }
@@ -997,7 +1024,7 @@ export class DestinyWorld {
    *
    * @param id - The ship id.
    * @param on - Switch on, or off.
-   * @returns The reason, or null: no ship, or switching on in proper warp.
+   * @returns The reason, or null: no ship, or switching on in proper warp or while a warp scrambler blocks it.
    */
   PropModRefusal(id: string, on: boolean): Maybe<string> {
     const entry = this.ships.get(id);
@@ -1009,13 +1036,16 @@ export class DestinyWorld {
       const landsIn = this.WarpReport(entry, ball)?.landsIn;
       const when = landsIn === undefined ? '' : `, in about ${landsIn} s`;
       refusal = `ship "${id}" is in warp; switch its prop mod on once it lands${when}`;
+    } else if (on && entry.tackle.propMod) {
+      refusal = `ship "${id}" cannot switch its prop mod on: ${entry.tackle.propMod}`;
     }
     return refusal;
   }
 
   /**
    * Sets a ship's prop mod to the document's state at once, like a placement: no tick wait and no cycle wait. On in
-   * proper warp leaves it off, with a note. Its event (if it changed) reaches the listeners before this returns.
+   * proper warp, or while a warp scrambler blocks it, leaves it off, with a note. Its event (if it changed) reaches the
+   * listeners before this returns.
    *
    * @param id - The ship id.
    * @param on - Running, or off.
@@ -1027,7 +1057,11 @@ export class DestinyWorld {
     // The document's state overrides a switch the pilot has yet to make.
     prop.queued = null;
     const running = IsRunning(prop.state);
-    if (on && this.InProperWarp(entry)) {
+    if (on && entry.tackle.propMod) {
+      if (running) this.PropModOffNow(entry, `off: ${entry.tackle.propMod}`, 'tackle');
+      prop.state = 'off';
+      prop.note = `not switched on: ${entry.tackle.propMod}`;
+    } else if (on && this.InProperWarp(entry)) {
       if (!running) {
         prop.state = 'off';
         prop.note = 'not switched on: in warp';
@@ -1047,6 +1081,64 @@ export class DestinyWorld {
     }
     this.ApplyPropModNumbers(entry);
     this.DeliverPropModEvents();
+  }
+
+  /**
+   * Sets what tackle stops a ship doing (the director computes the reasons from its dogma; this only enforces them).
+   * With `warp`: a pending or delayed warp order is dropped, a warp still aligning is cancelled (a plain ship flies on
+   * along it as a direction order at full speed; a formation-warp member drops its formation warp and follows its
+   * fleet again), and later warp orders are refused. With `propMod`: an activating, running or stopping prop mod
+   * switches off at once (its event reaches the listeners before this returns), and switching it on is refused.
+   * OnBoundary listeners run before the evolve, so a point landing on the boundary a warp would begin wins.
+   *
+   * @param id - The ship id.
+   * @param tackle - The reasons; null fields for what it may do.
+   */
+  SetTackle(id: string, tackle: ShipTackle): void {
+    const entry = this.ships.get(id);
+    if (!entry) return;
+    entry.tackle = tackle.warp == null && tackle.propMod == null ? FREE : { warp: tackle.warp ?? null, propMod: tackle.propMod ?? null };
+    const { warp, propMod } = entry.tackle;
+    if (warp) {
+      if (this.pending.get(id)?.type === 'warp') {
+        this.pending.delete(id);
+        this.pendingAt.delete(id);
+        entry.note = `dropped: the warp order (${warp})`;
+      }
+      const formation = entry.formationWarp;
+      const aligning = entry.warp && !entry.warp.start && !this.InProperWarp(entry) ? entry.warp : null;
+      if (formation && (!formation.applied || aligning)) {
+        entry.formationWarp = null;
+        if (aligning && entry.follow) {
+          this.Both((park) => park.Stop(entry.ballId));
+          entry.order = FollowOrder(entry.follow);
+          entry.warp = null;
+          entry.followApplied = true;
+          entry.settled = false;
+        }
+        entry.note = `dropped: its formation warp (${warp})`;
+      } else if (aligning && !formation) {
+        const ball = this.master.GetBall(entry.ballId);
+        const along: SceneVector = ball ? [aligning.destination[0] - ball.x, aligning.destination[1] - ball.y, aligning.destination[2] - ball.z] : [0, 0, 1];
+        const length = Math.hypot(...along);
+        this.ApplyOrder(entry, { type: 'direction', direction: length > 0 ? [along[0] / length, along[1] / length, along[2] / length] : [0, 0, 1], speed: 1 });
+        entry.note = `warp cancelled: ${warp}`;
+      }
+    }
+    if (propMod && entry.prop.state !== 'off') {
+      this.PropModOffNow(entry, `off: ${propMod}`, 'tackle');
+      this.DeliverPropModEvents();
+    }
+  }
+
+  /**
+   * What tackle stops a ship doing.
+   *
+   * @param id - The ship id.
+   * @returns Its tackle, or null for no ship.
+   */
+  Tackle(id: string): Maybe<ShipTackle> {
+    return this.ships.get(id)?.tackle ?? null;
   }
 
   /**
@@ -1321,19 +1413,21 @@ export class DestinyWorld {
   }
 
   /**
-   * Switches a ship's prop mod off at once as it enters proper warp: no event if it was only activating.
+   * Switches a ship's prop mod off at once (it enters proper warp, a scram lands): no event if it was only activating.
    *
    * @param entry - The ship.
+   * @param note - Why, for get_state.
+   * @param cause - The event's cause.
    */
-  private PropModOffForWarp(entry: ShipEntry): void {
+  private PropModOffNow(entry: ShipEntry, note: string, cause: PropModCause): void {
     const prop = entry.prop;
     if (prop.state === 'off') return;
     const running = IsRunning(prop.state);
     prop.state = 'off';
     prop.stopAt = null;
-    prop.note = 'off: entered warp';
+    prop.note = note;
     this.ApplyPropModNumbers(entry);
-    if (running) this.PropModEventOf('off', entry, 'warp');
+    if (running) this.PropModEventOf('off', entry, cause);
   }
 
   /**
@@ -1602,6 +1696,10 @@ export class DestinyWorld {
       entry.note = `dropped: the ${order.type} order came after it entered warp`;
       return;
     }
+    if (order.type === 'warp' && entry.tackle.warp) {
+      entry.note = `dropped: the warp order (${entry.tackle.warp})`;
+      return;
+    }
     const target = shipOrderTarget(order);
     const targetEntry = target ? this.TargetEntry(target) : undefined;
     const targetBall = targetEntry ? this.master.GetBall(targetEntry.ballId) : null;
@@ -1700,7 +1798,7 @@ export class DestinyWorld {
       const ball = warp?.landed === null ? this.master.GetBall(entry.ballId) : null;
       if (!warp || !ball) continue;
       if (!warp.start && ball.IsWarping()) {
-        this.PropModOffForWarp(entry);
+        this.PropModOffNow(entry, 'off: entered warp', 'warp');
         const landing: SceneVector = [ball.gotoX, ball.gotoY, ball.gotoZ];
         const distance = Distance(landing, warp.lastAlign);
         warp.start = { from: warp.lastAlign, landing, distance, stamp: ball.effectStamp, profile: this.master.SetupWarpConstants(warp.factor, distance, {}) };

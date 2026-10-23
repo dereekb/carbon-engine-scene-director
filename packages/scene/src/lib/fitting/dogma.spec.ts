@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createPilotContext } from '../stats/pilot';
-import { type DogmaShip, evaluateShipDogma, stackingFactor } from './dogma';
+import { type DogmaIncomingModifier, type DogmaShip, dogmaResistanceOf, evaluateShipDogma, stackingFactor } from './dogma';
 import type { DogmaAttributeRecord, DogmaBundle, DogmaEffectRecord, DogmaModifierRecord, DogmaTypeRecord } from './dogma-bundle';
 import { DAMNATION_ID, DOGMA_FIXTURE, fixtureTypeID, RIFTER_ID, TFI_ID } from './fitting.spec-helper';
 
@@ -233,5 +233,52 @@ describe('evaluateShipDogma over the fixture', () => {
     expect(ab.attribute('mass')).toBe(bare.attribute('mass') + 500_000);
     expect(ab.attribute('maxVelocity')).toBeGreaterThan(bare.attribute('maxVelocity'));
     expect(ab.attribute('signatureRadius')).toBe(bare.attribute('signatureRadius'));
+  });
+});
+
+describe('evaluateShipDogma incoming modifiers', () => {
+  const web = (amount = -60, source = 'tackle: Stasis Webifier II (mid-0)'): DogmaIncomingModifier => ({ source, effect: 'remoteWebifierFalloff', attributeID: 37, operation: 6, amount, resistanceAttributeID: 2115 });
+  const speed = (incoming: readonly DogmaIncomingModifier[], extra: Partial<Parameters<typeof evaluateShipDogma>[0]> = {}) => evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: TFI_ID, incoming, ...extra }).attribute('maxVelocity');
+
+  it('webs a bare TFI, stacking-penalized, and traces the source', () => {
+    const bare = speed([]);
+    expect(speed([web()])).toBeCloseTo(bare * 0.4, 9);
+    expect(speed([web(), web(-60, 'other: Stasis Webifier II (mid-1)')])).toBeCloseTo(bare * 0.4 * (1 - 0.6 * stackingFactor(1)), 9);
+    const ship = evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: TFI_ID, incoming: [web()] });
+    expect(ship.trace('maxVelocity').at(-1)).toMatchObject({ source: 'tackle: Stasis Webifier II (mid-0)', effect: 'remoteWebifierFalloff', operation: 'postPercent', amount: -60, penalty: 1 });
+  });
+
+  it("chains with the ship's own penalized modifiers, as a module of its own would", () => {
+    const own = [shipModule(10, 6, -10), shipModule(11, 6, -20)];
+    const ship = evaluateShipDogma({
+      bundle: makeBundle(own),
+      hullTypeID: HULL_ID,
+      modules: own.map((type, index) => ({ key: `low-${index}`, typeID: type.typeID, state: 'online' })),
+      incoming: [{ source: 'tackle: Stasis Webifier II (mid-0)', effect: 'remoteWebifierFalloff', attributeID: VALUE, operation: 6, amount: -60 }]
+    });
+    expect(ship.attribute('value')).toBeCloseTo(100 * 0.4 * (1 - 0.2 * stackingFactor(1)) * (1 - 0.1 * stackingFactor(2)), 9);
+    expect(ship.trace('value').map((step) => [step.source, step.penalty])).toEqual([
+      ['tackle: Stasis Webifier II (mid-0)', 1],
+      ['type 11 (low-1)', stackingFactor(1)],
+      ['type 10 (low-0)', stackingFactor(2)]
+    ]);
+  });
+
+  it("scales by the ship's resistance, 1 when the hull lacks it and the bundle has no record", () => {
+    const tfi = DOGMA_FIXTURE.types[TFI_ID];
+    const resistant: DogmaBundle = { ...DOGMA_FIXTURE, types: { ...DOGMA_FIXTURE.types, [TFI_ID]: { ...tfi, attributes: { ...tfi.attributes, 2115: 0.2 } } } };
+    expect(speed([web()], { bundle: resistant })).toBeCloseTo(speed([]) * 0.88, 9);
+    const { 2115: _web, ...attributes } = tfi.attributes;
+    const { 2115: _record, ...records } = DOGMA_FIXTURE.attributes;
+    const lacking: DogmaBundle = { ...DOGMA_FIXTURE, attributes: records, types: { ...DOGMA_FIXTURE.types, [TFI_ID]: { ...tfi, attributes } } };
+    expect(speed([web()], { bundle: lacking })).toBeCloseTo(speed([]) * 0.4, 9);
+    expect(dogmaResistanceOf(evaluateShipDogma({ bundle: lacking, hullTypeID: TFI_ID }), lacking, 2115)).toBe(1);
+  });
+
+  it('adds a point to the warp scramble status, against a running warp core stabilizer', () => {
+    const point: DogmaIncomingModifier = { source: 'tfi-02: Warp Disruptor II (mid-0)', effect: 'warpDisrupt', attributeID: 104, operation: 2, amount: 1 };
+    const status = (state: 'online' | 'active') => evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: RIFTER_ID, modules: [{ key: 'low-0', typeID: fixtureTypeID('Warp Core Stabilizer II'), state }], incoming: [point] }).attribute('warpScrambleStatus');
+    expect(status('online')).toBe(1);
+    expect(status('active')).toBe(-1);
   });
 });

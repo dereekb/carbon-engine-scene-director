@@ -30,6 +30,30 @@ function Spec(key: string, activation: Partial<ModuleActivation> = {}, extra: Pa
 
 const REMOTE_REP: Partial<ModuleActivation> = { category: 'remote-armor-repairer', groupID: 325, targeted: true, warpSafe: false, cycleTime: 5, range: 6000, falloff: 3000, reach: 12_000, repair: { layer: 'armor', amount: 300, remote: true } };
 
+const WEB: Partial<ModuleActivation> = {
+  category: 'web',
+  groupID: 65,
+  targeted: true,
+  warpSafe: false,
+  cycleTime: 5,
+  range: 6000,
+  falloff: 3000,
+  reach: 12_000,
+  targetEffect: { effect: 'remoteWebifierFalloff', modifiers: [{ attributeID: 37, operation: 6, amount: -60 }], resistanceAttributeID: 2115 }
+};
+
+const NEUT: Partial<ModuleActivation> = {
+  category: 'neut',
+  groupID: 71,
+  targeted: true,
+  warpSafe: false,
+  cycleTime: 3,
+  range: 6000,
+  falloff: 3000,
+  reach: 12_000,
+  targetEffect: { effect: 'energyNeutralizerFalloff', modifiers: [], resistanceAttributeID: 2045, capacitor: { kind: 'neut', amount: 600 } }
+};
+
 const TURRET: Partial<ModuleActivation> = { category: 'weapon', weapon: 'turret', groupID: 55, targeted: true, warpSafe: false, cycleTime: 2.5, range: 1000, falloff: 20_000 };
 
 /**
@@ -206,6 +230,52 @@ describe('ShipModules', () => {
     expect(Kinds(modules.OnWarpEnter('fc', 1))).toEqual(['fc:mid-0:off1@1 (entered warp)']);
     expect(modules.CycleState('fc', 'low-0')).toBe('active');
     expect(modules.Switch('fc', 'mid-0', 'active', { boundary: 2 })).toBe('ship "fc" is in warp');
+  });
+
+  it("keeps a web's effectiveness from each cycle start while it runs and stops, and lists running ones per target", () => {
+    const port = new FakePort();
+    const modules = new ShipModules(port);
+    modules.SetFit('logi', [Spec('mid-0', WEB), Spec('mid-1', WEB), Spec('high-0', TURRET)], 0);
+    port.x.set('fc', 9000);
+    modules.Switch('logi', 'mid-0', 'active', { boundary: 0, target: 'fc' });
+    modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+    expect(modules.Targeting('fc')).toEqual([]);
+    Run(modules, 0, 0);
+    expect(modules.Targeting('fc')).toEqual([{ from: 'logi', spec: expect.objectContaining({ key: 'mid-0' }), effectiveness: 0.5, applied: 0.5 }]);
+    port.x.set('fc', 6000);
+    Run(modules, 1, 4);
+    expect(modules.Targeting('fc')[0]).toMatchObject({ effectiveness: 1, applied: 0.5 });
+    Run(modules, 5, 5);
+    expect(modules.Targeting('fc')[0]).toMatchObject({ effectiveness: 1, applied: 1 });
+    modules.Switch('logi', 'mid-0', 'online', { boundary: 6 });
+    port.x.set('fc', 9000);
+    Run(modules, 6, 9);
+    expect(modules.Targeting('fc')[0]).toMatchObject({ applied: 1 });
+    expect(modules.TargetIndex().get('fc')).toHaveLength(1);
+    Run(modules, 10, 10);
+    expect(modules.Targeting('fc')).toEqual([]);
+    expect(modules.TargetIndex().size).toBe(0);
+  });
+
+  it('lands a neut at each cycle start with its effectiveness then, never at a cycle end or a stop', () => {
+    const port = new FakePort();
+    const modules = new ShipModules(port);
+    modules.SetFit('logi', [Spec('high-0', NEUT), Spec('high-1', REMOTE_REP)], 0);
+    port.x.set('fc', 9000);
+    modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+    modules.Switch('logi', 'high-1', 'active', { boundary: 0, target: 'fc' });
+    const first = modules.Boundary(0);
+    expect(modules.CapacitorLandings(first)).toEqual([{ from: 'logi', module: 'high-0', target: 'fc', kind: 'neut', amount: 300, override: false, resistanceAttributeID: 2045 }]);
+    port.x.set('fc', 4000);
+    const events: ShipModuleEvent[] = [];
+    for (let tick = 1; tick <= 3; tick++) events.push(...modules.Boundary(tick));
+    expect(Kinds(events).filter((kind) => kind.includes('high-0'))).toEqual(['logi:high-0:end1@3', 'logi:high-0:cycle2@3']);
+    expect(modules.CapacitorLandings(events)).toEqual([expect.objectContaining({ amount: 600 })]);
+    modules.Switch('logi', 'high-0', 'online', { boundary: 4 });
+    const stop: ShipModuleEvent[] = [];
+    for (let tick = 4; tick <= 6; tick++) stop.push(...modules.Boundary(tick));
+    expect(Kinds(stop).filter((kind) => kind.includes('high-0'))).toEqual(['logi:high-0:end2@6', 'logi:high-0:off2@6']);
+    expect(modules.CapacitorLandings(stop)).toEqual([]);
   });
 
   it('makes a delayed switch at its tick, waits out reactivation, and lands shield boosts at the cycle start', () => {

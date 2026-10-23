@@ -210,6 +210,20 @@ describe('FleetOrders', () => {
     expect(rig.Command('fleet', 'f').warp).toBeUndefined();
   });
 
+  it('leaves a tackled member out of a fleet warp, regrouped, and refuses a warp a tackled FC leads', () => {
+    const rig = new Rig();
+    const pointed = 'warp scramble status 1 (red: Warp Disruptor II (mid-0) +1): above 0 it cannot warp';
+    rig.world.SetTackle('d1', { warp: pointed, propMod: null });
+    const result = rig.Order({ fleet: 'f', order: WARP });
+    expect(result.skipped).toEqual([{ id: 'd1', reason: `cannot warp: ${pointed}` }]);
+    expect((result.ships as readonly { readonly id: string }[]).map((ship) => ship.id)).not.toContain('d1');
+    expect(rig.world.Following('d1')).toMatchObject({ anchor: 'fc' });
+    rig.Step(1);
+    expect(rig.world.FormationWarpOf('d1')).toBeNull();
+    rig.world.SetTackle('fc', { warp: pointed, propMod: null });
+    expect(() => rig.Order({ fleet: 'f', order: WARP })).toThrow(`ship "fc" cannot warp: ${pointed}`);
+  });
+
   it('warps a squad apart on its lead, and a far regroup warps it back in formation', () => {
     const rig = new Rig();
     const result = rig.Order({ fleet: 'f', squad: 'logi', order: { type: 'warp', point: [300_000, 0, 0] } });

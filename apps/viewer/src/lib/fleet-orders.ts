@@ -6,9 +6,10 @@
  *   squad then flies apart from its fleet on its leader (FleetFollowing.BreakAway) until a regroup.
  * - Warp: the whole group warps in formation. The leader warps; every other ship warps with it to its slot
  *   (DestinyWorld.WarpInFormation), its at-rest offset from the leader (toFleetGroupOffsets) around the leader's
- *   landing in the warp's heading frame. Ships in warp keep their own warp; ships that cannot move or whose slot is
- *   under MIN_WARP_DISTANCE away fly instead. A fleet warp regroups every ship apart or detached first; a wing or squad
- *   warp lands the group apart, on its leader.
+ *   landing in the warp's heading frame. Ships in warp keep their own warp; tackled ships (DestinyWorld.Tackle) stay,
+ *   regrouped, holding while the leader warps; ships that cannot move or whose slot is under MIN_WARP_DISTANCE away fly
+ *   instead. A fleet warp regroups every ship apart or detached first; a wing or squad warp lands the group apart, on
+ *   its leader.
  * - Regroup: ships apart or detached rejoin their fleet formation, and those MIN_WARP_DISTANCE or more from their slot
  *   warp back to it in formation with the FC.
  * - anchor and break-off are document edits the director applies; here they only record the order.
@@ -247,7 +248,8 @@ export class FleetOrders {
       else if (InProperWarp(motion)) {
         inWarp.add(id);
         skipped.push({ id, reason: 'in warp; it keeps its own warp' });
-      } else if (!(motion.physics.maxVelocity > 0)) skipped.push({ id, reason: 'cannot warp: its max velocity is 0' });
+      } else if (this.world.Tackle(id)?.warp) skipped.push({ id, reason: `cannot warp: ${this.world.Tackle(id)?.warp}` });
+      else if (!(motion.physics.maxVelocity > 0)) skipped.push({ id, reason: 'cannot warp: its max velocity is 0' });
       else if (away < MIN_WARP_DISTANCE) skipped.push({ id, reason: `its slot is ${Math.round(away / 100) / 10} km away; EVE warps only ${MIN_WARP_DISTANCE / 1000} km or more, so it flies there` });
       else warpers.push({ id, offset, landing: RoundVector(predicted) });
     }
@@ -289,6 +291,7 @@ export class FleetOrders {
         if (!motion || !offset || !this.world.Following(id)) continue;
         if (Distance(FramePoint({ origin, frame, offset }), motion.position) < MIN_WARP_DISTANCE) continue;
         if (InProperWarp(motion)) skipped.push({ id, reason: 'in warp; it keeps its own warp' });
+        else if (this.world.Tackle(id)?.warp) skipped.push({ id, reason: `cannot warp: ${this.world.Tackle(id)?.warp}` });
         else if (!(motion.physics.maxVelocity > 0)) skipped.push({ id, reason: 'cannot warp: its max velocity is 0' });
         else if (this.world.WarpInFormation(id, { leader: fc, offset, delay: delays.get(id) })) warping.push(id);
       }

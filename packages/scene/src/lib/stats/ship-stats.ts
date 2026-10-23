@@ -9,6 +9,9 @@
  * time constant is `mass × agility / 1e6` seconds, so align time is
  * `-ln(0.25) × mass × agility / 1e6` (exact; the server's warp waits for a whole tick).
  *
+ * Incoming webs and painters (`incoming`) chain after the prop mod, penalized among
+ * themselves; points and scrams add to warpScrambleStatus.
+ *
  * Not modelled on this table path: hull trait bonuses, rigs, implants, boosters, fleet
  * command bursts, heat (overloadSpeedFactorBonus), other modules and stacking penalties
  * against them, and server tick rounding. With one prop mod there is nothing to
@@ -22,7 +25,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { moduleNumbersOf, type ShipCapacitor, shipCapacitorOf, type ShipDefense, shipDefenseOf, type ShipTargeting, shipTargetingOf } from '../fitting/defense';
-import { DOGMA_ATTRIBUTES, type DogmaModuleInput, type DogmaShip, evaluateShipDogma } from '../fitting/dogma';
+import { applyIncomingModifiers, DOGMA_ATTRIBUTES, type DogmaIncomingModifier, type DogmaModuleInput, type DogmaShip, evaluateShipDogma } from '../fitting/dogma';
 import type { DogmaBundle } from '../fitting/dogma-bundle';
 import { MAX_SKILLS_PILOT, type PilotContext, readSkillLevel } from './pilot';
 import type { PropModStats } from './prop-mods';
@@ -79,6 +82,10 @@ export interface HullStats {
    * advancedCapitalAgility (874), carried by capital hulls (normally 1); Capital Ships scales it.
    */
   readonly advancedCapitalAgility?: Maybe<number>;
+  /**
+   * warpScrambleStatus (104): the hull's own warp core strength, negated (0 for most hulls, −2 on a Venture).
+   */
+  readonly warpScrambleStatus?: Maybe<number>;
 }
 
 /**
@@ -171,6 +178,12 @@ export interface ShipStatsInput {
    * The ship's fit for the dogma evaluator; `hull` is then ignored.
    */
   readonly dogma?: Maybe<ShipDogmaInput>;
+  /**
+   * Modifiers other ships' modules put on it (webs, painters, points, scrams: incomingModifiersOf). The dogma path
+   * evaluates them with its own modules and resistances; the table path applies maxVelocity and signatureRadius after
+   * the prop mod, and warpScrambleStatus, with no resistance.
+   */
+  readonly incoming?: Maybe<readonly DogmaIncomingModifier[]>;
 }
 
 /**
@@ -195,7 +208,7 @@ export interface ShipDogmaInput {
  */
 export type ShipStatsMath = 'table' | 'dogma';
 
-export type ShipStatsAttribute = HullStatOverrideKey | 'propModSpeedFactor' | 'propModDuration';
+export type ShipStatsAttribute = HullStatOverrideKey | 'propModSpeedFactor' | 'propModDuration' | 'warpScrambleStatus';
 
 /**
  * One step of the math, for answers that show their work.
@@ -236,6 +249,11 @@ export interface ShipStats {
    * Seconds to reach 75 % of max velocity from a standstill.
    */
   readonly alignTime: number;
+  /**
+   * warpScrambleStatus (104) with the points and scrams on it and its own modules (a warp core stabilizer, siege):
+   * above 0 it cannot warp. `applied` lists the steps that changed it.
+   */
+  readonly warpScrambleStatus: number;
   readonly propModActive: boolean;
   /**
    * Seconds per prop mod cycle with the pilot's skills; null without a prop mod or its duration.
@@ -263,6 +281,8 @@ export interface ShipStats {
 
 const ROMAN_LEVELS = ['0', 'I', 'II', 'III', 'IV', 'V'] as const;
 
+const WARP_SCRAMBLE_STATUS = 104;
+
 /**
  * Computes a ship's effective flight numbers.
  *
@@ -278,12 +298,12 @@ export function computeShipStats(input: ShipStatsInput): ShipStats {
       const value = overrides?.[key];
       if (value != null && !isStatValue(key, value)) throw new RangeError(`overrides.${key} ${STAT_RULES[key].expectation}`);
     }
-    const ship = evaluateShipDogma({ bundle: dogma.bundle, hullTypeID: dogma.hullTypeID, overrides, modules: dogma.modules, pilot });
+    const ship = evaluateShipDogma({ bundle: dogma.bundle, hullTypeID: dogma.hullTypeID, overrides, modules: dogma.modules, pilot, incoming: input.incoming });
     return dogmaShipStats({ ship, bundle: dogma.bundle, overrides, propModKey: dogma.propModKey });
   }
   const applied: AppliedBonus[] = [];
   if (propMod) checkPropMod(propMod);
-  const values: Record<ShipStatsAttribute, number> = { ...readBaseValues({ hull, overrides, applied }), propModSpeedFactor: propMod?.speedFactor ?? 0, propModDuration: propMod?.duration ?? 0 };
+  const values: Record<ShipStatsAttribute, number> = { ...readBaseValues({ hull, overrides, applied }), propModSpeedFactor: propMod?.speedFactor ?? 0, propModDuration: propMod?.duration ?? 0, warpScrambleStatus: hull?.warpScrambleStatus ?? 0 };
   const step = (source: string, attribute: ShipStatsAttribute, change: (from: number) => number): void => {
     const from = values[attribute];
     values[attribute] = change(from);
@@ -311,6 +331,20 @@ export function computeShipStats(input: ShipStatsInput): ShipStats {
     if (propMod.signatureRadiusBonus > 0) step(source, 'signatureRadius', (signatureRadius) => signatureRadius * (1 + propMod.signatureRadiusBonus / 100));
   }
 
+  const incoming = input.incoming ?? [];
+  for (const [attribute, id] of [
+    ['maxVelocity', DOGMA_ATTRIBUTES.maxVelocity],
+    ['signatureRadius', DOGMA_ATTRIBUTES.signatureRadius]
+  ] as const) {
+    const modifiers = incoming.filter((modifier) => modifier.attributeID === id);
+    if (!modifiers.length) continue;
+    for (const { source, to } of applyIncomingModifiers({ base: values[attribute], modifiers, stackable: false }).steps) step(source, attribute, () => to);
+  }
+  for (const modifier of incoming) {
+    if (modifier.attributeID !== WARP_SCRAMBLE_STATUS || (modifier.operation !== 2 && modifier.operation !== 3)) continue;
+    step(modifier.source, 'warpScrambleStatus', (status) => (modifier.operation === 2 ? status + modifier.amount : status - modifier.amount));
+  }
+
   return {
     mass: values.mass,
     maxVelocity: values.maxVelocity,
@@ -319,6 +353,7 @@ export function computeShipStats(input: ShipStatsInput): ShipStats {
     radius: hull?.radius ?? null,
     warpSpeedMultiplier: hull?.warpSpeedMultiplier ?? null,
     alignTime: computeAlignTime(values.mass, values.agility),
+    warpScrambleStatus: values.warpScrambleStatus,
     propModActive: propMod != null,
     propModCycleTime: propMod?.duration == null ? null : values.propModDuration / 1000,
     pilot: pilot.name,
@@ -363,6 +398,7 @@ export function dogmaShipStats(input: DogmaShipStatsInput): ShipStats {
     for (const step of ship.trace(id)) if (step.from !== step.to) applied.push({ source: step.source, attribute: key, from: step.from, to: step.to });
     values[key] = ship.attribute(id);
   }
+  for (const step of ship.trace(WARP_SCRAMBLE_STATUS)) if (step.from !== step.to) applied.push({ source: step.source, attribute: 'warpScrambleStatus', from: step.from, to: step.to });
   const active = [...ship.modules].flatMap(([key, module]) => (module.state === 'active' ? [key] : []));
   const prop = propModKey == null ? null : ship.modules.get(propModKey);
   const radius = ship.attribute(DOGMA_ATTRIBUTES.radius);
@@ -372,6 +408,7 @@ export function dogmaShipStats(input: DogmaShipStatsInput): ShipStats {
     radius: radius > 0 ? radius : null,
     warpSpeedMultiplier: warpSpeedMultiplier > 0 ? warpSpeedMultiplier : null,
     alignTime: computeAlignTime(values.mass, values.agility),
+    warpScrambleStatus: ship.attribute(WARP_SCRAMBLE_STATUS),
     propModActive: prop?.state === 'active',
     propModCycleTime: prop && propModKey != null ? (moduleNumbersOf(ship, bundle, propModKey)?.cycleTime ?? null) : null,
     pilot: ship.pilot,

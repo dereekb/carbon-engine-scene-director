@@ -86,7 +86,8 @@ export function fixtureHullStats(typeID: number): HullStats {
     warpSpeedMultiplier: attribute(600) ?? null,
     rigSize: attribute(1547) ?? null,
     advancedAgility: attribute(853) ?? null,
-    advancedCapitalAgility: attribute(874) ?? null
+    advancedCapitalAgility: attribute(874) ?? null,
+    warpScrambleStatus: attribute(104) ?? null
   };
 }
 
@@ -95,3 +96,6 @@ export const TFI_ID = 17732;
 export const GUARDIAN_ID = 11987;
 export const REVELATION_ID = 19720;
 export const DAMNATION_ID = 22474;
+export const VINDICATOR_ID = 17740;
+export const BHAALGORN_ID = 17920;
+export const FEROX_ID = 16227;

@@ -32,7 +32,7 @@ describe('ShipData', () => {
     expect(hull.name).toBe('Tempest Fleet Issue');
     expect(hull.group).toBe('Battleship');
     expect(hull.sdeBuild).toBe(SDE);
-    expect(hull.published).toEqual({ mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250, warpSpeedMultiplier: 3, rigSize: 3, advancedAgility: null, advancedCapitalAgility: null });
+    expect(hull.published).toEqual({ mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250, warpSpeedMultiplier: 3, rigSize: 3, advancedAgility: null, advancedCapitalAgility: null, warpScrambleStatus: null });
     const missing = await CaughtShipDataFailure(shipData.Hull({ dna: 'zz9_t1:nobody:amarr' }));
     expect(missing.failure).toBe('not-found');
     expect(missing.message).toMatch(/set the ship's type/);
@@ -46,9 +46,10 @@ describe('ShipData', () => {
     expect((await CaughtShipDataFailure(shipData.Hull({ type: 'Tempest' }))).failure).toBe('ambiguous');
   });
 
-  it('reads the capital agility hooks, and refuses a type with no agility', async () => {
+  it("reads the capital agility hooks and a hull's warp scramble status, and refuses a type with no agility", async () => {
     const { shipData } = MakeFakeShipData();
     expect((await shipData.Hull({ type: 19720 })).published).toMatchObject({ rigSize: 4, advancedAgility: 1, advancedCapitalAgility: 1, mass: 1_290_000_000 });
+    expect((await shipData.Hull({ type: 32880 })).published).toMatchObject({ rigSize: 1, warpScrambleStatus: -2 });
     const structure = await CaughtShipDataFailure(shipData.Hull({ type: 35833 }));
     expect(structure.failure).toBe('invalid');
     expect(structure.message).toBe('type 35833 (Astrahus) has no agility; it is not a ship');

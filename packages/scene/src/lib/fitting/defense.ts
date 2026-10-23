@@ -1,11 +1,12 @@
 /**
  * The numbers an evaluated ship gives the stats and the damage model: HP and resists per layer with omni EHP, the
- * capacitor (numbers only: no live level), targeting, and each module's cycle, capacitor need, range and repair.
+ * capacitor (numbers and its capacitor warfare resistances; the page keeps the live level), targeting, and each
+ * module's cycle, capacitor need, range and repair.
  */
 
 import type { Maybe } from '@dereekb/util';
 import type { DogmaBundle } from './dogma-bundle';
-import type { DogmaShip } from './dogma';
+import { dogmaResistanceOf, type DogmaShip } from './dogma';
 
 export type DamageType = 'em' | 'thermal' | 'kinetic' | 'explosive';
 
@@ -80,6 +81,15 @@ export interface ShipCapacitor {
    * Seconds from full until empty, when not stable.
    */
   readonly lastsFor?: number;
+  /**
+   * The fraction of a neut's or nos' amount it takes (energyWarfareResistance, 2045; 1 when the hull lacks it).
+   */
+  readonly energyWarfareResistance: number;
+  /**
+   * The fraction of a remote capacitor transmitter's amount it takes (remoteCapacitorImpedance, 6463; 1 when the hull
+   * lacks it).
+   */
+  readonly remoteCapacitorImpedance: number;
 }
 
 export interface ShipTargeting {
@@ -131,6 +141,8 @@ const ARMOR_DAMAGE_AMOUNT = 84;
 const STRUCTURE_DAMAGE_AMOUNT = 83;
 const CHARGED_ARMOR_DAMAGE_MULTIPLIER = 1886;
 const REACTIVATION_DELAY = 669;
+const ENERGY_WARFARE_RESISTANCE = 2045;
+const REMOTE_CAPACITOR_IMPEDANCE = 6463;
 
 /**
  * Repairer groups by the layer they repair and whether they repair another ship.
@@ -247,7 +259,7 @@ export function shipCapacitorOf(ship: DogmaShip, bundle: DogmaBundle, active: It
     const numbers = moduleNumbersOf(ship, bundle, key);
     if (numbers?.cycleTime && numbers.capacitorNeed > 0) drain += numbers.capacitorNeed / numbers.cycleTime;
   }
-  const capacitor = { capacity, rechargeTime, peakRecharge, drain };
+  const capacitor = { capacity, rechargeTime, peakRecharge, drain, energyWarfareResistance: dogmaResistanceOf(ship, bundle, ENERGY_WARFARE_RESISTANCE), remoteCapacitorImpedance: dogmaResistanceOf(ship, bundle, REMOTE_CAPACITOR_IMPEDANCE) };
   let result: ShipCapacitor;
   if (drain <= peakRecharge || capacity <= 0) {
     const k = capacity > 0 && rechargeTime > 0 ? (drain * rechargeTime) / (10 * capacity) : 0;

@@ -39,6 +39,13 @@
  * physics there, before orders), and its repairs land in the damage model
  * (damage.ts), which get_state's live defense reports.
  *
+ * Target effects (target-effects.ts): webs, painters, points and scrams running
+ * on a ship (fitted or not) go into its flight as incoming modifiers, so a web
+ * slows its ball through SetPhysics and a point sets its tackle
+ * (DestinyWorld.SetTackle: no warp; a scram also switches its MWD off and keeps
+ * it off). Neuts, nos and remote capacitor transmitters move its live capacitor
+ * (capacitor.ts) at each cycle start. get_state reports `targeted`.
+ *
  * Fleets fly (Follow the FC, following.ts): every fleet member but the FC
  * keeps range on its resolved anchor in its formation slot, re-planned at the
  * end of every edit and whenever a radius settles. Ordering the FC moves its
@@ -121,14 +128,23 @@ import {
   CELESTIAL_TARGET_REFUSAL,
   normalizeTargetCommand,
   type ShotTargetKind,
-  type WeaponShot
+  type WeaponShot,
+  incomingModifiersOf,
+  incomingSourceLabel,
+  microwarpdriveBlockNoteOf,
+  TARGET_EFFECT_ATTRIBUTES,
+  warpScrambleNoteOf,
+  type DogmaIncomingModifier,
+  type ModuleCategory,
+  type ShipStatsInput
 } from '@scene-director/scene';
+import { CapacitorModel } from './capacitor';
 import { TICKS_PER_SECOND, type SceneClock } from './clock';
 import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
 import { DamageModel, type DamageReport } from './damage';
 import {
   DogmaStateOf,
@@ -160,7 +176,7 @@ import { LocationDressing } from './location-dressing';
 import { ModuleAudioPost } from './module-audio';
 import { ModuleEffects, type ModuleEffectsReport } from './module-effects';
 import { ModuleFxCommands } from './module-fx';
-import { ShipModules, type ShipModuleEvent } from './modules';
+import { ShipModules, type CapacitorLanding, type ShipModuleEvent, type TargetingModule } from './modules';
 import { ShotQueue, WeaponShotsOf } from './shots';
 import { ShipTargets, type ShipTargetReport } from './targets';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
@@ -508,6 +524,18 @@ export class Director {
    */
   readonly damage = new DamageModel();
   /**
+   * Each fitted ship's live capacitor level (capacitor.ts): neuts, nos and transmitters move it.
+   */
+  readonly capacitor: CapacitorModel;
+  /**
+   * The GJ each capacitor warfare module moved at its latest cycle start, by `<ship>|<module>`.
+   */
+  private readonly capacitorMoved = new Map<string, number>();
+  /**
+   * A ship with incoming modifiers flown without them, for get_state's speed and signature factors.
+   */
+  private readonly unaffectedFlights = new Map<string, ShipFlight>();
+  /**
    * The running modules' drawn effects (module-effects.ts); null without a renderer.
    */
   private readonly moduleEffects: Maybe<ModuleEffects>;
@@ -534,8 +562,8 @@ export class Director {
   private readonly shots: ShotQueue;
   private readonly shotListeners = new Set<ShotListener>();
   /**
-   * Per fitted ship: the module specs last given to the activation layer, and the module states its flight was
-   * computed with.
+   * Per fitted ship: the module specs last given to the activation layer; per ship: the module states and the incoming
+   * target effects its flight was computed with (FlownKey).
    */
   private readonly moduleSpecs = new Map<string, string>();
   private readonly flownStates = new Map<string, string>();
@@ -598,6 +626,7 @@ export class Director {
     this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
     this.targets = new ShipTargets({ HasShip: (id) => world.Curves(id) != null, HasObject: (id) => this.IsAuthoredObject(id), SurfaceDistance: (a, b) => world.SurfaceDistance(a, b) });
     this.shots = new ShotQueue(world.master.tickInterval / 1000);
+    this.capacitor = new CapacitorModel(world.master.tickInterval / 1000);
     this.modules = new ShipModules({
       SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
       InWarp: (id) => world.InWarp(id),
@@ -1122,6 +1151,9 @@ export class Director {
       moduleEvents.push(...this.modules.Remove(doc.id, this.world.tick));
       this.ForgetTarget(doc.id);
       this.damage.Remove(doc.id);
+      this.capacitor.Remove(doc.id);
+      this.unaffectedFlights.delete(doc.id);
+      for (const key of [...this.capacitorMoved.keys()]) if (key.startsWith(`${doc.id}|`)) this.capacitorMoved.delete(key);
       this.moduleSpecs.delete(doc.id);
       this.flownStates.delete(doc.id);
       this.audio.Release(doc.id);
@@ -1157,6 +1189,9 @@ export class Director {
       this.turrets?.ClearAims();
       this.turrets?.ResetBursts();
       this.damage.Clear();
+      this.capacitor.Clear();
+      this.capacitorMoved.clear();
+      this.unaffectedFlights.clear();
       this.moduleSpecs.clear();
       this.flownStates.clear();
     }
@@ -1373,6 +1408,9 @@ export class Director {
     const defense = this.flights.get(doc.id)?.defense;
     if (defense) this.damage.SetDefense(doc.id, defense);
     else this.damage.Remove(doc.id);
+    const capacitor = this.flights.get(doc.id)?.capacitor;
+    if (capacitor) this.capacitor.Set(doc.id, capacitor, this.world.tick);
+    else this.capacitor.Remove(doc.id);
     this.ModuleOutputs(stoppedByRefit);
     this.SyncTurrets(doc.id);
   }
@@ -1391,6 +1429,7 @@ export class Director {
       try {
         this.world.SetPhysics(doc.id, flight);
         this.flights.set(doc.id, flight);
+        this.world.SetTackle(doc.id, this.TackleOf(doc.id, flight));
         flown = true;
       } catch (error) {
         console.error(`ship ${doc.id}: cannot fly ${JSON.stringify(flight)} (${ErrorText(error)}); it keeps its previous physics`);
@@ -1436,23 +1475,64 @@ export class Director {
   }
 
   /**
-   * Module events from a tick boundary, a warp, a removal or a load: every ship whose modules' states changed flies
-   * again with them (HP, resists, signature, siege and triage physics), then the repairs land.
+   * Module events from a tick boundary, a warp, a removal or a load: every ship whose modules' states changed, or whose
+   * incoming target effects changed (a web or point on it starting, stopping, or a new cycle's falloff), flies again
+   * with them (HP, resists, signature, siege and triage physics, webs, tackle), then the repairs and capacitor
+   * transfers land.
    *
    * @param events - The events.
    */
   private ModuleEvents(events: readonly ShipModuleEvent[]): void {
-    const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
-    for (const [id, resolved] of [...this.fittings]) {
-      const doc = docs.get(id);
-      if (doc && resolved.dogma && LiveStatesKey(this.LiveDogma(id, resolved.dogma)) !== this.flownStates.get(id)) this.SetFlight(doc, this.hullStats.Cached(doc));
+    const index = this.modules.TargetIndex();
+    for (const doc of [...(this.scene?.ships ?? [])]) {
+      if (!this.flownStates.has(doc.id)) continue;
+      const dogma = this.fittings.get(doc.id)?.dogma;
+      const key = FlownKey(dogma ? this.LiveDogma(doc.id, dogma) : null, index.get(doc.id) ?? []);
+      if (key !== this.flownStates.get(doc.id)) this.SetFlight(doc, this.hullStats.Cached(doc));
     }
     this.ModuleOutputs(events);
   }
 
   /**
-   * What module events do besides the ship's numbers: repairs land in the damage model, and the client's effects and
-   * sounds play (module-fx.ts, module-audio.ts, module-effects.ts).
+   * What tackle stops a ship doing, from its flight (warpScrambleStatus) and the scrams running on it.
+   *
+   * @param id - The ship id.
+   * @param flight - Its flight, with the incoming modifiers.
+   * @returns The reasons for DestinyWorld.SetTackle.
+   */
+  private TackleOf(id: string, flight: ShipFlight): ShipTackle {
+    const warp = flight.warpScrambleStatus > 0 ? warpScrambleNoteOf({ status: flight.warpScrambleStatus, steps: flight.warpScrambleSteps ?? [] }) : null;
+    const blockers = flight.propMod?.kind === 'microwarpdrive' ? this.modules.Targeting(id).filter((module) => module.spec.activation.targetEffect?.blocksMicrowarpdrive) : [];
+    return { warp, propMod: microwarpdriveBlockNoteOf(blockers.map((module) => incomingSourceLabel({ from: module.from, name: module.spec.name, key: module.spec.key }))) };
+  }
+
+  /**
+   * Lands a capacitor transfer on its target's live capacitor, scaled by the target's resistance.
+   *
+   * @param landing - The transfer.
+   */
+  private LandCapacitor(landing: CapacitorLanding): void {
+    const numbers = this.capacitor.Numbers(landing.target);
+    const key = `${landing.from}|${landing.module}`;
+    if (!numbers) {
+      this.capacitorMoved.delete(key);
+      return;
+    }
+    let resistance = 1;
+    if (landing.resistanceAttributeID === TARGET_EFFECT_ATTRIBUTES.energyWarfareResistance) resistance = numbers.energyWarfareResistance;
+    else if (landing.resistanceAttributeID === TARGET_EFFECT_ATTRIBUTES.remoteCapacitorImpedance) resistance = numbers.remoteCapacitorImpedance;
+    const amount = landing.amount * resistance;
+    const tick = this.world.tick;
+    let moved: number;
+    if (landing.kind === 'neut') moved = this.capacitor.Drain(landing.target, amount, tick);
+    else if (landing.kind === 'nos') moved = this.capacitor.Nos(landing.from, landing.target, amount, landing.override, tick);
+    else moved = this.capacitor.Give(landing.target, amount, tick);
+    this.capacitorMoved.set(key, moved);
+  }
+
+  /**
+   * What module events do besides the ship's numbers: repairs land in the damage model, capacitor transfers in the
+   * live capacitor, and the client's effects and sounds play (module-fx.ts, module-audio.ts, module-effects.ts).
    *
    * @param events - The events.
    */
@@ -1464,6 +1544,7 @@ export class Director {
       repaired.add(landing.ship);
     }
     for (const id of repaired) this.SyncImpactState(id);
+    for (const landing of this.modules.CapacitorLandings(events)) this.LandCapacitor(landing);
     this.Shots(events);
     const commands = ModuleFxCommands(events);
     const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
@@ -1739,9 +1820,14 @@ export class Director {
       const propMod = ResolveShipPropMod({ module, rigSize, answer: target == null ? null : this.propMods.Cached(target) });
       const fitting = this.ResolveFitting(doc, answer, propMod);
       const dogma = this.LiveDogma(doc.id, fitting?.dogma);
+      const targeting = this.modules.Targeting(doc.id);
       // Kept before the math, so a ship that cannot fly these states is not tried again every tick.
-      this.flownStates.set(doc.id, LiveStatesKey(dogma));
-      flight = ResolveFlight({ published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma, compute: (input) => this.fitLookup.ShipStats(input) });
+      this.flownStates.set(doc.id, FlownKey(dogma, targeting));
+      const incoming = IncomingModifiersOf(targeting);
+      const input = { published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma, compute: (stats: ShipStatsInput) => this.fitLookup.ShipStats(stats) };
+      flight = ResolveFlight({ ...input, incoming });
+      if (incoming.length) this.unaffectedFlights.set(doc.id, ResolveFlight(input));
+      else this.unaffectedFlights.delete(doc.id);
     } catch (error) {
       console.error(`ship ${doc.id}: no flight numbers (${ErrorText(error)}); it keeps its previous physics`);
     }
@@ -2286,6 +2372,7 @@ export class Director {
     shots?: number;
     defense: Maybe<ShipDefenseReport | DamageReport>;
     capacitor: Maybe<ShipCapacitorReport>;
+    targeted: Maybe<ShipTargetedReport>;
   } & Partial<ShipFleetMembership> &
     Omit<Partial<ShipMotion>, 'propMod'> {
     const sphere = this.WorldSphere(doc);
@@ -2294,12 +2381,12 @@ export class Director {
     const following = this.following.Report(doc.id);
     const ship = this.engine ? this.live.get(doc.id)?.ship : null;
     const boosters: Maybe<ShipBoosterState> = ship?.boosters ? { maxVel: ship.boosters.maxVel, intensity: Math.round(ship.GetBoosterIntensity() * 100) / 100, warpIntensity: Math.round(ship.boosters.warpIntensity * 100) / 100 } : null;
-    // Defense and capacitor are reported beside physics, not in it.
-    let physics: Maybe<Omit<ShipFlight, 'defense' | 'capacitor'> | ShipPhysics> = motion?.physics;
+    // Defense, capacitor and the warp scramble status are reported beside physics, not in it.
+    let physics: Maybe<Omit<ShipFlight, 'defense' | 'capacitor' | 'warpScrambleStatus' | 'warpScrambleSteps'> | ShipPhysics> = motion?.physics;
     let defense: Maybe<ShipDefense> = null;
     let capacitor: Maybe<ShipCapacitor> = null;
     if (flight) {
-      const { defense: flownDefense, capacitor: flownCapacitor, ...flown } = RunningFlight(flight, motion?.propMod.running === true);
+      const { defense: flownDefense, capacitor: flownCapacitor, warpScrambleStatus: _status, warpScrambleSteps: _steps, ...flown } = RunningFlight(flight, motion?.propMod.running === true);
       physics = flown;
       defense = flownDefense ?? null;
       capacitor = flownCapacitor ?? null;
@@ -2323,8 +2410,63 @@ export class Director {
       target: this.targets.Report(doc.id),
       ...(shots ? { shots } : {}),
       defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
-      capacitor: capacitor ? ShipCapacitorReportOf(capacitor) : null,
+      capacitor: capacitor ? ShipCapacitorReportOf(capacitor, this.capacitor.Report(doc.id, this.world.tick)) : null,
+      targeted: this.TargetedState(doc.id, flight, motion),
       ...(boosters ? { boosters } : {})
+    };
+  }
+
+  /**
+   * What runs on a ship and what it does to it, for get_state.
+   *
+   * @param id - The ship id.
+   * @param flight - What it flies with.
+   * @param motion - Its Destiny motion.
+   * @returns The report; null when nothing runs on it and it can warp.
+   */
+  private TargetedState(id: string, flight: Maybe<ShipFlight>, motion: Maybe<ShipMotion>): Maybe<ShipTargetedReport> {
+    const targeting = this.modules.Targeting(id);
+    const tackle = this.world.Tackle(id);
+    const status = flight?.warpScrambleStatus ?? 0;
+    const canWarp = !tackle?.warp;
+    if (!targeting.length && canWarp) return null;
+    const live = this.capacitor.Has(id);
+    const by = targeting.map(({ from, spec, effectiveness }): ShipTargetedByRow => {
+      const { activation } = spec;
+      const effect = activation.targetEffect;
+      const amount = effect?.capacitor?.amount ?? effect?.modifiers[0]?.amount ?? activation.repair?.amount;
+      const moved = effect?.capacitor && live ? this.capacitorMoved.get(`${from}|${spec.key}`) : undefined;
+      return {
+        from,
+        module: spec.key,
+        name: spec.name,
+        category: activation.category,
+        effectiveness: Math.round(effectiveness * 1000) / 1000,
+        ...(amount == null ? {} : { amount: Math.round(amount * 100) / 100 }),
+        cycleTime: Math.round(activation.cycleTime * 100) / 100,
+        ...(moved == null ? {} : { moved: Math.round(moved * 10) / 10 }),
+        ...(effect?.capacitor && !live ? { note: 'no live capacitor (no fit)' } : {})
+      };
+    });
+    const unaffected = this.unaffectedFlights.get(id);
+    const running = motion?.propMod.running === true;
+    const factor = (key: 'maxVelocity' | 'signatureRadius'): Maybe<number> => {
+      if (!flight || !unaffected) return null;
+      const base = RunningFlight(unaffected, running)[key];
+      const value = base > 0 ? Math.round((RunningFlight(flight, running)[key] / base) * 1000) / 1000 : 1;
+      return value === 1 ? null : value;
+    };
+    const speedFactor = factor('maxVelocity');
+    const signatureFactor = factor('signatureRadius');
+    const warpNote = tackle?.warp ?? warpScrambleNoteOf({ status, steps: flight?.warpScrambleSteps ?? [] });
+    return {
+      by,
+      ...(speedFactor == null ? {} : { speedFactor }),
+      ...(signatureFactor == null ? {} : { signatureFactor }),
+      warpScrambleStatus: Math.round(status * 1000) / 1000,
+      canWarp,
+      ...(warpNote ? { warpNote } : {}),
+      ...(tackle?.propMod ? { mwdBlocked: tackle.propMod } : {})
     };
   }
 
@@ -2375,6 +2517,86 @@ export class Director {
  */
 function LiveStatesKey(dogma: Maybe<ShipDogmaInput>): string {
   return (dogma?.modules ?? []).map((module) => `${module.key}:${module.typeID}:${module.state}`).join(',');
+}
+
+/**
+ * The running targeted modules that change a ship's flight or tackle: webs, painters, points and scrams.
+ *
+ * @param targeting - The running targeted modules on it (ShipModules.Targeting).
+ * @returns Those with target modifiers or an MWD block.
+ */
+function FlightTargeting(targeting: readonly TargetingModule[]): TargetingModule[] {
+  return targeting.filter(({ spec }) => {
+    const effect = spec.activation.targetEffect;
+    return effect != null && (effect.modifiers.length > 0 || effect.blocksMicrowarpdrive === true);
+  });
+}
+
+/**
+ * What a flight was computed with: the live module states and the incoming target effects (each module and its
+ * effectiveness at its latest cycle start), to tell when either changed.
+ *
+ * @param dogma - The live dogma input; null on the table path.
+ * @param targeting - The running targeted modules on the ship.
+ * @returns A key.
+ */
+function FlownKey(dogma: Maybe<ShipDogmaInput>, targeting: readonly TargetingModule[]): string {
+  const incoming = FlightTargeting(targeting).map(({ from, spec, applied }) => `${from}:${spec.key}:${spec.typeID}:${Math.round(applied * 10_000)}`);
+  return `${LiveStatesKey(dogma)}|${incoming.join(',')}`;
+}
+
+/**
+ * The incoming modifiers of the running targeted modules on a ship, each scaled by its effectiveness at its latest
+ * cycle start.
+ *
+ * @param targeting - The running targeted modules on the ship.
+ * @returns The modifiers for its flight.
+ */
+function IncomingModifiersOf(targeting: readonly TargetingModule[]): DogmaIncomingModifier[] {
+  return incomingModifiersOf(FlightTargeting(targeting).flatMap(({ from, spec, applied }) => (spec.activation.targetEffect ? [{ from, key: spec.key, name: spec.name, effect: spec.activation.targetEffect, effectiveness: applied }] : [])));
+}
+
+/**
+ * A running targeted module on a ship, in get_state's `targeted.by`.
+ */
+export interface ShipTargetedByRow {
+  readonly from: string;
+  readonly module: string;
+  readonly name: string;
+  readonly category: ModuleCategory;
+  /**
+   * Its falloff effectiveness now, 3 decimals.
+   */
+  readonly effectiveness: number;
+  /**
+   * Per cycle, before falloff: a web's or painter's percent, a point's strength, GJ for capacitor warfare, HP for a rep.
+   */
+  readonly amount?: number;
+  readonly cycleTime: number;
+  /**
+   * GJ its latest cycle start moved (capacitor warfare).
+   */
+  readonly moved?: number;
+  readonly note?: string;
+}
+
+/**
+ * What runs on a ship and what it does, in get_state: null when nothing runs on it and it can warp.
+ */
+export interface ShipTargetedReport {
+  readonly by: readonly ShipTargetedByRow[];
+  /**
+   * Max velocity with the webs over without them (physics already includes them); absent when 1.
+   */
+  readonly speedFactor?: number;
+  readonly signatureFactor?: number;
+  /**
+   * With the points and scrams on it and its own modules: above 0 it cannot warp.
+   */
+  readonly warpScrambleStatus: number;
+  readonly canWarp: boolean;
+  readonly warpNote?: string;
+  readonly mwdBlocked?: string;
 }
 
 /**

@@ -14,14 +14,18 @@
  *   maluses apart, strongest first; the i-th (from 0) counts `exp(-(i / 2.67)^2)`.
  * - `maxAttributeID` caps the result at the item's value of that attribute. A dependency cycle uses the base value.
  * - Code effects (no modifiers in the SDE; built in here as Pyfa does): the MWD and AB speed, mass and signature, and
- *   the reactive armor hardener's static profile. Other code effects (reps, webs, neuts) change no attribute here;
- *   their numbers are read with moduleAttribute.
+ *   the reactive armor hardener's static profile. Other code effects (reps, webs, neuts) change no attribute of their
+ *   own ship; their numbers are read with moduleAttribute.
+ * - Incoming modifiers (`incoming`: webs, painters, points and scrams on this ship, target-effects.ts) act on the ship
+ *   from a module-category source, so they stack with its own penalized modifiers, each times the ship's resistance
+ *   attribute (1 when it lacks it).
  */
 
 import type { Maybe } from '@dereekb/util';
 import type { HullStatOverrides } from '../stats/ship-stats';
 import { MAX_SKILLS_PILOT, type PilotContext } from '../stats/pilot';
 import type { DogmaAttributeRecord, DogmaBundle, DogmaEffectRecord, DogmaTypeRecord } from './dogma-bundle';
+import { scaleModifierAmount } from './target-effects';
 
 /**
  * A fitted module's state as dogma sees it.
@@ -58,6 +62,31 @@ export interface EvaluateShipDogmaInput {
    * The skills the pilot may have. Default: every skill (category 16) in the bundle.
    */
   readonly skillTypeIDs?: Maybe<readonly number[]>;
+  /**
+   * Modifiers other ships' modules put on this ship (incomingModifiersOf).
+   */
+  readonly incoming?: Maybe<readonly DogmaIncomingModifier[]>;
+}
+
+/**
+ * A modifier another ship's module puts on this ship, already scaled by its falloff effectiveness.
+ */
+export interface DogmaIncomingModifier {
+  /**
+   * `<ship>: <module name> (<key>)`: the trace's source.
+   */
+  readonly source: string;
+  readonly effect: string;
+  readonly attributeID: number;
+  /**
+   * A dogma operation (DOGMA_OPERATIONS).
+   */
+  readonly operation: number;
+  readonly amount: number;
+  /**
+   * The ship's attribute that scales the amount (1 when the ship lacks it).
+   */
+  readonly resistanceAttributeID?: number;
 }
 
 /**
@@ -178,6 +207,8 @@ const OVERRIDE_ATTRIBUTES: Readonly<Record<keyof HullStatOverrides, number>> = {
 const PENALIZED_OPERATIONS: ReadonlySet<number> = new Set([0, 1, 4, 5, 6]);
 
 const SKIPPED_DOMAINS: ReadonlySet<string> = new Set(['targetID', 'target', 'structureID']);
+
+const MODULE_CATEGORY = 7;
 
 const MWD_EFFECT = 'moduleBonusMicrowarpdrive';
 const AB_EFFECT = 'moduleBonusAfterburner';
@@ -329,6 +360,15 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
     addCodeEffect({ item, effect, ship, add, evaluate });
   }
 
+  for (const [index, modifier] of (input.incoming ?? []).entries()) {
+    const source = incomingItem(modifier, index);
+    const resistance = (): number => {
+      const id = modifier.resistanceAttributeID;
+      return id != null && resistsWith({ base: ship.base.has(id), record: bundle.attributes[id] }) ? evaluate(ship, id) : 1;
+    };
+    add(ship, modifier.attributeID, { source, effect: modifier.effect, operation: modifier.operation, amount: () => scaleModifierAmount(modifier.operation, modifier.amount, resistance()), penalizable: true });
+  }
+
   return {
     hull,
     pilot: pilot.name,
@@ -352,6 +392,56 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
     skipped: [...skipped].sort(),
     warnings
   };
+}
+
+/**
+ * A ship's resistance to a remote effect (stasisWebifierResistance, energyWarfareResistance, ...): its evaluated value
+ * when the hull carries the attribute or the bundle gives it a non-zero default, else 1. Many hulls lack 2114 or 6463,
+ * and a missing value means no resistance, never immunity.
+ *
+ * @param ship - The evaluated ship.
+ * @param bundle - Its bundle.
+ * @param attributeID - The resistance attribute.
+ * @returns The factor the effect is multiplied by.
+ */
+export function dogmaResistanceOf(ship: DogmaShip, bundle: DogmaBundle, attributeID: number): number {
+  return resistsWith({ base: ship.hull.attributes[attributeID] != null, record: bundle.attributes[attributeID] }) ? ship.attribute(attributeID) : 1;
+}
+
+function resistsWith(input: { readonly base: boolean; readonly record: Maybe<DogmaAttributeRecord> }): boolean {
+  return input.base || (input.record?.defaultValue ?? 0) > 0;
+}
+
+function incomingItem(modifier: DogmaIncomingModifier, index: number): DogmaItem {
+  const type: DogmaTypeRecord = { typeID: 0, name: modifier.source, groupID: 0, categoryID: MODULE_CATEGORY, published: false, attributes: {}, effects: [] };
+  return { id: `incoming:${index}`, label: modifier.source, type, base: new Map(), located: false, other: null, requiredSkills: new Set() };
+}
+
+export interface ApplyIncomingModifiersInput {
+  /**
+   * The attribute's value before them.
+   */
+  readonly base: number;
+  readonly modifiers: readonly DogmaIncomingModifier[];
+  /**
+   * Whether the attribute is stackable (maxVelocity and signatureRadius are not: their incoming modifiers are
+   * penalized).
+   */
+  readonly stackable: boolean;
+}
+
+/**
+ * Applies incoming modifiers to one attribute outside an evaluation (the table path's webs and painters), with the
+ * evaluator's operation order and stacking rules. Resistances are not applied: table-path ships resist nothing.
+ *
+ * @param input - The base value, the modifiers on that attribute and its stacking rule.
+ * @returns The value and the steps.
+ */
+export function applyIncomingModifiers(input: ApplyIncomingModifiersInput): { readonly value: number; readonly steps: DogmaTraceStep[] } {
+  const steps: DogmaTraceStep[] = [];
+  const modifiers = input.modifiers.map((modifier, index): AppliedModifier => ({ source: incomingItem(modifier, index), effect: modifier.effect, operation: modifier.operation, amount: () => modifier.amount, penalizable: true }));
+  const record: DogmaAttributeRecord = { attributeID: 0, name: 'incoming', stackable: input.stackable, highIsGood: true, defaultValue: 0 };
+  return { value: applyModifiers({ base: input.base, modifiers, record, steps }), steps };
 }
 
 const NAMES_BY_BUNDLE = new WeakMap<DogmaBundle, Map<string, number>>();

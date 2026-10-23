@@ -87,6 +87,7 @@ export const SHIP_ROUTES: Record<string, Answer> = {
   ...Hull({ typeID: 17732, name: 'Tempest Fleet Issue', group: 'Battleship', mass: 103_300_000, radius: 250, base: { maxVelocity: 130, agility: 0.115, warpSpeedMultiplier: 3, signatureRadius: 350 }, dogma: { 1547: 3 } }),
   ...Hull({ typeID: 11987, name: 'Guardian', group: 'Logistics', mass: 11_980_000, radius: 80, base: { maxVelocity: 209, agility: 0.61, warpSpeedMultiplier: 4, signatureRadius: 70 }, dogma: { 1547: 2 } }),
   ...Hull({ typeID: 19720, name: 'Revelation', group: 'Dreadnought', mass: 1_290_000_000, radius: 1700, base: { maxVelocity: 75, agility: 0.044, warpSpeedMultiplier: 1.5, signatureRadius: 11_100 }, dogma: { 1547: 4, 853: 1, 874: 1 } }),
+  ...Hull({ typeID: 32880, name: 'Venture', group: 'Frigate', mass: 1_200_000, radius: 41, base: { maxVelocity: 335, agility: 3.6, warpSpeedMultiplier: 5, signatureRadius: 40 }, dogma: { 1547: 1, 104: -2 } }),
   ...Hull({ typeID: 90000, name: 'Odd Tempest', group: 'Battleship', mass: 1, radius: 1, base: { maxVelocity: 1, agility: 1, signatureRadius: 1 }, dogma: {} }),
   ...Hull({ typeID: 35833, name: 'Astrahus', group: 'Citadel', mass: 1e10, radius: 1, base: { maxVelocity: 0, signatureRadius: 1 }, dogma: {} }),
   ...PropModRoutes({ typeID: 12084, name: '500MN Microwarpdrive II', attributes: { 20: 510, 567: 1.5e8, 796: 5e7, 554: 475, 73: 10_000 }, effects: [16, 6730] }),

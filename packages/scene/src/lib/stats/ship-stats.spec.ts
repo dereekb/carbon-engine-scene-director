@@ -4,6 +4,7 @@ import type { Maybe } from '@dereekb/util';
 import { createPilotContext, MAX_SKILLS_PILOT, type PilotContext } from './pilot';
 import { BAKED_PROP_MODS, findBakedPropMod, findHullSizedPropMod, HULL_SIZE_CLASSES, HULL_SIZED_PROP_MODS, normalizePropModName, propModKindOfName, type PropModStats, readPropModKind, readPropModModule, readRigSize, type RigSize } from './prop-mods';
 import { computeAlignTime, computeShipStats, type HullStats, normalizeHullStatOverrides } from './ship-stats';
+import type { DogmaIncomingModifier } from '../fitting/dogma';
 
 // Published values (EVE typeDogma via ESI, Tranquility, 2026-10-21).
 const TEMPEST_FLEET_ISSUE: HullStats = { mass: 103_300_000, maxVelocity: 130, agility: 0.115, signatureRadius: 350, radius: 250, warpSpeedMultiplier: 3, rigSize: 3 };
@@ -278,5 +279,32 @@ describe('computeShipStats, the dogma path', () => {
     expect(stats.applied[0]).toEqual({ source: 'stats override', attribute: 'maxVelocity', from: 209, to: 100 });
     expect(stats.applied.map((step) => step.source)).toContain('Navigation V');
     expect(() => computeShipStats({ hull: null, overrides: { mass: -1 }, dogma: dogmaOf(GUARDIAN_ID) })).toThrow('overrides.mass must be a positive number (kg)');
+  });
+});
+
+describe('computeShipStats with incoming modifiers', () => {
+  const web: DogmaIncomingModifier = { source: 'tackle: Stasis Webifier II (mid-0)', effect: 'remoteWebifierFalloff', attributeID: 37, operation: 6, amount: -60, resistanceAttributeID: 2115 };
+  const painter: DogmaIncomingModifier = { source: 'tackle: Target Painter II (mid-1)', effect: 'remoteTargetPaintFalloff', attributeID: 552, operation: 6, amount: 30, resistanceAttributeID: 2114 };
+  const point: DogmaIncomingModifier = { source: 'tackle: Warp Disruptor II (mid-2)', effect: 'warpDisrupt', attributeID: 104, operation: 2, amount: 1 };
+
+  it.each([TFI_ID, GUARDIAN_ID, RIFTER_ID])('webs, paints and points hull %i the same on both paths', (hullTypeID) => {
+    const incoming = [web, painter, point];
+    const table = computeShipStats({ hull: fixtureHullStats(hullTypeID), incoming });
+    const dogma = computeShipStats({ hull: null, dogma: { bundle: DOGMA_FIXTURE, hullTypeID }, incoming });
+    const bare = computeShipStats({ hull: fixtureHullStats(hullTypeID) });
+    for (const key of ['maxVelocity', 'signatureRadius'] as const) expect(Math.abs(dogma[key] - table[key]) / table[key]).toBeLessThan(1e-9);
+    expect(table.maxVelocity).toBeCloseTo(bare.maxVelocity * 0.4, 9);
+    expect(table.signatureRadius).toBeCloseTo(bare.signatureRadius * 1.3, 9);
+    expect([table.warpScrambleStatus, dogma.warpScrambleStatus]).toEqual([1, 1]);
+    expect(table.alignTime).toBe(bare.alignTime);
+    expect(table.applied.filter((step) => step.source.startsWith('tackle:')).map((step) => step.attribute)).toEqual(['maxVelocity', 'signatureRadius', 'warpScrambleStatus']);
+    expect(dogma.applied.filter((step) => step.source.startsWith('tackle:')).map((step) => step.attribute)).toEqual(['maxVelocity', 'signatureRadius', 'warpScrambleStatus']);
+  });
+
+  it("webs a running MWD's speed too, and takes the table hull's own warp scramble status", () => {
+    const running = computeShipStats({ hull: fixtureHullStats(RIFTER_ID), propMod: MWD_5MN_II, incoming: [web] });
+    expect(running.maxVelocity).toBeCloseTo(computeShipStats({ hull: fixtureHullStats(RIFTER_ID), propMod: MWD_5MN_II }).maxVelocity * 0.4, 9);
+    expect(computeShipStats({ hull: { ...RIFTER, warpScrambleStatus: -2 }, incoming: [point] }).warpScrambleStatus).toBe(-1);
+    expect(computeShipStats({ hull: RIFTER }).warpScrambleStatus).toBe(0);
   });
 });

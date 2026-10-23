@@ -18,7 +18,7 @@ describe('shipDefenseOf', () => {
     expect(defense.armor.ehp).toBeCloseTo(562.5 / ((0.4 + 0.65 + 0.75 + 0.9) / 4), 9);
     expect(defense.ehp).toBeCloseTo(defense.shield.ehp + defense.armor.ehp + defense.structure.ehp, 9);
     const capacitor = shipCapacitorOf(rifter, DOGMA_FIXTURE, []);
-    expect(capacitor).toEqual({ capacity: 312.5, rechargeTime: 93.75, peakRecharge: (2.5 * 312.5) / 93.75, drain: 0, stable: true, stableAt: 1 });
+    expect(capacitor).toEqual({ capacity: 312.5, rechargeTime: 93.75, peakRecharge: (2.5 * 312.5) / 93.75, drain: 0, stable: true, stableAt: 1, energyWarfareResistance: 1, remoteCapacitorImpedance: 1 });
   });
 
   it('adds a plate, then a damage control and two membranes, then a shield extender', () => {

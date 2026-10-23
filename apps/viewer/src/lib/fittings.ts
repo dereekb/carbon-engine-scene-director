@@ -325,7 +325,9 @@ export class FitLookup {
   }
 
   /**
-   * A ship's stats, memoized per bundle for dogma inputs (computeShipStats otherwise).
+   * A ship's stats, memoized per bundle for dogma inputs (computeShipStats otherwise). A ship with incoming modifiers
+   * (webs, points on it) is not memoized: their falloff scaling changes per cycle, and the director re-flies a target
+   * only when the set changes, so such entries would pile up.
    *
    * @param input - The computeShipStats input.
    * @returns The stats.
@@ -333,7 +335,7 @@ export class FitLookup {
    */
   ShipStats(input: ShipStatsInput): ShipStats {
     const { dogma } = input;
-    if (!dogma) return computeShipStats(input);
+    if (!dogma || input.incoming?.length) return computeShipStats(input);
     let memo = this.stats.get(dogma.bundle);
     if (!memo) {
       memo = new Map();
@@ -813,25 +815,41 @@ export function ShipDefenseReportOf(defense: ShipDefense): ShipDefenseReport {
 }
 
 /**
- * A ship's capacitor in get_state, rounded.
+ * A ship's capacitor in get_state, rounded: the evaluated numbers, the live level (capacitor.ts) when the page keeps
+ * one, and its capacitor warfare resistances when they are not 1.
  */
-export type ShipCapacitorReport = ShipCapacitor;
+export type ShipCapacitorReport = Omit<ShipCapacitor, 'energyWarfareResistance' | 'remoteCapacitorImpedance'> & {
+  /**
+   * GJ now, 1 decimal.
+   */
+  readonly level?: number;
+  /**
+   * level / capacity, 3 decimals.
+   */
+  readonly fraction?: number;
+  readonly energyWarfareResistance?: number;
+  readonly remoteCapacitorImpedance?: number;
+};
 
 /**
  * A ship's capacitor for get_state, rounded.
  *
  * @param capacitor - The evaluated capacitor.
+ * @param live - Its live level, when the page keeps one.
  * @returns The report.
  */
-export function ShipCapacitorReportOf(capacitor: ShipCapacitor): ShipCapacitorReport {
+export function ShipCapacitorReportOf(capacitor: ShipCapacitor, live: Maybe<{ readonly level: number; readonly fraction: number }> = null): ShipCapacitorReport {
   return {
+    ...(live ? { level: Round(live.level, 1), fraction: Round(live.fraction, 3) } : {}),
     capacity: Round(capacitor.capacity, 2),
     rechargeTime: Round(capacitor.rechargeTime, 2),
     peakRecharge: Round(capacitor.peakRecharge, 3),
     drain: Round(capacitor.drain, 3),
     stable: capacitor.stable,
     ...(capacitor.stableAt == null ? {} : { stableAt: Round(capacitor.stableAt, 3) }),
-    ...(capacitor.lastsFor == null ? {} : { lastsFor: Round(capacitor.lastsFor, 1) })
+    ...(capacitor.lastsFor == null ? {} : { lastsFor: Round(capacitor.lastsFor, 1) }),
+    ...(capacitor.energyWarfareResistance === 1 ? {} : { energyWarfareResistance: Round(capacitor.energyWarfareResistance, 3) }),
+    ...(capacitor.remoteCapacitorImpedance === 1 ? {} : { remoteCapacitorImpedance: Round(capacitor.remoteCapacitorImpedance, 3) })
   };
 }
 

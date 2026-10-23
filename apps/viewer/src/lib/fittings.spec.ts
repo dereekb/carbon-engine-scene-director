@@ -125,6 +125,22 @@ describe('FitLookup', () => {
     const input = { hull: null, dogma: resolved.dogma };
     expect(lookup.ShipStats(input)).toBe(lookup.ShipStats(input));
     expect(lookup.ShipStats(input)).toEqual(computeShipStats(input));
+    const webbed = { ...input, incoming: [{ source: 'tackle: Stasis Webifier II (mid-0)', effect: 'remoteWebifierFalloff', attributeID: 37, operation: 6, amount: -60, resistanceAttributeID: 2115 }] };
+    expect(lookup.ShipStats(webbed)).not.toBe(lookup.ShipStats(webbed));
+    expect(lookup.ShipStats(webbed).maxVelocity).toBeCloseTo(lookup.ShipStats(input).maxVelocity * 0.4, 9);
+  });
+
+  it('webs a fitted ship on the dogma path, its running prop mod included', async () => {
+    const lookup = new FitLookup({ fetch: FixtureHub(), retryDelaysMs: [] });
+    const resolved = await Resolved(PLATED, { lookup });
+    const propMod = ResolveShipPropMod({ module: 'mwd', rigSize: 1, answer: null });
+    const incoming = [{ source: 'tackle: Stasis Webifier II (mid-0)', effect: 'remoteWebifierFalloff', attributeID: 37, operation: 6, amount: -60, resistanceAttributeID: 2115 }];
+    const free = ResolveFlight({ published: null, hull: null, overrides: null, propMod, dogma: resolved.dogma, compute: (input) => lookup.ShipStats(input) });
+    const webbed = ResolveFlight({ published: null, hull: null, overrides: null, propMod, dogma: resolved.dogma, incoming, compute: (input) => lookup.ShipStats(input) });
+    expect(webbed.math).toBe('dogma');
+    expect(webbed.maxVelocity).toBeCloseTo(free.maxVelocity * 0.4, 9);
+    expect(webbed.propMod?.maxVelocity).toBeLessThan(free.propMod?.maxVelocity ?? 0);
+    expect(webbed.warpScrambleStatus).toBe(0);
   });
 });
 

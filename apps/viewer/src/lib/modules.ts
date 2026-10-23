@@ -14,12 +14,16 @@
  *   stops a ship's own modules that are not warp safe, and its targeted ones, at once.
  * - RepairLandings turns cycle events into repairs: shield boosters at cycle start, armor and hull repairers at cycle
  *   end, remote ones on their target scaled by effectiveness (damage.ts applies them).
+ * - Target effects (target-effects.ts): each running targeted module keeps `applied`, its effectiveness at its latest
+ *   cycle start (kept while it stops, null once off). Targeting / TargetIndex list them per target, for the target's
+ *   flight (webs, painters, points, scrams); CapacitorLandings turns cycle starts into neut, nos and transmitter
+ *   transfers (capacitor.ts applies them).
  *
  * Node-tested: it imports nothing from ./runtime.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { falloffEffectiveness, type DefenseLayerName, type ModuleActivation } from '@scene-director/scene';
+import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type ModuleActivation } from '@scene-director/scene';
 import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleReport, type ModuleCycleRequest, type ModuleCycleState } from './module-cycle';
 
 /**
@@ -87,6 +91,38 @@ export interface RepairLanding {
 }
 
 /**
+ * A running targeted module on a ship.
+ */
+export interface TargetingModule {
+  readonly from: string;
+  readonly spec: ShipModuleSpec;
+  /**
+   * Its falloff effectiveness now (1 when unknown).
+   */
+  readonly effectiveness: number;
+  /**
+   * Its effectiveness at its latest cycle start: what its effect on the target is scaled by this cycle.
+   */
+  readonly applied: number;
+}
+
+/**
+ * A capacitor transfer a cycle start lands: a neut or nos draining the target, a transmitter giving to it.
+ */
+export interface CapacitorLanding {
+  readonly from: string;
+  readonly module: string;
+  readonly target: string;
+  readonly kind: CapacitorTransferKind;
+  /**
+   * GJ, scaled by the cycle's effectiveness (the target's resistance not yet applied).
+   */
+  readonly amount: number;
+  readonly override: boolean;
+  readonly resistanceAttributeID?: number;
+}
+
+/**
  * A module's state in get_state (beside its key and name).
  */
 export interface ShipModuleLiveState extends ModuleCycleReport {
@@ -121,6 +157,10 @@ interface ModuleEntry {
    */
   retarget?: string;
   effectiveness: Maybe<number>;
+  /**
+   * The effectiveness at its latest cycle start; null once it is not running.
+   */
+  applied: Maybe<number>;
 }
 
 export class ShipModules {
@@ -158,7 +198,7 @@ export class ShipModules {
         const over = !spec.offline && limit > 0 && count >= limit;
         const cycle = new ModuleCycle(spec.offline || over ? 'offline' : 'online', timing);
         if (over) cycle.note = `offline: at most ${limit} of its group may be online`;
-        entry = { spec, cycle, target: null, effectiveness: null };
+        entry = { spec, cycle, target: null, effectiveness: null, applied: null };
       }
       if (entry.cycle.state !== 'offline') online.set(spec.activation.groupID, (online.get(spec.activation.groupID) ?? 0) + 1);
       after.set(spec.key, entry);
@@ -376,6 +416,62 @@ export class ShipModules {
   }
 
   /**
+   * The running targeted modules on a ship (remote reps included), with their effectiveness now and at their latest
+   * cycle start.
+   *
+   * @param target - The target ship's id.
+   * @returns Them, ship by ship in fit order.
+   */
+  Targeting(target: string): TargetingModule[] {
+    return this.TargetIndex().get(target) ?? [];
+  }
+
+  /**
+   * Targeting for every target, in one pass.
+   *
+   * @returns The running targeted modules by target id.
+   */
+  TargetIndex(): Map<string, TargetingModule[]> {
+    const index = new Map<string, TargetingModule[]>();
+    for (const [from, modules] of this.ships) {
+      for (const entry of modules.values()) {
+        if (!entry.target || !entry.cycle.running || !entry.spec.activation.targeted || IsTurret(entry)) continue;
+        const list = index.get(entry.target) ?? [];
+        list.push({ from, spec: entry.spec, effectiveness: entry.effectiveness ?? 1, applied: entry.applied ?? entry.effectiveness ?? 1 });
+        index.set(entry.target, list);
+      }
+    }
+    return index;
+  }
+
+  /**
+   * The capacitor transfers a batch of events lands: at each cycle start (the first at `on`) of a neut, nos or
+   * transmitter on a target, scaled by the effectiveness at that start.
+   *
+   * @param events - Boundary events.
+   * @returns The transfers, in event order.
+   */
+  CapacitorLandings(events: readonly ShipModuleEvent[]): CapacitorLanding[] {
+    const landings: CapacitorLanding[] = [];
+    for (const event of events) {
+      if (event.kind !== 'cycle' || !event.target) continue;
+      const effect = this.ships.get(event.ship)?.get(event.module)?.spec.activation.targetEffect;
+      const capacitor = effect?.capacitor;
+      if (!capacitor) continue;
+      landings.push({
+        from: event.ship,
+        module: event.module,
+        target: event.target,
+        kind: capacitor.kind,
+        amount: capacitor.amount * (event.effectiveness ?? 1),
+        override: capacitor.override === true,
+        ...(effect.resistanceAttributeID == null ? {} : { resistanceAttributeID: effect.resistanceAttributeID })
+      });
+    }
+    return landings;
+  }
+
+  /**
    * The repairs a batch of events lands: shield at a cycle's start, armor and hull at its end, remote ones on their
    * target scaled by effectiveness.
    *
@@ -461,6 +557,8 @@ export class ShipModules {
 
   private Events(ship: string, module: string, entry: ModuleEntry, events: readonly ModuleCycleEvent[]): ShipModuleEvent[] {
     const { effectGuid, cycleTime } = entry.spec.activation;
+    if (events.some((event) => event.kind === 'cycle')) entry.applied = entry.effectiveness ?? 1;
+    if (!entry.cycle.running) entry.applied = null;
     return events.map((event) => ({ ...event, ship, module, ...(entry.target ? { target: entry.target } : {}), ...(entry.effectiveness == null ? {} : { effectiveness: entry.effectiveness }), ...(effectGuid ? { effectGuid } : {}), cycleTime }));
   }
 

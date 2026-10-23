@@ -36,9 +36,15 @@ export const MAX_DOGMA_TYPE_IDS = 200;
  * HP (263 shield, 265 armor, 9 hull), shield recharge 479, the 12 resonances, capacitor 482 / 55, signature 552,
  * speed 37, agility 70, targeting 76 / 564 / 192, the prop mod numbers 20 / 567 / 796 / 554, duration 73, capacitor
  * need 6, range 54 / falloff 158 / falloffEffectiveness 2044, the rep amounts 68 / 84 / 83 and the ancillary multiplier
- * 1886.
+ * 1886; for target effects (target-effects.ts) the neut and transfer amounts 97 / 90, warp scramble status and strength
+ * 104 / 105, activationBlocked 1349 / 1350, nosOverride 1945, remoteResistanceID 2138 and the resistances it names (2045
+ * energy warfare, 2112 damps, 2113 disruption, 2114 painters, 2115 webs, 2116 remote repair, 2135 remote assistance,
+ * 2253 ECM, 6463 remote capacitor): webs and painters name theirs only through a module attribute value.
  */
-export const FIXED_ATTRIBUTE_IDS: readonly number[] = [4, 162, 38, 161, 280, 182, 183, 184, 1285, 1289, 1290, 669, 763, 978, 263, 265, 9, 479, 271, 272, 273, 274, 267, 268, 269, 270, 113, 111, 109, 110, 482, 55, 552, 37, 70, 76, 564, 192, 20, 567, 796, 554, 73, 6, 54, 158, 2044, 68, 84, 83, 1886];
+export const FIXED_ATTRIBUTE_IDS: readonly number[] = [
+  4, 162, 38, 161, 280, 182, 183, 184, 1285, 1289, 1290, 669, 763, 978, 263, 265, 9, 479, 271, 272, 273, 274, 267, 268, 269, 270, 113, 111, 109, 110, 482, 55, 552, 37, 70, 76, 564, 192, 20, 567, 796, 554, 73, 6, 54, 158, 2044, 68, 84, 83, 1886, 97, 90, 104, 105, 1349, 1350, 1945, 2138, 2045, 2112, 2113, 2114, 2115,
+  2116, 2135, 2253, 6463
+];
 
 /**
  * How many tools-core requests a bundle runs at once.
@@ -134,7 +140,7 @@ export class DogmaData implements DogmaDataApi {
         attributeIDs.add(modifier.modifiedAttributeID);
         attributeIDs.add(modifier.modifyingAttributeID);
       }
-      for (const id of [effect.durationAttributeID, effect.dischargeAttributeID, effect.rangeAttributeID, effect.falloffAttributeID, effect.trackingSpeedAttributeID]) if (id != null) attributeIDs.add(id);
+      for (const id of [effect.durationAttributeID, effect.dischargeAttributeID, effect.rangeAttributeID, effect.falloffAttributeID, effect.trackingSpeedAttributeID, effect.resistanceAttributeID]) if (id != null) attributeIDs.add(id);
     }
     const attributes = await this.Attributes(attributeIDs);
     return { sdeBuild, types, effects, attributes, ...(missing.length ? { missing: missing.sort((a, b) => a - b) } : {}) };
@@ -236,8 +242,8 @@ function ToEffectRecord(effectID: number, payload: JsonObject): DogmaEffectRecor
       ? [{ func: info['func'], domain: typeof info['domain'] === 'string' ? info['domain'] : '', modifiedAttributeID, modifyingAttributeID, operation, ...(groupID == null ? {} : { groupID }), ...(skillTypeID == null ? {} : { skillTypeID }) }]
       : [];
   });
-  const optional: Partial<Record<'durationAttributeID' | 'dischargeAttributeID' | 'rangeAttributeID' | 'falloffAttributeID' | 'trackingSpeedAttributeID', number>> = {};
-  for (const key of ['durationAttributeID', 'dischargeAttributeID', 'rangeAttributeID', 'falloffAttributeID', 'trackingSpeedAttributeID'] as const) {
+  const optional: Partial<Record<'durationAttributeID' | 'dischargeAttributeID' | 'rangeAttributeID' | 'falloffAttributeID' | 'trackingSpeedAttributeID' | 'resistanceAttributeID', number>> = {};
+  for (const key of ['durationAttributeID', 'dischargeAttributeID', 'rangeAttributeID', 'falloffAttributeID', 'trackingSpeedAttributeID', 'resistanceAttributeID'] as const) {
     const value = ReadNumber(payload[key]);
     if (value != null) optional[key] = value;
   }

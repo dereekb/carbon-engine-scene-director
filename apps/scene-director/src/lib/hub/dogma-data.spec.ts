@@ -43,6 +43,16 @@ describe('DogmaData', () => {
     expect(bundle.attributes['1527']).toBeDefined();
   });
 
+  it('carries an effect resistance attribute and the fixed tackle and resistance records', async () => {
+    const { dogmaData } = MakeRoutedDogmaData();
+    const bundle = await dogmaData.Bundle([12271, 527]);
+    expect(bundle.effects['6187']).toMatchObject({ name: 'energyNeutralizerFalloff', resistanceAttributeID: 2045 });
+    expect(bundle.effects['6426']).not.toHaveProperty('resistanceAttributeID');
+    expect(bundle.types['527'].attributes['2138']).toBe(2115);
+    for (const id of [97, 90, 104, 105, 1349, 1945, 2138, 2045, 2114, 2115, 6463]) expect(bundle.attributes[id]).toBeDefined();
+    expect(bundle.attributes['2115']).toMatchObject({ name: 'stasisWebifierResistance', defaultValue: 1 });
+  });
+
   it('lists every published skill once per hub', async () => {
     const { dogmaData, calls } = MakeRoutedDogmaData();
     const skills = await dogmaData.Skills();

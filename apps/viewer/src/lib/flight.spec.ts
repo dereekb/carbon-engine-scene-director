@@ -59,6 +59,22 @@ describe('ResolveFlight with a prop mod', () => {
     expect(ResolveFlight({ published: TFI, hull: null, overrides: null }).propMod).toBeUndefined();
   });
 
+  it('webs both the base and the running numbers, and reports the warp scramble status', () => {
+    const propMod = ResolveShipPropMod({ module: 'mwd', rigSize: 3, answer: null });
+    const incoming = [
+      { source: 'tackle: Stasis Webifier II (mid-0)', effect: 'remoteWebifierFalloff', attributeID: 37, operation: 6, amount: -60 },
+      { source: 'tackle: Warp Disruptor II (mid-1)', effect: 'warpDisrupt', attributeID: 104, operation: 2, amount: 1 }
+    ];
+    const free = ResolveFlight({ published: TFI, hull: null, overrides: null, propMod });
+    const webbed = ResolveFlight({ published: TFI, hull: null, overrides: null, propMod, incoming });
+    expect(webbed.maxVelocity).toBeCloseTo(free.maxVelocity * 0.4, 9);
+    expect(webbed.propMod?.maxVelocity).toBeCloseTo((free.propMod?.maxVelocity ?? 0) * 0.4, 9);
+    expect([free.warpScrambleStatus, webbed.warpScrambleStatus]).toEqual([0, 1]);
+    expect(free.warpScrambleSteps).toBeUndefined();
+    expect(webbed.warpScrambleSteps).toEqual([{ source: 'tackle: Warp Disruptor II (mid-1)', attribute: 'warpScrambleStatus', from: 0, to: 1 }]);
+    expect(webbed.alignTime).toBe(free.alignTime);
+  });
+
   it('gives class values prop mod numbers too, and a cycle time without a duration', () => {
     const stats = { ...findBakedPropMod(12084)!, duration: null };
     const flight = ResolveFlight({ published: null, hull: { category: 'Battleship', radius: 700 }, overrides: null, propMod: { module: 12084, stats, source: 'sde', size: 'L' } });

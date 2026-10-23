@@ -56,6 +56,11 @@ export interface DogmaEffectRecord {
   readonly rangeAttributeID?: number;
   readonly falloffAttributeID?: number;
   readonly trackingSpeedAttributeID?: number;
+  /**
+   * The target's attribute that scales a target effect (energyWarfareResistance 2045 for neuts and nos,
+   * remoteCapacitorImpedance 6463 for transmitters).
+   */
+  readonly resistanceAttributeID?: number;
   readonly modifiers: DogmaModifierRecord[];
 }
 
@@ -273,7 +278,7 @@ function readEffectRecord(value: unknown): Maybe<DogmaEffectRecord> {
       warpSafe: value['warpSafe'] === true,
       offensive: value['offensive'] === true,
       assistance: value['assistance'] === true,
-      ...optionalNumbers(value, ['durationAttributeID', 'dischargeAttributeID', 'rangeAttributeID', 'falloffAttributeID', 'trackingSpeedAttributeID'] as const),
+      ...optionalNumbers(value, ['durationAttributeID', 'dischargeAttributeID', 'rangeAttributeID', 'falloffAttributeID', 'trackingSpeedAttributeID', 'resistanceAttributeID'] as const),
       modifiers
     };
   }

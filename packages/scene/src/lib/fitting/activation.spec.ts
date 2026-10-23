@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { falloffEffectiveness, LAUNCHER_REFUSAL, moduleActivationOf, moduleReach } from './activation';
+import { EFFECTLESS_CATEGORIES, falloffEffectiveness, LAUNCHER_REFUSAL, moduleActivationOf, moduleReach } from './activation';
 import { evaluateShipDogma } from './dogma';
 import { DOGMA_FIXTURE, fixtureTypeID, GUARDIAN_ID, REVELATION_ID, RIFTER_ID } from './fitting.spec-helper';
 
@@ -20,11 +20,22 @@ describe('moduleActivationOf', () => {
     expect(remote?.cycleTime).toBeGreaterThan(0);
   });
 
-  it('marks siege as changing the flight, notes target effects not modelled, and refuses passive modules', () => {
+  it('marks siege as changing the flight, carries target effects, and refuses passive modules', () => {
     const [siege] = activations(REVELATION_ID, 'Siege Module II');
     expect(siege).toMatchObject({ category: 'siege', flight: true, warpSafe: false, refusal: null });
-    const [web, scram, plate] = activations(RIFTER_ID, 'Stasis Webifier II', 'Warp Scrambler II', '200mm Steel Plates II');
-    expect(web).toMatchObject({ category: 'web', targeted: true, note: 'cycles without effect on its target yet' });
+    const [web, scram, plate, point, neut] = activations(RIFTER_ID, 'Stasis Webifier II', 'Warp Scrambler II', '200mm Steel Plates II', 'Warp Disruptor II', 'Heavy Energy Neutralizer II');
+    expect(web).toMatchObject({ category: 'web', targeted: true, targetEffect: { effect: 'remoteWebifierFalloff' } });
+    for (const module of [web, scram, point, neut]) expect(module?.note).toBeUndefined();
+    expect(scram?.targetEffect?.blocksMicrowarpdrive).toBe(true);
+    expect(point?.targetEffect?.modifiers).toEqual([{ attributeID: 104, operation: 2, amount: 1 }]);
+    expect(neut?.targetEffect?.capacitor).toEqual({ kind: 'neut', amount: 600 });
+    expect(EFFECTLESS_CATEGORIES).toEqual({
+      'command-burst': 'cycles without effect: command burst buffs are not modelled yet',
+      'cap-booster': 'cycles without effect: cap boosters do not refill the live capacitor yet',
+      'weapon-disruptor': 'cycles without effect: weapons are not modelled yet',
+      'sensor-dampener': 'cycles without effect: locks are not modelled yet',
+      ecm: 'cycles without effect: locks are not modelled yet'
+    });
     expect(web?.reach).toBe(moduleReach(web ?? { range: null, falloff: null }));
     expect(web?.reach).toBeLessThan(Number.POSITIVE_INFINITY);
     expect(scram).toMatchObject({ category: 'scram', targeted: true, falloff: null });

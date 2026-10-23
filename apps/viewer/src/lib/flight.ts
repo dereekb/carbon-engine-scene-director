@@ -14,6 +14,8 @@
  * - A fitted ship whose fit has resolved (fittings.ts) flies the dogma path instead: the same computeShipStats with
  *   `dogma`, its modules online (the prop mod's running numbers with that module active), and reports its defense and
  *   capacitor. `math` says which path ran.
+ * - `incoming` (webs, painters, points and scrams running on the ship) goes to both computes, so a running MWD is
+ *   webbed too; `warpScrambleStatus` says whether it can warp (above 0 it cannot).
  * - Lookups are cached per page session by the hub's own key (the EVE type, else the DNA's hull:faction:race); failures
  *   are cached with the hub's message until ForgetFailures (every load_scene / open_scene).
  *
@@ -22,7 +24,9 @@
 
 import type { Maybe } from '@dereekb/util';
 import {
+  type AppliedBonus,
   computeShipStats,
+  type DogmaIncomingModifier,
   HULL_STAT_OVERRIDE_KEYS,
   type HullSizeClass,
   type HullStatOverrides,
@@ -122,6 +126,14 @@ export interface ShipFlight extends ShipPhysics {
    * The capacitor with the modules online (the dogma path); absent on the table path.
    */
   readonly capacitor?: ShipCapacitor;
+  /**
+   * warpScrambleStatus with the points and scrams on it and its own modules: above 0 it cannot warp.
+   */
+  readonly warpScrambleStatus: number;
+  /**
+   * The steps that changed warpScrambleStatus, when any did.
+   */
+  readonly warpScrambleSteps?: readonly AppliedBonus[];
 }
 
 export interface ResolveFlightInput {
@@ -149,6 +161,10 @@ export interface ResolveFlightInput {
    * The ship's resolved fit (fittings.ts): the dogma path runs, `published` then gives only the type and radius.
    */
   readonly dogma?: Maybe<ShipDogmaInput>;
+  /**
+   * Modifiers other ships' modules put on it (incomingModifiersOf): webs, painters, points, scrams.
+   */
+  readonly incoming?: Maybe<readonly DogmaIncomingModifier[]>;
   /**
    * computeShipStats, or a memoized one (FitLookup.ShipStats).
    */
@@ -251,7 +267,8 @@ export function ClassHull(hull: Maybe<ShipHull>): HullStats {
  */
 export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
   const { published, note, hull, overrides, propMod, dogma } = input;
-  const compute = input.compute ?? computeShipStats;
+  const incoming = input.incoming?.length ? input.incoming : null;
+  const compute = (stats: ShipStatsInput): ShipStats => (input.compute ?? computeShipStats)(incoming ? { ...stats, incoming } : stats);
   const pinned = HULL_STAT_OVERRIDE_KEYS.every((key) => overrides?.[key] != null);
   let source: FlightSource = 'class';
   if (pinned) source = 'stats';
@@ -272,6 +289,7 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
   else if (IsPositive(published?.published.radius)) radius = published.published.radius;
   else if (IsPositive(hull?.radius)) radius = hull.radius;
   const warpSpeed = [stats.warpSpeedMultiplier, published?.published.warpSpeedMultiplier].find(IsPositive) ?? ClassHull(hull).warpSpeedMultiplier ?? DEFAULT_WARP_SPEED;
+  const warpScrambleSteps = stats.applied.filter((step) => step.attribute === 'warpScrambleStatus');
   return {
     mass: stats.mass,
     agility: stats.agility,
@@ -304,7 +322,9 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
       : {}),
     math: stats.math,
     ...(stats.defense ? { defense: stats.defense } : {}),
-    ...(stats.capacitor ? { capacitor: stats.capacitor } : {})
+    ...(stats.capacitor ? { capacitor: stats.capacitor } : {}),
+    warpScrambleStatus: stats.warpScrambleStatus,
+    ...(warpScrambleSteps.length ? { warpScrambleSteps } : {})
   };
 }
 

@@ -19,7 +19,8 @@ What works today:
 - **Fits**: ships carry EVE fits (EFT); their modules set HP, resists, capacitor,
   signature and speed through the max-skills pilot, with stacking penalties and hull
   traits: fitted ships fly by them, `get_state` reports them, `ship_stats` evaluates
-  any fit, and activation plays the client's module effects and sounds.
+  any fit, and activation plays the client's module effects and sounds; webs, scrams,
+  points, painters, neuts and nos act on their targets.
 - **Weapons**: every ship mounts its fit's turrets on its hull's hardpoints, or default
   guns for its hull and race (with a charge) when it has no fit; `set_target` points
   them at a ship or object, and they fire once per weapon cycle with the game's

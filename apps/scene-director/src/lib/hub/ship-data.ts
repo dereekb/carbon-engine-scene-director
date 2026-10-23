@@ -12,7 +12,7 @@
  * `--no-sde-auto-prepare`, so an unprepared build answers 404 "not prepared"; that
  * becomes an `unavailable` error naming the prepare command. Lookups are cached per hub
  * (a failed one is retried). tools-core's typed dogma sections lack the prop-mod
- * attributes, rigSize and the capital agility hooks, so those are read by attribute id
+ * attributes, rigSize, the capital agility hooks and warpScrambleStatus, so those are read by attribute id
  * from `sde/typeDogma`.
  */
 
@@ -28,6 +28,7 @@ export { ShipDataError, type ShipDataFailure } from './sde-client';
 export const RIG_SIZE_ATTRIBUTE = 1547;
 export const ADVANCED_AGILITY_ATTRIBUTE = 853;
 export const ADVANCED_CAPITAL_AGILITY_ATTRIBUTE = 874;
+export const WARP_SCRAMBLE_STATUS_ATTRIBUTE = 104;
 export const SPEED_FACTOR_ATTRIBUTE = 20;
 export const SPEED_BOOST_FACTOR_ATTRIBUTE = 567;
 export const MASS_ADDITION_ATTRIBUTE = 796;
@@ -149,7 +150,8 @@ export class ShipData implements ShipDataApi {
       warpSpeedMultiplier: ReadNumber(base['warpSpeedMultiplier']),
       rigSize: typeDogma.attributes.get(RIG_SIZE_ATTRIBUTE) ?? null,
       advancedAgility: typeDogma.attributes.get(ADVANCED_AGILITY_ATTRIBUTE) ?? null,
-      advancedCapitalAgility: typeDogma.attributes.get(ADVANCED_CAPITAL_AGILITY_ATTRIBUTE) ?? null
+      advancedCapitalAgility: typeDogma.attributes.get(ADVANCED_CAPITAL_AGILITY_ATTRIBUTE) ?? null,
+      warpScrambleStatus: typeDogma.attributes.get(WARP_SCRAMBLE_STATUS_ATTRIBUTE) ?? null
     };
     if (!(published.mass > 0) || !(published.agility > 0)) {
       throw new ShipDataError('invalid', `type ${resolved.typeID} (${name}) has no ${published.mass > 0 ? 'agility' : 'mass'}; it is not a ship`);

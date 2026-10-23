@@ -9,6 +9,7 @@ import { moduleCategoryOf, type ModuleCategory, weaponKindOf, type WeaponKind } 
 import type { DogmaShip } from './dogma';
 import type { DogmaBundle } from './dogma-bundle';
 import { moduleNumbersOf, type ModuleNumbers } from './defense';
+import { moduleTargetEffectOf, type ModuleTargetEffect } from './target-effects';
 
 /**
  * Groups that cannot be activated yet, with why.
@@ -28,18 +29,16 @@ export const UNACTIVATABLE_GROUPS: Readonly<Record<number, string>> = {
  */
 export const EFFECTLESS_CATEGORIES: Readonly<Partial<Record<ModuleCategory, string>>> = {
   'command-burst': 'cycles without effect: command burst buffs are not modelled yet',
-  'cap-booster': 'cycles without effect: the capacitor is not live yet',
-  web: 'cycles without effect on its target yet',
-  scram: 'cycles without effect on its target yet',
-  point: 'cycles without effect on its target yet',
-  neut: 'cycles without effect on its target yet',
-  nos: 'cycles without effect on its target yet',
-  'weapon-disruptor': 'cycles without effect on its target yet',
-  'sensor-dampener': 'cycles without effect on its target yet',
-  'target-painter': 'cycles without effect on its target yet',
-  ecm: 'cycles without effect on its target yet',
-  'remote-capacitor': 'cycles without effect on its target yet'
+  'cap-booster': 'cycles without effect: cap boosters do not refill the live capacitor yet',
+  'weapon-disruptor': 'cycles without effect: weapons are not modelled yet',
+  'sensor-dampener': 'cycles without effect: locks are not modelled yet',
+  ecm: 'cycles without effect: locks are not modelled yet'
 };
+
+/**
+ * The note of a targeted module that does nothing modelled to its target.
+ */
+export const TARGET_EFFECTLESS_NOTE = 'cycles without effect on its target yet';
 
 /**
  * Why a missile launcher cannot be activated yet.
@@ -103,6 +102,10 @@ export interface ModuleActivation extends Omit<ModuleNumbers, 'cycleTime'> {
    * Its default effect's guid (`effects.ArmorHardening`): the client effect and sounds it plays (effects.ts).
    */
   readonly effectGuid?: string;
+  /**
+   * What it does to its target (webs, painters, points, scrams, neuts, nos, transmitters: target-effects.ts).
+   */
+  readonly targetEffect?: ModuleTargetEffect;
 }
 
 /**
@@ -126,7 +129,9 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
   else if (UNACTIVATABLE_GROUPS[type.groupID]) refusal = UNACTIVATABLE_GROUPS[type.groupID];
   else if (!effect || (effect.category !== 1 && effect.category !== 2)) refusal = 'it is passive: it is only online or offline';
   const flight = Boolean(effect?.modifiers.some((modifier) => modifier.domain === 'shipID' && SHIP_FLIGHT_ATTRIBUTES.has(modifier.modifiedAttributeID)));
-  const note = EFFECTLESS_CATEGORIES[category];
+  const targeted = effect?.category === 2;
+  const targetEffect = targeted ? moduleTargetEffectOf(ship, bundle, key) : null;
+  const note = EFFECTLESS_CATEGORIES[category] ?? (targeted && !weapon && !numbers.repair && !targetEffect ? TARGET_EFFECTLESS_NOTE : null);
   return {
     ...numbers,
     category,
@@ -134,14 +139,15 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
     refusal,
     ...(weapon ? { weapon } : {}),
     reach: weapon === 'turret' || effect?.category !== 2 ? Number.POSITIVE_INFINITY : moduleReach(numbers),
-    targeted: effect?.category === 2,
+    targeted,
     warpSafe: effect?.warpSafe === true,
     cycleTime: numbers.cycleTime ?? DEFAULT_MODULE_CYCLE_TIME,
     maxGroupActive: ship.moduleAttribute(key, MAX_GROUP_ACTIVE) ?? 0,
     maxGroupOnline: ship.moduleAttribute(key, MAX_GROUP_ONLINE) ?? 0,
     flight,
     ...(note && !refusal ? { note } : {}),
-    ...(effect?.guid ? { effectGuid: effect.guid } : {})
+    ...(effect?.guid ? { effectGuid: effect.guid } : {}),
+    ...(targetEffect ? { targetEffect } : {})
   };
 }
 

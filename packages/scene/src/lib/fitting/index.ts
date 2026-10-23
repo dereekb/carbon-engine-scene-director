@@ -9,3 +9,4 @@ export * from './typed-fit';
 export * from './switch';
 export * from './activation';
 export * from './effects';
+export * from './target-effects';
