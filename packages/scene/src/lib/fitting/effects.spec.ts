@@ -27,6 +27,7 @@ describe('module effects', () => {
     expect(moduleEffectSounds(hardener, 'off', { size: 'M', cycleTime: 24 })).toEqual({ events: ['ship_effect_M_armorhardener_stop'], stops: ['ship_effect_M_armorhardener_play'] });
     expect(moduleEffectSounds(MODULE_EFFECTS['effects.ShieldBoosting'], 'cycle', { size: 'L', cycleTime: 3 }).events).toEqual(['ship_effect_L_shieldboost_play']);
     expect(moduleEffectSounds(MODULE_EFFECTS['effects.RemoteArmourRepair'], 'on', { size: 'M', cycleTime: 6 }).events).toEqual(['remote_shipeffect_switch_size_M', 'remote_shipeffect_switch_duration_6000', 'remote_armorrepair']);
+    expect(moduleEffectSounds(MODULE_EFFECTS['effects.RemoteArmourRepair'], 'cycle', { size: 'M', cycleTime: 6 }).events).toEqual(['remote_shipeffect_switch_size_M', 'remote_shipeffect_switch_duration_6000', 'remote_armorrepair']);
     expect(moduleEffectSounds(MODULE_EFFECTS['effects.RemoteArmourRepair'], 'off', { size: 'M', cycleTime: 6 })).toEqual({ events: ['remote_shipeffect_stop'], stops: ['remote_armorrepair'] });
     expect([nearestSoundDuration(4900), nearestSoundDuration(24000), nearestSoundDuration(100)]).toEqual([5000, 20000, 2500]);
   });

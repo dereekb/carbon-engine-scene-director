@@ -41,13 +41,21 @@ import {
   type CjsModelValues,
   type EvePlanet,
   type EveShip2,
+  type EveRootTransform,
   type EveSpaceObject2,
+  type EveStretch,
+  type EveStretch3,
   type Tr2Effect,
   type TriVectorCurve,
   type Vec3
 } from './runtime';
 
 const DEGREES = Math.PI / 180;
+
+/**
+ * What the page puts in scene.objects besides ships: static objects and module effects (module-effects.ts).
+ */
+export type SceneObjectRoot = EveSpaceObject2 | EveStretch | EveStretch3 | EveRootTransform;
 
 /**
  * EVE's maps are BC7/BC5; without the feature the reader decodes to RGBA8.
@@ -294,14 +302,15 @@ export class Engine {
   }
 
   /**
-   * Adds a static object (a dressed station or stargate) to the live scene.
+   * Adds a static object (a dressed station or stargate) or a module effect (a beam, the web's trigger) to the live
+   * scene. A module effect is added when it starts, so it follows the ships built before it in scene.objects.
    */
-  AddObject(object: EveSpaceObject2): void {
+  AddObject(object: SceneObjectRoot): void {
     const { scene } = this.Parts();
     addChild(scene, 'objects', object, { listNotify: scene });
   }
 
-  RemoveObject(object: EveSpaceObject2): void {
+  RemoveObject(object: SceneObjectRoot): void {
     const { scene } = this.Parts();
     removeChild(scene, 'objects', object, { listNotify: scene });
   }

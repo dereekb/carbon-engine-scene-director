@@ -18,8 +18,8 @@ What works today:
   squad, wing or fleet on EVE's cycle timing, with the engine sound.
 - **Fits**: ships carry EVE fits (EFT); their modules set HP, resists, capacitor,
   signature and speed through the max-skills pilot, with stacking penalties and hull
-  traits: fitted ships fly by them, `get_state` reports them, and `ship_stats` evaluates
-  any fit.
+  traits: fitted ships fly by them, `get_state` reports them, `ship_stats` evaluates
+  any fit, and activation plays the client's module effects and sounds.
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.

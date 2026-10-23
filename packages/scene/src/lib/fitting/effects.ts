@@ -57,10 +57,12 @@ const OVERLAY = (name: string): string => `res:/dx9/model/effect/${name}_skinned
 const MODULE_FX = (name: string): string => `res:/fisfx/module/${name}.black`;
 
 /**
- * A remote repair beam's sounds: the size and duration switches, the event, and the shared stop.
+ * A remote repair beam's sounds: the size and duration switches and the event, every cycle (the event plays for the
+ * duration switch, about one cycle: real-GPU check 2026-10-23), and the shared stop.
  */
 function RemoteSounds(event: string): ModuleEffectSounds {
-  return { on: ['remote_shipeffect_switch_size_<size>', 'remote_shipeffect_switch_duration_<duration>', event], off: ['remote_shipeffect_stop'], stops: [event] };
+  const play = ['remote_shipeffect_switch_size_<size>', 'remote_shipeffect_switch_duration_<duration>', event];
+  return { on: play, cycle: play, off: ['remote_shipeffect_stop'], stops: [event] };
 }
 
 function Effect(guid: string, kind: ModuleEffectKind, resPath: string, sounds: ModuleEffectSounds = {}): ModuleEffect {

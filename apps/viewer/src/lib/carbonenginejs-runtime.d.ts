@@ -567,11 +567,18 @@ declare module '@carbonenginejs/runtime/trinity' {
   export class EveStretch {
     source: TriVectorCurve | null;
     dest: TriVectorCurve | null;
+    /**
+     * The stretch's own sounds (a Tr2AudioStretch*): StartFiring triggers them, and controller sound actions find
+     * their emitters here.
+     */
+    audio: object | null;
+    stretchAudio: object | null;
     display: boolean;
     readonly curveSets: readonly TriCurveSet[];
     /**
-     * Pins the endpoints (a 3-vector source, or a 16-element transform) and marks the stretch -Z forward. The loaded
-     * `source` / `dest` curves stay and overwrite the ends unless nulled first.
+     * Pins the endpoints (a 3-vector source, or a 16-element transform) and marks the stretch -Z forward, the turret
+     * muzzle path: a module beam fired this way points away from its target. The loaded `source` / `dest` curves stay
+     * and overwrite the ends unless nulled first. The page writes the loaded adapters' `value` instead.
      */
     SetFiringTransform(source: ArrayLike<number>, destination: ArrayLike<number>): void;
     StartFiring(delay?: number): void;
@@ -586,15 +593,25 @@ declare module '@carbonenginejs/runtime/trinity' {
    * A remote repair beam (remote armor, shield and hull repair): fired through its controllers' IsFiring variable.
    */
   export class EveStretch3 {
+    /**
+     * As loaded: Tr2TranslationAdapters. Its stretch modifier keeps the loaded `dest` and samples it at Blue's frame
+     * time, so the page writes the adapters' `value` instead of replacing them.
+     */
     source: TriVectorCurve | null;
     dest: TriVectorCurve | null;
+    /**
+     * As on EveStretch.
+     */
+    audio: object | null;
+    stretchAudio: object | null;
     display: boolean;
     readonly sourcePosition: Vec3;
     readonly destinationPosition: Vec3;
     readonly curveSets: readonly TriCurveSet[];
     readonly controllers: readonly { Unlink(): void }[];
     /**
-     * Pins both endpoints and drops the `source` / `dest` curves.
+     * Pins both endpoints and drops the `source` / `dest` curves (which drops the stretch modifier as well when the
+     * change notifies): the page writes the adapters' `value` instead.
      */
     SetFiringTransform(source: ArrayLike<number>, destination: ArrayLike<number>): void;
     StartFiring(delay?: number): void;

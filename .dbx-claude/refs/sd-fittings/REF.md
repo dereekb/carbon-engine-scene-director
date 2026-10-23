@@ -5,13 +5,14 @@
 > itself (numbers, switching, audio): `sd-ship-stats`; compositions and `cjs-fleet/1`: `sd-fleets` → `compositions`;
 > `add_ships` / `stage_engagement`: `sd-staging`.
 
-**Status (2026-10-23)**: slices C1-C5 of the fitted-modules plan
-(`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) are in: fits
-are parsed and ride on scene ships, the hub resolves fit names and serves dogma bundles, the dogma evaluator computes a
-fitted ship's HP, resists, capacitor, targeting and flight numbers (`ship_stats` reports them for a `fit`), and the page
-flies fitted ships by their fit and reports their modules, defense and capacitor in `get_state`, and `switch_modules`
-runs the modules on EVE's timing into a page-side damage model (below). Not yet: module effects and sounds (C6). Research
-behind the design: the dbx-claude note `fitted-modules-dogma-and-module-effects-research`.
+**Status (2026-10-23)**: the fitted-modules plan
+(`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) is in, C1-C6:
+fits are parsed and ride on scene ships, the hub resolves fit names and serves dogma bundles, the dogma evaluator
+computes a fitted ship's HP, resists, capacitor, targeting and flight numbers (`ship_stats` reports them for a `fit`),
+the page flies fitted ships by their fit and reports their modules, defense and capacitor in `get_state`,
+`switch_modules` runs the modules on EVE's timing into a page-side damage model, and running modules draw the client's
+effects and play its sounds (below). Research behind the design: the dbx-claude note
+`fitted-modules-dogma-and-module-effects-research`.
 
 ## Files
 
@@ -44,6 +45,10 @@ behind the design: the dbx-claude note `fitted-modules-dogma-and-module-effects-
 | `apps/viewer/src/lib/module-cycle.ts` | `ModuleCycle` (one module's state machine), `CycleEnd` (moved from destiny.ts, which re-exports it) |
 | `apps/viewer/src/lib/modules.ts` | `ShipModules`: the activation layer over a world port (`SurfaceDistance`, `InWarp`, `HasShip`, `tickSeconds`) |
 | `apps/viewer/src/lib/damage.ts` | `DamageModel`: current / max HP per layer, resonances, repairs and incoming repairs |
+| `fitting/effects.ts` | `MODULE_EFFECTS` (the client effect per default dogma effect guid), `moduleEffectOf`, `moduleEffectSounds`, `nearestSoundDuration`, `MODULE_EFFECT_SOUND_DURATIONS` |
+| `apps/viewer/src/lib/module-fx.ts` | `ModuleFxCommands`: module events → `start` / `cycle` / `stop` effect commands keyed `<ship>\|<module>` (node-tested) |
+| `apps/viewer/src/lib/module-audio.ts` | `ModuleAudioPost`: a command → the hull-sized sound events and stops on the module's ship (node-tested) |
+| `apps/viewer/src/lib/module-effects.ts` | `ModuleEffects` (runtime): loads, hydrates, attaches, places and tears down the drawn effects |
 
 ## Fits in the document
 
@@ -345,6 +350,82 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   target and stop when it is removed" (two Large Remote Armor Repairer II on a TFI 3 km off: refused without a target,
   then `incoming` on the TFI, stopped with `its target is gone` on `remove_ship`). The Guardian's Large RAR II reaches
   57.6 km optimal + 16.8 km falloff in this build (14.4 km base, +300 % Amarr Cruiser V).
+
+## Module effects and sounds (C6)
+
+Running modules draw what the EVE client draws and play its sounds. Not drawn: weapons, prop mods (their boosters and
+sound are `sd-ship-stats`'), siege, command bursts, cap boosters and anything else whose default effect guid is not in
+`MODULE_EFFECTS`.
+
+- **Catalog** (`fitting/effects.ts`, by the default effect's `guid`; paths and events checked against build 3632936's
+  res index and audio library):
+
+  | Kind | Effects (`effects.*`) | File | Sounds (`<size>` = the hull's S / M / L / XL) |
+  |---|---|---|---|
+  | overlay | ShieldBoosting, ArmorRepair, StructureRepair, ArmorHardening, ModifyShieldResonance | `res:/dx9/model/effect/<name>_skinned.black` | `ship_effect_<size>_shieldboost_play` each cycle; `_armorrepair_play`, `_hullrepair_play`, `_armorhardener_play` loop until their `_stop`; `_shieldhardener_play` once |
+  | overlay | Invulnerability, TriageMode | `res:/fisfx/module/{invulnerability,triagemode}_ov_t1a_skinned.black` | `ship_effect_invulnerability_field_play`, `ship_effect_triage_overlay_play` |
+  | beam (EveStretch3) | RemoteArmourRepair, ShieldTransfer, RemoteHullRepair | `res:/fisfx/module/<name>_st_t1a.black` | `remote_shipeffect_switch_size_<size>`, `remote_shipeffect_switch_duration_<cycle ms>`, then `remote_armorrepair` / `remote_shieldbooster` / `remote_hullrepair`, at the start and **every cycle** (the event lasts about one cycle); `remote_shipeffect_stop` on a stop |
+  | beam (EveStretch) | EnergyTransfer, WarpScramble, WarpDisrupt, EnergyDestabilization, EnergyVampire | the same folder | none in the library |
+  | trigger | ModifyTargetSpeed (web) | `res:/fisfx/module/stasisweb_tr_t1a.black` | none |
+
+- **Commands** (`ModuleFxCommands`): `on` → `start`, `cycle` n > 1 → `cycle`, `off` → `stop`; `end` gives none. A
+  beam or trigger needs the module's `target` (except a stop). Overlays play on the module's ship, beams from it to the
+  target, the trigger at the target.
+- **Sounds** (`ModuleAudioPost`, posted by `Director.ModuleOutputs` through `PageAudio.Post` on the module's ship's
+  emitter, beams included): `<size>` from `HULL_SIZE_CLASSES[RigSizeOf(...)]` as the prop mod's; the duration switch is
+  the nearest of `MODULE_EFFECT_SOUND_DURATIONS` to the cycle. A stop posts the `off` events and stops the loops the
+  start began (the Web Audio backend ignores authored stop relationships). A removed ship posts nothing: its emitter is
+  released with it.
+- **Drawing** (`ModuleEffects`, created only with a renderer; one effect per key: `loading`, `live` or `failed`):
+  - Each file loads once (`ResourceValues`); every start hydrates a new object from it inside `PageAudio.Detached`,
+    and a beam's own `audio` / `stretchAudio` are dropped, so nothing plays twice and no emitter registers.
+  - **Overlay**: `ship.AddOverlayEffect` once the hull is built (its curve set plays on load and is replayed each cycle:
+    `ResetTimeRange` + `Play`); on a stop it stays until the last replay's curve set ends (`GetMaxCurveDuration`: 1 s
+    shield boost, 6 s armor / hull repair, 10 s shield hardener, suppressor and triage, 20 s armor hardener), then
+    `RemoveOverlayEffect` and `Destruct()` of its Tr2Effects. A rebuilt hull gets a fresh overlay.
+  - **Beam**: added to `scene.objects` and `StartFiring(0)` on its first placement; ends written every frame (before
+    `engine.Frame`) from the drawn ClientBall positions into its loaded `source` / `dest` Tr2TranslationAdapters' `value`
+    (`sd-runtime`: why not `SetFiringTransform`); re-fired each cycle (EveStretch `StartFiring(0)`, EveStretch3
+    `PlayCurveSet('play_start')`); a stop `StopFiring()`s it and removes it `BEAM_LINGER` (2 s) later.
+  - **Trigger**: the web's EveTransform (curve LOD off) inside a new EveRootTransform on the target's curves, scaled to
+    2 × the target's drawn radius ÷ 2.7 m (its authored size); played each cycle, removed `TRIGGER_LINGER` (5 s) after
+    its last play once the module stops.
+  - Every frame (`DriveModuleEffects`, after `DriveAudio`): a beam whose ship or target is gone and an overlay whose
+    ship is gone are removed. A load clears every effect after the modules' stop commands. Teardown retires the root
+    through `RetireShips` against every other live root (ships, dressing, objects, effects).
+- **get_state**: `renderer.moduleEffects` `{ live, loading, failed, errors }` (the 5 latest errors; a failure is also a
+  `console.warn` in `page_log`).
+
+### Real-GPU evidence (2026-10-23, Windows Chrome, RTX 40 series, SDE 3632936)
+
+Scene (`.scratch/c6-gpu/` on dbxpc: `scene.json`, `setup.sh`, screenshots): a Guardian (Domination Thermal Armor
+Hardener, DC II, 10MN AB II, 2 × Large Remote Armor Repairer II, Heavy Energy Neutralizer II, Large Remote Capacitor
+Transmitter II) on a bare TFI 3 km off; a tackle Rifter (Stasis Webifier II, Warp Scrambler II, Warp Disruptor II) on
+the TFI; a Rifter with Small Armor Repairer II, Thermal Armor Hardener II, Medium Shield Booster II and Multispectrum
+Shield Hardener II. All 12 effects live, 0 failed, `gpuErrors` 0, 60 fps, no warnings in `page_log`;
+`audio.gameObjects` stayed the page's 2 emitters plus the listener.
+
+- **Beams**: remote armor repair (teal stream), neut (thin line with a travelling flare), cap transfer (a ~3 s pulse of
+  each 5 s cycle, impact flare at the target), scram (blue), point (faint green strands) all run from the shooter to the
+  target (`rar-beams.png`, `neut-beam.png`, `cap-transfer-beam.png`, `scram-beam.png`, `point-beam.png`).
+  **`EveStretch.SetFiringTransform` turned every EveStretch beam away from its target** (it marks the stretch -Z
+  forward: the turret muzzle path), so beams write their adapters instead.
+- **Web**: a bluish field around the TFI, sized to it (`web-trigger.png`).
+- **Overlays on an animated hull** (the Rifter, `isAnimated` true): an on / off A/B shows the hardener's lit pattern
+  and glints on the hull (`overlay-rifter-on.png` vs `-off.png`); replays measured (the shield hardener's curve time
+  restarts each 10 s cycle). Subtle at 75 m, as in the client.
+- **Overlays on a non-animated hull** (the Guardian, `isAnimated` false; only `_skinned` overlay files exist): the
+  overlay emits its additive batch every frame (an `emitOverlayBatches` probe) with no GPU error, but nothing visible
+  changes in an A/B (`overlay-guardian-on.png` / `-off.png`). Follow-up.
+- **Teardown**: switching every module `online` emptied the effects as timed (12 → 3 at +4 s → 1 → 0 by the hardener's
+  20 s curve), left no overlay on either hull and only the 4 ships in `scene.objects`, and stopped every loop
+  (`GetPlayingEvents` empty). Removing the target took its beams and web at once; a `load_scene` cleared the rest.
+- **Sounds** (measured, not heard: `posted` with `played` true, and the emitter's `GetPlayingEvents`):
+  `ship_effect_S_shieldboost_play` each 3 s cycle; `ship_effect_{S,M}_armorhardener_play` and
+  `ship_effect_S_armorrepair_play` looping until stopped; `ship_effect_S_shieldhardener_play` once;
+  `remote_shipeffect_switch_size_M`, `remote_shipeffect_switch_duration_6000`, `remote_armorrepair` (plays ~6 s, so it
+  is posted every cycle) and `remote_shipeffect_stop`. Not posted in this check: the hull repairer, suppressor and
+  triage sounds, and the shield transfer / remote hull beams (same code path as remote armor).
 
 ## Why not tools-core's `fitting/parse`
 

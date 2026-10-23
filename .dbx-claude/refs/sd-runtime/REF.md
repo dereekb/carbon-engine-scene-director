@@ -19,7 +19,7 @@
   `.d.ts` first, so a wrong rename fails to compile (see the naming rules in `sd-workspace`).
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
-  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`. The full facade drags in the renderer and the `runtime-dist/`
+  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`. The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)
@@ -80,6 +80,42 @@ move them (`sd-destiny`).
 The ClientBall's velocity becomes `EveSpaceObject2.worldVelocity` (`UpdateWorldTransform`), `EveShip2.UpdateSyncronous`
 sets `speed.value` from it, and `EveBoosterSet2Renderable.CalculateIntensity` divides it by `boosters.maxVel` (runtime
 default 250 m/s for every hull). `Director.DriveBoosters` sets that per ship each frame: see `sd-destiny` (`boosters`).
+
+## Module effects (`module-effects.ts`)
+
+The running modules' client effects (what they are and when they play: `sd-fittings` → Module effects and sounds).
+`.d.ts` classes: `EveMeshOverlayEffect`, `EveStretch`, `EveStretch3`, `EveTransform`, `EveRootTransform`, `TriCurveSet`,
+and `EveShip2.isAnimated` / `overlayEffects` / `AddOverlayEffect` / `RemoveOverlayEffect`.
+
+- **Hydration**: `ResourceValues` once per file, then `CjsSchema.from` on a `structuredClone` of the values inside
+  `PageAudio.Detached`, a new object per use. Not `blue.resMan.LoadObject`: it also builds a new object per call
+  (`CjsBlueResMan.js` LoadObject), but asynchronously, so it cannot run detached, and an EveStretch3's
+  `Tr2AudioStretchBase` (three `AudEmitter`s) or the web's `TriObserverLocal` would register with the page's audio.
+  A beam's `audio` / `stretchAudio` are then nulled: `StartFiring` triggers them and controller `Tr2ActionPlaySound`s
+  find their emitters through them.
+- **Beam ends: write the loaded adapters, never `SetFiringTransform`.** Every module stretch file loads `source` /
+  `dest` as `Tr2TranslationAdapter`s (no child curve: they answer `value` at any time). The page copies the drawn
+  ClientBall positions into their `value` each frame, before `engine.Frame`.
+  - `EveStretch.SetFiringTransform` also calls `SetIsNegZForward(true)` (the turret muzzle path): a module beam then
+    points from its source *away* from the target (real GPU 2026-10-23). It also leaves the loaded adapters in place,
+    which overwrite the ends.
+  - `EveStretch3.SetFiringTransform` nulls `source` / `dest`, but the stretch modifier `Initialize` built
+    (`EveChildModifierStretch`) keeps the loaded `dest` and samples it at **Blue's clock**
+    (`blue.os.GetCurrentFrameTime()`), so the stretched mesh would aim at the file's `[0, 0, 10000]`; and a notified
+    `dest = null` drops the modifier (`OnModified`), leaving the mesh unstretched. Writing the adapter keeps the
+    modifier on the target, whatever the clock.
+- **Order**: beams and the web's root go into `scene.objects` with `Engine.AddObject` (typed `SceneObjectRoot`: static
+  objects and these) when they first place, after the ships built by then.
+- **Overlays**: the overlay's curve set plays on load (`TriCurveSet.playOnLoad` defaults true); the hull drives its
+  `Update` (curve LOD-gated by the ship). Teardown: `RemoveOverlayEffect`, then `Destruct()` every `Tr2Effect` in its
+  opaque / decal / transparent / additive / distortion lists (ship retirement does not destruct Tr2Effects; `Destruct`
+  only unhooks the effect's own resource notifications and bindings, so a shared shader survives). A rebuilt hull gets
+  a fresh overlay. Only `_skinned` overlay files exist: on a non-animated hull (`isAnimated` false, e.g. the Guardian)
+  the overlay emits its batch but draws nothing visible (2026-10-23; follow-up).
+- **Web**: an `EveTransform` scene child needs an `EveRootTransform` parent (`addChild(root, 'children', web)`) to be
+  placed by curves; `useLodLevel = false` on the whole tree, or small on screen its curve sets step at 1 Hz.
+- **Retire**: stretches and roots go through `RetireShips([root], retained)` with every other live root; the
+  director adds `ModuleEffects.Roots()` to the ships', dressing's and objects' retained sets.
 
 ## Audio (`audio.ts`)
 

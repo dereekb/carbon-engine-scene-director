@@ -246,6 +246,7 @@ async function Start(): Promise<void> {
     liveDirector?.TrackCamera(now);
     presentation.Apply(liveDirector?.cinema.Presentation() ?? {});
     liveDirector?.DriveAudio(now);
+    liveDirector?.DriveModuleEffects(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);
   };

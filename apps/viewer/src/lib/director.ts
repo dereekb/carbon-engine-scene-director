@@ -65,6 +65,7 @@
 import type { Maybe } from '@dereekb/util';
 import {
   applySceneOperations,
+  HULL_SIZE_CLASSES,
   type CelestialTarget,
   type SceneObject,
   toCelestialTargets,
@@ -145,6 +146,9 @@ import { LocationKey, LocationLookup } from './location';
 import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrders } from './objects';
 import { ObjectForward, SceneObjects } from './scene-objects';
 import { LocationDressing } from './location-dressing';
+import { ModuleAudioPost } from './module-audio';
+import { ModuleEffects, type ModuleEffectsReport } from './module-effects';
+import { ModuleFxCommands } from './module-fx';
 import { ShipModules, type ShipModuleEvent } from './modules';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource, type ResolvedShipPropMod } from './prop-mods';
@@ -447,6 +451,10 @@ export class Director {
    */
   readonly damage = new DamageModel();
   /**
+   * The running modules' drawn effects (module-effects.ts); null without a renderer.
+   */
+  private readonly moduleEffects: Maybe<ModuleEffects>;
+  /**
    * Per fitted ship: the module specs last given to the activation layer, and the module states its flight was
    * computed with.
    */
@@ -485,11 +493,11 @@ export class Director {
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
-      retained: () => [...this.ShipRoots(), ...this.objects.Roots()],
+      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()],
       onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
-    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
+    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -499,6 +507,14 @@ export class Director {
     // A module already running when audio turns on has played its one-shot activation: nothing to post.
     this.audio = new PageAudio({ disabled: audioDisabled, onChange: () => this.onChange() });
     world.OnPropMod((event) => this.PostPropModAudio(event));
+    this.moduleEffects = engine
+      ? new ModuleEffects({
+          engine,
+          ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots()],
+          detachAudio: (build) => this.audio.Detached(build)
+        })
+      : null;
     this.modules = new ShipModules({
       SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
       InWarp: (id) => world.InWarp(id),
@@ -685,6 +701,16 @@ export class Director {
   }
 
   /**
+   * Places the running modules' effects for the frame at `now` (beam ends from the drawn balls, overlays on rebuilt
+   * hulls). Runs between world.Tick and engine.Frame.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  DriveModuleEffects(now: number): void {
+    this.moduleEffects?.Frame(now);
+  }
+
+  /**
    * Feeds every built ship's booster set from its drawn ball speed, for the frame at `now`. Runs between world.Tick
    * and engine.Frame; the ClientBall caches its sample per time, so the renderer draws the same velocity.
    *
@@ -784,7 +810,9 @@ export class Director {
         });
       }
     }
-    const renderer: ({ available: true } & EngineStats) | { available: false; reason: string } = this.engine ? { available: true, ...this.engine.Stats() } : { available: false, reason: this.engineError?.message ?? 'not started' };
+    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport> } & EngineStats) | { available: false; reason: string } = this.engine
+      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null }
+      : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0 } : null,
@@ -907,8 +935,10 @@ export class Director {
       this.flownStates.clear();
     }
     // Modules that ran on or at a removed ship stop: their ships fly again without them (a load retunes every ship).
-    if (restart) this.ModuleOutputs(moduleEvents);
-    else this.ModuleEvents(moduleEvents);
+    if (restart) {
+      this.ModuleOutputs(moduleEvents);
+      this.moduleEffects?.Clear();
+    } else this.ModuleEvents(moduleEvents);
 
     // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place
     // before the store write, so an order arriving meanwhile always finds a ball for every document ship.
@@ -1178,14 +1208,33 @@ export class Director {
   }
 
   /**
-   * What module events do besides the ship's numbers: repairs land in the damage model.
+   * What module events do besides the ship's numbers: repairs land in the damage model, and the client's effects and
+   * sounds play (module-fx.ts, module-audio.ts, module-effects.ts).
    *
    * @param events - The events.
    */
   private ModuleOutputs(events: readonly ShipModuleEvent[]): void {
     if (!events.length) return;
     for (const landing of this.modules.RepairLandings(events)) this.damage.Repair(landing.ship, landing.layer, landing.amount);
+    const commands = ModuleFxCommands(events);
+    const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
+    for (const command of commands) {
+      const doc = docs.get(command.ship);
+      // A removed ship's emitter is already released: its voices stopped with it.
+      if (!doc) continue;
+      const size = HULL_SIZE_CLASSES[RigSizeOf({ published: this.hullStats.Cached(doc)?.hull, hull: this.live.get(command.ship)?.hull })];
+      const { ship, events: sounds, stops } = ModuleAudioPost(command, size);
+      if (sounds.length || stops.length) this.audio.Post({ ship, tick: command.tick, events: sounds, stops, placement: this.AudioPlacement(ship, this.clock.now) });
+    }
+    this.moduleEffects?.Apply(commands, this.clock.now);
     this.onChange();
+  }
+
+  /**
+   * The module effects' roots, for every retire's retained set.
+   */
+  private ModuleEffectRoots(): object[] {
+    return this.moduleEffects?.Roots() ?? [];
   }
 
   /**
@@ -1367,7 +1416,7 @@ export class Director {
     this.live.delete(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
-    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots()]);
+    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()]);
   }
 
   /**
