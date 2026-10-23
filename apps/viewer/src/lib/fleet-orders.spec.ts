@@ -62,7 +62,7 @@ class Rig {
    * order_fleet as Director.OrderFleet runs it: resolve, apply the document ops, then fly.
    */
   Order(request: object): FleetOrderResult {
-    const resolved = this.orders.Resolve(normalizeFleetOrderRequest(request, { ships: new Set(this.scene.ships.map((doc) => doc.id)) }));
+    const resolved = this.orders.Resolve(normalizeFleetOrderRequest(request, { ships: new Set(this.scene.ships.map((doc) => doc.id)), objects: new Set(this.world.ObjectIds()) }));
     const operations = toFleetOrderOperations(this.scene, resolved);
     if (operations.length) this.Edit(operations);
     return this.orders.Fly(resolved);
@@ -208,6 +208,30 @@ describe('FleetOrders', () => {
     for (const [id, at] of landedAt) expect(Gap(rig.world.Motion(id)!.position, at), id).toBeLessThan(3000);
     rig.Until(() => rig.Command('fleet', 'f').state === 'idle', 60);
     expect(rig.Command('fleet', 'f').warp).toBeUndefined();
+  });
+
+  it('warps the fleet to an object or a celestial target in formation: every member warps and lands in its slot', () => {
+    // A station-sized object and a celestial target: static balls, which the landing prediction reads like a ship's.
+    const targets = [
+      { id: 'station', position: [0, 0, 600_000] as SceneVector, radius: 5000 },
+      { id: 'celestial:60003760', position: [0, 600_000, 0] as SceneVector, radius: 100_000 }
+    ];
+    for (const target of targets) {
+      const rig = new Rig();
+      rig.world.AddObject(target, target.radius);
+      const result = rig.Order({ fleet: 'f', order: { type: 'warp', target: target.id, range: 10_000 } });
+      // The FC lands both radii plus the range short of the centre.
+      expect(Gap(result.landing as SceneVector, target.position), target.id).toBeCloseTo(10_000 + target.radius + FLIGHTS.get('fc')!.radius, -1);
+      expect(result.skipped, target.id).toEqual([]);
+      const warping = result.ships as readonly { readonly id: string; readonly landing: SceneVector }[];
+      expect(
+        warping.map((ship) => ship.id),
+        target.id
+      ).toEqual(MEMBERS);
+      rig.Until(() => rig.Phase('fc') === 'landed', 150);
+      rig.Until(() => rig.InFormation(MEMBERS), 90);
+      for (const ship of warping) expect(Gap(rig.world.Motion(ship.id)!.position, ship.landing), `${target.id} ${ship.id}`).toBeLessThan(3000);
+    }
   });
 
   it('leaves a tackled member out of a fleet warp, regrouped, and refuses a warp a tackled FC leads', () => {

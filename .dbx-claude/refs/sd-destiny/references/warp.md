@@ -26,6 +26,10 @@ default 0; no `speed`: a warp always aligns at full speed). Code: `DestinyWorld`
 
 - Point: `range` metres short of it, back toward where warp begins.
 - Ship: `range` surface to surface from **where the target was when the order applied** (not tracked during warp).
+- Object or celestial target (`celestial:<id>`): the same, on its static ball (both radii, as for a ship).
+- A planet, moon, star or asteroid belt **by name** (`sd-locations` "Order targets by name"): no ball; the name becomes
+  a warp to the point `range` off its surface (a belt: off its centre) on the line from its centre toward the ship (a
+  fleet: its FC), range 0. A landing beyond the scene extent (10,000 km) is refused.
 
 ## Rules that cost debugging
 

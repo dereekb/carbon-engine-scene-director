@@ -11,11 +11,31 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, CELESTIAL_KINDS, type LocationDirection, MAP_SEARCH_KINDS, type MapCelestial, type MapSystem, type MapSystemAnswer, normalizeScene, normalizeSceneLocation, type SceneDocument, type SceneLocation, type SceneVector, toLocationPlacement, toMapSystemAnswer } from '@scene-director/scene';
+import {
+  applySceneOperations,
+  CELESTIAL_KINDS,
+  type LocationDirection,
+  MAP_SEARCH_KINDS,
+  type MapCelestial,
+  type MapSystem,
+  type MapSystemAnswer,
+  normalizeScene,
+  normalizeSceneLocation,
+  type SceneDocument,
+  type SceneLocation,
+  type SceneVector,
+  toLocationPlacement,
+  toMapSystemAnswer,
+  matchCelestialName,
+  normalizeMapName
+} from '@scene-director/scene';
 import type { MapDataApi, MapSearchItem } from './map-data';
 import type { SavedScenesPage } from './saved-scenes';
 import { ShipDataError } from './ship-data';
 import { ToolError, type ToolArgs } from './tool-call';
+
+// The name matcher lives in @scene-director/scene (the page resolves order targets by name too).
+export { matchCelestialName as MatchCelestialName, normalizeMapName as NormalizeMapName, type CelestialMatch, type CelestialMatchRule, type MatchCelestialNameInput } from '@scene-director/scene';
 
 const SYSTEM_SEARCH_LIMIT = 50;
 const DEFAULT_MAP_SEARCH_LIMIT = 20;
@@ -23,9 +43,6 @@ const MAX_MAP_SEARCH_LIMIT = 50;
 const SUGGESTION_LIMIT = 5;
 const CANDIDATE_LIMIT = 10;
 const CELESTIAL_SEARCH_KINDS = ['star', 'planet', 'station', 'stargate'];
-const STAR_WORDS = new Set(['star', 'sun', 'the star', 'the sun']);
-const GATE_TO_PATTERN = /^(?:the )?(?:star)?gate\s*(?:to )?\(?(.+?)\)?$/u;
-const GATE_NAMED_PATTERN = /^(?:the )?(.+?) (?:star)?gate$/u;
 const IN_SYSTEM_PATTERN = /^(.*\S)\s+in\s+(\S.*)$/iu;
 const UNSEARCHABLE_HINT = 'moons and asteroid belts are found through their system: give the full name ("Jita IV - Moon 4") or pass system';
 
@@ -37,68 +54,9 @@ export interface LocationsOptions {
   readonly page: SavedScenesPage;
 }
 
-/**
- * Which rule of MatchCelestialName matched.
- */
-export type CelestialMatchRule = 'exact' | 'prefixed' | 'star' | 'gate' | 'substring';
-
-export type CelestialMatch = Maybe<{ readonly celestial: MapCelestial; readonly rule: CelestialMatchRule } | { readonly candidates: MapCelestial[] }>;
-
-export interface MatchCelestialNameInput {
-  readonly celestials: readonly MapCelestial[];
-  readonly text: string;
-  readonly systemName: string;
-}
-
 interface ResolvedTarget {
   readonly system: MapSystem;
   readonly celestial: MapCelestial;
-}
-
-/**
- * A name as the resolver compares it: NFKC, trimmed, single spaces, lower case.
- *
- * @param text - The name.
- * @returns Its comparable form.
- */
-export function NormalizeMapName(text: string): string {
-  return text.normalize('NFKC').trim().replaceAll(/\s+/gu, ' ').toLowerCase();
-}
-
-/**
- * Which of a system's celestials a name means. The first rule that matches wins: the exact name; the system-prefixed
- * name ("IV - Moon 4" in Jita is "Jita IV - Moon 4", "Star" is "Jita - Star"); a star word ("star", "the sun"); a
- * gate shorthand ("Perimeter gate", "the gate to Perimeter"); a unique substring (after a leading "at" or "the").
- *
- * @param input - The system's celestials and name, and the text.
- * @returns The celestial and the rule, the candidates when a substring matches several, or null.
- */
-export function MatchCelestialName(input: MatchCelestialNameInput): CelestialMatch {
-  const { celestials } = input;
-  const text = NormalizeMapName(input.text);
-  const bare = text.replace(/^at /u, '').replace(/^the /u, '');
-  const system = NormalizeMapName(input.systemName);
-  const named = (name: string) => celestials.find((celestial) => NormalizeMapName(celestial.name) === name);
-
-  let match: CelestialMatch = null;
-  const exact = named(text) ?? named(bare);
-  const prefixed = [text, bare]
-    .flatMap((part) => [`${system} ${part}`, `${system} - ${part}`])
-    .map(named)
-    .find((celestial) => celestial != null);
-  const gate = (GATE_TO_PATTERN.exec(text) ?? GATE_NAMED_PATTERN.exec(text))?.[1];
-  const gateName = gate ? `stargate (${gate.trim()})` : null;
-  if (exact) match = { celestial: exact, rule: 'exact' };
-  else if (prefixed) match = { celestial: prefixed, rule: 'prefixed' };
-  else if (STAR_WORDS.has(text) && celestials.some((celestial) => celestial.kind === 'star')) match = { celestial: celestials.find((celestial) => celestial.kind === 'star') as MapCelestial, rule: 'star' };
-  else if (gateName && celestials.some((celestial) => celestial.kind === 'stargate' && NormalizeMapName(celestial.name) === gateName)) {
-    match = { celestial: celestials.find((celestial) => celestial.kind === 'stargate' && NormalizeMapName(celestial.name) === gateName) as MapCelestial, rule: 'gate' };
-  } else if (bare) {
-    const found = celestials.filter((celestial) => NormalizeMapName(celestial.name).includes(bare));
-    if (found.length === 1) match = { celestial: found[0], rule: 'substring' };
-    else if (found.length > 1) match = { candidates: found };
-  }
-  return match;
 }
 
 export class Locations {
@@ -292,7 +250,7 @@ export class Locations {
 
   private async TargetInSystem(text: string, system: MapSystem): Promise<ResolvedTarget> {
     const celestials = await this.mapData.SystemCelestials(system.id);
-    const match = MatchCelestialName({ celestials, text, systemName: system.name });
+    const match = matchCelestialName({ celestials, text, systemName: system.name });
     if (match && 'candidates' in match) {
       const names = match.candidates.slice(0, CANDIDATE_LIMIT).map((celestial) => celestial.name);
       throw new ToolError(`"${text}" matches ${match.candidates.length} celestials in ${system.name}: ${names.join(', ')}; use the full name or the id`);
@@ -306,9 +264,9 @@ export class Locations {
    * words are a system name (moons and belts, which the map search does not index).
    */
   private async TargetByName(text: string): Promise<ResolvedTarget> {
-    const wanted = NormalizeMapName(text);
+    const wanted = normalizeMapName(text);
     const search = await this.mapData.Search({ query: text, kinds: CELESTIAL_SEARCH_KINDS, limit: SYSTEM_SEARCH_LIMIT });
-    const exact = search.items.filter((item) => item.solarSystemID != null && NormalizeMapName(item.name) === wanted);
+    const exact = search.items.filter((item) => item.solarSystemID != null && normalizeMapName(item.name) === wanted);
     const systems = [...new Set(exact.map((item) => item.solarSystemID as number))];
     if (systems.length === 1) {
       const system = await this.mapData.System(systems[0]);
@@ -329,7 +287,7 @@ export class Locations {
       if (words[count - 1] === '-') continue;
       const system = await this.ResolveSystemExact(words.slice(0, count).join(' '));
       if (!system) continue;
-      const match = MatchCelestialName({ celestials: await this.mapData.SystemCelestials(system.id), text, systemName: system.name });
+      const match = matchCelestialName({ celestials: await this.mapData.SystemCelestials(system.id), text, systemName: system.name });
       if (match && 'rule' in match && (match.rule === 'exact' || match.rule === 'prefixed')) return { system, celestial: match.celestial };
       break;
     }
@@ -373,8 +331,8 @@ export class Locations {
    * The system with exactly this name (normalized), or null.
    */
   private async ResolveSystemExact(text: string): Promise<Maybe<MapSystem>> {
-    const wanted = NormalizeMapName(text);
-    const item = (await this.SystemSearch(text)).find((candidate) => NormalizeMapName(candidate.name) === wanted);
+    const wanted = normalizeMapName(text);
+    const item = (await this.SystemSearch(text)).find((candidate) => normalizeMapName(candidate.name) === wanted);
     return item ? this.mapData.System(item.id) : null;
   }
 
@@ -382,7 +340,7 @@ export class Locations {
    * The map's system search for a text, cached by its normalized form (a failed search is retried).
    */
   private async SystemSearch(text: string): Promise<MapSearchItem[]> {
-    const key = NormalizeMapName(text);
+    const key = normalizeMapName(text);
     let entry = this.systemSearches.get(key);
     if (!entry) {
       entry = this.mapData.Search({ query: text.trim(), kinds: ['system'], limit: SYSTEM_SEARCH_LIMIT }).then((answer) => answer.items.filter((item) => item.kind === 'system'));

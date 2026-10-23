@@ -97,6 +97,8 @@ import {
   normalizeModuleSwitch,
   normalizeScene,
   normalizeShipOrderRequest,
+  resolveNamedOrderTarget,
+  type ResolvedNamedOrderTarget,
   PROP_MOD_MODULE_NONE,
   SceneError,
   shipPropModModuleOf,
@@ -524,6 +526,10 @@ export interface OrderShipResult {
    * from its fleet (it keeps leading); its following report for a rejoin.
    */
   readonly following?: 'detached' | 'leading' | ShipFollowingReport;
+  /**
+   * What a target given by name resolved to (resolveNamedOrderTarget).
+   */
+  readonly resolved?: ResolvedNamedOrderTarget;
 }
 
 interface WorldSphere {
@@ -903,12 +909,13 @@ export class Director {
     const ships = new Set((this.scene?.ships ?? []).map((doc) => doc.id));
     if (typeof id !== 'string' || !ships.has(id)) throw new Error(`no ship "${String(id)}"`);
     if (this.IsDead(id)) throw new Error(`ship "${id}" was destroyed`);
-    const normalized = normalizeShipOrderRequest(order, { ships, objects: this.TargetIds(), self: id });
+    const named = this.NamedTarget({ order, from: id, where: 'order' });
+    const normalized = normalizeShipOrderRequest(named.order, { ships, objects: this.TargetIds(), self: id });
     if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
     const refusal = this.world.OrderRefusal(id, normalized);
     if (refusal !== null || !this.world.Order(id, normalized)) throw new Error(refusal ?? `ship "${id}" or its target has no Destiny ball`);
     const following = this.following.Detach(id);
-    return { id, order: normalized, tick: this.world.tick, ...(following ? { following } : {}) };
+    return { id, order: normalized, tick: this.world.tick, ...(following ? { following } : {}), ...(named.resolved ? { resolved: named.resolved } : {}) };
   }
 
   /**
@@ -923,8 +930,12 @@ export class Director {
    * @throws {Error} When the leader refuses the order, or the fleet is not planned yet for a wing or squad move or a warp.
    */
   OrderFleet(input: unknown): Promise<object> {
-    const request = normalizeFleetOrderRequest(input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
-    if (!isFleetStructureOrder(request.order)) return Promise.resolve(this.orders.Fly(this.orders.Resolve(request)));
+    const record = input !== null && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
+    const fc = this.scene?.fleets?.find((fleet) => fleet.id === record?.['fleet'])?.commander;
+    const named = record ? this.NamedTarget({ order: record['order'], from: fc, where: 'order_fleet.order' }) : { order: undefined };
+    const request = normalizeFleetOrderRequest(named.resolved ? { ...record, order: named.order } : input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
+    const resolved = named.resolved ? { resolved: named.resolved } : {};
+    if (!isFleetStructureOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
       // Resolved against the document current at its turn in the queue.
       const resolved = this.orders.Resolve(request);
@@ -2727,6 +2738,42 @@ export class Director {
    */
   private ShipRoots(): EveShip2[] {
     return [...this.live.values()].map((entry) => entry.ship).filter((ship): ship is EveShip2 => ship !== null);
+  }
+
+  /**
+   * order_ship and order_fleet take a target by name: an order whose target is no ship, object or celestial target id
+   * is rewritten by resolveNamedOrderTarget before it is normalized (a body's warp becomes a warp to a point). Nothing
+   * matching leaves the order alone, for the normalizer to refuse.
+   *
+   * @param input - The order as JSON, the ship it is measured from (order_fleet: the FC) and the message prefix.
+   * @returns The order to normalize, and what the name resolved to.
+   * @throws {SceneError} When the name is ambiguous or names a celestial that cannot be the target.
+   */
+  private NamedTarget(input: { readonly order: unknown; readonly from: Maybe<string>; readonly where: string }): { readonly order: unknown; readonly resolved?: ResolvedNamedOrderTarget } {
+    const record = input.order !== null && typeof input.order === 'object' && !Array.isArray(input.order) ? (input.order as Record<string, unknown>) : null;
+    const text = typeof record?.['target'] === 'string' ? record['target'].trim() : '';
+    const known = this.TargetIds().has(text) || (this.scene?.ships ?? []).some((doc) => doc.id === text);
+    if (!record || !text || known || record['point'] !== undefined) return { order: input.order };
+    const answer = this.location.Answer();
+    const result = resolveNamedOrderTarget({
+      text,
+      type: String(record['type']),
+      range: record['range'],
+      from: (input.from ? this.world.Motion(input.from)?.position : null) ?? [0, 0, 0],
+      objects: this.scene?.objects ?? [],
+      celestials: answer?.celestials ?? [],
+      systemName: answer?.system.name,
+      targets: new Set(this.celestialTargets.keys()),
+      where: input.where
+    });
+    if (result && 'problem' in result) throw new SceneError([result.problem]);
+    let named: { readonly order: unknown; readonly resolved?: ResolvedNamedOrderTarget } = { order: input.order };
+    if (result?.resolved.point) {
+      const order: Record<string, unknown> = { ...record, point: result.resolved.point, range: 0 };
+      delete order['target'];
+      named = { order, resolved: result.resolved };
+    } else if (result) named = { order: { ...record, target: result.resolved.target }, resolved: result.resolved };
+    return named;
   }
 
   /**

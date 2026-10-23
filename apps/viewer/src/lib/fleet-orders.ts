@@ -229,10 +229,11 @@ export class FleetOrders {
     const from = this.world.Motion(leader);
     if (!offsets || !from) throw new Error(NotReady(group.fleet));
 
-    // The leader's landing as OrderRefusal and the aligning warp report estimate it.
-    const target = 'target' in order ? this.world.Motion(order.target) : null;
+    // The leader's landing as OrderRefusal and the aligning warp report estimate it; the target is a ship, an object or
+    // a celestial target (both radii, as ApplyOrder's warp).
+    const target = 'target' in order ? this.TargetBall(order.target) : null;
     const destination = 'point' in order ? order.point : (target?.position ?? from.position);
-    const range = order.range + (target ? from.physics.radius + target.physics.radius : 0);
+    const range = order.range + (target ? from.physics.radius + target.radius : 0);
     const landing = LandingPoint(destination, range, from.position);
     const frame = WarpFrame(from.position, landing);
 
@@ -268,6 +269,14 @@ export class FleetOrders {
     }
     this.warps.set(toFleetGroupKey(group), { leader, ships: warping.map((ship) => ship.id), skipped: skipped.length, landed: new Set() });
     return this.Result(resolved, { ships: warping, skipped, landing: RoundVector(landing) });
+  }
+
+  /**
+   * A warp target's ball: a ship's master ball, else an object's or a celestial target's.
+   */
+  private TargetBall(id: string): Maybe<{ readonly position: SceneVector; readonly radius: number }> {
+    const motion = this.world.Motion(id);
+    return motion ? { position: motion.position, radius: motion.physics.radius } : this.world.ObjectBall(id);
   }
 
   private Regroup(resolved: ResolvedFleetOrder, delays: ReadonlyMap<string, number>): FleetOrderResult {

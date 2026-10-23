@@ -19,7 +19,9 @@ unchanged and runs it through `Director.OrderFleet`.
   a squad whose only member is the FC is refused.
 - **Orders**: `order_ship`'s movement orders (`direction`, `goto`, `approach`, `keep-at-range`, `orbit`, `stop`) and
   `warp`; the document orders `anchor`, `break-off`, `regroup`. `rejoin` is refused ("use regroup").
-- **Targets** must be outside the group (the FC is a fine target for a squad).
+- **Targets** must be outside the group (the FC is a fine target for a squad). A target that is no id is tried as a
+  name first (`Director.NamedTarget`, `sd-locations` "Order targets by name"), measured from the fleet's FC; the result
+  adds `resolved`.
 
 ## Authority and the leader (`resolveFleetOrderRequest`)
 
@@ -53,8 +55,11 @@ unchanged and runs it through `Director.OrderFleet`.
 
 1. Refusals: `OrderRefusal(leader, warp)` (so a tackled leader refuses the warp: `ship "fc" cannot warp: <warp>`,
    `sd-destiny` "Tackle"), and the fleet must be planned (`formation.ready`).
-2. Predict the leader's landing (`LandingPoint`, both EVE radii for a ship target) and the frame
-   `WarpFrame(leaderPos, landing)`; each ship's predicted slot is `FramePoint(landing, frame, offset)`.
+2. Predict the leader's landing (`LandingPoint`, both EVE radii for a target ball) and the frame
+   `WarpFrame(leaderPos, landing)`; each ship's predicted slot is `FramePoint(landing, frame, offset)`. The target ball
+   is `world.Motion(id)` for a ship, else `world.ObjectBall(id)` (an object or a celestial target). **Reading `Motion`
+   alone (the old bug) put an object target's landing at the leader itself**: every slot read under 150 km and only
+   the leader warped (`fleet-orders.spec` "warps the fleet to an object or a celestial target").
 3. Skip (reported in `skipped`): a ship in proper warp (it keeps its own warp, untouched), a tackled one (`cannot
    warp: <warp>`, from `world.Tackle(id)`), max velocity 0, or a slot under 150 km away (it flies there: **Destiny's
    `WarpTo` turns anything within 100 km into a `GotoPoint`**, and EVE refuses warps under 150 km). A tackled member

@@ -14,6 +14,8 @@
 | `location/map.ts` | the `/map/system` answer type and the `get_state` report; `MAP_SEARCH_KINDS`, `LOCATION_NEARBY_LIMIT` 10 |
 | `location/dressing.ts` | what a location draws (sub-doc `dressing`) |
 | `location/targets.ts` | the location's stations and gates as order targets: `celestial:<id>` ids, `toCelestialTargets`, the `get_state.location.targets` rows |
+| `location/names.ts` | `matchCelestialName` / `normalizeMapName`: the name rules below, pure (the hub re-exports them as `MatchCelestialName` / `NormalizeMapName`) |
+| `location/named-targets.ts` | `resolveNamedOrderTarget`: order targets by name (below) |
 | `apps/scene-director/src/lib/hub/map-data.ts` | `MapData`: tools-core's map routes (search, one system, its celestials, one celestial by id) |
 | `hub/locations.ts` | `search_map`, `get_system`, `set_location`, `/map/system` |
 | `hub/map-data.testing.ts` | tools-core stand-in: Jita, Perimeter, Niyabainen (SDE 3632936, captured 2026-10-22) |
@@ -91,6 +93,28 @@ The exact name; a name inside `system` (`"IV - Moon 4"`, `"Star"`, a unique part
 `"star"` / `"the sun"`; a gate shorthand (`"Perimeter gate"`, `"the gate to Perimeter"`); `"<celestial> in <system>"`.
 Without `system`: exact name across the map, then that phrase, then the longest-leading-system-words rule
 (`"Jita IV - Moon 4"`, `"New Caldari V - Moon 1"`). Ambiguous names list candidates. No player slang (`"Jita 4-4"`).
+
+## Order targets by name
+
+`order_ship` and `order_fleet` take a name where they take a target id. `Director.NamedTarget` rewrites an order whose
+`target` is no ship, object or celestial target id (and has no `point`) **in the page, synchronously, before it is
+normalized**, with `resolveNamedOrderTarget` over the document's objects and the `/map/system` answer (origin-relative,
+so no hub call). `from` is the ordered ship, or the fleet's FC. First match wins:
+
+1. an object by its exact `name` (`normalizeMapName`), then by its `type` (a name or a type id) when exactly one has
+   it; several list their ids;
+2. a celestial by `matchCelestialName` (the rules above, with the location's system name); several list their names,
+   nearest first;
+3. a station or stargate → its `celestial:<id>`, refused when it is not a live target (beyond the extent: "…; set_location
+   there first"; or no radius);
+4. a planet, moon, star or asteroid belt → **warp only** (any other order is refused): a warp to the point
+   `centre + unit(from − centre) × (radius + range)` (a belt's radius counts 0), range 0, refused when that landing is
+   beyond `MAX_SCENE_DISTANCE`. From the spec fixtures, warping from the CNAP 30 km origin: Jita IV - Moon 4 lands about
+   2,600 km out; Jita IV lands about 51,000 km out and is refused.
+
+Nothing matching leaves the order to the normalizer's "not a ship, object or celestial target" refusal. The tool
+results add `resolved { name, kind, target? | point?, range }` and `order` holds what it became. Specs:
+`names.spec.ts`, `named-targets.spec.ts`.
 
 ## `get_state.location`
 
