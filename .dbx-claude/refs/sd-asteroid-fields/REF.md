@@ -8,9 +8,10 @@
 > authored objects (the pattern this copies): `sd-objects`. Plan:
 > `~/.claude/plans/asteroid-fields-seeded-ore-belts-in-cjs-scene-1-drawn-as-sof-rocks.md`.
 
-**Status (2026-10-23, A2)**: fields are validated, stored and expanded by the hub, and **drawn by the page** as one
-instanced SOF root per field (proven on the real GPU), listed in `get_state.asteroidFields`, framed by `frame_camera`
-and checked by verify-page `--only field`. A3 (the real-GPU cost check and tuning) is the plan's §6.
+**Status (2026-10-23, A3)**: fields are validated, stored and expanded by the hub, and **drawn by the page** as one
+instanced SOF root per field, listed in `get_state.asteroidFields`, framed by `frame_camera` and checked by
+verify-page `--only field`. Measured and tuned on the real GPU: rocks cast no shadows and each model draws its LOD
+mesh for its nearest rock (Real-GPU evidence below).
 
 ## Files
 
@@ -170,11 +171,20 @@ node bin/scene-director.js call add_asteroid_field '{"ores":["Veldspar",{"ore":"
   the scene, then removes and retires it (`RetireShips` with every other root retained); a removal retires at once. A
   failed field is retried on the next apply. Fields build after the objects; `SetDrawReach(FieldReach, 'fields')`
   (the farthest `|centre| + 2 × envelope`).
-- **Cells**: `FIELD_CELL_SIZE` (`Infinity`: one child per model). The runtime picks a child's LOD by its nearest
-  instance and frustum-culls the child whole, so a finite size splits each model's rocks by cell (A3 tunes it).
+- **LOD (`SceneFields.DriveLod`, every frame before `engine.Frame`)**: a rock `.gr2` keeps its LODs as **separate
+  meshes** (`rock_01_m_v1.gr2`: `v3Shape`, then `v3Shape LOD 640`, `320`, `160`, `80`, `40`, `20`; the base is ~35k
+  triangles), each with one LOD of threshold `0xffffffff`, and the SOF mesh always names mesh 0, so the runtime never
+  LODs a rock. The page sets each instanced child's `Tr2InstancedMesh.meshIndex` to the smallest `LOD N` mesh with
+  N ≥ `min(currentInstanceScreenSize, currentScreenSize)` (`FieldLodMeshes` / `FieldLodIndex`; the base above 640 px),
+  read from the last scene update (a frame late). All rocks of a model share the LOD of its **nearest** rock, so near
+  a field most models draw their base mesh; per-instance LOD is a follow-up.
+- **Shadows are off by default**: the shadow passes cost 4× the rest (below). `?fields=shadow` composes the
+  templates' `castShadow: true`.
+- **Cells**: `FIELD_CELL_SIZE` stays `Infinity` (one child per model): cells multiply the children and their CPU cost
+  faster than their LOD saves (below).
 - **Switches**: `?fields=off` builds the templates but draws nothing (status `off`; the fps baseline);
-  `?fields=noshadow` composes `castShadow: false`. Without a renderer (headless) the root is composed but not
-  hydrated: `validated`.
+  `?fields=shadow` turns rock shadows on. Without a renderer (headless) the root is composed but not hydrated:
+  `validated`.
 - **get_state**: `scene.asteroidFields` (count) and `asteroidFields[]` rows (`SceneAsteroidFieldStateReport`): `id`,
   `name`, `status` (queued, building, ready, validated, off, failed + `error`), the field keys, `rocks { requested,
   placed, bySize, byOre: [{ ore, rocks }] }`, `models { total, built, failed, failedDnas? }`, `cells`, `envelope`,
@@ -199,6 +209,44 @@ is not the fields'. No fallback was needed: `quadinstancedv5` and one object per
 belt disc (Veldspar, Scordite, Dark Ochre; 293 of 300 placed, 36 models) built and drew at 56–60 fps with digest equal
 to the hub's; moving the camera onto the field for the first time stalled the frame (1 fps for a few seconds) while the
 models' geometry and textures loaded.
+
+## Real-GPU evidence (2026-10-23)
+
+Windows Chrome, NVIDIA (lovelace), vsync 60 Hz, ~1600×900, private hub on 5537, Perimeter II - Asteroid Belt 1.
+`fps` is from rAF intervals over 3–5 s, `CPU` the mean `engine.Frame` time, `draws` the AL's drawn batches per
+frame; "off" takes the roots out of the scene in the same tab (as `?fields=off`). These are measurements, not specs:
+re-measure after a change.
+
+- **Shadows were the cost.** A 150-rock disc (Veldspar, Scordite, Dark Ochre; 36 models): +907 draws and +8.5 ms CPU
+  with SOF's `castShadow`, +128 draws (2 areas × 2 passes per model) and +2 ms without. Near the field (a Rifter
+  inside it, camera 3 km), base meshes, no LOD:
+
+  | rocks | shadows | no shadows | off |
+  |---|---|---|---|
+  | 500 | 33 fps, 1,173 draws | 58.6 fps, 269 draws | 60 fps, 124 draws |
+  | 1,000 | 17 fps | 55.9 fps | 60 fps |
+  | 2,000 | 8.7 fps | 35 fps | 60 fps |
+
+  The same 2,000 from 186 km cost the same (36 fps): the base mesh never LODs.
+- **With the LOD meshes and no shadows** (the shipped defaults; a 60 km disc of 36 models): 150, 500 and 1,000
+  rocks hold **60 fps near and far** (+120–145 draws, +1.5–2.5 ms CPU over off); 2,000 rocks hold 60 fps far (LOD
+  20/40 meshes) and **43.6 fps near** (every model's nearest rock is big, so all 36 draw their base mesh).
+- **Cells at radius / 2** (30 km) on the 2,000-rock field: 924 children, 30 fps, 2,071 draws, 33 ms CPU, against
+  44 fps and 5.5 ms with one child per model. Cells stay off; per-instance LOD is the follow-up.
+- **The look**: the belt disc (arc 180, 293 of 300 placed, digest = the hub's), a 150-rock Blue Ice sphere and a
+  100-rock Arkonor sphere (99 placed): lit by Perimeter's star, textured per ore, ice and crystals telling apart, small,
+  medium and large models mixed; near (2 km off a 2,960 m Scordite rock) 45–47 fps, mid (20 km) 44 fps, far (100 km)
+  52 fps, against a 52 fps baseline for that nebula view (the 542 rocks, 60 models: +240 draws, +6 ms CPU).
+- **Behind fleets**: `stage_engagement` with 100 ships a side (Rifters and Thrashers against Merlins and
+  Cormorants, 201 ships) in front of a 1,000-rock field: **5.1–5.3 fps with the field, 5.1–5.2 without**: the ships'
+  `engine.Frame` takes ~190 ms; the field adds ~140 draws and no measurable CPU.
+- **Cold load stalls**: the first time a field's models and LODs come into view the main thread stalls for seconds
+  (8 s frames; ~40–60 s until steady after a reload with 60 rock models), while geometry and its LOD buffers load.
+  Steady state is reached once each geometry and LOD has drawn once.
+- **Tuned**: shadows off by default (`?fields=shadow`), LOD meshes per child each frame, `FIELD_CELL_SIZE`
+  `Infinity`. Kept: `MAX_FIELD_ROCKS` 2,000 (44 fps near, 60 far) and the A1 defaults (150 rocks fill the default 20 km
+  sphere; ~200 is its packing limit at `[300, 3000]`, and the shortfall warning says so).
+- `?tier=lo` draws an all-white frame with the default post process, fields or not (`?tier=lo&post=off` draws).
 
 ### Pin-bump checklist (runtime)
 

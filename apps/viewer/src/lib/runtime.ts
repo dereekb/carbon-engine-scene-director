@@ -27,8 +27,10 @@ export { CjsBatchManager, gTriDev, Tr2QuadRenderer, Tr2Renderer, Tr2RenderContex
 export {
   EveCamera,
   EveChildBehaviorSystem,
+  EveChildContainer,
   EveChildExplosion,
   EveChildLineSet,
+  EveChildMesh,
   EveEffectRoot2,
   EveLensflare,
   EveMeshOverlayEffect,

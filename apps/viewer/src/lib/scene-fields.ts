@@ -3,23 +3,34 @@
  * and draws as one meshless SOF root on fixed curves holding an instanced child per rock model (asteroid-fields.ts
  * composes the values). Each rock DNA's SOF values build once per page session, shared by every field. A move
  * re-places the curves; a rebuild hydrates the new root before the old one leaves, so an edit never blanks the field.
- * Without a renderer fields build to values (`validated`); `?fields=off` draws none (`off`), `?fields=noshadow` draws
- * them without shadows. Rocks are draw-only: no Destiny balls (sd-asteroid-fields).
+ * Every frame each instanced child draws its rock's LOD mesh for its nearest rock's screen size (DriveLod). Rocks cast
+ * no shadows (the shadow passes cost 4× the rest on the GPU, A3); `?fields=shadow` turns them on, `?fields=off` draws
+ * none (`off`). Without a renderer fields build to values (`validated`). Rocks are draw-only: no Destiny balls
+ * (sd-asteroid-fields).
  */
 
 import type { Maybe } from '@dereekb/util';
 import { expandAsteroidField, type AsteroidFieldExpansion, type SceneAsteroidField, type SceneAsteroidFieldsDiff, type SceneAsteroidFieldStatus, type SceneDocument } from '@scene-director/scene';
-import { FIELD_CELL_SIZE, FieldDrawPlan, FieldReach, FieldRootValues, FieldSphere, RockTemplateOf, type FieldEntryState, type RockTemplate } from './asteroid-fields';
+import { FIELD_CELL_SIZE, FieldDrawPlan, FieldLodIndex, FieldLodMeshes, FieldReach, FieldRootValues, FieldSphere, RockTemplateOf, type FieldEntryState, type FieldLodMesh, type RockTemplate } from './asteroid-fields';
 import { DocumentRotation } from './destiny';
 import type { Engine } from './engine';
 import { ErrorText } from './resources';
-import type { CjsModelValues, EveSpaceObject2 } from './runtime';
+import { CjsSchema, EveChildContainer, EveChildMesh, Tr2InstancedMesh, type CjsModelValues, type EveSpaceObject2 } from './runtime';
 import { BuildShipValues, CreateStaticCurves, HydrateSofObject, PlaceStatic, RetireShips, type DetachAudio, type StaticCurves } from './ships';
 
 /**
- * The `?fields=` switch: `off` draws no field (an fps baseline), `noshadow` draws rocks without shadows.
+ * The `?fields=` switch: `off` draws no field (an fps baseline), `shadow` lets rocks cast shadows.
  */
-export const FIELDS_SWITCH: Maybe<'off' | 'noshadow'> = ReadFieldsSwitch(globalThis.location?.search ?? '');
+export const FIELDS_SWITCH: Maybe<'off' | 'shadow'> = ReadFieldsSwitch(globalThis.location?.search ?? '');
+
+/**
+ * One instanced child's LOD state: its mesh, and its geometry's LOD meshes once the geometry has loaded.
+ */
+interface FieldLodChild {
+  readonly child: EveChildMesh;
+  readonly mesh: Tr2InstancedMesh;
+  lods: Maybe<FieldLodMesh[]>;
+}
 
 /**
  * Each rock DNA's template for the page session; a failed build is forgotten so the next build retries it.
@@ -64,6 +75,10 @@ export class SceneFields {
   private readonly onChange: () => void;
   private readonly detachAudio: DetachAudio;
   private readonly entries = new Map<string, SceneFieldEntry>();
+  /**
+   * Every hydrated root's instanced children, for DriveLod.
+   */
+  private readonly lodChildren = new Map<EveSpaceObject2, FieldLodChild[]>();
 
   constructor(options: SceneFieldsOptions) {
     this.engine = options.engine;
@@ -141,7 +156,7 @@ export class SceneFields {
       entry.models = { total: dnas.length, built: built.size, failed: failedDnas.length, failedDnas };
       if (dnas.length && !built.size) throw new Error(`no rock model built (${firstError})`);
       if (dnas.length) {
-        const values = FieldRootValues({ plan, templates: built, envelope: expansion.envelope, castShadow: FIELDS_SWITCH === 'noshadow' ? false : undefined });
+        const values = FieldRootValues({ plan, templates: built, envelope: expansion.envelope, castShadow: FIELDS_SWITCH === 'shadow' ? undefined : false });
         if (this.engine && FIELDS_SWITCH !== 'off' && this.Current(entry)) {
           entry.root = this.detachAudio(() =>
             HydrateSofObject<EveSpaceObject2>(values as CjsModelValues, (root) => {
@@ -149,6 +164,7 @@ export class SceneFields {
               root.rotationCurve = entry.curves.rotation;
             })
           );
+          this.lodChildren.set(entry.root, LodChildren(entry.root));
           if (this.Current(entry)) this.engine.AddObject(entry.root);
         }
       }
@@ -161,6 +177,21 @@ export class SceneFields {
     this.SwapOut(entry);
     if (!this.Current(entry)) this.Teardown(entry);
     this.onChange();
+  }
+
+  /**
+   * Points each drawn rock model at its LOD mesh for its nearest rock's screen size, measured by the last scene update
+   * (so a frame late). Runs every frame before engine.Frame.
+   */
+  DriveLod(): void {
+    for (const children of this.lodChildren.values()) {
+      for (const entry of children) {
+        const size = Math.min(entry.child.currentInstanceScreenSize, entry.child.currentScreenSize);
+        if (!(size >= 0)) continue;
+        entry.lods ??= ReadLodMeshes(entry.mesh);
+        if (entry.lods) entry.mesh.meshIndex = FieldLodIndex(entry.lods, size);
+      }
+    }
   }
 
   Has(id: string): boolean {
@@ -240,6 +271,7 @@ export class SceneFields {
   }
 
   private RetireRoot(id: string, root: EveSpaceObject2): void {
+    this.lodChildren.delete(root);
     try {
       RetireShips([root], [...this.retained(), ...this.Roots().filter((other) => other !== root)]);
     } catch (error) {
@@ -265,12 +297,44 @@ function Template(dna: string): Promise<RockTemplate> {
 }
 
 /**
+ * A hydrated field root's instanced children.
+ *
+ * @param root - The field root.
+ * @returns Each child with its instanced mesh.
+ */
+function LodChildren(root: EveSpaceObject2): FieldLodChild[] {
+  return root.effectChildren.flatMap((container) =>
+    (CjsSchema.cast(container, EveChildContainer)?.objects ?? []).flatMap((object) => {
+      const child = CjsSchema.cast(object, EveChildMesh);
+      const mesh = child ? CjsSchema.cast(child.mesh, Tr2InstancedMesh) : null;
+      return child && mesh ? [{ child, mesh, lods: null }] : [];
+    })
+  );
+}
+
+/**
+ * A rock mesh's LOD meshes, once its geometry has loaded.
+ *
+ * @param mesh - The instanced mesh.
+ * @returns The LOD meshes, or null while the geometry loads.
+ */
+function ReadLodMeshes(mesh: Tr2InstancedMesh): Maybe<FieldLodMesh[]> {
+  try {
+    const geometry = mesh.GetGeometryResource();
+    const count = geometry?.GetMeshCount() ?? 0;
+    return geometry && count > 0 ? FieldLodMeshes(Array.from({ length: count }, (_, index) => geometry.GetMeshName(index))) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Reads the `?fields=` switch.
  *
  * @param search - `location.search`.
- * @returns `off`, `noshadow`, or null.
+ * @returns `off`, `shadow`, or null.
  */
-export function ReadFieldsSwitch(search: string): Maybe<'off' | 'noshadow'> {
+export function ReadFieldsSwitch(search: string): Maybe<'off' | 'shadow'> {
   const value = new URLSearchParams(search).get('fields')?.trim().toLowerCase();
-  return value === 'off' || value === 'noshadow' ? value : null;
+  return value === 'off' || value === 'shadow' ? value : null;
 }

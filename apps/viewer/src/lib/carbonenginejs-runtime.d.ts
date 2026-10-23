@@ -393,6 +393,10 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly boundingSphereCenter: Vec3;
     readonly boundingSphereRadius: number;
     display: boolean;
+    /**
+     * Its effect children (an asteroid field root's one EveChildContainer).
+     */
+    readonly effectChildren: readonly object[];
     StartControllers(): void;
     /**
      * Arms the impact overlay with the remaining shield, armor and hull fractions; no impacts draw before a call.
@@ -920,7 +924,44 @@ declare module '@carbonenginejs/runtime/trinity' {
    */
   export class Tr2GrannyPrimitiveSet {}
   export class Tr2ParticleSystem {}
-  export class Tr2InstancedMesh {}
+  export class Tr2InstancedMesh {
+    /**
+     * The geometry mesh drawn. A rock's gr2 holds its LODs as separate meshes ("v3Shape", "v3Shape LOD 640" ... "LOD
+     * 20"), so an asteroid field picks one per frame (scene-fields.ts).
+     */
+    meshIndex: number;
+    /**
+     * The loaded geometry file, null until it loads.
+     */
+    GetGeometryResource(): TriGeometryRes | null;
+  }
+
+  /**
+   * A loaded geometry file (gr2): its meshes by index.
+   */
+  export interface TriGeometryRes {
+    GetMeshCount(): number;
+    GetMeshName(index: number): string | null;
+  }
+
+  /**
+   * A SOF object's child container (a placement): its child objects.
+   */
+  export class EveChildContainer {
+    readonly objects: readonly object[];
+  }
+
+  /**
+   * A SOF object's child mesh. The scene update sets its screen sizes (pixels across) each frame it is visible: its
+   * bounds', and its nearest instance's for an instanced mesh (Infinity otherwise); it draws at their minimum.
+   */
+  export class EveChildMesh {
+    readonly name: string;
+    readonly mesh: object | null;
+    castShadow: boolean;
+    readonly currentScreenSize: number;
+    readonly currentInstanceScreenSize: number;
+  }
   export class Tr2RuntimeInstanceData {}
   export class Tr2DirectInstanceData {}
   export class EveChildBehaviorSystem {}

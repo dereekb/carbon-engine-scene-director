@@ -111,6 +111,7 @@ provider). Do not sink time into headless GPU.
 | `?tier=lo\|hi` | shader tier (default `depth`) |
 | `?audio=off` | no audio |
 | `?turretlod=on` | the runtime's own turret LOD (default: every turret set frozen at high detail, `sd-weapons`) |
+| `?fields=off\|shadow` | asteroid fields: `off` draws none (status `off`), `shadow` lets rocks cast shadows (default off, `sd-asteroid-fields`) |
 
 ## Real-GPU findings are dated evidence
 

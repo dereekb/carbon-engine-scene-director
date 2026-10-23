@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { expandAsteroidField, normalizeScene, type SceneAsteroidField } from '@scene-director/scene';
-import { AsteroidFieldsText, AsteroidFieldStateRow, FIELD_INSTANCE_LAYOUT, FieldDrawPlan, FieldReach, FieldRootValues, FieldSphere, PackInstance, RockTemplateOf, type RockTemplate } from './asteroid-fields';
+import { AsteroidFieldsText, AsteroidFieldStateRow, FIELD_INSTANCE_LAYOUT, FieldDrawPlan, FieldLodIndex, FieldLodMeshes, FieldReach, FieldRootValues, FieldSphere, PackInstance, RockTemplateOf, type RockTemplate } from './asteroid-fields';
 import { ROCK_DNA, ROCK_VALUES } from './asteroid-fields.spec-helper';
 
 const OTHER_DNA = 'rock_01_m_v2a_whiteyellow:ore_veldspar:asteroid';
@@ -135,6 +135,25 @@ describe('asteroid fields: the instanced composer', () => {
     expect(root['castShadow']).toBe(false);
     expect(Children(root).map((child) => [child['name'], child['castShadow']])).toEqual([[ROCK_DNA, false]]);
     expect(() => FieldRootValues({ plan, templates: new Map(), envelope: 1 })).toThrow('no rock model of the field built');
+  });
+
+  it("reads a rock geometry's LOD meshes and picks the smallest one covering the screen size", () => {
+    // rock_01_m_v1.gr2's meshes (2026-10-23): the base, then one mesh per LOD.
+    const lods = FieldLodMeshes(['v3Shape', 'v3Shape LOD 640', 'v3Shape LOD 320', 'v3Shape LOD 160', 'v3Shape LOD 80', 'v3Shape LOD 40', 'v3Shape LOD 20']);
+    expect(lods.map((lod) => [lod.index, lod.pixels])).toEqual([
+      [6, 20],
+      [5, 40],
+      [4, 80],
+      [3, 160],
+      [2, 320],
+      [1, 640]
+    ]);
+    expect(FieldLodIndex(lods, 7)).toBe(6);
+    expect(FieldLodIndex(lods, 20)).toBe(6);
+    expect(FieldLodIndex(lods, 21)).toBe(5);
+    expect(FieldLodIndex(lods, 600)).toBe(1);
+    expect(FieldLodIndex(lods, 641)).toBe(0);
+    expect(FieldLodIndex(FieldLodMeshes(['v3Shape', null]), 5)).toBe(0);
   });
 
   it('frames and reaches a field by its envelope, else its radius and largest rock', () => {

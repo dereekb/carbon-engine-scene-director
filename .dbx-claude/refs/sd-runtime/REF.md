@@ -102,7 +102,10 @@ shape (EveSOF.js). The spec pins our side; the pin-bump checklist for the runtim
 Rock templates come from `BuildShipValues` (cached per DNA for the page session), roots hydrate through
 `HydrateSofObject` inside `PageAudio.Detached` and retire through `RetireShips` (`Tr2InstancedMesh` and
 `Tr2RuntimeInstanceData` are in `SHIP_RESOURCE_TYPES`); the director's `SceneryRoots()` (dressing, objects, fields)
-joins every retained set.
+joins every retained set. A rock `.gr2` keeps its LODs as separate meshes (`<name> LOD <px>`), which the runtime
+never selects (it LODs within a mesh), so `SceneFields.DriveLod` sets each child's `Tr2InstancedMesh.meshIndex` every
+frame from `EveChildMesh.currentInstanceScreenSize` (declared in the `.d.ts` with `EveChildContainer`,
+`TriGeometryRes` and `EveSpaceObject2.effectChildren`).
 
 ## Module effects (`module-effects.ts`)
 

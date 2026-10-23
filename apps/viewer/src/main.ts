@@ -291,6 +291,7 @@ async function Start(): Promise<void> {
     // Every tick boundary up to the frame's time, at the clock's rate; a failing tick is logged once and the loop goes on.
     const now = timeControl.Frame(timestamp);
     liveDirector?.DriveBoosters(now);
+    liveDirector?.fields.DriveLod();
     liveDirector?.TrackCamera(now);
     presentation.Apply(liveDirector?.cinema.Presentation() ?? {});
     liveDirector?.DriveAudio(now);

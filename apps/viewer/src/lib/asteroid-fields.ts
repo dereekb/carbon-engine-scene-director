@@ -12,8 +12,9 @@ import { NearestShips, type ShipSphere } from './objects';
 
 /**
  * The side of a spatial cell rocks are grouped by (one draw group per model per cell), metres. Infinity draws each
- * model as one group: the runtime picks a child's LOD by its nearest instance and culls the child as a whole, so cells
- * are the knob when a field near the camera costs too much.
+ * model as one group. The page picks a child's LOD mesh by its nearest rock, so a finite size would let far cells draw
+ * low LODs, but every cell multiplies the children: on the real GPU (2026-10-23) 30 km cells turned a 2,000-rock
+ * field's 36 children into 924, 5.5 → 33 ms of CPU a frame and 44 → 30 fps (sd-asteroid-fields).
  */
 export const FIELD_CELL_SIZE = Infinity;
 
@@ -146,6 +147,46 @@ export function PackInstance(position: ArrayLike<number>, rotation: ArrayLike<nu
 }
 
 /**
+ * One LOD mesh of a rock geometry: the gr2 keeps each LOD as its own mesh, named `"<name> LOD <pixels>"`, beside the
+ * full-detail base mesh (`rock_01_m_v1.gr2`: `v3Shape`, then `LOD 640` down to `LOD 20`). The SOF mesh always names the
+ * base, so a field picks the mesh itself (FieldLodIndex), per instanced child and frame.
+ */
+export interface FieldLodMesh {
+  readonly index: number;
+  readonly pixels: number;
+}
+
+const LOD_MESH_NAME = /\bLOD (\d+)$/u;
+
+/**
+ * A rock geometry's LOD meshes, fewest pixels first.
+ *
+ * @param names - The geometry's mesh names, by index.
+ * @returns The LOD meshes (none when the geometry has only its base mesh).
+ */
+export function FieldLodMeshes(names: readonly Maybe<string>[]): FieldLodMesh[] {
+  return names
+    .flatMap((name, index) => {
+      const match = name ? LOD_MESH_NAME.exec(name) : null;
+      return match ? [{ index, pixels: Number(match[1]) }] : [];
+    })
+    .sort((a, b) => a.pixels - b.pixels || a.index - b.index);
+}
+
+/**
+ * The mesh an instanced child draws at a screen size: the smallest LOD mesh at least that many pixels across, else the
+ * base mesh.
+ *
+ * @param lods - FieldLodMeshes of its geometry.
+ * @param screenSize - Pixels across: the child's nearest instance's (or its bounds', when smaller).
+ * @param base - The base mesh's index.
+ * @returns The mesh index.
+ */
+export function FieldLodIndex(lods: readonly FieldLodMesh[], screenSize: number, base = 0): number {
+  return lods.find((lod) => lod.pixels >= screenSize)?.index ?? base;
+}
+
+/**
  * What a field takes from one rock DNA's SOF values.
  */
 export interface RockTemplate {
@@ -192,7 +233,7 @@ export interface FieldRootInput {
    */
   readonly envelope: number;
   /**
-   * False draws no rock shadows (`?fields=noshadow`); else each template's own.
+   * False draws no rock shadows (the page's default); else each template's own (`?fields=shadow`).
    */
   readonly castShadow?: boolean;
 }
