@@ -173,6 +173,16 @@ waits parked off-grid and lands staggered, the FC first (`sd-staging` "Warp-in";
 the FC, its anchor and its frame ship have landed, then forms up at its own speed; a member whose FC or anchor is
 still arriving holds too, so nobody flies off-grid. A join lands at its live slots around the FC.
 
+Checked headless by `verify-page --only warp-in` (2026-10-23, real tools-core): an inline TFI FC + 3 TFIs + 2 Guardians
+lands FC first (ticks 60–63), every member in formation by tick 64, the logi lead 30,007 m off the FC; joiners added to a
+Rifter fleet after it warped 400 km land within ~1 km of the moved FC (not at its document placement); a
+`stage_engagement` side warps in along its heading toward the other side and lands 20 km off it.
+
+On the GPU (2026-10-23, Windows Chrome, NVIDIA, the CNAP, `.scratch/warp-in-gpu/`): the 44-ship TFIs (`warpIn: true`)
+lands over ~10 s after its first flash and reports `formed` ~33 s after the first landing. The group stays `landed`
+until then because the FC, which has no follow, counts as formed only once it coasts below the settled speed (a TFI
+coasts ~30 s after the exit). Members were in formation (43/43) within ~6 s of the last landing.
+
 ## Limits
 
 No collisions (ships pass through while re-forming). Slots are rigid: on an FC turn a far squad (logi at 30 km) swings

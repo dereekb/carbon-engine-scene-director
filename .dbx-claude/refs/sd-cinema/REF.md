@@ -112,14 +112,16 @@ with the SOF bounding radius (100 m until built); `[forward, starboard, up]` coe
 - **`warp-landing`** reads each ship's Destiny warp through the lazy `CinemaScene.warpOf` (the director's
   `world.Motion(id).warp`; no per-frame cost, no `destiny.ts` change). Reference: the leader if it warps, else the first
   group ship that does. The lane is landing minus the reference's drawn centre (its forward once landed). It frames the
-  **core** (`WARP_LANDING_CORE` 0.8: the hulls nearest the reference, so logi 30 km behind the DPS do not shrink the
-  hulls to pixels; they land deeper up the lane). Aligning: the core where it stands, its offset turned from the
+  **core** (the hulls within `WARP_LANDING_CORE_SPREAD` 2.5 × the median hull's distance from the reference, at least
+  `MIN_WARP_LANDING_RADIUS`, so logi 30 km behind the DPS or carriers 16 km out do not shrink the hulls to pixels; they
+  land deeper up the lane. A fixed 80% share did: on the TFIs it reached the carriers and put the eye 83 km out). Aligning: the core where it stands, its offset turned from the
   reference's heading into the lane's (a formation warp lands every slot in the leader's heading at warp) and moved to
   the landing; in warp: the members' landings, less any farther than `MIN_WARP_DISTANCE` from the reference's (an
   earlier warp's, a pilot delay). **A `landed` warp frames its landing unanchored**: Destiny keeps reporting it until
   the next warp resolves, so anchoring on it would hold the eye at the previous landing. R ≥ 2 km
-  (`MIN_WARP_LANDING_RADIUS`), the eye `fitDistance(R)` downstream, 25° to `side` (starboard default) and 12° up, looking
-  back up the lane. The eye and look anchor on the first frame that sees a warp; **an anchor appearing after the first
+  (`MIN_WARP_LANDING_RADIUS`), the eye `fitDistance(R)` downstream, 25° to `side` and 12° up, looking back up the lane.
+  **No `side`: the sunward one** (the side whose eye direction runs most against `sunDirection`), so the landing is
+  front-lit; starboard on a tie. The eye and look anchor on the first frame that sees a warp; **an anchor appearing after the first
   frame resets the rig's lag smoothing**, so the camera cuts to the landing instead of smearing across the lane. No warp:
   it frames the group where it is, with a note.
 - **Arrivals (`warpIn`)**: `CinemaScene.arriving` holds the ships with an unfinished arrival (`world.Arriving`: parked
@@ -255,6 +257,20 @@ errors, page_log clean.
 - "Watch a fleet land" found three warp-landing bugs, fixed: the stale landed warp, the formation not turned to the
   lane, and the whole-formation radius (now the core). Landing toward the fight it reads: the fleet settles lit in
   front of the CNAP. Landing away from the sun the hulls are back-lit silhouettes (it looks into the light).
+
+### The warp-in shot on arrivals (2026-10-23, Windows Chrome, NVIDIA, 1600 × 900, `?audio=off`)
+
+Private hub on 5521 (temp stores), Jita IV - Moon 4 - CNAP 30 km off, the TFIs added with `warpIn: true`, then
+`play_shot { shot: "warp-in", fleet: "tfis" }`; driver and screens in `.scratch/warp-in-gpu/` on dbxpc.
+
+- The shot anchors at once on the arriving landings ("holding on the landing of fleet tfis's warp") and holds while
+  the fleet streaks in, flashes and forms up. 0 GPU errors, page_log clean.
+- Two fixes from it: the 80% core reached the TFIs' carriers (eye 83 km out, hulls a few px), now the median spread
+  (eye 8.5 km); and the starboard default looked into the light (silhouettes against the nebula), now the sunward side
+  (hulls lit, the moon behind).
+- Headless (`verify-page --only warp-in`): a Rifter fleet's shot anchors with its look within 5 km of the FC's landing
+  while all three are still arriving; `flank-port` on it is refused with "fleet ws is still arriving by warp: play
+  warp-in, or wait for it to land".
 
 ### The rig (2026-10-22, Windows Chrome, 1600 × 900, `?audio=off`)
 

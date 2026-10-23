@@ -40,6 +40,8 @@ What works today:
   nebula, its star, and the planets, moons, stations and stargates near it.
 - **Scene building**: `add_ships` and `stage_engagement` add N ships, or two
   opposing fleets, in one call.
+- **Fleet warp-in**: `warpIn` lands added fleets and ships from warp, staggered,
+  with the client's warp flashes, then forms them up.
 - **Objects**: stations, stargates, Upwell structures, large collidable objects and
   wrecks placed by EVE type name, static in the scene and order targets for ships,
   as are the location's own stations and gates. A scene spans 10,000 km at most.

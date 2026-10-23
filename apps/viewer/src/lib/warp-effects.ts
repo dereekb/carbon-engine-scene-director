@@ -5,12 +5,14 @@
  * - Files load once per path as values (ResourceValues); every play hydrates a NEW EveTransform from them inside
  *   PageAudio.Detached (sd-runtime), with curve LOD off (small on screen its curve sets would step at 1 Hz).
  * - Each flash is wrapped in an EveRootTransform on fixed curves (ships.ts CreateStaticCurves) at the command's
- *   position, turned so the effect's +Z runs along the warp (the warp-out trace is a beam along +Z), and scaled.
+ *   position, turned so the effect's +Z runs along the warp (the warp-out trace is a beam along +Z), and scaled. A
+ *   warp-in flash then follows its ship's drawn position every frame (DrawnPosition) until it is gone.
  * - Added with Engine.AddObject, every curve set in its tree played (PlayCurveSets: warp_out_start's are on a child),
  *   and removed WARP_EFFECT_LINGER after its longest curve set. At most WARP_EFFECTS_LIVE_MAX at once: a flash over the
  *   cap is skipped (counted).
- * - Teardown retires the root (RetireShips) against every other live root; the director joins Roots() into every
- *   retained set.
+ * - A flash leaves the scene when its time runs out; its resources wait for one batch RetireShips (when no flash is left
+ *   drawn, or WARP_EFFECT_RETIRE_WAIT after the oldest) against the other live roots; the director joins Roots() (drawn
+ *   and waiting) into every retained set.
  *
  * Runtime module (imports ./runtime): only the director, with a renderer, creates one.
  */
@@ -21,13 +23,20 @@ import type { Engine } from './engine';
 import { NoCurveLod } from './module-effects';
 import { ErrorText, ResourceValues } from './resources';
 import { addChild, CjsSchema, EveRootTransform, EveTransform, quat, vec3, type CjsModelValues } from './runtime';
-import { CreateStaticCurves, PlaceStatic, RetireShips, type DetachAudio } from './ships';
+import { CreateStaticCurves, PlaceStatic, RetireShips, type DetachAudio, type StaticCurves } from './ships';
 import type { WarpFxCommand } from './warp-fx';
 
 /**
  * Seconds a flash stays past its longest curve set.
  */
 export const WARP_EFFECT_LINGER = 0.5;
+
+/**
+ * Seconds a removed flash waits for a batch retire, unless no flash is left drawn: each retire walks every retained
+ * graph (~150 ms beside the 44-ship TFIs on the GPU) and a fleet's landing removes a flash every few frames, so one
+ * retire per removal held the page at ~5 fps for 10 s.
+ */
+export const WARP_EFFECT_RETIRE_WAIT = 5;
 
 /**
  * The most flashes drawn at once (loading included).
@@ -47,6 +56,11 @@ export interface WarpEffectsOptions {
    */
   readonly retained: () => object[];
   readonly detachAudio: DetachAudio;
+  /**
+   * A ship's drawn position at `now` (scene metres), which its warp-in flash follows; null once it is gone (the flash
+   * holds where it was).
+   */
+  readonly DrawnPosition?: (id: string, now: number) => Maybe<ArrayLike<number>>;
   /**
    * Reads an effect file as values; ResourceValues by default.
    */
@@ -78,6 +92,10 @@ interface FlashEntry {
   readonly path: string;
   root: Maybe<EveRootTransform>;
   /**
+   * The root's fixed curves: a warp-in flash's follow its ship.
+   */
+  curves: Maybe<StaticCurves>;
+  /**
    * When it leaves (100 ns ticks); null while it loads.
    */
   removeAt: Maybe<number>;
@@ -88,20 +106,27 @@ export class WarpEffects {
   private readonly retained: () => object[];
   private readonly detachAudio: DetachAudio;
   private readonly read: (path: string) => Promise<CjsModelValues>;
+  private readonly DrawnPosition: Maybe<(id: string, now: number) => Maybe<ArrayLike<number>>>;
   private readonly entries = new Set<FlashEntry>();
   /**
    * Loaded effect files by path (a pending load until it lands; a failed load is forgotten).
    */
   private readonly values = new Map<string, CjsModelValues | Promise<CjsModelValues>>();
   private readonly errors: string[] = [];
+  /**
+   * Removed flashes' roots waiting for their batch retire (Retire), and the scene clock the oldest was removed at.
+   */
+  private retiring: object[] = [];
+  private retiringSince = 0;
   private failed = 0;
   private skipped = 0;
   private now = 0;
 
-  constructor({ engine, retained, detachAudio, read = ResourceValues }: WarpEffectsOptions) {
+  constructor({ engine, retained, detachAudio, DrawnPosition, read = ResourceValues }: WarpEffectsOptions) {
     this.engine = engine;
     this.retained = retained;
     this.detachAudio = detachAudio;
+    this.DrawnPosition = DrawnPosition;
     this.read = read;
   }
 
@@ -119,7 +144,7 @@ export class WarpEffects {
           this.skipped += 1;
           continue;
         }
-        const entry: FlashEntry = { command, path, root: null, removeAt: null };
+        const entry: FlashEntry = { command, path, root: null, curves: null, removeAt: null };
         this.entries.add(entry);
         const values = this.Values(path);
         if (values instanceof Promise) {
@@ -144,25 +169,25 @@ export class WarpEffects {
    */
   Frame(now: number): void {
     this.now = now;
-    for (const entry of [...this.entries]) {
-      if (entry.removeAt != null && now >= entry.removeAt) this.Discard(entry);
-    }
+    for (const entry of this.entries) this.Follow(entry, now);
+    const due = [...this.entries].filter((entry) => entry.removeAt != null && now >= entry.removeAt);
+    if (due.length) this.Discard(due);
+    if (this.retiring.length && (!this.LiveRoots().length || now - this.retiringSince >= WARP_EFFECT_RETIRE_WAIT * TICKS_PER_SECOND)) this.Retire();
   }
 
   /**
-   * Removes every flash (a load).
+   * Removes every flash and retires them at once (a load).
    */
   Clear(): void {
-    for (const entry of [...this.entries]) this.Discard(entry);
+    this.Discard([...this.entries]);
+    this.Retire();
   }
 
   /**
-   * The drawn flashes' roots, for every retire's retained set.
+   * The flashes' roots, drawn or waiting for their retire, for every retire's retained set.
    */
   Roots(): object[] {
-    const roots: object[] = [];
-    for (const { root } of this.entries) if (root) roots.push(root);
-    return roots;
+    return [...this.LiveRoots(), ...this.retiring];
   }
 
   Report(): WarpEffectsReport {
@@ -207,6 +232,8 @@ export class WarpEffects {
       vec3.set(root.scaling, command.scale, command.scale, command.scale);
       addChild(root, 'children', effect);
       entry.root = root;
+      entry.curves = curves;
+      this.Follow(entry, now);
       this.engine.AddObject(root);
       PlayAll(effect);
       entry.removeAt = now + (LongestCurveSet(effect) + WARP_EFFECT_LINGER) * TICKS_PER_SECOND;
@@ -215,10 +242,23 @@ export class WarpEffects {
     }
   }
 
+  /**
+   * Moves a warp-in flash onto its ship's drawn position: it fires while the ship still coasts in (WarpFx triggers it
+   * 2 km out), and one left at the landing glowed beside the hull on the GPU.
+   *
+   * @param entry - The flash.
+   * @param now - The scene clock, in 100 ns ticks.
+   */
+  private Follow(entry: FlashEntry, now: number): void {
+    if (entry.command.kind !== 'warp-in' || !entry.curves) return;
+    const at = this.DrawnPosition?.(entry.command.ship, now);
+    if (at) vec3.set(entry.curves.translation.value, at[0], at[1], at[2]);
+  }
+
   private Fail(entry: FlashEntry, error: unknown): void {
     this.failed += 1;
     this.Record(`${entry.command.kind} on ${entry.command.ship} ${entry.path}: ${ErrorText(error)}`);
-    this.Discard(entry);
+    this.Discard([entry]);
   }
 
   private Record(message: string): void {
@@ -227,16 +267,44 @@ export class WarpEffects {
     if (this.errors.length > WARP_EFFECT_ERRORS_KEPT) this.errors.shift();
   }
 
-  private Discard(entry: FlashEntry): void {
-    this.entries.delete(entry);
-    const { root } = entry;
-    entry.root = null;
-    if (!root) return;
+  private LiveRoots(): object[] {
+    const roots: object[] = [];
+    for (const { root } of this.entries) if (root) roots.push(root);
+    return roots;
+  }
+
+  /**
+   * Takes flashes out of the scene at once; their resources wait for the next batch retire (WARP_EFFECT_RETIRE_WAIT).
+   *
+   * @param entries - The flashes to remove.
+   */
+  private Discard(entries: readonly FlashEntry[]): void {
+    for (const entry of entries) {
+      this.entries.delete(entry);
+      const { root } = entry;
+      entry.root = null;
+      if (!root) continue;
+      try {
+        this.engine.RemoveObject(root);
+      } catch (error) {
+        this.Record(`${entry.command.kind} on ${entry.command.ship} removal: ${ErrorText(error)}`);
+      }
+      if (!this.retiring.length) this.retiringSince = this.now;
+      this.retiring.push(root);
+    }
+  }
+
+  /**
+   * Retires every removed flash in one RetireShips against the other live graphs and the flashes still drawn.
+   */
+  private Retire(): void {
+    const roots = this.retiring;
+    if (!roots.length) return;
+    this.retiring = [];
     try {
-      this.engine.RemoveObject(root);
-      RetireShips([root], [...this.retained(), ...this.Roots()]);
+      RetireShips(roots, [...this.retained(), ...this.LiveRoots()]);
     } catch (error) {
-      this.Record(`${entry.command.kind} on ${entry.command.ship} teardown: ${ErrorText(error)}`);
+      this.Record(`teardown of ${roots.length} flash${roots.length === 1 ? '' : 'es'}: ${ErrorText(error)}`);
     }
   }
 }

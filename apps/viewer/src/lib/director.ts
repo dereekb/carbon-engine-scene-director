@@ -791,7 +791,8 @@ export class Director {
       ? new WarpEffects({
           engine,
           retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()],
-          detachAudio: (build) => this.audio.Detached(build)
+          detachAudio: (build) => this.audio.Detached(build),
+          DrawnPosition: (id, now) => world.Curves(id)?.translation.GetValueAt__Ticks(now, vec3.create()) ?? null
         })
       : null;
     this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;

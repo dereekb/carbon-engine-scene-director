@@ -88,11 +88,11 @@ describe('WarpFx', () => {
     const exit = run.events.find((event) => event.kind === 'exit');
     expect(run.commands.map(({ kind, from }) => `${kind}:${from}`)).toEqual(['warp-out:event', 'warp-in:frame']);
     const [out, inFlash] = run.commands;
-    expect(out).toMatchObject({ ship: 'r', files: [WARP_OUT_START_PATH, WARP_OUT_PATH], position: enter?.position, scale: 0.25, tick: enter?.tick });
+    expect(out).toMatchObject({ ship: 'r', files: [WARP_OUT_START_PATH, WARP_OUT_PATH], position: enter?.position, scale: 0.5, tick: enter?.tick });
     // Along the warp: +Z turns onto the direction.
     const along = Rotate(out.rotation, [0, 0, 1]);
     enter?.direction.forEach((value, axis) => expect(along[axis]).toBeCloseTo(value, 6));
-    expect(inFlash).toMatchObject({ ship: 'r', files: [WARP_IN_NOGLOW_PATH], position: exit?.landing, scale: 0.25 });
+    expect(inFlash).toMatchObject({ ship: 'r', files: [WARP_IN_NOGLOW_PATH], position: exit?.landing, scale: 0.5 });
     expect(inFlash.at).toBeLessThanOrEqual(exit?.tick ?? 0);
     expect(run.drawnGaps[0]).toBeLessThanOrEqual(WarpInTriggerDistance(RIFTER_RADIUS));
     expect(run.fx.Counts()).toEqual({ warpOut: 1, warpIn: 1 });
@@ -156,7 +156,7 @@ describe('WarpFx', () => {
     expect(WarpInFlashPath(31)).toBe(WARP_IN_NOGLOW_PATH);
     expect(WarpInFlashPath(149.9)).toBe(WARP_IN_NOGLOW_PATH);
     expect(WarpInFlashPath(150)).toBe(WARP_IN_GLOW_PATH);
-    expect(WarpFlashScale(31)).toBe(0.25);
+    expect(WarpFlashScale(31)).toBe(0.5);
     expect(WarpFlashScale(250)).toBe(1);
     expect(WarpFlashScale(1000)).toBe(4);
     expect(WarpFlashScale(20_000)).toBe(8);

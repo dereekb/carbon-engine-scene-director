@@ -156,10 +156,12 @@ export const MIN_WARP_LANDING_RADIUS = 2000;
 export const WARP_LANDING_YAW = 25;
 export const WARP_LANDING_PITCH = 12;
 /**
- * The share of a group warp-landing frames: the hulls nearest the reference, leaving out logi or tackle far off the main
- * body (they land deeper up the lane, in frame or just past it).
+ * How far out a group's warp-landing core reaches: the hulls within this many times the median hull's distance from the
+ * reference (at least MIN_WARP_LANDING_RADIUS), leaving out logi, capitals or tackle far off the main body (they land
+ * deeper up the lane, in frame or just past it). A share of the hulls failed on the GPU: 80% of the TFIs reached its
+ * carriers 16 km out and put the eye 83 km away.
  */
-export const WARP_LANDING_CORE = 0.8;
+export const WARP_LANDING_CORE_SPREAD = 2.5;
 
 /**
  * Which hardpoint, on which subject.
@@ -427,10 +429,14 @@ function resolveWarpLanding(ref: HardpointRef, scene: CinemaScene, ships: readon
   const distance = fitDistance(radius, fov, scene.aspect, fill);
   const up = Math.abs(dotVec(lane, WORLD_UP)) > 0.98 ? lead.forward : (orthogonalizeVec(WORLD_UP, lane) ?? [...WORLD_UP]);
   const starboard = crossVec(lane, up);
-  const side = scaleVec(starboard, ref.side === 'port' ? -1 : 1);
   const yaw = (WARP_LANDING_YAW * Math.PI) / 180;
   const pitch = (WARP_LANDING_PITCH * Math.PI) / 180;
-  const direction = normalizeVec(addScaledVec(scaleVec(addScaledVec(scaleVec(lane, Math.cos(yaw)), side, Math.sin(yaw)), Math.cos(pitch)), up, Math.sin(pitch))) ?? lane;
+  const directionFor = (sign: number): SceneVector => normalizeVec(addScaledVec(scaleVec(addScaledVec(scaleVec(lane, Math.cos(yaw)), starboard, sign * Math.sin(yaw)), Math.cos(pitch)), up, Math.sin(pitch))) ?? lane;
+  // No side asked: the sunward one (the light travels along sunDirection), so the landing is front-lit; a back-lit TFIs
+  // landing drew as silhouettes on the GPU.
+  let sign = ref.side === 'port' ? -1 : 1;
+  if (!ref.side && dotVec(directionFor(-1), scene.sunDirection) < dotVec(directionFor(1), scene.sunDirection)) sign = -1;
+  const direction = directionFor(sign);
   const eye = addScaledVec(centre, direction, distance);
   const subject: SubjectFrame = { centre, radius, forward: lane, up, starboard, velocity: [...leader.velocity], extents: { forward: [-radius, radius], starboard: [-radius, radius], up: [-radius, radius] } };
   return { pose: { eye, look: [...centre], up, fov }, subject, note, ...(placed ? { anchor: { eye: [...eye], look: [...centre], radius } } : {}) };
@@ -442,12 +448,14 @@ interface LandingPoint {
 }
 
 /**
- * The core of a formation or its landings: the WARP_LANDING_CORE share of the hulls nearest the reference (its slot),
- * so logi or tackle far off the main body do not shrink it to a few pixels; its centroid and bounding radius.
+ * The core of a formation or its landings: the hulls within WARP_LANDING_CORE_SPREAD times the median hull's distance
+ * from the reference (its slot), so logi or capitals far off the main body do not shrink it to a few pixels; its
+ * centroid and bounding radius.
  */
 function landingCore(points: readonly LandingPoint[], reference: SceneVector): { centre: SceneVector; radius: number } {
-  const sorted = [...points].sort((a, b) => distanceVec(a.point, reference) - distanceVec(b.point, reference));
-  const core = sorted.slice(0, Math.max(1, Math.ceil(WARP_LANDING_CORE * sorted.length)));
+  const distances = points.map((entry) => distanceVec(entry.point, reference)).sort((a, b) => a - b);
+  const reach = Math.max(MIN_WARP_LANDING_RADIUS, WARP_LANDING_CORE_SPREAD * (distances[Math.floor(distances.length / 2)] ?? 0));
+  const core = points.filter((entry) => distanceVec(entry.point, reference) <= reach);
   const centre = scaleVec(
     core.reduce<SceneVector>((sum, entry) => addVec(sum, entry.point), [0, 0, 0]),
     1 / Math.max(1, core.length)

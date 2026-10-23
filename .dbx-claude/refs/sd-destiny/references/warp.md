@@ -128,8 +128,12 @@ The client's warp effects play on every warp, arrivals included. Which and when:
   when no frame did. `warp_in_glow.black` for a SOF radius ≥ 150 m, else `warp_in_noglow.black` (EveTransform
   `warp_in_flash`: `disc` 500 m, `glow_core` 500 m, `glow_core2` 3,500 m, `streak` 750 m billboards; `_glow` adds
   `glow_core_big`; one unnamed curve set to 4.125 s).
-- **Scale** radius / 250, clamped [0.25, 8] (`WarpFlashScale`). Radius: the built hull's `boundingSphereRadius`, else
-  the flight's radius. All provisional until the real-GPU check.
+- **Scale** radius / 250, clamped [0.5, 8] (`WarpFlashScale`; the floor was 0.25 until the GPU check: a Rifter's flash
+  read as a faint dot from 5 km). Radius: the built hull's `boundingSphereRadius`, else the flight's radius.
+- **A warp-in flash follows its ship**: it fires 2 km out while the hull still coasts in, so `WarpEffects.Frame` moves
+  its root onto the ship's drawn position every frame (`DrawnPosition`, the director's `world.Curves` lookup, as
+  `WarpFx` uses) until the ship is gone; left at the landing it glowed beside the hull. Warp-outs stay where warp
+  began.
 - A placement or a removal ends a warp with no exit: the next frame drops it (`InWarp` false), no flash. A load
   clears every tracked warp and drawn flash.
 - **Drawing**: each file loads once (`ResourceValues`); every play hydrates a new `EveTransform` inside
@@ -137,10 +141,29 @@ The client's warp effects play on every warp, arrivals included. Which and when:
   fixed curves (`CreateStaticCurves` / `PlaceStatic`: position, the +Z-to-warp rotation) with the scale on the root,
   `Engine.AddObject`, then `PlayCurveSets()` on every transform in the tree (`warp_out_start`'s curve sets are on a
   child). Removed `WARP_EFFECT_LINGER` (0.5 s) after its longest curve set; at most `WARP_EFFECTS_LIVE_MAX` (64) at
-  once, the rest skipped. Teardown: `RemoveObject`, then `RetireShips` against every other root; `Roots()` joins every
-  retained set in `director.ts`.
+  once, the rest skipped. Teardown: `RemoveObject` at once, then **one batch `RetireShips`** for every removed flash
+  when none is left drawn or `WARP_EFFECT_RETIRE_WAIT` (5 s) after the oldest (and at a load). Each retire walks every
+  retained graph, ~150 ms beside the 44-ship TFIs, so one per removal held the page at ~5 fps for 10 s after a fleet
+  landed. `Roots()` (drawn and waiting) joins every retained set in `director.ts`.
 - **get_state**: `renderer.warpEffects { live, loading, failed, skipped, errors }`; `simulation.warpFlashes
   { warpOut, warpIn }` counts the commands, with or without a renderer.
+- **Checks**: `verify-page --only warp-in` (headless: arrivals, counts, by-name warps, the shot); the drawn look below.
+
+### Real-GPU evidence (2026-10-23, Windows Chrome, NVIDIA, 1600 × 900, `?audio=off`)
+
+Private hub on 5521 with temp stores, Jita IV - Moon 4 - Caldari Navy Assembly Plant (30 km off), driver and screens in
+`.scratch/warp-in-gpu/` on dbxpc (not committed).
+
+- **TFIs warp-in** (44 ships, `warpIn: true`): 44 warp-in flashes, 0 failed, 0 `gpuErrors`, empty `page_log`; up to
+  38 drawn at once. Ships streak in with their warp trails and land in formation. fps ~20 (5–7 at the flash peak);
+  before the batch retire a 5–6 s stall followed the burst (26–44 retires at ~150 ms), after it two retires (144 ms,
+  142 ms) and no stall.
+- **The flashes**: the glow (`glow_core2`) is soft and blue-white, small at a warp-in shot's 5–9 km and partly lost
+  against a bright nebula; the 0.17 s core flash rarely lands in a 5 Hz capture. Brightness is the authored curves';
+  no client reference to tune against yet.
+- **Warp-out** (`order_fleet` warp 3,000 km along +X): 44 warp-outs as members entered warp, a horizontal blue-white
+  streak along the warp in a side view (the +Z-to-warp rotation is right), 38 warp-ins counted at the far landing,
+  0 failed.
 
 ## Reporting and hooks
 

@@ -37,10 +37,11 @@ export const WARP_IN_TRIGGER_RADII = 4;
 export const WARP_IN_GLOW_RADIUS = 150;
 
 /**
- * The radius (metres) the flashes are drawn at scale 1 for, and the scale's clamp.
+ * The radius (metres) the flashes are drawn at scale 1 for, and the scale's clamp. The floor is 0.5 since the GPU check
+ * (2026-10-23): a Rifter's flash at 0.25 read as a faint dot from 5 km.
  */
 export const WARP_FLASH_AUTHORED_RADIUS = 250;
-export const WARP_FLASH_SCALE_MIN = 0.25;
+export const WARP_FLASH_SCALE_MIN = 0.5;
 export const WARP_FLASH_SCALE_MAX = 8;
 
 export type WarpFxKind = 'warp-out' | 'warp-in';

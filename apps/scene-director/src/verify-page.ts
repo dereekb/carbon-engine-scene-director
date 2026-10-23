@@ -99,6 +99,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly slotError?: number;
   readonly following?: ShipFollowingState;
   readonly warp?: ShipWarpState;
+  readonly arrival?: ShipArrivalState;
   readonly boosters?: { readonly maxVel: number; readonly intensity: number; readonly warpIntensity: number };
   readonly propMod?: Maybe<ShipPropModState>;
   readonly fit?: Maybe<ShipFitState>;
@@ -313,6 +314,41 @@ interface ShipWarpState {
   readonly landsIn?: number;
 }
 
+/**
+ * get_state's `arrival` on a ship landing from warp (destiny.ts ShipArrivalReport).
+ */
+interface ShipArrivalState {
+  readonly state: 'parked' | 'scheduled' | 'warping' | 'landed';
+  readonly from: SceneVector;
+  readonly landing: SceneVector;
+  readonly landsIn?: number;
+  readonly landedAt?: number;
+  readonly leader?: string;
+}
+
+/**
+ * What an arrival watch saw of one ship: the least distance from its landing while it waited, the greatest while it
+ * was in warp, where it warped from and to, and the tick it dropped out of warp.
+ */
+interface ArrivalSeen {
+  waitedFrom: number;
+  warpedFrom: number;
+  from: Maybe<SceneVector>;
+  landing: Maybe<SceneVector>;
+  landedAt: Maybe<number>;
+}
+
+/**
+ * get_state's `arrivals` (and an add's result `arrivals`): one group of ships landing from warp.
+ */
+interface ArrivalGroupState {
+  readonly group: string;
+  readonly fleet?: string;
+  readonly state: string;
+  readonly counts: Record<string, number>;
+  readonly ships: { readonly id: string; readonly state: string }[];
+}
+
 interface ShipFollowingState {
   readonly state: string;
   readonly anchor: string;
@@ -337,11 +373,20 @@ interface FleetFormationState {
   readonly waiting: number;
 }
 
+/**
+ * get_state's `simulation.warpFlashes`: the warp flashes played since the page loaded.
+ */
+interface WarpFlashState {
+  readonly warpOut: number;
+  readonly warpIn: number;
+}
+
 interface ViewerState {
   readonly renderer: { readonly available: boolean; readonly adapter?: string; readonly reason?: string };
   readonly environment: Maybe<{ readonly background: { readonly ready: boolean }; readonly dressing: { readonly state: string } }>;
-  readonly simulation: { readonly tick: number; readonly seconds: number };
+  readonly simulation: { readonly tick: number; readonly seconds: number; readonly warpFlashes?: WarpFlashState };
   readonly ships: ShipState[];
+  readonly arrivals?: ArrivalGroupState[];
   readonly distances: { readonly centreToCentre: number }[];
   readonly fleets: (FleetReport & { readonly actingFor?: string; readonly destroyed?: string[]; readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
@@ -415,6 +460,7 @@ interface AddedFleetResult extends Omit<SceneResult, 'scene'> {
   readonly hulls: { readonly hull?: string; readonly radius: number; readonly dnaFrom: string; readonly radiusFrom: string }[];
   readonly propMods: { readonly module: string | number; readonly typeID?: number; readonly from: string; readonly note?: string }[];
   readonly scene: { readonly name: string; readonly ships: { readonly id: string; readonly type?: string; readonly position: SceneVector }[] };
+  readonly arrivals?: ArrivalGroupState[];
 }
 
 interface StagedLead {
@@ -428,12 +474,14 @@ interface AddShipsResult extends Omit<SceneResult, 'scene'> {
   readonly hull: { readonly dna: string; readonly radius: number; readonly dnaFrom: string; readonly radiusFrom: string };
   readonly scene: { readonly ships: { readonly id: string; readonly position: SceneVector; readonly rotation: SceneVector }[] };
   readonly warnings?: string[];
+  readonly arrivals?: ArrivalGroupState[];
 }
 
 interface StageEngagementResult extends Omit<SceneResult, 'scene'> {
   readonly engagement: { readonly center: SceneVector; readonly heading: number; readonly sides: { readonly team: string; readonly fleet?: string; readonly commander?: string; readonly ships: string[]; readonly lead: Maybe<StagedLead> }[] };
   readonly scene: { readonly ships: { readonly id: string; readonly position: SceneVector }[]; readonly fleets?: unknown[] };
   readonly loaded?: boolean;
+  readonly arrivals?: ArrivalGroupState[];
 }
 
 interface LogEntry {
@@ -448,8 +496,20 @@ interface CommandTree {
   readonly wings: readonly { readonly id: string; readonly command?: FleetGroupCommandReport; readonly squads: readonly { readonly id: string; readonly command?: FleetGroupCommandReport }[] }[];
 }
 
+/**
+ * An order's `resolved`: what a target name became (order_ship, order_fleet).
+ */
+interface ResolvedOrderTarget {
+  readonly name: string;
+  readonly kind: string;
+  readonly target?: string;
+  readonly point?: SceneVector;
+  readonly range: number;
+}
+
 interface OrderFleetResult {
   readonly by: string;
+  readonly resolved?: ResolvedOrderTarget;
   readonly leader: string;
   readonly ships: readonly (string | { readonly id: string; readonly landing: SceneVector })[];
   readonly skipped?: readonly { readonly id: string; readonly reason: string }[];
@@ -503,6 +563,9 @@ class Skipped extends Error {}
  */
 function SkipWithoutSde(error: unknown): never {
   if (error instanceof ShipDataError && error.failure === 'unavailable') throw new Skipped(error.message);
+  // A hull name the hub could not resolve for want of the SDE comes back among the document's problems.
+  const missing = /tools-core has no SDE for build \d+/u.exec(ErrorMessage(error));
+  if (missing) throw new Skipped(missing[0]);
   throw error;
 }
 
@@ -2886,6 +2949,224 @@ try {
     const cut = cinemaOf(await call<ViewerState>('get_state'));
     Expect(cut.state === 'idle' && cut.resumable === null, JSON.stringify(cut));
     return `released: ${released.note}; load: ${cut.note}`;
+  });
+
+  // Fleet warp-in (sd-destiny warp doc "Warp-in", sd-fleets "Arriving fleets"): each check loads its own scene, so
+  // --only warp-in runs them alone. Headless, so the flashes are the counted commands, not drawn ones.
+  const between = (a: readonly number[], b: readonly number[]): number => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const flashesOf = (state: ViewerState): WarpFlashState => state.simulation.warpFlashes ?? { warpOut: 0, warpIn: 0 };
+  const RIFTER_DNA = 'mf4_t1:minmatarbase:minmatar';
+  /**
+   * Polls get_state until every ship has dropped out of warp (its arrival landed, or over once it seen it), recording
+   * what each did; `each` sees every poll first.
+   */
+  const watchArrivals = async (ids: readonly string[], seconds: number, each?: (state: ViewerState, seen: ReadonlyMap<string, ArrivalSeen>) => void): Promise<{ readonly seen: Map<string, ArrivalSeen>; readonly state: ViewerState }> => {
+    const seen = new Map<string, ArrivalSeen>(ids.map((id) => [id, { waitedFrom: Infinity, warpedFrom: 0, from: null, landing: null, landedAt: null }]));
+    const state = await WaitFor('every arrival to drop out of warp', seconds, (polled) => {
+      each?.(polled, seen);
+      for (const id of ids) {
+        const ship = ShipIn(polled, id);
+        const record = seen.get(id) as ArrivalSeen;
+        const { arrival } = ship;
+        if (arrival) {
+          record.from = arrival.from;
+          record.landing = arrival.landing;
+          const away = ship.position ? between(ship.position, arrival.landing) : null;
+          if (away != null && (arrival.state === 'parked' || arrival.state === 'scheduled')) record.waitedFrom = Math.min(record.waitedFrom, away);
+          if (away != null && arrival.state === 'warping') record.warpedFrom = Math.max(record.warpedFrom, away);
+          if (arrival.landedAt != null) record.landedAt ??= arrival.landedAt;
+        } else if (record.landing && record.landedAt == null) {
+          // A follower's arrival ends as it starts to follow: this poll's tick bounds its exit.
+          record.landedAt = polled.simulation.tick;
+        }
+      }
+      const pending = ids.find((id) => seen.get(id)?.landedAt == null);
+      return pending ? `${pending} ${JSON.stringify(ShipIn(polled, pending).arrival ?? null)}` : null;
+    });
+    return { seen, state };
+  };
+  const formationReady = (fleet: string) => (polled: ViewerState) => (polled.fleets.find((group) => group.id === fleet)?.formation?.ready ? null : JSON.stringify(polled.fleets.find((group) => group.id === fleet)?.formation ?? null));
+  const rifterFleet = (id: string, count = 2) => ({ id, commander: { hull: 'Rifter' }, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ hull: 'Rifter', count }] }] }] });
+
+  await Check('warp-in: three Rifters land staggered at their placements, a warp-in flash each and no warp-out', async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-in' } });
+    const before = flashesOf(await call<ViewerState>('get_state'));
+    const result = await call<AddShipsResult>('add_ships', { hull: 'Rifter', count: 3, formation: 'line', position: [0, 0, 0], warpIn: true }).catch(SkipWithoutSde);
+    const ids = result.added.ships;
+    Expect(ids.length === 3 && result.arrivals?.length === 1, JSON.stringify({ ids, arrivals: result.arrivals }));
+    const { seen, state } = await watchArrivals(ids, 120);
+    const placed = new Map(result.scene.ships.map((ship) => [ship.id, ship.position]));
+    let worst = 0;
+    for (const id of ids) {
+      const record = seen.get(id) as ArrivalSeen;
+      const off = between(ShipIn(state, id).position ?? [Infinity, 0, 0], placed.get(id) ?? [0, 0, 0]);
+      worst = Math.max(worst, off);
+      Expect(record.waitedFrom >= 2_000_000 && record.warpedFrom >= 150_000 && off <= 1000, `${id}: waited ${Math.round(record.waitedFrom)} m out, warped from ${Math.round(record.warpedFrom)} m, landed ${Math.round(off)} m off its placement`);
+    }
+    const exits = [...new Set(ids.map((id) => seen.get(id)?.landedAt))];
+    Expect(exits.length >= 2, `exit ticks ${exits.join(', ')}`);
+    const flashed = await WaitFor('a warp-in flash each', 10, (polled) => (flashesOf(polled).warpIn - before.warpIn >= 3 ? null : JSON.stringify(flashesOf(polled))));
+    const flashes = flashesOf(flashed);
+    Expect(flashes.warpOut === before.warpOut, `warp-outs ${before.warpOut} -> ${flashes.warpOut}`);
+    return `exit ticks ${exits.join(', ')}; landed at most ${Math.round(worst)} m off; warp-in flashes +${flashes.warpIn - before.warpIn}, warp-out +0`;
+  });
+
+  await Check('warp-in: orders on an arriving ship are refused', async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-in-refusals' } });
+    const result = await call<AddShipsResult>('add_ships', { hull: 'Rifter', count: 1, position: [0, 0, 0], warpIn: true }).catch(SkipWithoutSde);
+    const [id] = result.added.ships;
+    const refused = await call('order_ship', { id, order: { type: 'stop' } }).then(() => null, ErrorMessage);
+    Expect(refused != null && /arriving by warp/u.test(refused), `order_ship: ${refused}`);
+    const prop = await call('switch_prop_mods', { ships: [id], active: true }).then(() => null, ErrorMessage);
+    const report = ShipIn(await call<ViewerState>('get_state'), id);
+    Expect(prop != null || report.propMod?.state !== 'active', `switch_prop_mods: ${prop}, ${JSON.stringify(report.propMod)}`);
+    return refused ?? '';
+  });
+
+  await Check('warp-in: an inline TFI fleet holds for its FC, forms up within 90 s, logi at 30 km', async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-in-fleet' } });
+    const composition = {
+      id: 'wi',
+      commander: { hull: 'Tempest Fleet Issue' },
+      wings: [
+        {
+          id: 'w',
+          squads: [
+            { id: 'dps', role: 'dps', ships: [{ hull: 'Tempest Fleet Issue', count: 3 }] },
+            { id: 'logi', role: 'logi', ships: [{ hull: 'Guardian', count: 2 }] }
+          ]
+        }
+      ]
+    };
+    const added = await call<AddedFleetResult>('add_fleet_composition', { composition, position: [0, 0, 0], warpIn: true }).catch(SkipWithoutSde);
+    const { commander, ships } = added.added;
+    const members = ships.filter((id) => id !== commander);
+    // A member whose arrival ended (it follows) while the FC is still arriving did not hold.
+    const strays = new Set<string>();
+    const { seen } = await watchArrivals(ships, 150, (polled, records) => {
+      if (!ShipIn(polled, commander).arrival || ShipIn(polled, commander).arrival?.state === 'landed') return;
+      for (const id of members) if (!ShipIn(polled, id).arrival && records.get(id)?.landing) strays.add(id);
+    });
+    Expect(!strays.size, `followed before the FC landed: ${[...strays].join(', ')}`);
+    const fcAt = seen.get(commander)?.landedAt ?? Infinity;
+    const early = members.filter((id) => (seen.get(id)?.landedAt ?? Infinity) < fcAt);
+    const earlyTicks = early.map((id) => id + ' ' + String(seen.get(id)?.landedAt)).join(', ');
+    Expect(!early.length, `landed before the FC (tick ${fcAt}): ${earlyTicks}`);
+    const formed = await WaitFor('every member in formation', 90, (polled) => NotInFormation(polled, members), 2);
+    const logi = members.filter((id) => ShipIn(formed, id).role === 'logi');
+    const lead = logi.map((id) => ShipIn(formed, id)).find((ship) => ship.anchor?.ship === commander);
+    const range = lead?.following?.distance ?? NaN;
+    Expect(lead?.anchor?.range === 30000 && Math.abs(range - 30000) <= 3000, `logi lead ${JSON.stringify({ anchor: lead?.anchor, following: lead?.following })}`);
+    const landed = [...seen.values()].map((record) => record.landedAt ?? 0);
+    return `landed ticks ${Math.min(...landed)}-${Math.max(...landed)}, FC first; formed at tick ${formed.simulation.tick}; logi lead ${Math.round(range)} m off the FC`;
+  });
+
+  await Check('warp-in: a stage_engagement side lands onto the other', async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-in-engagement' } });
+    await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
+    const result = await call<StageEngagementResult>('stage_engagement', {
+      sides: [{ ships: [{ hull: 'Rifter', count: 3 }] }, { ships: [{ hull: 'Slasher', count: 3 }], warpIn: true }],
+      range: 20000,
+      near: { celestial: CNAP, range: 40000 }
+    }).catch(SkipWithoutSde);
+    const [blue, red] = result.engagement.sides;
+    Expect(result.arrivals?.length === 1 && !blue.ships.some((id) => result.arrivals?.[0]?.ships.some((ship) => ship.id === id)), JSON.stringify(result.arrivals));
+    const { seen, state } = await watchArrivals(red.ships, 120);
+    const placed = new Map(result.scene.ships.map((ship) => [ship.id, ship.position]));
+    const toBlue = (blue.lead?.position ?? [0, 0, 0]).map((value, axis) => value - (red.lead?.position ?? [0, 0, 0])[axis]);
+    for (const id of red.ships) {
+      const record = seen.get(id) as ArrivalSeen;
+      const lane = (record.landing ?? [0, 0, 0]).map((value, axis) => value - (record.from ?? [0, 0, 0])[axis]);
+      const onto = lane[0] * toBlue[0] + lane[1] * toBlue[1] + lane[2] * toBlue[2];
+      Expect(between(record.landing ?? [Infinity, 0, 0], placed.get(id) ?? [0, 0, 0]) <= 1 && onto > 0, `${id}: landing ${JSON.stringify(record.landing)} vs ${JSON.stringify(placed.get(id))}, lane ${JSON.stringify(lane)}`);
+    }
+    const gap = between(ShipIn(state, red.lead?.id ?? '').position ?? [Infinity, 0, 0], ShipIn(state, blue.lead?.id ?? '').position ?? [0, 0, 0]);
+    Expect(Math.abs(gap - 20000) <= 3000, `leads ${Math.round(gap)} m apart after the landing`);
+    return `${red.ships.length} ${red.team} ships landed ${Math.round(gap)} m from the ${blue.team} lead, warping toward it`;
+  });
+
+  await Check("warp-in: joiners land at a moved fleet's live slots", async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-in-join' } });
+    const added = await call<AddedFleetResult>('add_fleet_composition', { composition: rifterFleet('jw'), position: [0, 0, 0] }).catch(SkipWithoutSde);
+    const fc = added.added.commander;
+    await WaitFor('the jw formation is ready', 60, formationReady('jw'));
+    await WaitFor('the FC gets its warp speed', 30, (polled) => ((ShipIn(polled, fc).physics?.warpSpeed ?? 0) > 0 ? null : JSON.stringify(ShipIn(polled, fc).physics)));
+    await call<OrderFleetResult>('order_fleet', { fleet: 'jw', order: { type: 'warp', point: [0, 0, 400000] } });
+    const moved = await WaitFor('the jw fleet lands 400 km on', 90, (polled) => (ShipIn(polled, fc).warp?.phase === 'landed' && between(ShipIn(polled, fc).position ?? [0, 0, 0], [0, 0, 400000]) < 20000 ? null : JSON.stringify(ShipIn(polled, fc).warp ?? null)));
+    const live = ShipIn(moved, fc).position ?? [0, 0, 0];
+    const result = await call<AddShipsResult>('add_ships', { hull: 'Rifter', count: 2, fleet: { id: 'jw', squad: 'dps' }, warpIn: true });
+    const { seen } = await watchArrivals(result.added.ships, 120);
+    for (const id of result.added.ships) {
+      const landing = seen.get(id)?.landing ?? [Infinity, 0, 0];
+      Expect(between(landing, live) <= 5000, `${id} lands ${Math.round(between(landing, live))} m from the FC's live position (${Math.round(between(landing, [0, 0, 0]))} m from its placement)`);
+    }
+    await WaitFor('the joiners in formation', 60, (polled) => NotInFormation(polled, result.added.ships), 2);
+    return `${result.added.ships.join(', ')} landed within ${Math.round(Math.max(...result.added.ships.map((id) => between(seen.get(id)?.landing ?? [0, 0, 0], live))))} m of the moved FC`;
+  });
+
+  await Check('warp-in: order_ship warps to the CNAP and a moon by name; a far planet and approach on a planet are refused', async () => {
+    await call('load_scene', {
+      scene: {
+        name: 'verify-warp-names',
+        ships: [
+          { id: 'a', dna: RIFTER_DNA, type: 'Rifter', position: [0, 0, 0] },
+          { id: 'b', dna: RIFTER_DNA, type: 'Rifter', position: [0, 0, 1000] }
+        ]
+      }
+    });
+    const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 300000 }).catch(SkipWithoutSde);
+    // The CNAP's centre sits at minus the anchor offset (the origin is offset off it); its SDE radius is 100 km.
+    const station = (set.location.anchor?.offset ?? [0, 0, 0]).map((value) => -value);
+    await WaitFor('the location targets', 20, (polled) => (polled.location?.status === 'ready' && (ShipIn(polled, 'b').physics?.warpSpeed ?? 0) > 0 ? null : JSON.stringify(polled.location?.status)));
+    const far = await call('order_ship', { id: 'b', order: { type: 'warp', target: 'Jita I' } }).then(() => null, ErrorMessage);
+    Expect(far != null && /set_location there first/u.test(far), `Jita I: ${far}`);
+    const approach = await call('order_ship', { id: 'b', order: { type: 'approach', target: 'Jita IV - Moon 4' } }).then(() => null, ErrorMessage);
+    Expect(approach != null && /warp/u.test(approach), `approach on a moon: ${approach}`);
+    const toStation = await call<{ resolved?: ResolvedOrderTarget }>('order_ship', { id: 'a', order: { type: 'warp', target: CNAP, range: 10000 } });
+    Expect(toStation.resolved?.target === 'celestial:60003760', JSON.stringify(toStation));
+    const moon = await call<{ resolved?: ResolvedOrderTarget }>('order_ship', { id: 'b', order: { type: 'warp', target: 'Jita IV - Moon 4', range: 20000 } });
+    Expect(moon.resolved?.kind === 'moon' && moon.resolved.point != null, JSON.stringify(moon));
+    const landed = await WaitFor('both warps land', 120, (polled) => (['a', 'b'].every((id) => ShipIn(polled, id).warp?.phase === 'landed') ? null : JSON.stringify(['a', 'b'].map((id) => ShipIn(polled, id).warp?.phase))));
+    const offMoon = between(ShipIn(landed, 'b').position ?? [Infinity, 0, 0], moon.resolved?.point ?? [0, 0, 0]);
+    const offStation = between(ShipIn(landed, 'a').position ?? [Infinity, 0, 0], station) - 100000;
+    Expect(offMoon <= 5000 && Math.abs(offStation - 10000) <= 5000, `b ${Math.round(offMoon)} m off its moon landing; a ${Math.round(offStation)} m off the CNAP`);
+    return `a ${Math.round(offStation)} m off the CNAP; b ${Math.round(offMoon)} m off its Moon 4 landing; refused: ${far?.split(';')[0]} / ${approach}`;
+  });
+
+  await Check('warp-in: order_fleet warps to an object by name, every member warping', async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-names-fleet' } });
+    const added = await call<AddedFleetResult>('add_fleet_composition', { composition: rifterFleet('jo'), position: [0, 0, 0] }).catch(SkipWithoutSde);
+    await call('add_objects', { objects: [{ type: 'Astrahus', id: 'keep', name: 'Verify Keep', position: [0, 0, 600000] }] });
+    await WaitFor('the jo formation is ready', 60, formationReady('jo'));
+    await WaitFor('warp speeds', 30, (polled) => added.added.ships.map((id) => ShipIn(polled, id)).find((ship) => !((ship.physics?.warpSpeed ?? 0) > 0))?.id ?? null);
+    const before = flashesOf(await call<ViewerState>('get_state'));
+    const ordered = await call<OrderFleetResult>('order_fleet', { fleet: 'jo', order: { type: 'warp', target: 'verify keep', range: 5000 } });
+    Expect(ordered.resolved?.kind === 'object' && ordered.resolved.target === 'keep', JSON.stringify(ordered.resolved));
+    const warped = new Set<string>();
+    const state = await WaitFor('every member warps, a warp-out each', 90, (polled) => {
+      for (const id of added.added.ships) if (ShipIn(polled, id).warp?.phase === 'warping') warped.add(id);
+      const out = flashesOf(polled).warpOut - before.warpOut;
+      return warped.size === added.added.ships.length && out >= added.added.ships.length ? null : `warped ${[...warped].join(', ')}; warp-outs +${out}`;
+    });
+    return `${warped.size} members warped to "${ordered.resolved?.name}"; warp-outs +${flashesOf(state).warpOut - before.warpOut}`;
+  });
+
+  await Check("warp-in: the warp-in shot anchors at an arriving fleet's landing; other hardpoints refuse it", async () => {
+    await call('load_scene', { scene: { name: 'verify-warp-in-shot' } });
+    const added = await call<AddedFleetResult>('add_fleet_composition', { composition: rifterFleet('ws'), position: [0, 0, 0], warpIn: true }).catch(SkipWithoutSde);
+    const landing = added.scene.ships.find((ship) => ship.id === added.added.commander)?.position ?? [0, 0, 0];
+    await playShot({ shot: 'warp-in', fleet: 'ws' });
+    const anchored = await WaitFor('the warp-in anchor', 20, (polled) => {
+      const pose = cinemaOf(polled).pose;
+      return pose && between(pose.look, landing) <= 5000 ? null : JSON.stringify(polled.cinema);
+    });
+    const arriving = added.added.ships.filter((id) => ShipIn(anchored, id).arrival && ShipIn(anchored, id).arrival?.state !== 'landed');
+    Expect(arriving.length > 0, 'the fleet landed before the shot anchored');
+    const eye = cinemaOf(anchored).pose?.eye ?? [0, 0, 0];
+    const refused = await playShot({ hardpoint: { name: 'flank-port', fleet: 'ws' } }).then(() => null, ErrorMessage);
+    const note = refused ?? cinemaOf(await call<ViewerState>('get_state')).note ?? '';
+    Expect(/still arriving by warp/u.test(note), `flank-port: ${note}`);
+    return `anchored ${Math.round(between(eye, landing))} m from the landing with ${arriving.length} still arriving; flank-port: ${note}`;
   });
 
   if (rendering) {
