@@ -1,9 +1,9 @@
-# Fleet personalities: templates, the library, pilots, and (later) the FC brain
+# Fleet personalities: templates, the library, pilots, and the FC brain
 
 > A fleet personality is an FC's playstyle (`cjs-fleet-personality/1`) a fleet picks by name, so a cheap model only
 > picks one per fleet and deterministic page code runs the fight. Fetch before touching
 > `packages/scene/src/lib/personalities/`, the hub's `fleet-personalities.ts` / `personality-files.ts`, the
-> `*_fleet_personality*` tools, `personality` on the staging tools, or (S7) `fleet-commanders`. Plan:
+> `*_fleet_personality*` tools, `personality` on the staging tools, or `fleet-commanders` (the brain on the page). Plan:
 > `~/.claude/plans/i-want-to-be-reactive-twilight.md` (slices S1–S8).
 
 ## Status
@@ -18,11 +18,14 @@
   doc `orders`), and `order_fleet { type: "free-fire", on }` (`FleetCommanders` free fire, `FleetTargets` free picks
   with `pickFreeFireTarget`; `sd-fleets` doc `targets`). `Director.ShipReach` / `FreeFireView` are ready for S7's
   picture port.
-- **Not yet**: S7 the brain running on the page (`fleet-commanders` builds the picture with `toFleetPicture`, draws
-  command traits, runs succession and `stepFleetBrain`; get_state `fc` and `pilot`, manual levers;
-  `set_fleet_personality` then re-arms them), S8 real-GPU evidence. **Today a fleet's personality only times its
-  pilots' reactions; no FC brain runs** (tools.ts `set_fleet_personality`, the scene format's `personality` line and the
-  MCP instructions say so; S7 rewrites those phrases). The free-fire verify-page check has not run on tools-core.
+- **S7 (2026-10-23) the brain runs on the page** (below, The brain on the page): `FleetCommanders` steps every
+  personality fleet each boundary, its calls run as `order_fleet` / `switch_prop_mods` with the acting FC as `by`; the
+  succession hands the formation to the designate; a model's lever is manual until `set_fleet_personality`; get_state
+  `fleets[].fc` and `ships[].pilot`. Node specs: `fleet-commanders.spec.ts` (fake port). The verify-page check
+  `personality: the FC brain calls the nearest hostile ...` is written but **not yet run on tools-core** (the Mac has
+  none).
+- **Not yet**: S8 real-GPU evidence (brawler TFIs vs sniper Ferox on dbxpc), and the dbxpc verify-page run of
+  `personality|called|FC|free fire`.
 
 ## Files
 
@@ -41,6 +44,8 @@
 | `.../personalities/targeting.ts` | `rankFleetTargets`, `toFleetCall`, `toFleetEngaged`, `pickFreeFireTarget` |
 | `.../personalities/movement.ts` | `toFleetMove` (stances), `isFleetMoveChange`, `toFleetPropMods` |
 | `.../personalities/brain.ts` | `stepFleetBrain`, the levers, memory (pending decisions, the decisions log) |
+| `apps/viewer/src/lib/fleet-commanders.ts` | the page's command state: call book, free fire, acting commanders (overlay), and the brain: `Step`, `CommanderDown`, `TakeLevers`, `AfterOperations`, `Report`, `PilotOf`; node-tested over `FleetBrainPort` |
+| `packages/scene/src/lib/fleets/live.ts` | `LiveFleetOverlay.commanders`: the acting commander replaces the default successor, or takes the command from a flagged FC |
 
 ## The template
 
@@ -132,3 +137,56 @@ tool calls that come back. Specs on synthetic pictures: `personalities.spec-help
   an action; a want that goes away drops it. `manual` levers are skipped, `held` (cease_fire) skips call and free
   fire, no FC (leaderless) decides nothing and drops the pending ones. Calls only once engaged. The decisions log keeps
   the latest 20 `{ tick, lever, tool, args, why }`.
+
+## The brain on the page (S7, `fleet-commanders.ts`)
+
+`Director` builds `FleetCommanders` with a `FleetBrainPort` (Document, Live, Destroyed, Ready, Settled, Facts,
+OrderOf, CallOf, PropMods, Run, HandOver), so the brain is node-tested with a fake port and imports nothing from
+`./runtime`.
+
+- **Loop**: `Director.StepFleetBrains(boundary)` runs in the boundary listener between `SyncRecharged` and
+  `SyncFleetTargets(boundary)` (try/catch; a fleet whose step throws gets `fc.note`, the others step). Per personality
+  fleet in document order: succession checks, the handover, the gate, the picture, `stepFleetBrain`, then each action
+  through `port.Run`: `order_fleet` → `Director.FleetOrderNow(args, { boundary })` (targets → `CallTargets`,
+  free-fire → `FreeFireOrder`, both skipping their own sync so the boundary's starts the locks; moves → `orders.Fly`;
+  a document order is refused without a cue), `switch_prop_mods` → `SwitchPropMods` (pilots answer at their
+  reactions). A refused action stays in the log with `refused`.
+- **Gate**: `following.Ready(fleet)`, no member arriving or in warp, and every member and ship of another team
+  `Settled` (`Director.ShipSettled`: hull stats, prop mod lookup, fit or default weapons' type). It gives up after
+  `FLEET_GATE_TICKS` (20) boundaries from its first, noting what it waited for (`fc.note`); `readyAt` keys every jitter.
+  After it, a ship joins the pictures once settled or 20 ticks after it was first seen unsettled. The brain idles while
+  the acting FC is in warp, arriving or without a ball.
+- **Picture port** (`Director.BrainFacts`): every ship with a ball that has not exploded: position and radius from
+  `world.Motion` (`physics.radius`, `physics.maxVelocity`), HP from `damage.Health`, paper DPS (`Director.PaperDps`,
+  shared with get_state's `combat.paperDps`), `SignatureOf`, its target, `ShipReach`, `combat.Attackers` (the 20 s DPS
+  window); flagged, warping and arriving ships are `away`. `CallOf` is the fleet group's live list filtered to
+  `CalledTargetStatus` live; `OrderOf` the FC's pending, else applied, order; `PropMods` from the fleet's prop mod
+  counts (on when activating + active outnumber stopping + off).
+- **Traits**: one `toFleetTraitBook` per document (personalities resolved, `toFleetPilotTraits` per personality
+  fleet, authored traits elsewhere with source `pilot`): `PilotOf` feeds get_state `pilot`, `ReactionOf` feeds
+  `toPilotDelays` (it replaced S6's `PilotReactions`).
+- **Succession**: `CommanderDown(fleet, down, tick, { flagged })` runs `toFleetSuccessor` over the document fleet with
+  every destroyed ship gone, and sets the handover (`toHandoverTicks`, unit keyed `fleet|handover|designate|tick −
+  readyAt`). Explode: `Director.Destroy` calls it for each personality fleet the dead ship commanded (live view)
+  **before** reading the heirs, so the overlay's `commanders` makes the designate the formation root at once and S2's
+  `CaptureFleetHeirs` / `InheritFleetOrders` fly it on. Flag: the step sees the live commander destroyed and starts it
+  flagged; the flagged FC stays the root until the handover, when `port.HandOver` captures the flagged FC's motion,
+  moves the overlay, re-plans (`following.Reconcile`) and has the designate inherit. A designate dying during its
+  handover re-runs the protocol (explode through `Destroy`, flag through the step). No designate: `leaderless` (the
+  overlay entry goes, the default rule keeps a root, the brain decides nothing). A patch that changes a fleet's
+  document commander drops its acting commander and succession.
+- **Levers taken by a model** (`TakeLevers`, after a tool call or a timeline cue succeeds, `Director.Manual`): order_fleet
+  targets / free-fire, engage and cease_fire on members → `call` + `free-fire` (cease_fire also `held`, the others
+  let it go); a fleet (not wing or squad) move or warp, `order_ship` on the acting FC (and a ship script's steps on
+  it) → `move`; switch_prop_mods on members → `prop-mods`. The brain's own calls never pass through it.
+  `set_fleet_personality` (any `update_fleet` whose `set` has `personality`, `AfterOperations` from `Edit` and
+  `CueEdit`) clears `manual`, `held` and the pending decisions; a held fleet's members get their holds lifted
+  (`FleetTargets.Rearm`) so the brain's call is shot again.
+- **get_state `fleets[].fc`** (personality fleets): `personality`, `ship` (the live commander: the formation root;
+  during an explode handover already the designate), `ability`, `state` (`handover` > `leaderless` > `waiting` >
+  `no-team` > `commanding`), `successor` / `takesOverIn` (seconds) during a handover, `readyAt`, `engaged` /
+  `engagedBy`, `hostiles` and `reach` (the last picture), `stance`, `manual`, `held`, `pending` (`lever`, `dueIn`,
+  `why`), `decisions` (`tick`, `lever`, `tool`, `args`, `why`, `refused?`; the latest 20), `note`. **`ships[].pilot`**:
+  `{ command?, reaction?, source }` for a personality fleet's members and ships with authored traits.
+- **Reset**: a load clears every brain, acting commander, gate memory and the trait book (`Clear`); a fleet removed
+  drops its brain.

@@ -1,6 +1,6 @@
-import { applySceneOperations, normalizeScene, type SceneDocument, toLiveFleetScene } from '@scene-director/scene';
+import { applySceneOperations, type FleetBrainAction, type FleetShipFacts, normalizeScene, type SceneDocument, type ShipOrder, toLiveFleetScene } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
-import { FleetCommanders } from './fleet-commanders';
+import { type FleetBrainPort, FleetCommanders } from './fleet-commanders';
 
 const DNA = 'mf1_t1:minmatarbase:minmatar';
 const FLEET = 'f';
@@ -104,5 +104,245 @@ describe('FleetCommanders', () => {
     commanders.SetFreeFire(WHOLE, true);
     commanders.Clear();
     expect(commanders.FreeFireKeys().size).toBe(0);
+  });
+});
+
+/**
+ * A personality fleet `f` (fc, d1, d2 on team blue) and two hostiles r1, r2 on team red, ahead along +x. The custom
+ * personalities fix the FC ability (1 or 0) and hold position (no moves, no prop mods, no free fire), so only the call
+ * lever pulls.
+ */
+function BrainScene(personality: string, extra: Record<string, unknown> = {}): SceneDocument {
+  const template = (ability: number, more: Record<string, unknown> = {}) => ({
+    schema: 'cjs-fleet-personality/1',
+    command: { ability, backups: 2, handover: 20 },
+    pilots: { reaction: 1 },
+    engage: 'on-sight',
+    targeting: { queue: 1, freeFire: false },
+    movement: { stance: 'hold', propMods: 'never' },
+    ...more
+  });
+  return normalizeScene({
+    ships: [
+      { id: 'fc', dna: DNA, team: 'blue', position: [0, 0, 0] },
+      { id: 'd1', dna: DNA, team: 'blue', position: [0, 0, 500] },
+      { id: 'd2', dna: DNA, team: 'blue', position: [0, 0, -500] },
+      { id: 'r1', dna: DNA, team: 'red', position: [5000, 0, 0] },
+      { id: 'r2', dna: DNA, team: 'red', position: [8000, 0, 0] }
+    ],
+    personalities: {
+      sharp: template(1),
+      slow: template(0),
+      lone: template(1, { command: { ability: 1, backups: 0, succession: ['most-able'], handover: 20 } })
+    },
+    fleets: [{ id: FLEET, commander: 'fc', personality, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', members: ['d1', 'd2'] }] }] }],
+    ...extra
+  }).scene;
+}
+
+interface BrainRun extends FleetBrainAction {
+  readonly tick: number;
+}
+
+/**
+ * The brain over a fake port: every ship settled and planned, facts from the document's positions, the brain's calls
+ * landing in the call book, its moves as the FC's order. `Kill` explodes a ship (out of the live view), `Flag` flags it.
+ */
+function BrainRig(scene: SceneDocument) {
+  const runs: BrainRun[] = [];
+  const handovers: { fleet: string; from: string; to: string }[] = [];
+  const destroyed = new Set<string>();
+  const dead = new Set<string>();
+  const orders = new Map<string, ShipOrder>();
+  // The port reads the commanders it is built into (set below, before any call).
+  const holder: { commanders?: FleetCommanders } = {};
+  const Commanders = (): FleetCommanders => holder.commanders as FleetCommanders;
+  const live = (): SceneDocument => toLiveFleetScene(scene, dead, Commanders().Overlay()).scene;
+  const port: FleetBrainPort = {
+    Document: () => scene,
+    Live: live,
+    Destroyed: (id) => destroyed.has(id),
+    Ready: () => true,
+    Settled: () => true,
+    Facts: () =>
+      scene.ships
+        .filter((doc) => !dead.has(doc.id))
+        .map((doc): FleetShipFacts => ({
+          id: doc.id,
+          ...(doc.team ? { team: doc.team } : {}),
+          position: doc.position,
+          radius: 50,
+          health: 1,
+          remaining: 5000,
+          dps: 100,
+          signature: 40,
+          speed: 400,
+          ...(destroyed.has(doc.id) ? { away: true } : {}),
+          reach: { lock: 30_000, optimal: 5000, falloff: 10_000 },
+          attackedBy: []
+        })),
+    OrderOf: (id) => orders.get(id) ?? null,
+    CallOf: (fleet) => (Commanders().CallOf({ fleet, kind: 'fleet', id: fleet }) ?? []).filter((id) => !destroyed.has(id)),
+    PropMods: () => 'none',
+    Run: (action, tick) => {
+      runs.push({ tick, ...action });
+      const order = action.args['order'] as Record<string, unknown>;
+      if (order['type'] === 'targets') Commanders().SetCall(WHOLE, (order['set'] as string[] | undefined) ?? []);
+      else if (order['type'] === 'free-fire') Commanders().SetFreeFire(WHOLE, order['on'] === true);
+    },
+    HandOver: (fleet, from, to, apply) => {
+      handovers.push({ fleet, from, to });
+      apply();
+    }
+  };
+  const commanders = new FleetCommanders({ port });
+  holder.commanders = commanders;
+  return {
+    commanders,
+    runs,
+    handovers,
+    live,
+    Steps(from: number, to: number) {
+      for (let tick = from; tick <= to; tick++) commanders.Step(tick);
+    },
+    Kill(id: string, tick: number) {
+      // As Director.Destroy: the fleets it commands are read before its death enters the live view.
+      const commanded = (live().fleets ?? []).filter((fleet) => fleet.commander === id).map((fleet) => fleet.id);
+      destroyed.add(id);
+      dead.add(id);
+      for (const fleet of commanded) commanders.CommanderDown(fleet, id, tick);
+    },
+    Flag(id: string) {
+      destroyed.add(id);
+    }
+  };
+}
+
+const CallArgs = (by: string, set: string[]) => ({ fleet: FLEET, by, order: { type: 'targets', set } });
+
+describe('FleetCommanders: the FC brain', () => {
+  it('an FC of ability 1 calls the nearest in reach at the boundary it engages; ability 0 waits 5-10 s over it', () => {
+    const sharp = BrainRig(BrainScene('sharp'));
+    sharp.Steps(1, 3);
+    expect(sharp.runs.map((run) => [run.tick, run.tool, run.args])).toEqual([[1, 'order_fleet', CallArgs('fc', ['r1', 'r2'])]]);
+    expect(sharp.commanders.Report(FLEET, 3)).toMatchObject({ personality: 'sharp', ship: 'fc', ability: 1, state: 'commanding', engaged: true, hostiles: 2, readyAt: 1, manual: [], pending: [] });
+    expect(sharp.commanders.Report(FLEET, 3)?.decisions).toEqual([expect.objectContaining({ tick: 1, lever: 'call', tool: 'order_fleet', args: CallArgs('fc', ['r1', 'r2']) })]);
+
+    const slow = BrainRig(BrainScene('slow'));
+    slow.Steps(1, 1);
+    const due = slow.commanders.Report(FLEET, 1)?.pending[0];
+    expect(due).toMatchObject({ lever: 'call' });
+    expect(due?.dueIn).toBeGreaterThanOrEqual(5);
+    expect(due?.dueIn).toBeLessThanOrEqual(10);
+    slow.Steps(2, 12);
+    expect(slow.runs.map((run) => run.tick)).toEqual([1 + (due?.dueIn ?? 0)]);
+  });
+
+  it('replays the same decisions at the same ticks for the same seed', () => {
+    const runOf = () => {
+      const rig = BrainRig(BrainScene('slow'));
+      rig.Steps(1, 12);
+      rig.Kill('fc', 12);
+      rig.Steps(13, 45);
+      return { runs: rig.runs, report: rig.commanders.Report(FLEET, 45) };
+    };
+    expect(runOf()).toEqual(runOf());
+  });
+
+  it('a dead FC hands the formation to the designate at once, who takes command after its handover', () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 4);
+    rig.Kill('fc', 4);
+    // The protocol's designate (most-able: the backups drew ability 1; ties go by fleet order) flies as the root at once.
+    expect(rig.live().fleets?.[0].commander).toBe('d1');
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ ship: 'd1', state: 'handover', successor: 'd1', takesOverIn: 2 });
+    rig.Steps(5, 5);
+    expect(rig.commanders.Report(FLEET, 5)).toMatchObject({ state: 'handover', takesOverIn: 1 });
+    rig.Steps(6, 6);
+    expect(rig.commanders.Report(FLEET, 6)).toMatchObject({ ship: 'd1', state: 'commanding' });
+    expect(rig.commanders.Report(FLEET, 6)).not.toHaveProperty('successor');
+
+    // Ability 0: half to all of the 20 s handover.
+    const slow = BrainRig(BrainScene('slow'));
+    slow.Steps(1, 3);
+    slow.Kill('fc', 3);
+    const takesOverIn = slow.commanders.Report(FLEET, 3)?.takesOverIn ?? 0;
+    expect(takesOverIn).toBeGreaterThanOrEqual(11);
+    expect(takesOverIn).toBeLessThanOrEqual(20);
+  });
+
+  it('a flagged FC flies on as the root until the handover moves the command', () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 3);
+    rig.Flag('fc');
+    rig.Steps(4, 4);
+    expect(rig.live().fleets?.[0].commander).toBe('fc');
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ ship: 'fc', state: 'handover', successor: 'd1', takesOverIn: 2 });
+    rig.Steps(5, 6);
+    expect(rig.handovers).toEqual([{ fleet: FLEET, from: 'fc', to: 'd1' }]);
+    expect(rig.live().fleets?.[0].commander).toBe('d1');
+    expect(rig.commanders.Report(FLEET, 6)).toMatchObject({ ship: 'd1', state: 'commanding' });
+  });
+
+  it('a designate dying during the handover re-runs the protocol', () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 2);
+    rig.Kill('fc', 2);
+    rig.Kill('d1', 3);
+    expect(rig.live().fleets?.[0].commander).toBe('d2');
+    expect(rig.commanders.Report(FLEET, 3)).toMatchObject({ state: 'handover', successor: 'd2', takesOverIn: 2 });
+    rig.Steps(3, 5);
+    expect(rig.commanders.Report(FLEET, 5)).toMatchObject({ ship: 'd2', state: 'commanding' });
+  });
+
+  it('leaderless when the protocol finds nobody: the default rule keeps a root and the brain decides nothing', () => {
+    const rig = BrainRig(BrainScene('lone'));
+    rig.Steps(1, 2);
+    const before = rig.runs.length;
+    rig.Kill('fc', 2);
+    rig.commanders.SetCall(WHOLE, []);
+    rig.Steps(3, 8);
+    expect(rig.live().fleets?.[0].commander).toBe('d1');
+    expect(rig.commanders.Report(FLEET, 8)).toMatchObject({ state: 'leaderless', pending: [] });
+    expect(rig.runs.length).toBe(before);
+  });
+
+  it('a lever a model pulls is manual until set_fleet_personality; cease_fire also holds the fleet', () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 1);
+    rig.commanders.TakeLevers('order_fleet', { fleet: FLEET, order: { type: 'targets', set: ['r2'] } });
+    rig.commanders.SetCall(WHOLE, ['r2']);
+    rig.Steps(2, 4);
+    expect(rig.runs).toHaveLength(1);
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ manual: ['call', 'free-fire'] });
+    expect(rig.commanders.Report(FLEET, 4)).not.toHaveProperty('held');
+
+    rig.commanders.TakeLevers('order_ship', { id: 'fc', order: { type: 'stop' } });
+    rig.commanders.TakeLevers('switch_prop_mods', { ships: ['d1'], active: true });
+    rig.commanders.TakeLevers('cease_fire', { ships: ['d2'] });
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ manual: ['call', 'free-fire', 'move', 'prop-mods'], held: true });
+    // A wing or squad move and ships outside the fleet take nothing more.
+    rig.commanders.TakeLevers('engage', { ships: ['r1'], target: 'fc' });
+
+    expect(rig.commanders.AfterOperations([{ op: 'update_fleet', fleet: FLEET, set: { personality: 'sharp' } }])).toEqual([FLEET]);
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ manual: [] });
+    expect(rig.commanders.Report(FLEET, 4)).not.toHaveProperty('held');
+    // The brain keeps the live primary the model called and refills the queue behind it.
+    rig.Steps(5, 5);
+    expect(rig.runs.at(-1)).toMatchObject({ tick: 5, args: CallArgs('fc', ['r2', 'r1']) });
+  });
+
+  it('gives pilots their traits: personality draws under authored ones, authored traits outside personality fleets', () => {
+    const scene = BrainScene('slow', {});
+    const withPilots = applySceneOperations(scene, [
+      { op: 'update_ship', id: 'd2', set: { pilot: { reaction: 0.25 } } },
+      { op: 'update_ship', id: 'r1', set: { pilot: { command: 0.5 } } }
+    ]).scene;
+    const rig = BrainRig(withPilots);
+    expect(rig.commanders.PilotOf('fc')).toEqual({ command: 0, reaction: 1, source: 'personality' });
+    expect(rig.commanders.PilotOf('d2')).toMatchObject({ reaction: 0.25, source: 'mixed' });
+    expect(rig.commanders.PilotOf('r1')).toEqual({ command: 0.5, source: 'pilot' });
+    expect(rig.commanders.PilotOf('r2')).toBeNull();
+    expect(rig.commanders.ReactionOf('d2')).toBe(0.25);
   });
 });

@@ -46,6 +46,12 @@ export interface LiveFleetOverlay {
    * nothing. A key whose group the document no longer holds is ignored.
    */
   readonly calls?: ReadonlyMap<string, readonly string[]>;
+  /**
+   * The acting fleet commander by fleet id (a personality fleet's succession, FleetCommanders): it replaces the default
+   * rule's successor once the commander is gone, and takes the command from a commander that still flies (a flagged
+   * FC after its handover). Ignored when it is gone or holds no position in the fleet.
+   */
+  readonly commanders?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -98,20 +104,35 @@ export function toDefaultFleetSuccessor(fleet: SceneFleet, gone: ReadonlySet<str
 }
 
 /**
+ * The overlay's acting commander for a fleet, when it holds a position in the fleet, is not gone and is not already
+ * its commander.
+ *
+ * @param fleet - The fleet.
+ * @param gone - The destroyed ships.
+ * @param commanders - The overlay's acting commanders.
+ * @returns The ship, or null.
+ */
+function overlayCommanderOf(fleet: SceneFleet, gone: ReadonlySet<string>, commanders: Maybe<ReadonlyMap<string, string>>): Maybe<string> {
+  const ship = commanders?.get(fleet.id);
+  return ship != null && ship !== fleet.commander && !gone.has(ship) && toFleetShipOrder(fleet).includes(ship) ? ship : null;
+}
+
+/**
  * The fleets as they fly once some ships are gone (destroyed): each gone ship leaves its fleet through the same
  * fleet ops a removal runs, so squads anchored on it fall back down the chain as remove_ship does. A gone fleet
- * commander first hands the fleet (update_fleet) to its successor (toDefaultFleetSuccessor). A fleet with nobody alive
- * is dropped. The overlay's live calls replace
- * their groups' document lists first. Never written to the document.
+ * commander first hands the fleet (update_fleet) to its successor: the overlay's acting commander (a personality
+ * fleet's designate), else the default rule's (toDefaultFleetSuccessor); an acting commander the overlay names for a
+ * fleet whose commander still flies takes the command the same way. A fleet with nobody alive is dropped. The overlay's
+ * live calls replace their groups' document lists first. Never written to the document.
  *
  * @param scene - The document.
  * @param gone - The destroyed ships.
- * @param overlay - The page's live fleet state (its live calls).
+ * @param overlay - The page's live fleet state (its live calls and acting commanders).
  * @returns The live document, what changed per fleet and the repairs' warnings.
  */
 export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(scene: S, gone: ReadonlySet<string>, overlay: LiveFleetOverlay = {}): LiveFleetView<S> {
   const fleets = scene.fleets ?? [];
-  const touched = fleets.filter((fleet) => toFleetShipOrder(fleet).some((ship) => gone.has(ship)));
+  const touched = fleets.filter((fleet) => toFleetShipOrder(fleet).some((ship) => gone.has(ship)) || overlayCommanderOf(fleet, gone, overlay.commanders) != null);
   if (!touched.length && !overlay.calls?.size) return { scene, changes: new Map(), warnings: [] };
 
   const cloned = structuredClone(fleets);
@@ -123,13 +144,13 @@ export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(s
   for (const fleet of touched) {
     const order = toFleetShipOrder(fleet);
     const destroyed = order.filter((ship) => gone.has(ship));
-    const successor = toDefaultFleetSuccessor(fleet, gone);
+    const successor = overlayCommanderOf(fleet, gone, overlay.commanders) ?? toDefaultFleetSuccessor(fleet, gone);
     if (!successor) {
       dropped.add(fleet.id);
       changes.set(fleet.id, { destroyed, dropped: true });
       continue;
     }
-    const acting = gone.has(fleet.commander) ? fleet.commander : undefined;
+    const acting = successor !== fleet.commander ? fleet.commander : undefined;
     if (acting) applyFleetOperation({ op: 'update_fleet', fleet: fleet.id, set: { commander: successor } }, context);
     changes.set(fleet.id, { ...(acting ? { actingFor: acting } : {}), destroyed });
   }

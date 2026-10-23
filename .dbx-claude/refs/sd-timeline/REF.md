@@ -50,6 +50,10 @@ The director is both ports.
 - **Kinds** (`entry.kind(args)`): `live` (orders, switches, locks, called targets: `order_fleet` targets is live since
   fb0f033), `camera`, `document` (`patch_scene`, `auto_repair`, and `order_fleet`'s anchor / break-off / regroup). T2
   applies document cues to the **live scene only**, so saving mid-play saves the script, not its effects.
+- **Cues are a model's calls to the FC brain** (`sd-personalities`): an `order_fleet`, `order_ship`, `engage`,
+  `cease_fire` or `switch_prop_mods` cue on a personality fleet takes its lever manual as the tool does
+  (`Director.Manual`), and so do a ship script's steps on its acting FC. `order_fleet` cues run through
+  `Director.FleetOrderNow(args, { cue })`, free-fire included.
 - **Limits**: 1,000 cues, 50 patch cues (each costs a projection step), 32 ops per patch cue, 64 steps per ship.
 - **Event cues are reserved for Movie mode** (decision): `when` is refused with "reserved for Movie mode's event cues;
   give at". Movie mode owns "cued by time or events" together with re-simulating from snapshots, which is what makes

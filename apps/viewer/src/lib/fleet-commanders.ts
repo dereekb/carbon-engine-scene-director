@@ -1,20 +1,60 @@
 /**
- * The page's fleet command state: the live call book and free fire. order_fleet's targets order edits a group's live
- * list here at once, as moves and warps fly at once, and never writes the document: the document's `targets` are the
- * opening calls a load starts with, so a reload replays the same fight. Its free-fire order turns a group's free fire on
- * or off here (FleetTargets picks the targets); the document has no free fire, so a load ends it.
+ * The page's fleet command state: the live call book, free fire, and the FC brain of each personality fleet.
+ * order_fleet's targets order edits a group's live list here at once, as moves and warps fly at once, and never writes
+ * the document: the document's `targets` are the opening calls a load starts with, so a reload replays the same fight.
+ * Its free-fire order turns a group's free fire on or off here (FleetTargets picks the targets); the document has no
+ * free fire, so a load ends it.
  *
  * - The book overlays the document (Overlay → toLiveFleetScene), so FleetTargets, FleetFollowing, FleetOrders and
  *   get_state read the live calls with no change of their own. `[]` shadows the document's list: the group calls
- *   nothing.
+ *   nothing. The overlay also names each personality fleet's acting commander (its succession's designate).
  * - A load clears it (Clear). A patch (AfterEdit) drops a group's live call when the group is gone or the patch edited
  *   its document list (beyond pruning a removed id), and prunes removed ships and objects from the live lists, with
  *   remove_ship's warning; a group gone also ends its free fire.
+ * - The brain (Step, each Destiny boundary): per personality fleet in document order, the gate (the formation planned,
+ *   every ship's numbers and fit settled, no member arriving or in warp; it gives up after FLEET_GATE_TICKS), the
+ *   succession (CommanderDown: the protocol's designate, the handover), the picture (toFleetPicture over the port's
+ *   facts), stepFleetBrain, and its actions run through the port as the tool calls a model makes, the acting FC as
+ *   `by`. A model pulling a lever (TakeLevers) makes it manual until set_fleet_personality re-arms it (Rearm).
  *
  * Node-tested: it imports nothing from ./runtime.
  */
 
-import { calledTargetsOf, type FleetGroup, type LiveFleetOverlay, type SceneDocument, toFleetGroupKey } from '@scene-director/scene';
+import type { Maybe } from '@dereekb/util';
+import {
+  calledTargetsOf,
+  EMPTY_FLEET_BRAIN_MEMORY,
+  FLEET_BRAIN_LEVERS,
+  FLEET_TARGETING_LEVERS,
+  type FleetBrainAction,
+  type FleetBrainDecision,
+  type FleetBrainLever,
+  type FleetBrainMemory,
+  type FleetGroup,
+  type FleetPicturePropMods,
+  type FleetPilotTraitSource,
+  type FleetReachNumbers,
+  type FleetShipFacts,
+  type FleetSuccessor,
+  fleetTraitUnit,
+  type LiveFleetOverlay,
+  type ResolvedFleetPersonality,
+  resolveFleetPersonality,
+  type SceneDocument,
+  type SceneFleet,
+  sceneCombatOf,
+  selectFleetShips,
+  shipPilotTraits,
+  type ShipOrder,
+  stepFleetBrain,
+  toFleetGroupKey,
+  toFleetMemberships,
+  toFleetPicture,
+  toFleetPilotTraits,
+  toFleetShipOrder,
+  toFleetSuccessor,
+  toHandoverTicks
+} from '@scene-director/scene';
 
 /**
  * One group's live call.
@@ -53,6 +93,230 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
   return a.length === b.length && a.every((id, index) => id === b[index]);
 }
 
+/**
+ * Ticks: the gate stops waiting for unsettled ships after this many boundaries (they count as they are, noted).
+ */
+export const FLEET_GATE_TICKS = 20;
+
+/**
+ * Where a personality fleet's command stands: `waiting` for the gate, `commanding`, `handover` (its FC went down and the
+ * designate has yet to take over), `leaderless` (the protocol found nobody) or `no-team` (no team, so no hostiles).
+ */
+export type FleetCommandState = 'waiting' | 'commanding' | 'handover' | 'leaderless' | 'no-team';
+
+/**
+ * The page's side of the brain: what it reads of the fight and how it runs the brain's tool calls.
+ */
+export interface FleetBrainPort {
+  /**
+   * The live document (personalities, pilots, the combat seed).
+   */
+  Document(): Maybe<SceneDocument>;
+  /**
+   * The document as its fleets fly (the live view: live calls, the dead out, acting commanders).
+   */
+  Live(): Maybe<SceneDocument>;
+  /**
+   * Whether a ship is down: destroyed, flagged or exploded.
+   */
+  Destroyed(id: string): boolean;
+  /**
+   * Whether a fleet's formation is planned (FleetFollowing.Ready).
+   */
+  Ready(fleet: string): boolean;
+  /**
+   * Whether a ship's hull numbers and fit (or default weapons) have settled.
+   */
+  Settled(id: string): boolean;
+  /**
+   * Every ship with a ball that is not dead (destroyed and exploded), in document order.
+   */
+  Facts(): readonly FleetShipFacts[];
+  /**
+   * A ship's order: its pending one, else the applied one.
+   */
+  OrderOf(id: string): Maybe<ShipOrder>;
+  /**
+   * The fleet's live call: its live primary, then its live queue.
+   */
+  CallOf(fleet: string): readonly string[];
+  /**
+   * Whether the ships' prop mods run.
+   */
+  PropMods(ships: readonly string[]): FleetPicturePropMods;
+  /**
+   * Runs one brain action as its tool call (order_fleet through the live dispatch, switch_prop_mods) at the boundary.
+   *
+   * @throws {Error} When the tool refuses it.
+   */
+  Run(action: FleetBrainAction, boundary: number): void;
+  /**
+   * Moves a fleet's command to its designate while the old commander still flies (a flagged FC at its handover):
+   * captures what the old one flew, runs `apply` (the overlay's new commander), re-plans the formation and has the
+   * designate inherit the order.
+   */
+  HandOver(fleet: string, from: string, to: string, apply: () => void): void;
+}
+
+/**
+ * A ship's pilot for get_state: its traits and where they came from.
+ */
+export interface ShipPilotReport {
+  readonly command?: number;
+  readonly reaction?: number;
+  readonly source: FleetPilotTraitSource;
+}
+
+/**
+ * A personality fleet's brain for get_state (fleets[].fc).
+ */
+export interface FleetCommandReport {
+  readonly personality: string;
+  /**
+   * The acting FC (the formation's root); during a handover, the one the designate takes over from.
+   */
+  readonly ship: string;
+  /**
+   * The acting FC's command ability (0 for a pilot that is not FC-capable).
+   */
+  readonly ability: number;
+  readonly state: FleetCommandState;
+  readonly successor?: string;
+  /**
+   * Seconds until the designate takes command.
+   */
+  readonly takesOverIn?: number;
+  readonly readyAt?: number;
+  readonly engaged: boolean;
+  readonly engagedBy?: string;
+  /**
+   * Hostiles in the last picture.
+   */
+  readonly hostiles: number;
+  readonly reach: FleetReachNumbers;
+  readonly stance: string;
+  readonly manual: readonly FleetBrainLever[];
+  readonly held?: true;
+  readonly pending: readonly { readonly lever: FleetBrainLever; readonly dueIn: number; readonly why: string }[];
+  readonly decisions: readonly FleetBrainLogEntry[];
+  /**
+   * What the gate gave up waiting for, or the last step's failure.
+   */
+  readonly note?: string;
+}
+
+/**
+ * A decision as get_state logs it: the tool call and why, and why the tool refused it, if it did.
+ */
+export interface FleetBrainLogEntry extends FleetBrainDecision {
+  readonly refused?: string;
+}
+
+/**
+ * The designate taking over from a commander that went down.
+ */
+interface FleetHandover {
+  readonly from: string;
+  readonly designate: FleetSuccessor;
+  /**
+   * The tick it takes command at.
+   */
+  readonly at: number;
+  /**
+   * The old commander still flies (flag mode): the overlay moves the root at the handover.
+   */
+  readonly flagged: boolean;
+}
+
+/**
+ * One personality fleet's brain.
+ */
+interface FleetBrain {
+  /**
+   * The first boundary the gate ran at.
+   */
+  since: Maybe<number>;
+  readyAt: Maybe<number>;
+  memory: FleetBrainMemory;
+  /**
+   * Refusals by decision (tick and lever), for the log.
+   */
+  refusals: Map<string, string>;
+  readonly manual: Set<FleetBrainLever>;
+  held: boolean;
+  handover: Maybe<FleetHandover>;
+  leaderless: boolean;
+  hostiles: number;
+  reach: FleetReachNumbers;
+  team: Maybe<string>;
+  note?: string;
+}
+
+/**
+ * The traits and personalities a document gives, memoized per document.
+ */
+interface FleetTraitBook {
+  readonly scene: SceneDocument;
+  readonly personalities: ReadonlyMap<string, ResolvedFleetPersonality>;
+  readonly pilots: ReadonlyMap<string, ShipPilotReport>;
+}
+
+const NO_REACH: FleetReachNumbers = { lock: 0, optimal: 0, falloff: 0 };
+
+/**
+ * The order types that fly a fleet's FC (the move lever).
+ */
+const FLEET_MOVE_ORDERS = new Set(['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'stop', 'warp']);
+
+function ErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function Round(value: number, scale = 100): number {
+  return Math.round(value * scale) / scale;
+}
+
+/**
+ * A tool call's selection (ships, fleet, wing, squad) as far as it is well formed.
+ *
+ * @param args - The tool's arguments.
+ * @returns The selection.
+ */
+function SelectionOf(args: Readonly<Record<string, unknown>>): { ships?: string[]; fleet?: string; wing?: string; squad?: string } {
+  const ships = Array.isArray(args['ships']) ? args['ships'].filter((id): id is string => typeof id === 'string') : null;
+  const text = (key: string): Maybe<string> => (typeof args[key] === 'string' ? (args[key] as string) : null);
+  const fleet = text('fleet');
+  const wing = text('wing');
+  const squad = text('squad');
+  return { ...(ships ? { ships } : {}), ...(fleet ? { fleet } : {}), ...(wing ? { wing } : {}), ...(squad ? { squad } : {}) };
+}
+
+/**
+ * Every pilot's traits and every personality fleet's personality: personality fleets' members their toFleetPilotTraits
+ * (authored traits win, the rest seeded draws), then the other ships with authored traits.
+ *
+ * @param scene - The document.
+ * @returns The book.
+ */
+function toFleetTraitBook(scene: SceneDocument): FleetTraitBook {
+  const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
+  const seed = sceneCombatOf(scene).seed;
+  const personalities = new Map<string, ResolvedFleetPersonality>();
+  const pilots = new Map<string, ShipPilotReport>();
+  for (const fleet of scene.fleets ?? []) {
+    const personality = fleet.personality ? resolveFleetPersonality({ name: fleet.personality, personalities: scene.personalities }).personality : null;
+    if (!personality) continue;
+    personalities.set(fleet.id, personality);
+    for (const [id, traits] of toFleetPilotTraits({ fleet, personality, pilotOf: (ship) => shipPilotTraits(docs.get(ship)?.pilot), seed })) if (!pilots.has(id)) pilots.set(id, traits);
+  }
+  for (const doc of scene.ships) {
+    if (pilots.has(doc.id)) continue;
+    const authored = shipPilotTraits(doc.pilot);
+    if (authored.command != null || authored.reaction != null) pilots.set(doc.id, { ...authored, source: 'pilot' });
+  }
+  return { scene, personalities, pilots };
+}
+
 export class FleetCommanders {
   /**
    * The live calls by group key (toFleetGroupKey).
@@ -62,11 +326,33 @@ export class FleetCommanders {
    * The groups with free fire on, by group key.
    */
   private readonly freeFire = new Map<string, FleetGroup>();
+  /**
+   * The acting commander by fleet id (a personality fleet's designate), in the overlay.
+   */
+  private readonly acting = new Map<string, string>();
+  /**
+   * Each personality fleet's brain, by fleet id.
+   */
+  private readonly brains = new Map<string, FleetBrain>();
+  /**
+   * The first boundary each ship was seen unsettled at, for the gate's give-up.
+   */
+  private readonly unsettledSince = new Map<string, number>();
+  private book: Maybe<FleetTraitBook> = null;
   private overlay: LiveFleetOverlay = {};
   private changes = 0;
+  private readonly port: Maybe<FleetBrainPort>;
 
   /**
-   * Bumped on every change to the calls, so a memo of the live view keys on it (free fire is not in the view).
+   * @param config - `port`: the page's side of the brain; without it the brain never runs (the call book alone).
+   */
+  constructor(config: { readonly port?: FleetBrainPort } = {}) {
+    this.port = config.port ?? null;
+  }
+
+  /**
+   * Bumped on every change to the calls or the acting commanders, so a memo of the live view keys on it (free fire is
+   * not in the view).
    */
   get version(): number {
     return this.changes;
@@ -138,6 +424,7 @@ export class FleetCommanders {
   AfterEdit(before: Pick<SceneDocument, 'fleets'>, after: Pick<SceneDocument, 'ships' | 'objects' | 'fleets'>): string[] {
     const warnings: string[] = [];
     for (const [key, group] of [...this.freeFire]) if (!hasGroup(after, group)) this.freeFire.delete(key);
+    this.AfterFleetEdit(before, after);
     if (!this.calls.size) return warnings;
     const ids = new Set([...after.ships.map((doc) => doc.id), ...(after.objects ?? []).map((doc) => doc.id)]);
     let changed = false;
@@ -178,13 +465,359 @@ export class FleetCommanders {
    */
   Clear(): void {
     this.freeFire.clear();
-    if (!this.calls.size) return;
+    this.brains.clear();
+    this.unsettledSince.clear();
+    this.book = null;
+    if (!this.calls.size && !this.acting.size) return;
     this.calls.clear();
+    this.acting.clear();
     this.Changed();
+  }
+
+  /**
+   * A ship's pilot: its personality fleet's traits (authored ones win over the seeded draws), else its authored traits;
+   * null for a ship with neither.
+   *
+   * @param id - The ship.
+   * @returns Its traits and their source.
+   */
+  PilotOf(id: string): Maybe<ShipPilotReport> {
+    return this.Book()?.pilots.get(id) ?? null;
+  }
+
+  /**
+   * A pilot's reaction for an order given without delay (toPilotDelays): PilotOf's; null answers at once.
+   *
+   * @param id - The ship.
+   * @returns Its reaction, 0..1.
+   */
+  ReactionOf(id: string): Maybe<number> {
+    return this.PilotOf(id)?.reaction ?? null;
+  }
+
+  /**
+   * The brain at a Destiny boundary (between the shield recharge and the fleets' target sync): per personality fleet in
+   * document order, the succession, the gate, the picture and stepFleetBrain, its actions run through the port. A fleet
+   * whose step throws notes the failure; the others still step.
+   *
+   * @param boundary - The master tick.
+   */
+  Step(boundary: number): void {
+    const port = this.port;
+    const scene = port?.Document();
+    const book = this.Book();
+    if (!port || !scene || !book) return;
+    for (const id of [...this.brains.keys()]) if (!book.personalities.has(id)) this.brains.delete(id);
+    if (!book.personalities.size) return;
+    let facts: Maybe<readonly FleetShipFacts[]> = null;
+    const factsOf = (): readonly FleetShipFacts[] => {
+      if (!facts) {
+        facts = port.Facts();
+        for (const ship of facts) {
+          if (port.Settled(ship.id)) this.unsettledSince.delete(ship.id);
+          else if (!this.unsettledSince.has(ship.id)) this.unsettledSince.set(ship.id, boundary);
+        }
+      }
+      return facts;
+    };
+    const seed = sceneCombatOf(scene).seed;
+    for (const fleet of scene.fleets ?? []) {
+      const personality = book.personalities.get(fleet.id);
+      if (!personality) continue;
+      const brain = this.BrainOf(fleet.id);
+      brain.since ??= boundary;
+      try {
+        this.StepFleet({ fleet, personality, brain, boundary, seed, book, factsOf });
+      } catch (error) {
+        brain.note = `the brain failed at tick ${boundary}: ${ErrorMessage(error)}`;
+      }
+    }
+  }
+
+  /**
+   * A personality fleet's commander went down (destroyed, flagged or exploded): the protocol picks the designate over
+   * the live members, who takes command after its handover (toHandoverTicks). When the old commander leaves the
+   * formation (it exploded) the designate becomes the formation's root at once (the overlay); when it still flies
+   * (`flagged`) it stays the root until the handover. Nobody found: leaderless (the default rule keeps a root). Fleets
+   * with no personality are left to the default rule.
+   *
+   * @param fleet - The fleet id.
+   * @param down - The commander that went down.
+   * @param tick - The master tick.
+   * @param options - `flagged`: the old commander still flies as the formation's root.
+   */
+  CommanderDown(fleet: string, down: string, tick: number, options: { readonly flagged?: boolean } = {}): void {
+    const port = this.port;
+    const scene = port?.Document();
+    const book = this.Book();
+    const doc = scene?.fleets?.find((candidate) => candidate.id === fleet);
+    const personality = book?.personalities.get(fleet);
+    if (!port || !scene || !book || !doc || !personality) return;
+    const brain = this.BrainOf(fleet);
+    const gone = new Set(toFleetShipOrder(doc).filter((ship) => ship === down || port.Destroyed(ship)));
+    const designate = toFleetSuccessor({ fleet: doc, gone, steps: personality.command.succession, abilityOf: (ship) => book.pilots.get(ship)?.command ?? null });
+    const flagged = options.flagged === true;
+    if (!designate) {
+      brain.leaderless = true;
+      brain.handover = null;
+      this.SetCommander(fleet, null);
+      return;
+    }
+    brain.leaderless = false;
+    const unit = fleetTraitUnit(sceneCombatOf(scene).seed, `${fleet}|handover|${designate.ship}|${tick - (brain.readyAt ?? tick)}`);
+    brain.handover = { from: down, designate, at: tick + toHandoverTicks({ ability: designate.ability, handover: personality.command.handover, unit }), flagged };
+    if (!flagged) this.SetCommander(fleet, designate.ship);
+  }
+
+  /**
+   * A model's tool call on a personality fleet takes the lever it pulls (manual until set_fleet_personality): order_fleet
+   * targets or free-fire, engage and cease_fire the call and free fire (cease_fire also holds the fleet, a targets
+   * order, free fire or engage lets it go); a fleet move or warp, or order_ship on its acting FC, the movement;
+   * switch_prop_mods the prop mods. The brain's own calls never come through here.
+   *
+   * @param tool - The tool's name.
+   * @param args - Its arguments, as given.
+   */
+  TakeLevers(tool: string, args: unknown): void {
+    const book = this.Book();
+    const live = this.port?.Live() ?? this.port?.Document();
+    if (!book?.personalities.size || !live || args === null || typeof args !== 'object' || Array.isArray(args)) return;
+    const record = args as Readonly<Record<string, unknown>>;
+    const take = (fleet: unknown, levers: readonly FleetBrainLever[], held?: boolean): void => {
+      if (typeof fleet !== 'string' || !book.personalities.has(fleet)) return;
+      const brain = this.BrainOf(fleet);
+      for (const lever of levers) brain.manual.add(lever);
+      if (held != null) brain.held = held;
+    };
+    if (tool === 'order_fleet') {
+      const order = record['order'];
+      const type = order !== null && typeof order === 'object' ? (order as Readonly<Record<string, unknown>>)['type'] : null;
+      if (type === 'targets' || type === 'free-fire') take(record['fleet'], FLEET_TARGETING_LEVERS, false);
+      else if (typeof type === 'string' && FLEET_MOVE_ORDERS.has(type) && record['wing'] == null && record['squad'] == null) take(record['fleet'], ['move']);
+    } else if (tool === 'order_ship') {
+      for (const fleet of live.fleets ?? []) if (fleet.commander === record['id']) take(fleet.id, ['move']);
+    } else if (tool === 'engage' || tool === 'cease_fire' || tool === 'switch_prop_mods') {
+      const memberships = toFleetMemberships(live);
+      const fleets = new Set(selectFleetShips(live, SelectionOf(record)).ships.flatMap((id) => memberships.get(id)?.fleet ?? []));
+      for (const fleet of fleets) {
+        if (tool === 'switch_prop_mods') take(fleet, ['prop-mods']);
+        else take(fleet, FLEET_TARGETING_LEVERS, tool === 'cease_fire');
+      }
+    }
+  }
+
+  /**
+   * set_fleet_personality (an update_fleet setting `personality`) hands every lever back to the fleet's brain: manual
+   * levers re-armed, the cease_fire hold let go, its pending decisions dropped.
+   *
+   * @param operations - The edit's operations.
+   * @returns The fleets whose cease_fire hold it let go (their members' holds lift too).
+   */
+  AfterOperations(operations: unknown): string[] {
+    const released: string[] = [];
+    for (const operation of Array.isArray(operations) ? operations : []) {
+      if (operation === null || typeof operation !== 'object') continue;
+      const { op, fleet, set } = operation as Readonly<Record<string, unknown>>;
+      if (op !== 'update_fleet' || typeof fleet !== 'string' || set === null || typeof set !== 'object' || !('personality' in set)) continue;
+      const brain = this.brains.get(fleet);
+      if (!brain) continue;
+      if (brain.held) released.push(fleet);
+      brain.manual.clear();
+      brain.held = false;
+      brain.memory = { ...brain.memory, pending: [] };
+    }
+    return released;
+  }
+
+  /**
+   * A personality fleet's brain for get_state.
+   *
+   * @param fleet - The fleet id.
+   * @param tick - The master tick.
+   * @returns Its report; null for a fleet with no personality.
+   */
+  Report(fleet: string, tick: number): Maybe<FleetCommandReport> {
+    const port = this.port;
+    const book = this.Book();
+    const doc = port?.Document()?.fleets?.find((candidate) => candidate.id === fleet);
+    const personality = book?.personalities.get(fleet);
+    if (!port || !book || !doc?.personality || !personality) return null;
+    const brain = this.brains.get(fleet);
+    const ship = port.Live()?.fleets?.find((candidate) => candidate.id === fleet)?.commander ?? this.acting.get(fleet) ?? doc.commander;
+    let state: FleetCommandState = 'commanding';
+    if (brain?.handover) state = 'handover';
+    else if (brain?.leaderless) state = 'leaderless';
+    else if (brain?.readyAt == null) state = 'waiting';
+    else if (brain.team == null) state = 'no-team';
+    const memory = brain?.memory ?? EMPTY_FLEET_BRAIN_MEMORY;
+    const manual = FLEET_BRAIN_LEVERS.filter((lever) => brain?.manual.has(lever));
+    const handover = brain?.handover;
+    return {
+      personality: doc.personality,
+      ship,
+      ability: Round(book.pilots.get(ship)?.command ?? 0),
+      state,
+      ...(handover ? { successor: handover.designate.ship, takesOverIn: Math.max(0, handover.at - tick) } : {}),
+      ...(brain?.readyAt != null ? { readyAt: brain.readyAt } : {}),
+      engaged: memory.engaged,
+      ...(memory.engagedBy ? { engagedBy: memory.engagedBy } : {}),
+      hostiles: brain?.hostiles ?? 0,
+      reach: brain?.reach ?? NO_REACH,
+      stance: personality.movement.stance,
+      manual,
+      ...(brain?.held ? { held: true as const } : {}),
+      pending: memory.pending.map((each) => ({ lever: each.lever, dueIn: Math.max(0, each.due - tick), why: each.why })),
+      decisions: memory.decisions.map((decision) => {
+        const refused = brain?.refusals.get(`${decision.tick}|${decision.lever}`);
+        return refused ? { ...decision, refused } : decision;
+      }),
+      ...(brain?.note ? { note: brain.note } : {})
+    };
+  }
+
+  /**
+   * One personality fleet's step: the succession (a flagged FC or a designate down, a handover due), the gate, the
+   * picture, then stepFleetBrain and its actions. The brain idles while the acting FC is in warp, arriving or without
+   * a ball.
+   */
+  private StepFleet(input: { readonly fleet: SceneFleet; readonly personality: ResolvedFleetPersonality; readonly brain: FleetBrain; readonly boundary: number; readonly seed: number; readonly book: FleetTraitBook; readonly factsOf: () => readonly FleetShipFacts[] }): void {
+    const { fleet, personality, brain, boundary: tick, seed, book } = input;
+    const port = this.port as FleetBrainPort;
+    const liveFleet = (): Maybe<SceneFleet> => port.Live()?.fleets?.find((candidate) => candidate.id === fleet.id) ?? null;
+    const before = liveFleet();
+    if (!before) return;
+    const pending = brain.handover;
+    if (pending && port.Destroyed(pending.designate.ship)) this.CommanderDown(fleet.id, pending.flagged ? pending.from : pending.designate.ship, tick, { flagged: pending.flagged });
+    else if (!pending && !brain.leaderless && port.Destroyed(before.commander)) this.CommanderDown(fleet.id, before.commander, tick, { flagged: true });
+    const handover = brain.handover;
+    if (handover && tick >= handover.at) {
+      const to = handover.designate.ship;
+      if (handover.flagged) port.HandOver(fleet.id, handover.from, to, () => this.SetCommander(fleet.id, to));
+      brain.handover = null;
+    }
+    const facts = input.factsOf();
+    if (brain.readyAt == null) {
+      const waiting = this.GateWaits(fleet, facts);
+      if (waiting.length && tick - (brain.since ?? tick) < FLEET_GATE_TICKS) return;
+      brain.readyAt = tick;
+      if (waiting.length) brain.note = `the gate gave up waiting for ${waiting.join(', ')} after ${FLEET_GATE_TICKS} s`;
+    }
+    const live = port.Live();
+    const now = liveFleet();
+    if (!live || !now) return;
+    const commanding = !brain.handover && !brain.leaderless;
+    const fc = commanding ? { ship: now.commander, ability: book.pilots.get(now.commander)?.command ?? 0 } : null;
+    const counted = facts.filter((ship) => this.Counts(ship.id, tick));
+    const fcFacts = fc ? counted.find((ship) => ship.id === fc.ship) : null;
+    if (fc && (!fcFacts || fcFacts.away)) return;
+    const picture = toFleetPicture({
+      fleet: now,
+      memberships: toFleetMemberships(live),
+      ships: counted,
+      fc,
+      call: port.CallOf(fleet.id),
+      order: fc ? port.OrderOf(fc.ship) : null,
+      freeFire: this.FreeFireOf({ fleet: fleet.id, kind: 'fleet', id: fleet.id }),
+      propMods: port.PropMods(toFleetShipOrder(now))
+    });
+    brain.team = picture.team;
+    brain.hostiles = picture.hostiles.length;
+    brain.reach = picture.reach;
+    const step = stepFleetBrain({ picture, personality, memory: brain.memory, tick, readyAt: brain.readyAt, seed, manual: [...brain.manual], held: brain.held });
+    brain.memory = step.memory;
+    for (const action of step.actions) {
+      try {
+        port.Run(action, tick);
+      } catch (error) {
+        brain.refusals.set(`${tick}|${action.lever}`, ErrorMessage(error));
+      }
+    }
+    const logged = new Set(step.memory.decisions.map((decision) => `${decision.tick}|${decision.lever}`));
+    for (const key of [...brain.refusals.keys()]) if (!logged.has(key)) brain.refusals.delete(key);
+  }
+
+  /**
+   * What the gate still waits for: the formation's plan, members arriving or in warp, and ships (members, and ships of
+   * another team once the fleet has one) whose numbers or fit have not settled.
+   *
+   * @param fleet - The fleet (the document's).
+   * @param facts - The scene's live ships.
+   * @returns A label per wait; none when the fleet is ready.
+   */
+  private GateWaits(fleet: SceneFleet, facts: readonly FleetShipFacts[]): string[] {
+    const port = this.port as FleetBrainPort;
+    const members = new Set(toFleetShipOrder(fleet));
+    const teams = facts.filter((ship) => members.has(ship.id) && ship.team != null).map((ship) => ship.team);
+    const waits: string[] = [];
+    if (!port.Ready(fleet.id)) waits.push('the formation');
+    for (const ship of facts) {
+      const member = members.has(ship.id);
+      if (member && ship.away && !port.Destroyed(ship.id)) waits.push(`"${ship.id}" (arriving or in warp)`);
+      else if ((member || (ship.team != null && teams.length > 0 && !teams.includes(ship.team))) && !port.Settled(ship.id)) waits.push(`"${ship.id}"`);
+    }
+    return waits;
+  }
+
+  /**
+   * Whether a ship counts in the pictures: settled, or unsettled for FLEET_GATE_TICKS.
+   */
+  private Counts(id: string, tick: number): boolean {
+    const since = this.unsettledSince.get(id);
+    return since == null || tick - since >= FLEET_GATE_TICKS;
+  }
+
+  private BrainOf(fleet: string): FleetBrain {
+    let brain = this.brains.get(fleet);
+    if (!brain) {
+      brain = { since: null, readyAt: null, memory: EMPTY_FLEET_BRAIN_MEMORY, refusals: new Map(), manual: new Set(), held: false, handover: null, leaderless: false, hostiles: 0, reach: NO_REACH, team: null };
+      this.brains.set(fleet, brain);
+    }
+    return brain;
+  }
+
+  /**
+   * Sets (or clears) a fleet's acting commander in the overlay.
+   */
+  private SetCommander(fleet: string, ship: Maybe<string>): void {
+    if ((this.acting.get(fleet) ?? null) === ship) return;
+    if (ship == null) this.acting.delete(fleet);
+    else this.acting.set(fleet, ship);
+    this.Changed();
+  }
+
+  /**
+   * A patch's fleets: a fleet gone drops its brain and acting commander; a fleet whose document commander changed
+   * drops its acting commander and its succession (the author's commander stands).
+   */
+  private AfterFleetEdit(before: Pick<SceneDocument, 'fleets'>, after: Pick<SceneDocument, 'fleets'>): void {
+    const ids = new Set([...this.brains.keys(), ...this.acting.keys()]);
+    for (const id of ids) {
+      const was = before.fleets?.find((fleet) => fleet.id === id);
+      const now = after.fleets?.find((fleet) => fleet.id === id);
+      if (!now) this.brains.delete(id);
+      if (!now || (was && was.commander !== now.commander)) {
+        this.SetCommander(id, null);
+        const brain = this.brains.get(id);
+        if (brain) {
+          brain.handover = null;
+          brain.leaderless = false;
+        }
+      }
+    }
+  }
+
+  private Book(): Maybe<FleetTraitBook> {
+    const scene = this.port?.Document();
+    if (!scene) return null;
+    if (this.book?.scene !== scene) this.book = toFleetTraitBook(scene);
+    return this.book;
   }
 
   private Changed(): void {
     this.changes++;
-    this.overlay = this.calls.size ? { calls: new Map([...this.calls].map(([key, call]) => [key, call.targets])) } : {};
+    this.overlay = {
+      ...(this.calls.size ? { calls: new Map([...this.calls].map(([key, call]) => [key, call.targets])) } : {}),
+      ...(this.acting.size ? { commanders: new Map(this.acting) } : {})
+    };
   }
 }

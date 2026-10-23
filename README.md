@@ -43,6 +43,10 @@ What works today:
 - **Fleet commands**: `order_fleet` moves or warps a fleet, wing or squad on its
   leader (the FC warps the fleet in formation, each hull at its own warp speed),
   breaks a squad off and regroups it, with an optional pilot response delay.
+- **Fleet personalities**: pick an FC playstyle per fleet (`brawler`, `sniper`, ...) and
+  its FC brain runs the fight: target calls, free fire, the FC's moves and prop mods,
+  as the same tool calls a model makes, with FC ability, pilot reactions and a
+  succession with a handover when the FC dies; pulling a lever yourself takes it manual.
 - **Locations**: a scene can sit at a real EVE place, dressed with its region's
   nebula, its star, and the planets, moons, stations and stargates near it.
 - **Scene building**: `add_ships` and `stage_engagement` add N ships, or two

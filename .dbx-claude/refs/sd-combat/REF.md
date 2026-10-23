@@ -160,7 +160,7 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 
 | File | Holds |
 |---|---|
-| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone, overlay?)` → `{ scene, changes, warnings }` (`overlay.calls`: the live call book spliced in first): `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); `toDefaultFleetSuccessor(fleet, gone)` (the acting commander rule); spec'd |
+| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone, overlay?)` → `{ scene, changes, warnings }` (`overlay.calls`: the live call book spliced in first; `overlay.commanders`: a personality fleet's acting commander): `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); `toDefaultFleetSuccessor(fleet, gone)` (the acting commander rule); spec'd |
 | `viewer/fleet-succession.ts` | the heir flies on: `CaptureFleetHeirs`, `HeirOrderOf`, `InheritFleetOrders` (`sd-fleets` "Edits and fallback"); node-tested |
 | `viewer/destiny.ts` | `Destroy(id)` / `IsDestroyed(id)`, the `destroyed` refusals, prop mod cause `destroyed` (`destiny-destroy.spec.ts`) |
 | `viewer/explosion-plan.ts` | `ExplosionFileFacts`, `ExplosionFiles`, `ExplosionSchedule` / `ExplosionTimes`, `ExplosionRemoveTick`, `EXPLOSION_LINGER_MARGIN_SECONDS` (2); node-tested |
@@ -199,8 +199,10 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 ## The live fleets (`toLiveFleetScene`)
 
 The document with the destroyed taken out of their fleets by the same fleet ops a removal runs: a dead FC first hands
-the fleet (`update_fleet`) to its successor (`toDefaultFleetSuccessor`: the first live wing commander in wing order,
-else the first live squad commander, else the first live member); then `removeShipFromFleets` per dead ship, so squads anchored on it fall back down the chain
+the fleet (`update_fleet`) to its successor (a personality fleet's designate, the overlay's `commanders`, set by
+`FleetCommanders.CommanderDown` in `Director.Destroy` before the heirs are read, `sd-personalities`; else
+`toDefaultFleetSuccessor`: the first live wing commander in wing order, else the first live squad commander, else the
+first live member); an overlay commander also takes the command from a flagged FC that still flies, at its handover; then `removeShipFromFleets` per dead ship, so squads anchored on it fall back down the chain
 with remove_ship's warnings; a fleet with nobody alive is dropped. The page's live calls (`FleetCommanders`, the
 `overlay` argument, `sd-fleets` doc `targets`) replace their groups' document lists first. Never written.
 `Director.LiveFleets()` memoizes it by (document, destroyed set, call book `version`) and feeds `FleetTargets`, `FleetFollowing`, `FleetOrders`, get_state's memberships and fleets (`actingFor`,
@@ -461,7 +463,9 @@ tallies, kills, destroyed, spools, the scene's repaired total), a remote repaire
 `ModuleCycle` activation counters, `Director.engagements`, `AutoRepair` (owned modules with the target asked, incumbent
 targets with their since tick, manual marks, pending adoptions, last resolved settings, pre-locks; `sd-logi`),
 `FleetTargets` (own marks, called targets, holds, responses,
-the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders` (group key → list), and
+the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders` (group key → list, free fire, acting commanders, and each personality fleet's
+brain: gate `since` / `readyAt`, memory, refusals, manual levers, `held`, handover, leaderless, the unsettled-since
+ticks; the trait book is derived from the document), and
 `Director.deaths` (kill, explosion choice, start, hidden, `removeTick`, gone), `DestinyWorld`'s missile entries and
 balls, and `MissileFlights` (the drawn missiles replay from the flights). The RNG is the document's seed, so a
 re-simulation rolls the same; explosions re-trigger from their kills' times. Missiles add no randomness.

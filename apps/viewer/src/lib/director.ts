@@ -93,11 +93,10 @@ import {
   isFleetFreeFireOrder,
   isFleetTargetsOrder,
   type FleetFreeFireOrder,
+  type FleetPicturePropMods,
   type FleetReachNumbers,
+  type FleetShipFacts,
   type FreeFirePickInput,
-  resolveFleetPersonality,
-  shipPilotTraits,
-  toFleetPilotTraits,
   toFleetTargetingReach,
   type CalledTargetStatus,
   calledTargetsOf,
@@ -225,7 +224,7 @@ import {
   type ShipModuleRowState
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
-import { FleetCommanders } from './fleet-commanders';
+import { type FleetCommandReport, FleetCommanders, type ShipPilotReport } from './fleet-commanders';
 import { CaptureFleetHeirs, InheritFleetOrders } from './fleet-succession';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { AutoRepair, type AutoRepairCondition, type AutoRepairFleetReport, type AutoRepairReport } from './auto-repair';
@@ -840,14 +839,10 @@ export class Director {
    */
   readonly autoRepair: AutoRepair;
   /**
-   * The live call book order_fleet's targets order edits, and free fire (fleet-commanders.ts); the live fleet view
-   * splices the calls over the document.
+   * The live call book order_fleet's targets order edits, free fire, and the FC brain of each personality fleet with
+   * its acting commanders (fleet-commanders.ts); the live fleet view splices the calls and commanders over the document.
    */
-  private readonly commanders = new FleetCommanders();
-  /**
-   * Each pilot's reaction (ReactionOf), for the document it was worked out from.
-   */
-  private reactions: Maybe<{ readonly scene: SceneDocument; readonly reactions: ReadonlyMap<string, number> }> = null;
+  private readonly commanders: FleetCommanders;
   private readonly killListeners = new Set<KillListener>();
   private readonly primaryListeners = new Set<PrimaryListener>();
   /**
@@ -1104,11 +1099,49 @@ export class Director {
         Switch: (id, key, request, options) => this.modules.Switch(id, key, request, { boundary: world.tick, ...(options?.target ? { target: options.target } : {}), ...(options?.retarget ? { retarget: true } : {}) })
       }
     });
-    // Shields recharge, then fleets move to their next called targets, locks advance and engagements re-arm, then cycles
-    // land: right after the prop mods apply and before orders, so a siege module's physics fly from that tick.
+    this.commanders = new FleetCommanders({
+      port: {
+        Document: () => this.scene,
+        Live: () => this.LiveFleets()?.scene ?? this.scene,
+        Destroyed: (id) => this.combat.IsDestroyed(id) || this.IsDead(id),
+        Ready: (fleet) => this.following.Ready(fleet),
+        Settled: (id) => this.ShipSettled(id),
+        Facts: () => this.BrainFacts(),
+        OrderOf: (id) => {
+          const motion = world.Motion(id);
+          return motion ? (motion.pendingOrder ?? motion.order) : null;
+        },
+        CallOf: (fleet) => {
+          const scene = this.LiveFleets()?.scene ?? this.scene;
+          return scene ? calledTargetsOf(scene, { fleet, kind: 'fleet', id: fleet }).filter((id) => this.CalledTargetStatus(id) === 'live') : [];
+        },
+        PropMods: (ships) => {
+          const counts = this.FleetPropMods(ships);
+          let state: FleetPicturePropMods = 'none';
+          if (counts.activating + counts.active + counts.stopping + counts.off) state = counts.activating + counts.active > counts.stopping + counts.off ? 'on' : 'off';
+          return state;
+        },
+        Run: (action, boundary) => {
+          if (action.tool === 'order_fleet') this.FleetOrderNow(action.args, { boundary });
+          else this.SwitchPropMods(action.args);
+        },
+        HandOver: (fleet, from, to, apply) => {
+          const heirs = CaptureFleetHeirs(world, from, [[fleet, to]]);
+          apply();
+          this.following.Reconcile();
+          InheritFleetOrders(world, heirs);
+          this.onChange();
+        }
+      }
+    });
+    // Shields recharge, then the FC brains decide, fleets move to their next called targets, locks advance and
+    // engagements re-arm, then cycles land: right after the prop mods apply and before orders, so a siege module's
+    // physics fly from that tick.
     world.OnBoundary((boundary) => {
       this.RemoveDead(boundary);
       this.SyncRecharged(this.combat.Recharge(world.master.tickInterval / 1000));
+      // The brains' calls land before the sync, so their locks start at this boundary.
+      this.StepFleetBrains(boundary);
       this.SyncFleetTargets(boundary);
       // Logi pick their targets before the lock sweep, so a new rep target's lock starts at this boundary.
       this.SyncAutoRepair(boundary);
@@ -1139,7 +1172,7 @@ export class Director {
         Now: () => performance.now()
       },
       scripts: new ShipScripts({
-        Order: (id, order) => this.OrderShip(id, order).order,
+        Order: (id, order) => this.Manual('order_ship', { id, order }, () => this.OrderShip(id, order)).order,
         Motion: (id) => world.Motion(id),
         Alive: (id) => !this.IsDead(id),
         Arriving: (id) => world.Arriving(id),
@@ -1167,14 +1200,14 @@ export class Director {
       timeline: (args) => this.Timeline(args),
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
       frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
-      order_ship: ({ id, order }) => this.OrderShip(id, order),
-      switch_prop_mods: (args) => this.SwitchPropMods(args),
+      order_ship: (args) => this.Manual('order_ship', args, () => this.OrderShip(args['id'], args['order'])),
+      switch_prop_mods: (args) => this.Manual('switch_prop_mods', args, () => this.SwitchPropMods(args)),
       switch_modules: (args) => this.SwitchModules(args),
       auto_repair: (args) => this.SetAutoRepair(args),
       set_target: (args) => this.SetTarget(args),
-      engage: (args) => this.Engage(args),
-      cease_fire: (args) => this.CeaseFire(args),
-      order_fleet: (args) => this.OrderFleet(args),
+      engage: (args) => this.Manual('engage', args, () => this.Engage(args)),
+      cease_fire: (args) => this.Manual('cease_fire', args, () => this.CeaseFire(args)),
+      order_fleet: (args) => this.OrderFleet(args).then((result) => this.Manual('order_fleet', args, () => result)),
       list_hardpoints: (args) => this.ListHardpoints(args),
       play_shot: (args) => this.PlayShot(args),
       play_sequence: (args) => this.PlayShot({ shots: args['shots'] }),
@@ -1271,14 +1304,21 @@ export class Director {
   }
 
   /**
-   * A timeline cue's order_fleet, synchronous from the pre-boundary hook: moves, warps and targets as the tool runs
-   * them; a document order (anchor, break-off, regroup) edits the live scene only (CueEdit), then flies its live half.
+   * order_fleet, synchronous: a timeline cue's from the pre-boundary hook, or an FC brain's at a boundary. Moves, warps,
+   * targets and free fire as the tool runs them (at a `boundary` the boundary's own sync starts the calls' locks); a
+   * document order (anchor, break-off, regroup) only from a cue, editing the live scene only (CueEdit), then flying its
+   * live half.
+   *
+   * @throws {SceneError} When the order is refused, or is a document order without a cue.
    */
-  private FleetOrderNow(input: unknown, cue: SceneCue): object {
+  private FleetOrderNow(input: unknown, options: { readonly cue?: SceneCue; readonly boundary?: number }): object {
+    const { cue, boundary } = options;
     const { request, resolved: named } = this.FleetRequest(input);
-    if (isFleetTargetsOrder(request.order)) return { ...this.CallTargets(request), ...named };
+    if (isFleetTargetsOrder(request.order)) return { ...this.CallTargets(request, { boundary }), ...named };
+    if (isFleetFreeFireOrder(request.order)) return { ...this.FreeFireOrder(request, { boundary }), ...named };
     const resolved = this.orders.Resolve(request);
     if (!isFleetDocumentOrder(request.order)) return { ...this.orders.Fly(resolved), ...named };
+    if (!cue) throw new SceneError([`order_fleet.order.type: "${request.order.type}" edits the document; only a tool call or a timeline cue gives it`]);
     const tick = this.world.tick;
     const operations = toFleetOrderOperations(this.Current(), resolved);
     const patch = operations.length ? this.CueEdit(operations, cue) : null;
@@ -1410,16 +1450,13 @@ export class Director {
 
   /**
    * A pilot's reaction for an order given with no delay: its ships[].pilot.reaction, else its personality fleet's seeded
-   * draw (toFleetPilotTraits), else none (it answers at once). Memoized per document.
+   * draw (FleetCommanders.ReactionOf over toFleetPilotTraits), else none (it answers at once).
    *
    * @param id - The ship.
    * @returns Its reaction, 0..1, or null.
    */
   private ReactionOf(id: string): Maybe<number> {
-    const scene = this.scene;
-    if (!scene) return null;
-    if (this.reactions?.scene !== scene) this.reactions = { scene, reactions: PilotReactions(scene) };
-    return this.reactions.reactions.get(id) ?? null;
+    return this.commanders.ReactionOf(id);
   }
 
   /**
@@ -2228,19 +2265,19 @@ export class Director {
     const input = args as unknown as Record<string, unknown>;
     switch (name) {
       case 'order_ship':
-        return Fired(this.OrderShip(input['id'], input['order']));
+        return Fired(this.Manual('order_ship', input, () => this.OrderShip(input['id'], input['order'])));
       case 'order_fleet':
-        return Fired(this.FleetOrderNow(args, cue));
+        return Fired(this.Manual('order_fleet', input, () => this.FleetOrderNow(args, { cue })));
       case 'switch_prop_mods':
-        return Fired(this.SwitchPropMods(args));
+        return Fired(this.Manual('switch_prop_mods', input, () => this.SwitchPropMods(args)));
       case 'switch_modules':
         return Fired(this.SwitchModules(args));
       case 'set_target':
         return Fired(this.SetTarget(args));
       case 'engage':
-        return Fired(this.Engage(args));
+        return Fired(this.Manual('engage', input, () => this.Engage(args)));
       case 'cease_fire':
-        return Fired(this.CeaseFire(args));
+        return Fired(this.Manual('cease_fire', input, () => this.CeaseFire(args)));
       case 'auto_repair':
         return Fired(this.AutoRepairNow(args, cue));
       case 'play_shot':
@@ -2345,6 +2382,7 @@ export class Director {
             command: this.orders.GroupReport({ fleet: report.id, kind: 'fleet', id: report.id }),
             ...this.CalledState({ fleet: report.id, kind: 'fleet', id: report.id }),
             ...this.AutoRepairFleetState(report.id),
+            ...this.FcState(report.id),
             wings: report.wings.map((wing) => ({
               ...wing,
               command: this.orders.GroupReport({ fleet: report.id, kind: 'wing', id: wing.id }),
@@ -2402,7 +2440,11 @@ export class Director {
    * tool's forwarded op), through the edit queue.
    */
   private Edit(operations: unknown): Promise<object> {
-    return this.Serialize(() => this.EditNow(operations));
+    return this.Serialize(async () => {
+      const result = await this.EditNow(operations);
+      this.FleetLeversBack(operations);
+      return result;
+    });
   }
 
   /**
@@ -2441,6 +2483,7 @@ export class Director {
   private CueEdit(operations: unknown, cue: SceneCue): object {
     const normalized = applySceneOperations(this.Current(), operations);
     const applied = this.ApplyNow(normalized);
+    this.FleetLeversBack(operations);
     this.liveEdits.push({ source: 'cue', cue: cue.id, tick: this.world.tick, operations, ...(cue.adds ? { adds: cue.adds } : {}) });
     this.FinishApply(applied).catch((error: unknown) => console.warn(`timeline cue "${cue.id}": its builds failed: ${ErrorText(error)}`));
     const { diff } = applied;
@@ -3773,6 +3816,103 @@ export class Director {
   }
 
   /**
+   * Runs a model's tool call (a tool or a timeline cue), then lets the FC brains know which levers it took
+   * (FleetCommanders.TakeLevers): only a call that went through takes one.
+   */
+  private Manual<T>(tool: string, args: unknown, run: () => T): T {
+    const result = run();
+    this.commanders.TakeLevers(tool, args);
+    return result;
+  }
+
+  /**
+   * set_fleet_personality (an update_fleet setting `personality`) hands a fleet's levers back to its brain
+   * (FleetCommanders.AfterOperations); a fleet a cease_fire held has its members' holds lifted, as engage lifts them.
+   */
+  private FleetLeversBack(operations: unknown): void {
+    const released = this.commanders.AfterOperations(operations);
+    if (!released.length) return;
+    const memberships = toFleetMemberships(this.LiveFleets()?.scene ?? this.Current());
+    this.fleetTargets.Rearm([...memberships].filter(([, membership]) => released.includes(membership.fleet)).map(([id]) => id));
+    this.SyncFleetTargets();
+  }
+
+  /**
+   * The FC brains' step at a boundary (FleetCommanders.Step), between the shield recharge and the fleets' target sync;
+   * a failure is logged and the boundary goes on.
+   */
+  private StepFleetBrains(boundary: number): void {
+    try {
+      this.commanders.Step(boundary);
+    } catch (error) {
+      console.error(`the FC brains failed at tick ${boundary}: ${ErrorText(error)}`);
+    }
+  }
+
+  /**
+   * Whether a ship's numbers have settled for the brain's gate: its /ship-stats answer and prop mod lookup, and its fit
+   * (or its default weapons' hull type) resolved.
+   */
+  private ShipSettled(id: string): boolean {
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    const answer = doc ? this.hullStats.Cached(doc) : null;
+    if (!doc || !answer) return false;
+    const propMod = this.PropModTarget(doc, answer);
+    const hullTypeID = answer.hull?.typeID;
+    return (propMod == null || Boolean(this.propMods.Cached(propMod))) && !this.fittings.get(id)?.pending && !(!doc.fit && hullTypeID != null && this.fitLookup.TypePending(hullTypeID));
+  }
+
+  /**
+   * What the FC brains know of each live ship (toFleetPicture's facts): every ship with a ball that has not exploded,
+   * in document order. Flagged, warping and arriving ships are `away`.
+   */
+  private BrainFacts(): FleetShipFacts[] {
+    const tick = this.world.tick;
+    const facts: FleetShipFacts[] = [];
+    for (const doc of this.scene?.ships ?? []) {
+      const motion = this.IsDead(doc.id) ? null : this.world.Motion(doc.id);
+      if (!motion) continue;
+      let hp = 0;
+      let max = 0;
+      for (const layer of Object.values(this.damage.Health(doc.id) ?? {})) {
+        hp += layer.hp;
+        max += layer.max;
+      }
+      const target = this.targets.Of(doc.id);
+      const away = this.combat.IsDestroyed(doc.id) || this.world.InWarp(doc.id) || this.world.Arriving(doc.id);
+      facts.push({
+        id: doc.id,
+        ...(doc.team != null ? { team: doc.team } : {}),
+        position: motion.position,
+        radius: motion.physics.radius,
+        health: max > 0 ? hp / max : 1,
+        remaining: hp,
+        dps: this.PaperDps(doc.id),
+        signature: this.SignatureOf(doc.id),
+        speed: motion.physics.maxVelocity,
+        ...(target ? { target } : {}),
+        ...(away ? { away: true } : {}),
+        reach: this.ShipReach(doc.id),
+        attackedBy: this.combat.Attackers(doc.id, tick)
+      });
+    }
+    return facts;
+  }
+
+  /**
+   * A ship's paper DPS: each weapon's turret DPS, else its launcher's, summed.
+   */
+  private PaperDps(id: string): number {
+    return this.modules
+      .WeaponKeys(id)
+      .map((key) => {
+        const spec = this.modules.Spec(id, key);
+        return spec?.combat?.dps ?? spec?.missile?.dps ?? 0;
+      })
+      .reduce((sum, dps) => sum + dps, 0);
+  }
+
+  /**
    * Runs logi auto-repair (AutoRepair.Sync): at a boundary right after the fleets' calls and before the lock sweep, and
    * after an edit or auto_repair so the new settings decide at once.
    *
@@ -3909,6 +4049,8 @@ export class Director {
       this.targets.Set(id, null);
       this.turrets?.Aim(id, null);
     }
+    // A personality fleet's protocol names its heir (the designate, in the overlay); the default rule names the rest.
+    for (const fleet of commanded) this.commanders.CommanderDown(fleet, id, this.world.tick);
     const fleets = this.LiveFleets()?.scene.fleets ?? [];
     const heirs = CaptureFleetHeirs(
       this.world,
@@ -4386,6 +4528,7 @@ export class Director {
     propMod: Maybe<ShipPropModState>;
     fit: Maybe<ShipFitReport>;
     fitNote?: string;
+    pilot?: ShipPilotReport;
     target: Maybe<ShipTargetReport & { readonly source?: ShipTargetSource }>;
     call?: ShipCallReport;
     autoRepair?: AutoRepairReport;
@@ -4433,6 +4576,7 @@ export class Director {
       propMod: this.PropModState(doc, flight, motion),
       fit: fitting ? ShipFitReportOf(fitting, (module) => this.ModuleRowState(doc.id, module, motion)) : null,
       ...(fitNote ? { fitNote } : {}),
+      ...this.PilotState(doc.id),
       target: this.TargetState(doc.id),
       ...this.CallState(doc.id),
       ...this.AutoRepairShipState(doc.id),
@@ -4453,6 +4597,23 @@ export class Director {
     const report = this.targets.Report(id);
     const source = report ? this.fleetTargets.Source(id) : null;
     return report ? { ...report, ...(source ? { source } : {}) } : null;
+  }
+
+  /**
+   * A ship's `pilot` for get_state: its traits (its personality fleet's draws under its authored ones) and their source;
+   * omitted for a ship with neither.
+   */
+  private PilotState(id: string): { pilot?: ShipPilotReport } {
+    const pilot = this.commanders.PilotOf(id);
+    return pilot ? { pilot: { ...(pilot.command != null ? { command: Round(pilot.command, 2) } : {}), ...(pilot.reaction != null ? { reaction: Round(pilot.reaction, 2) } : {}), source: pilot.source } } : {};
+  }
+
+  /**
+   * A personality fleet's `fc` for get_state: its brain (FleetCommanders.Report); omitted for other fleets.
+   */
+  private FcState(fleet: string): { fc?: FleetCommandReport } {
+    const fc = this.commanders.Report(fleet, this.world.tick);
+    return fc ? { fc } : {};
   }
 
   /**
@@ -4509,13 +4670,7 @@ export class Director {
     const engaged = this.engagements.get(id);
     const combat = this.combat.Report(id, tick);
     const kill = this.combat.KillOf(id);
-    const paperDps = this.modules
-      .WeaponKeys(id)
-      .map((key) => {
-        const spec = this.modules.Spec(id, key);
-        return spec?.combat?.dps ?? spec?.missile?.dps ?? 0;
-      })
-      .reduce((sum, dps) => sum + dps, 0);
+    const paperDps = this.PaperDps(id);
     const missiles = this.missiles.Counts(id);
     return {
       ...(targeting ? { targeting: { scanResolution: Round(targeting.scanResolution, 2), maxTargetRange: Math.round(targeting.maxTargetRange), maxLocks: targeting.maxLocks } } : {}),
@@ -4780,29 +4935,6 @@ function ToVector(value: ArrayLike<number>): SceneVector {
 function DrawnCameraReport(drawn: Maybe<DrawnCamera>): Maybe<object> {
   const round = (value: number, scale: number): number => Math.round(value * scale) / scale;
   return drawn ? { eye: drawn.eye.map((value) => round(value, 100)), look: drawn.look.map((value) => round(value, 100)), up: drawn.up.map((value) => round(value, 1000)), fov: round(drawn.fov, 100), near: round(drawn.near, 1000), far: Math.round(drawn.far) } : null;
-}
-
-/**
- * Every pilot's reaction: personality fleets' members their seeded draws (toFleetPilotTraits), then each ship's
- * authored ships[].pilot.reaction over it. Ships with neither are left out (they answer at once).
- *
- * @param scene - The document.
- * @returns Reaction by ship id.
- */
-function PilotReactions(scene: SceneDocument): Map<string, number> {
-  const reactions = new Map<string, number>();
-  const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
-  const seed = sceneCombatOf(scene).seed;
-  for (const fleet of scene.fleets ?? []) {
-    const personality = fleet.personality ? resolveFleetPersonality({ name: fleet.personality, personalities: scene.personalities }).personality : null;
-    if (!personality) continue;
-    for (const [id, traits] of toFleetPilotTraits({ fleet, personality, pilotOf: (ship) => shipPilotTraits(docs.get(ship)?.pilot), seed })) reactions.set(id, traits.reaction);
-  }
-  for (const doc of scene.ships) {
-    const reaction = shipPilotTraits(doc.pilot).reaction;
-    if (reaction != null) reactions.set(doc.id, reaction);
-  }
-  return reactions;
 }
 
 /**

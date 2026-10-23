@@ -112,7 +112,8 @@ ids.
 - **A destroyed ship leaves its fleet live, never in the document** (`fleets/live.ts` `toLiveFleetScene`, `sd-combat`):
   the same ops a removal runs, after a dead FC hands the fleet (`update_fleet`) to its successor
   (`toDefaultFleetSuccessor`: the first live wing commander in wing order, else the first live squad commander, else
-  the first live member); a fleet with nobody alive drops. The page's `FleetFollowing`, `FleetOrders`, memberships and
+  the first live member; a personality fleet's designate instead, the overlay's `commanders`, `sd-personalities`); a
+  fleet with nobody alive drops. The page's `FleetFollowing`, `FleetOrders`, memberships and
   fleets report read that view, so the members re-form on the acting FC (the same re-plan an `update_fleet` causes); a
   load revives everyone and the document's fleets come back.
 - **The FC dies, the fleet flies on** (`apps/viewer/src/lib/fleet-succession.ts`, node-tested, wired in

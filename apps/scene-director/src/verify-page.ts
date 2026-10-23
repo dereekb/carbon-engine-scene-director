@@ -467,6 +467,24 @@ interface WarpFlashState {
   readonly warpIn: number;
 }
 
+/**
+ * A personality fleet's brain in get_state (fleets[].fc).
+ */
+interface FleetBrainState {
+  readonly personality: string;
+  readonly ship: string;
+  readonly ability: number;
+  readonly state: string;
+  readonly successor?: string;
+  readonly takesOverIn?: number;
+  readonly engaged: boolean;
+  readonly hostiles: number;
+  readonly manual: readonly string[];
+  readonly held?: true;
+  readonly pending: readonly { readonly lever: string; readonly dueIn: number; readonly why: string }[];
+  readonly decisions: readonly { readonly tick: number; readonly lever: string; readonly tool: string; readonly args: { readonly by?: string; readonly order?: { readonly type?: string; readonly set?: readonly string[] } }; readonly why: string; readonly refused?: string }[];
+}
+
 interface ViewerState {
   readonly renderer: { readonly available: boolean; readonly adapter?: string; readonly reason?: string };
   readonly environment: Maybe<{ readonly background: { readonly ready: boolean }; readonly dressing: { readonly state: string } }>;
@@ -474,7 +492,16 @@ interface ViewerState {
   readonly ships: ShipState[];
   readonly arrivals?: ArrivalGroupState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: (FleetReport & { readonly actingFor?: string; readonly destroyed?: string[]; readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport; readonly autoRepair?: FleetAutoRepairState })[];
+  readonly fleets: (FleetReport & {
+    readonly actingFor?: string;
+    readonly destroyed?: string[];
+    readonly formation?: FleetFormationState;
+    readonly propMods?: Record<string, number>;
+    readonly modules?: Record<string, number>;
+    readonly command?: FleetGroupCommandReport;
+    readonly autoRepair?: FleetAutoRepairState;
+    readonly fc?: FleetBrainState;
+  })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
@@ -2206,6 +2233,47 @@ try {
     const tree = CalledOf(off) as Maybe<CalledTree & { readonly freeFire?: boolean }>;
     Expect(!tree?.freeFire, Show(tree));
     return `free fire at tick ${order.tick}: bfc, p2 on r1 by tick ${picked.simulation.tick}, p1 (reaction 0) ${p1At} ticks later (its delay ${reaction}); set_target null skipped p2; a call took all three onto r2, clearing it gave r1 back (tick ${back.simulation.tick}); off cleared them`;
+  });
+
+  await Check('personality: the FC brain calls the nearest hostile as its FC; a model call takes the lever, a dead FC hands over, set_fleet_personality hands it back', async () => {
+    const Team = <T extends object>(ship: T, team: string) => ({ ...ship, team });
+    const ships = [Team(Punisher('bfc', [0, 0, 0]), 'blue'), Team(Punisher('p1', [0, 0, 1200]), 'blue'), Team(Punisher('p2', [0, 0, -1200]), 'blue'), Team(Punisher('k1', [2500, 0, 0]), 'red'), Team(Punisher('k2', [2500, 0, 1500]), 'red')];
+    // Ability 1 and reaction 1: every decision at the boundary it is wanted, every pilot at once; a 4 s handover (2 s at
+    // ability 1). It holds position and fires on sight, so only the call lever pulls.
+    const verify = { schema: 'cjs-fleet-personality/1', command: { ability: 1, backups: 2, handover: 4 }, pilots: { reaction: 1 }, engage: 'on-sight', targeting: { queue: 1, freeFire: false }, movement: { stance: 'hold', propMods: 'never' } };
+    const fleets = [{ id: 'b', commander: 'bfc', personality: 'verify', wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', members: ['p1', 'p2'] }] }] }];
+    await LoadCombatScene(ships, { death: 'explode' }, { fleets, personalities: { verify } });
+    const Fc = (state: ViewerState): Maybe<FleetBrainState> => state.fleets.find((fleet) => fleet.id === 'b')?.fc ?? null;
+    const Called = (state: ViewerState, ids: readonly string[], target: string): boolean => ids.every((id) => ShipIn(state, id).target?.id === target && ShipIn(state, id).target?.source === 'called');
+    const called = await WaitFor('the brain calls k1 (the nearest) as bfc and the members shoot it', 20, (polled) => {
+      const fc = Fc(polled);
+      const call = fc?.decisions.find((decision) => decision.tool === 'order_fleet' && decision.args.order?.type === 'targets');
+      return fc?.state === 'commanding' && call?.args.by === 'bfc' && call.args.order?.set?.[0] === 'k1' && Called(polled, ['bfc', 'p1', 'p2'], 'k1') ? null : Show({ fc, targets: Targets(polled, ['bfc', 'p1', 'p2']) });
+    });
+    const pilots = ['bfc', 'p1'].map((id) => ShipIn(called, id) as ShipState & { readonly pilot?: { readonly command?: number; readonly reaction?: number; readonly source?: string } });
+    Expect(pilots[0].pilot?.command === 1 && pilots[0].pilot.reaction === 1 && pilots[0].pilot.source === 'personality' && pilots[1].pilot?.reaction === 1, Show(pilots.map((ship) => ship.pilot)));
+    const manualAt = (await call<{ readonly tick: number }>('order_fleet', { fleet: 'b', delay: 0, order: { type: 'targets', set: ['k2'] } })).tick;
+    await Delay(3000);
+    const manual = await call<ViewerState>('get_state');
+    Expect(Show(Fc(manual)?.manual) === '["call","free-fire"]' && Called(manual, ['bfc', 'p1', 'p2'], 'k2') && !(Fc(manual)?.decisions ?? []).some((decision) => decision.tick > manualAt), `the model's call stands, the brain silent: ${Show({ fc: Fc(manual), targets: Targets(manual, ['bfc', 'p1', 'p2']) })}`);
+    await call('cease_fire', { fleet: 'b' });
+    await call<EngageResult>('engage', { ships: ['k1', 'k2'], target: 'bfc' });
+    const dead = await WaitFor('bfc dies and the designate flies as the root, taking command after its handover', 90, (polled) => {
+      const fleet = polled.fleets.find((candidate) => candidate.id === 'b');
+      return ShipIn(polled, 'bfc').destroyed && fleet?.actingFor === 'bfc' && fleet.fc?.state === 'handover' && fleet.fc.successor === fleet.commander && (fleet.fc.takesOverIn ?? 9) <= 2
+        ? null
+        : Show({ destroyed: ShipIn(polled, 'bfc').destroyed, commander: fleet?.commander, actingFor: fleet?.actingFor, fc: fleet?.fc });
+    });
+    const heir = dead.fleets.find((fleet) => fleet.id === 'b')?.commander ?? '';
+    const commanding = await WaitFor('the designate commands', 10, (polled) => (Fc(polled)?.state === 'commanding' && Fc(polled)?.ship === heir ? null : Show(Fc(polled))));
+    Expect(Fc(commanding)?.held === true && Show(Fc(commanding)?.manual) === '["call","free-fire"]', `cease_fire still holds the levers: ${Show(Fc(commanding))}`);
+    await call('set_fleet_personality', { fleet: 'b', personality: 'verify' });
+    const back = await WaitFor('set_fleet_personality hands the levers back: the survivors shoot the call again', 15, (polled) => {
+      const fc = Fc(polled);
+      const live = ['p1', 'p2'].filter((id) => !ShipIn(polled, id).destroyed);
+      return fc && !fc.manual.length && !fc.held && live.every((id) => ShipIn(polled, id).call?.state === 'following') ? null : Show({ fc, calls: live.map((id) => ShipIn(polled, id).call) });
+    });
+    return `brain call on k1 by bfc at tick ${called.simulation.tick}; the model's call on k2 at ${manualAt} took call + free fire; bfc died at ${ShipIn(dead, 'bfc').destroyed?.tick}, ${heir} took command at ${commanding.simulation.tick}; handed back at ${back.simulation.tick}, ${Fc(back)?.decisions.length} decisions`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

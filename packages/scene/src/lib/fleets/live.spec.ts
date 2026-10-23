@@ -47,6 +47,23 @@ describe('toLiveFleetScene', () => {
     expect(squadOf(toMember.scene, 'logi')?.members).toEqual(['guardian-2']);
   });
 
+  it('an overlay commander replaces the default successor, and takes the command from a commander that still flies', () => {
+    const commanders = new Map([['tfi', 'tfi-2']]);
+    const dead = toLiveFleetScene(base(), new Set(['fc']), { commanders });
+    expect(dead.scene.fleets?.[0].commander).toBe('tfi-2');
+    expect(dead.changes.get('tfi')).toEqual({ actingFor: 'fc', destroyed: ['fc'] });
+
+    const flagged = toLiveFleetScene(base(), new Set(), { commanders });
+    expect(flagged.scene.fleets?.[0].commander).toBe('tfi-2');
+    expect(flagged.changes.get('tfi')).toEqual({ actingFor: 'fc', destroyed: [] });
+    expect(toFleetMemberships(flagged.scene).get('fc')).toBeUndefined();
+
+    // Gone, or not in the fleet: the default rule stands.
+    expect(toLiveFleetScene(base(), new Set(['fc', 'tfi-2']), { commanders }).scene.fleets?.[0].commander).toBe('guardian-1');
+    const stranger = base();
+    expect(toLiveFleetScene(stranger, new Set(), { commanders: new Map([['tfi', 'nobody']]) }).scene).toBe(stranger);
+  });
+
   it('drops a fleet with nobody alive', () => {
     const view = toLiveFleetScene(base(), new Set(['fc', 'tfi-1', 'tfi-2', 'tfi-3', 'guardian-1', 'guardian-2']));
     expect(view.scene.fleets).toEqual([]);
