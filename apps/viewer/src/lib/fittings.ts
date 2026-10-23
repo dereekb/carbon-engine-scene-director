@@ -16,6 +16,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import type { ShipModuleSpec } from './modules';
 import {
   computeShipStats,
   DAMAGE_TYPES,
@@ -24,7 +25,10 @@ import {
   type DefenseLayerName,
   type DogmaBundle,
   type DogmaModuleState,
+  type DogmaShip,
   eftTypeNames,
+  evaluateShipDogma,
+  type EvaluateShipDogmaInput,
   type EftFit,
   type FittedModule,
   type FitTypeAnswer,
@@ -32,6 +36,7 @@ import {
   fittingTypeIDs,
   isInlineFit,
   mergeDogmaBundles,
+  moduleActivationOf,
   normalizePropModName,
   parseEftFit,
   PROP_MOD_MODULE_AB,
@@ -47,6 +52,7 @@ import {
   type ShipFitting,
   type ShipStats,
   type ShipStatsInput,
+  type HullStatOverrides,
   toDogmaModules,
   typeEftFit
 } from '@scene-director/scene';
@@ -158,6 +164,7 @@ export class FitLookup {
   private skillsRequest: Maybe<Promise<void>> = null;
   private bundle: Maybe<DogmaBundle> = null;
   private readonly stats = new WeakMap<DogmaBundle, Map<string, ShipStats>>();
+  private readonly ships = new WeakMap<DogmaBundle, Map<string, DogmaShip>>();
 
   constructor(options: FitLookupOptions = {}) {
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
@@ -336,6 +343,28 @@ export class FitLookup {
       memo.set(key, stats);
     }
     return stats;
+  }
+
+  /**
+   * A ship evaluated, memoized per bundle and input (its modules' activation numbers come from it).
+   *
+   * @param input - The evaluator input.
+   * @returns The evaluated ship.
+   * @throws {RangeError} From evaluateShipDogma.
+   */
+  Evaluate(input: EvaluateShipDogmaInput): DogmaShip {
+    let memo = this.ships.get(input.bundle);
+    if (!memo) {
+      memo = new Map();
+      this.ships.set(input.bundle, memo);
+    }
+    const key = JSON.stringify([input.hullTypeID, input.modules ?? [], input.overrides ?? null, input.pilot?.name ?? null]);
+    let ship = memo.get(key);
+    if (!ship) {
+      ship = evaluateShipDogma(input);
+      memo.set(key, ship);
+    }
+    return ship;
   }
 
   /**
@@ -598,7 +627,26 @@ function NamesModule(propMod: ShipFitPropMod, module: FittedModule): boolean {
 }
 
 /**
- * A fitted module's live state in get_state (C4: online or offline; the prop mod's from Destiny).
+ * The modules a fitted ship's activation layer runs (modules.ts): every resolved module but the prop mod, with how it
+ * activates, from the ship evaluated with its fit's states.
+ *
+ * @param resolved - The ship's resolved fit, with its dogma input.
+ * @param lookup - The lookups, for the memoized evaluation.
+ * @param overrides - The document ship's `stats`.
+ * @returns The specs; none until the fit has dogma.
+ */
+export function ShipModuleSpecsOf(resolved: ResolvedShipFitting, lookup: FitLookup, overrides: Maybe<HullStatOverrides> = null): ShipModuleSpec[] {
+  const { dogma } = resolved;
+  if (!dogma) return [];
+  const ship = lookup.Evaluate({ bundle: dogma.bundle, hullTypeID: dogma.hullTypeID, modules: dogma.modules, overrides });
+  return resolved.modules.flatMap((module): ShipModuleSpec[] => {
+    const activation = module.prop || module.typeID == null ? null : moduleActivationOf(ship, dogma.bundle, module.key);
+    return activation && module.typeID != null ? [{ key: module.key, name: module.name, typeID: module.typeID, offline: module.offline === true, activation }] : [];
+  });
+}
+
+/**
+ * A fitted module's live state in get_state: the activation layer's (modules.ts), the prop mod's from Destiny.
  */
 export type ShipModuleState = 'offline' | 'online' | 'activating' | 'active' | 'stopping' | 'reactivating';
 
@@ -607,12 +655,27 @@ export const SHIP_MODULE_STATES: readonly ShipModuleState[] = ['offline', 'onlin
 /**
  * A module row in get_state: module, name and state always, the rest only when they apply.
  */
-export interface ShipModuleRow {
+export interface ShipModuleRow extends ShipModuleRowState {
   readonly module: string;
   readonly name: string;
-  readonly state: ShipModuleState;
   readonly charge?: string;
   readonly prop?: true;
+}
+
+/**
+ * A module row's live part: its state, and its cycle, timing, target and note when they apply.
+ */
+export interface ShipModuleRowState {
+  readonly state: ShipModuleState;
+  readonly cycle?: { readonly number: number; readonly endsIn: number };
+  readonly at?: number;
+  readonly stopsIn?: number;
+  readonly activatesIn?: number;
+  readonly readyIn?: number;
+  readonly respondsIn?: number;
+  readonly target?: string;
+  readonly targetDistance?: number;
+  readonly effectiveness?: number;
   readonly note?: string;
 }
 
@@ -644,10 +707,10 @@ export interface ShipFitReport {
  * A ship's fit for get_state.
  *
  * @param resolved - The ship's resolved fit.
- * @param stateOf - A module's live state.
+ * @param stateOf - A module's live state (and its cycle, target and note).
  * @returns The report.
  */
-export function ShipFitReportOf(resolved: ResolvedShipFitting, stateOf: (module: ShipFitModule) => ShipModuleState): ShipFitReport {
+export function ShipFitReportOf(resolved: ResolvedShipFitting, stateOf: (module: ShipFitModule) => ShipModuleRowState): ShipFitReport {
   const { fitting, modules, dogma, note } = resolved;
   return {
     name: fitting.name,
@@ -655,14 +718,11 @@ export function ShipFitReportOf(resolved: ResolvedShipFitting, stateOf: (module:
     hull: fitting.hull,
     ...(dogma ? { typeID: dogma.hullTypeID } : {}),
     unknown: fitting.unknown,
-    modules: modules.map((module) => ({
-      module: module.key,
-      name: module.name,
-      state: stateOf(module),
-      ...(module.charge ? { charge: module.charge.name } : {}),
-      ...(module.prop ? { prop: true as const } : {}),
-      ...(module.note ? { note: module.note } : {})
-    })),
+    modules: modules.map((module) => {
+      const { note, ...live } = stateOf(module);
+      const notes = [module.note, note].filter(Boolean).join('; ');
+      return { module: module.key, name: module.name, ...live, ...(module.charge ? { charge: module.charge.name } : {}), ...(module.prop ? { prop: true as const } : {}), ...(notes ? { note: notes } : {}) };
+    }),
     drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),
     math: dogma ? 'dogma' : 'table',
     ...(note ? { note } : {})

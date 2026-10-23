@@ -5,13 +5,13 @@
 > itself (numbers, switching, audio): `sd-ship-stats`; compositions and `cjs-fleet/1`: `sd-fleets` → `compositions`;
 > `add_ships` / `stage_engagement`: `sd-staging`.
 
-**Status (2026-10-22)**: slices C1-C4 of the fitted-modules plan
+**Status (2026-10-23)**: slices C1-C5 of the fitted-modules plan
 (`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) are in: fits
 are parsed and ride on scene ships, the hub resolves fit names and serves dogma bundles, the dogma evaluator computes a
 fitted ship's HP, resists, capacitor, targeting and flight numbers (`ship_stats` reports them for a `fit`), and the page
-flies fitted ships by their fit and reports their modules, defense and capacitor in `get_state` (below). Not yet:
-module activation (`switch_modules`) and the damage model (C5), module effects and sounds (C6). Research behind the
-design: the dbx-claude note `fitted-modules-dogma-and-module-effects-research`.
+flies fitted ships by their fit and reports their modules, defense and capacitor in `get_state`, and `switch_modules`
+runs the modules on EVE's timing into a page-side damage model (below). Not yet: module effects and sounds (C6). Research
+behind the design: the dbx-claude note `fitted-modules-dogma-and-module-effects-research`.
 
 ## Files
 
@@ -38,7 +38,12 @@ design: the dbx-claude note `fitted-modules-dogma-and-module-effects-research`.
 | `apps/scene-director/src/lib/hub/dogma-data.ts` | `DogmaData` (`TypeByName`, `Bundle`, `Skills`), `FIXED_ATTRIBUTE_IDS`, `MAX_DOGMA_TYPE_IDS` |
 | `apps/scene-director/src/lib/hub/dogma-data.testing.ts` | `DogmaFixture`, `DogmaRoutes` (tools-core routes rebuilt from the fixture), `MakeRoutedDogmaData`, `MakeFakeDogmaData` |
 | `apps/viewer/src/lib/fittings.ts` | the page's fit lookups (`FitLookup`), `ResolveShipFitting`, the get_state reports (`ShipFitReportOf`, `ShipDefenseReportOf`, `ShipCapacitorReportOf`, `FleetModuleCountsOf`); node-tested over the fixture (`fittings.spec.ts`) |
-| `apps/viewer/src/lib/flight.ts` / `director.ts` | `ResolveFlight`'s `dogma` path; the director's `ResolveFitting`, `LookupFit`, `PropModModule` / `FitsPropMod`, get_state's `fit` / `defense` / `capacitor` and fleet `modules` |
+| `apps/viewer/src/lib/flight.ts` / `director.ts` | `ResolveFlight`'s `dogma` path; the director's `ResolveFitting`, `LookupFit`, `PropModModule` / `FitsPropMod`, get_state's `fit` / `defense` / `capacitor` and fleet `modules`; `SwitchModules`, `SyncModules`, `LiveDogma`, `ModuleEvents` (activation, below) |
+| `fitting/switch.ts` | `normalizeModuleSwitch` (the `switch_modules` arguments, a plain object a timeline beat can embed), `MODULE_SWITCH_STATES` |
+| `fitting/activation.ts` | `moduleActivationOf` (how a module activates: refusal, targeted, warp safe, cycle, reactivation, reach, repair, group limits, `flight`, `note`), `UNACTIVATABLE_GROUPS`, `EFFECTLESS_CATEGORIES`, `falloffEffectiveness`, `moduleReach` |
+| `apps/viewer/src/lib/module-cycle.ts` | `ModuleCycle` (one module's state machine), `CycleEnd` (moved from destiny.ts, which re-exports it) |
+| `apps/viewer/src/lib/modules.ts` | `ShipModules`: the activation layer over a world port (`SurfaceDistance`, `InWarp`, `HasShip`, `tickSeconds`) |
+| `apps/viewer/src/lib/damage.ts` | `DamageModel`: current / max HP per layer, resonances, repairs and incoming repairs |
 
 ## Fits in the document
 
@@ -268,6 +273,78 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   HP, resist and capacitor values equal `dogma/evaluate` with Shield / Armor / Hull Upgrades, Mechanics, Capacitor
   Management and Operation at V); "a fitted TFIs fleet reports fit-driven defense" (all 44 on dogma, `tfis-fc` armor
   52,527.2 HP = `ship_stats { fit }` for `tfis/tfi`, 23 modules online, 2026-10-22).
+
+## Module activation (`switch_modules`, C5)
+
+Live only (never in the document; a fit's `/OFFLINE` is the persistent offline marker). Node-tested: `module-cycle.ts`,
+`modules.ts`, `damage.ts`, `fitting/switch.ts`, `fitting/activation.ts`.
+
+- **States**: `offline`, `online`, `activating` (applies at the next 1 s tick boundary), `active` (cycling: get_state
+  `cycle: { number, endsIn }`), `stopping` (runs to its cycle end, rounded up to a tick: `CycleEnd`), `reactivating`
+  (after a stop, for `moduleReactivationDelay`, 669). Passive modules only go online / offline; rigs and subsystems
+  refuse offline.
+- **Rules** (the prop mod's, generalized; `ModuleCycle`): `active` on online → activating, on stopping → active again,
+  on reactivating → queued until ready (`activatesIn`), on offline → onlined and activated at the same boundary. `online`
+  cancels an activation, stops a running module at its cycle end, and onlines an offline one at the next boundary.
+  `offline` stops a running module at its cycle end and then takes it offline; the rest go offline at the next boundary.
+  A pilot `delay` (`toPilotDelays`, key `modules|fleet|wing|squad`) queues the switch to its tick (`respondsIn`).
+- **Events**: `on`, `cycle` (cycle n starts), `end` (cycle n ends), `off` (with `why` when it stopped on its own). A
+  cycle boundary between ticks fires at the first tick boundary at or after it. Online / offline transitions fire no
+  event: the director compares the live states instead (below).
+- **What runs** (`moduleActivationOf`, from the ship evaluated with its live states, so skills, hull bonuses and triage
+  apply): category 1 and 2 default effects activate; cycle = the default effect's duration (10 s when it has none).
+  Refused: weapons (the Turrets entry), MJD 1189, MJFG 1533, cloaks 330, cynos 658, bubbles 899, smartbombs 72, ECM
+  bursts 80, passive modules. Webs, scrams, points, neuts, nos, EWAR and cap transmitters cycle on their target without
+  effect yet; command bursts and cap boosters cycle without effect (`note`).
+- **Group limits**: activation beyond the evaluated `maxGroupActive` (763) is refused; modules beyond `maxGroupOnline`
+  (978) start offline with a note, and onlining one is refused.
+- **Targeted modules** (default effect category 2) need `target`: another ship in the scene, no lock. Distance is
+  surface to surface on the EVE radii (`DestinyWorld.SurfaceDistance`). Refused beyond `moduleReach` (optimal + 2 ×
+  falloff), on its own ship, on a ship in warp, or while running on another target. `effectiveness` =
+  `0.5^((max(0, d − optimal) / falloff)²)` scales repairs. A running one whose target drifts out of reach stops at its
+  cycle end (`its target is out of range`); target removed or in warp: it stops at once (`its target is gone` /
+  `entered warp`).
+- **Warp**: entering proper warp (`OnWarp` enter) stops at once every running module that is not warp safe and every
+  targeted one, plus every module targeting the ship. The prop mod already did this in DestinyWorld.
+- **The prop mod** stays DestinyWorld's: `switch_modules` on the `prop: true` module calls `PropModRefusal` /
+  `SwitchPropMod` exactly as `switch_prop_mods` does (offline refused; its row maps `off` → `online`). A second group-46
+  module (or the fit's own under `propMod.module "none"`) is refused. **Duplication** (the plan's §2.7 fallback):
+  DestinyWorld keeps its own prop mod code, so `destiny.spec.ts` stays untouched, and `ModuleCycle` copies its rules
+  (`SwitchPropMod`, `ApplyPropMods`) for the other modules. A timing rule changed in one must change in the other.
+- **Director wiring**: `ShipModules` over the world port; `world.OnBoundary` → `modules.Boundary` (right after
+  `ApplyPropMods`, before orders: `sd-destiny`); `OnWarp` enter → `OnWarpEnter`; ship removal → `Remove` + damage
+  `Remove`; a load → `Clear`. `Flight` passes `LiveDogma` (the fit's dogma modules with the layer's states through
+  `DogmaStateOf`, by key and type id; the prop key untouched), so HP, resists, capacitor drain, signature (a suppressor)
+  and siege / triage physics follow the running modules. `SetFlight` → `SyncModules`: `ShipModuleSpecsOf` (every resolved
+  module but the prop mod, evaluated with live states) goes to `SetFit` when its JSON changed; states carry over by
+  (key, type id), a running module that vanished stops (`refitted`) and the flight is recomputed once. `ModuleEvents`
+  (each boundary, warp, removal) re-flies every fitted ship whose live-states key differs from the one it flies, then
+  lands the repairs. Cost: a key per fitted ship per tick; the evaluations are memoized by fit and states.
+- **Result**: `{ tick, state, ships: [{ id, modules: [{ module, name, state, at?, stopsIn?, activatesIn?, respondsIn?,
+  target?, effectiveness? }] }], skipped: [{ id, module?, reason }] }`. Skipped: a ship without a resolved fit, a
+  selector matching none of a ship's modules (`module` = the selector), every refusal (`module` = the key). A `target`
+  naming no ship throws.
+- **get_state rows** (`ShipModuleRowState`): `module`, `name`, `state` always; `cycle`, `at`, `stopsIn`,
+  `activatesIn`, `readyIn`, `respondsIn`, `target`, `targetDistance`, `effectiveness`, `note` when they apply. Fleet
+  `modules` counts the rows by state.
+
+## The damage model (`damage.ts`, C5)
+
+- Per fitted ship (the dogma path only): `{ hp, max, resonances }` per layer, `shieldRecharge`, `repairs` (HP/s of the
+  running local repairers) and `incoming` (`{ from, module, layer, amount, cycleTime, effectiveness }`).
+- `SetDefense` on every `SetFlight`: current HP starts at max; when max changes the fraction is kept, clamped to max.
+- Repairs land at cycle events (`RepairLandings`): shield boosters at `cycle` (including the first, at `on`), armor and
+  hull repairers at `end`; remote ones on their target × effectiveness; ancillary armor reps × their charge multiplier
+  while paste is loaded (`moduleNumbersOf`).
+- `Damage(id, layer, amount)` is internal: nothing deals damage yet (Combat rules will). get_state's `defense` is
+  `Report`: hp, max, resists, ehp of the current HP, `repairs`, `incoming`.
+- verify-page (2026-10-23, SDE 3632936): "switch_modules runs a Guardian's armor hardener" (Domination Thermal Armor
+  Hardener: thermal 44.75 % → 75.14 % from the next tick, back after `online` and its 24 s cycle end; DC II refused as
+  passive, an unmatched `weapon` selector skipped); "switch_modules prop matches switch_prop_mods" (the 10MN AB II
+  through Destiny, 650.7 m/s; `switch_prop_mods` off reads `stopping` in its row; offline refused); "remote reps take a
+  target and stop when it is removed" (two Large Remote Armor Repairer II on a TFI 3 km off: refused without a target,
+  then `incoming` on the TFI, stopped with `its target is gone` on `remove_ship`). The Guardian's Large RAR II reaches
+  57.6 km optimal + 16.8 km falloff in this build (14.4 km base, +300 % Amarr Cruiser V).
 
 ## Why not tools-core's `fitting/parse`
 

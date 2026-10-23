@@ -32,6 +32,13 @@
  * then, and without the EVE data, it flies the table path. A fit change
  * retunes the ship (the diff's `retuned`).
  *
+ * Fitted modules (modules.ts): switch_modules runs them on EVE's cycle timing,
+ * at Destiny's tick boundaries (DestinyWorld.OnBoundary); the prop module goes
+ * through the same DestinyWorld calls as switch_prop_mods. A ship whose
+ * modules' states change flies again with them (siege and triage change its
+ * physics there, before orders), and its repairs land in the damage model
+ * (damage.ts), which get_state's live defense reports.
+ *
  * Fleets fly (Follow the FC, following.ts): every fleet member but the FC
  * keeps range on its resolved anchor in its formation slot, re-planned at the
  * end of every edit and whenever a radius settles. Ordering the FC moves its
@@ -70,11 +77,13 @@ import {
   toFleetOrderOperations,
   toPilotDelays,
   normalizePropModSwitch,
+  normalizeModuleSwitch,
   normalizeScene,
   normalizeShipOrderRequest,
   PROP_MOD_MODULE_NONE,
   SceneError,
   shipPropModModuleOf,
+  selectFittedModules,
   selectFleetShips,
   toFleetMemberships,
   toFleetReports,
@@ -97,7 +106,10 @@ import {
   type CinemaShip,
   type SceneVector,
   type ShipCapacitor,
-  type ShipDefense
+  type ShipDefense,
+  type ShipDogmaInput,
+  type ModuleSwitch,
+  type ModuleSwitchState
 } from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { PageAudio } from './audio';
@@ -105,7 +117,24 @@ import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayResult } from './cinema';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics } from './destiny';
-import { FitLookup, FleetModuleCountsOf, ResolveShipFitting, ShipCapacitorReportOf, ShipDefenseReportOf, ShipFitReportOf, type FleetModuleCounts, type ResolvedShipFitting, type ShipCapacitorReport, type ShipDefenseReport, type ShipFitModule, type ShipFitReport, type ShipModuleState } from './fittings';
+import { DamageModel, type DamageReport } from './damage';
+import {
+  DogmaStateOf,
+  FitLookup,
+  FleetModuleCountsOf,
+  ResolveShipFitting,
+  ShipCapacitorReportOf,
+  ShipDefenseReportOf,
+  ShipFitReportOf,
+  ShipModuleSpecsOf,
+  type FleetModuleCounts,
+  type ResolvedShipFitting,
+  type ShipCapacitorReport,
+  type ShipDefenseReport,
+  type ShipFitModule,
+  type ShipFitReport,
+  type ShipModuleRowState
+} from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -116,6 +145,7 @@ import { LocationKey, LocationLookup } from './location';
 import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrders } from './objects';
 import { ObjectForward, SceneObjects } from './scene-objects';
 import { LocationDressing } from './location-dressing';
+import { ShipModules, type ShipModuleEvent } from './modules';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource, type ResolvedShipPropMod } from './prop-mods';
 import { ErrorText } from './resources';
@@ -257,6 +287,27 @@ export interface SwitchPropModsResult {
   readonly skipped: { readonly id: string; readonly reason: string }[];
 }
 
+/**
+ * A module switch_modules switched, with its state after the call.
+ */
+export interface SwitchedModule extends Omit<ShipModuleRowState, 'note' | 'cycle' | 'readyIn' | 'targetDistance'> {
+  /**
+   * Its key (`mid-2`).
+   */
+  readonly module: string;
+  readonly name: string;
+}
+
+export interface SwitchModulesResult {
+  readonly tick: number;
+  readonly state: ModuleSwitchState;
+  readonly ships: { readonly id: string; readonly modules: SwitchedModule[] }[];
+  /**
+   * Ships and modules left alone, with why (no fit, a selector matching none of its modules, a refusal).
+   */
+  readonly skipped: { readonly id: string; readonly module?: string; readonly reason: string }[];
+}
+
 export interface ShipReport {
   readonly id: string;
   readonly dna?: string;
@@ -388,6 +439,20 @@ export class Director {
    */
   private readonly fittings = new Map<string, ResolvedShipFitting>();
   /**
+   * The fitted modules' activation (modules.ts): every module but the prop mod, which stays DestinyWorld's.
+   */
+  readonly modules: ShipModules;
+  /**
+   * Each fitted ship's current HP and the repairs running on it (damage.ts).
+   */
+  readonly damage = new DamageModel();
+  /**
+   * Per fitted ship: the module specs last given to the activation layer, and the module states its flight was
+   * computed with.
+   */
+  private readonly moduleSpecs = new Map<string, string>();
+  private readonly flownStates = new Map<string, string>();
+  /**
    * The camera following its target ship (camera.ts).
    */
   private readonly cameraFollow = new CameraFollow();
@@ -434,6 +499,19 @@ export class Director {
     // A module already running when audio turns on has played its one-shot activation: nothing to post.
     this.audio = new PageAudio({ disabled: audioDisabled, onChange: () => this.onChange() });
     world.OnPropMod((event) => this.PostPropModAudio(event));
+    this.modules = new ShipModules({
+      SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
+      InWarp: (id) => world.InWarp(id),
+      HasShip: (id) => world.Curves(id) != null,
+      get tickSeconds() {
+        return world.master.tickInterval / 1000;
+      }
+    });
+    // Cycles land right after the prop mods apply and before orders, so a siege module's physics fly from that tick.
+    world.OnBoundary((boundary) => this.ModuleEvents(this.modules.Boundary(boundary)));
+    world.OnWarp((event) => {
+      if (event.kind === 'enter') this.ModuleEvents(this.modules.OnWarpEnter(event.id, event.tick));
+    });
     if (engine) this.AttachCameraControls(engine.canvas);
   }
 
@@ -454,6 +532,7 @@ export class Director {
       frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
       order_ship: ({ id, order }) => this.OrderShip(id, order),
       switch_prop_mods: (args) => this.SwitchPropMods(args),
+      switch_modules: (args) => this.SwitchModules(args),
       order_fleet: (args) => this.OrderFleet(args)
     };
   }
@@ -550,6 +629,49 @@ export class Director {
     }
     this.onChange();
     return { tick: this.world.tick, active: command.active, ships, skipped };
+  }
+
+  /**
+   * Switches the selected ships' fitted modules live, on EVE's cycle timing (modules.ts): the prop module through the
+   * same DestinyWorld calls as switch_prop_mods, the rest through the activation layer. Not saved.
+   *
+   * @param input - The switch_modules arguments: modules, state, target, delay and a selection.
+   * @returns The tick, each switched module's state after the call, and what was skipped with why.
+   * @throws {SceneError} When the switch is invalid, names an unknown ship, fleet, wing or squad, or a target that is
+   *   no ship in the scene.
+   */
+  SwitchModules(input: unknown): SwitchModulesResult {
+    const command = normalizeModuleSwitch(input);
+    const scene = this.Current();
+    const selected = selectFleetShips(scene, command);
+    const problems = [...selected.problems];
+    if (command.target && !scene.ships.some((doc) => doc.id === command.target)) {
+      problems.push(`switch.target: no ship "${command.target}"${this.TargetIds().has(command.target) ? ' (a targeted module runs on a ship, not an object)' : ''}`);
+    }
+    if (problems.length) throw new SceneError(problems);
+    const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
+    const key = `modules|${command.fleet ?? ''}|${command.wing ?? ''}|${command.squad ?? ''}`;
+    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay ?? 0, ships: selected.ships, issuer: '' });
+    const ships: SwitchModulesResult['ships'] = [];
+    const skipped: SwitchModulesResult['skipped'] = [];
+    for (const id of selected.ships) {
+      const resolved = this.fittings.get(id);
+      if (!resolved?.dogma) {
+        skipped.push({ id, reason: resolved ? `its fit has not resolved: ${resolved.note ?? 'waiting for the hub'}` : docs.get(id)?.fit ? 'its fit has not resolved yet' : 'it has no fit (ships[].fit)' });
+        continue;
+      }
+      const { modules, unmatched } = selectFittedModules({ modules: resolved.modules }, command.modules);
+      for (const selector of unmatched) skipped.push({ id, module: selector, reason: 'it fits no module matching it' });
+      const switched: SwitchedModule[] = [];
+      for (const module of modules) {
+        const result = this.SwitchModule(id, module, command, delays.get(id) ?? 0);
+        if (typeof result === 'string') skipped.push({ id, module: module.key, reason: result });
+        else switched.push(result);
+      }
+      if (switched.length) ships.push({ id, modules: switched });
+    }
+    this.onChange();
+    return { tick: this.world.tick, state: command.state, ships, skipped };
   }
 
   /**
@@ -754,10 +876,15 @@ export class Director {
     // Removed and rebuilt objects retire with the ships; added, rebuilt and failed ones queue.
     const objectBuilds = this.objects.Apply(diff.objects, scene);
     const stopped: string[] = [];
+    const moduleEvents: ShipModuleEvent[] = [];
     for (const doc of diff.removed) {
       stopped.push(...this.world.RemoveShip(doc.id));
       this.flights.delete(doc.id);
       this.fittings.delete(doc.id);
+      moduleEvents.push(...this.modules.Remove(doc.id, this.world.tick));
+      this.damage.Remove(doc.id);
+      this.moduleSpecs.delete(doc.id);
+      this.flownStates.delete(doc.id);
       this.audio.Release(doc.id);
     }
     for (const doc of diff.objects.removed) stopped.push(...this.world.RemoveObject(doc.id));
@@ -773,7 +900,15 @@ export class Director {
       this.hullStats.ForgetFailures();
       this.propMods.ForgetFailures();
       this.fitLookup.ForgetFailures();
+      // A load restarts every module online (or offline as fitted) and every ship at full HP.
+      moduleEvents.push(...this.modules.Clear(this.world.tick));
+      this.damage.Clear();
+      this.moduleSpecs.clear();
+      this.flownStates.clear();
     }
+    // Modules that ran on or at a removed ship stop: their ships fly again without them (a load retunes every ship).
+    if (restart) this.ModuleOutputs(moduleEvents);
+    else this.ModuleEvents(moduleEvents);
 
     // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place
     // before the store write, so an order arriving meanwhile always finds a ball for every document ship.
@@ -959,14 +1094,188 @@ export class Director {
    * @param answer - Its /ship-stats answer; null while the lookup is in flight.
    */
   private SetFlight(doc: SceneShip, answer: Maybe<HullStatsAnswer>): void {
+    if (!this.FlyFlight(doc, answer)) return;
+    // A refit that stopped running modules changes the states the flight was computed with: fly once more.
+    const stoppedByRefit = this.SyncModules(doc);
+    if (stoppedByRefit.length) this.FlyFlight(doc, answer);
+    const defense = this.flights.get(doc.id)?.defense;
+    if (defense) this.damage.SetDefense(doc.id, defense);
+    else this.damage.Remove(doc.id);
+    this.ModuleOutputs(stoppedByRefit);
+  }
+
+  /**
+   * Resolves a ship's flight and sets it on its ball.
+   *
+   * @param doc - The current document ship.
+   * @param answer - Its /ship-stats answer; null while the lookup is in flight.
+   * @returns Whether it flies the new numbers.
+   */
+  private FlyFlight(doc: SceneShip, answer: Maybe<HullStatsAnswer>): boolean {
     const flight = this.Flight(doc, answer);
-    if (!flight) return;
-    try {
-      this.world.SetPhysics(doc.id, flight);
-      this.flights.set(doc.id, flight);
-    } catch (error) {
-      console.error(`ship ${doc.id}: cannot fly ${JSON.stringify(flight)} (${ErrorText(error)}); it keeps its previous physics`);
+    let flown = false;
+    if (flight) {
+      try {
+        this.world.SetPhysics(doc.id, flight);
+        this.flights.set(doc.id, flight);
+        flown = true;
+      } catch (error) {
+        console.error(`ship ${doc.id}: cannot fly ${JSON.stringify(flight)} (${ErrorText(error)}); it keeps its previous physics`);
+      }
     }
+    return flown;
+  }
+
+  /**
+   * Gives the activation layer a ship's modules when they changed (a fit resolving, a refit, a module's numbers moving
+   * with another's state, such as triage's remote reps).
+   *
+   * @param doc - The current document ship.
+   * @returns The `off` events of running modules the refit removed.
+   */
+  private SyncModules(doc: SceneShip): ShipModuleEvent[] {
+    const resolved = this.fittings.get(doc.id);
+    const dogma = this.LiveDogma(doc.id, resolved?.dogma);
+    const specs = resolved && dogma ? ShipModuleSpecsOf({ ...resolved, dogma }, this.fitLookup, doc.stats) : [];
+    const signature = JSON.stringify(specs);
+    let events: ShipModuleEvent[] = [];
+    if (this.moduleSpecs.get(doc.id) !== signature) {
+      this.moduleSpecs.set(doc.id, signature);
+      events = this.modules.SetFit(doc.id, specs, this.world.tick);
+    }
+    return events;
+  }
+
+  /**
+   * A fitted ship's dogma input with its modules' live states (the prop module's stays the fit's: flight.ts runs it).
+   *
+   * @param id - The ship id.
+   * @param dogma - Its resolved fit's dogma input.
+   * @returns The input; null without one.
+   */
+  private LiveDogma(id: string, dogma: Maybe<ShipDogmaInput>): Maybe<ShipDogmaInput> {
+    if (!dogma) return null;
+    const modules = (dogma.modules ?? []).map((module) => {
+      const state = module.key === dogma.propModKey ? null : this.modules.CycleState(id, module.key, module.typeID);
+      return state == null ? module : { ...module, state: DogmaStateOf(state) };
+    });
+    return { ...dogma, modules };
+  }
+
+  /**
+   * Module events from a tick boundary, a warp, a removal or a load: every ship whose modules' states changed flies
+   * again with them (HP, resists, signature, siege and triage physics), then the repairs land.
+   *
+   * @param events - The events.
+   */
+  private ModuleEvents(events: readonly ShipModuleEvent[]): void {
+    const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
+    for (const [id, resolved] of [...this.fittings]) {
+      const doc = docs.get(id);
+      if (doc && resolved.dogma && LiveStatesKey(this.LiveDogma(id, resolved.dogma)) !== this.flownStates.get(id)) this.SetFlight(doc, this.hullStats.Cached(doc));
+    }
+    this.ModuleOutputs(events);
+  }
+
+  /**
+   * What module events do besides the ship's numbers: repairs land in the damage model.
+   *
+   * @param events - The events.
+   */
+  private ModuleOutputs(events: readonly ShipModuleEvent[]): void {
+    if (!events.length) return;
+    for (const landing of this.modules.RepairLandings(events)) this.damage.Repair(landing.ship, landing.layer, landing.amount);
+    this.onChange();
+  }
+
+  /**
+   * Switches one fitted module for switch_modules.
+   *
+   * @param id - The ship id.
+   * @param module - The module as the ship carries it.
+   * @param command - The switch.
+   * @param delay - The pilot's delay, whole ticks.
+   * @returns Its state after the call, or why it was refused.
+   */
+  private SwitchModule(id: string, module: ShipFitModule, command: ModuleSwitch, delay: number): SwitchedModule | string {
+    const { state } = command;
+    const row = { module: module.key, name: module.name };
+    let result: SwitchedModule | string;
+    if (module.prop) {
+      const on = state === 'active';
+      const refusal = state === 'offline' ? "the prop mod is never switched offline (a fit's /OFFLINE marks it offline)" : this.world.PropModRefusal(id, on);
+      const switched = refusal === null ? this.world.SwitchPropMod(id, on, { delay }) : null;
+      result = switched
+        ? {
+            ...row,
+            state: switched.state === 'off' ? 'online' : switched.state,
+            ...(switched.at === undefined ? {} : { at: switched.at }),
+            ...(switched.stopsIn === undefined ? {} : { stopsIn: switched.stopsIn }),
+            ...(switched.respondsIn === undefined ? {} : { respondsIn: switched.respondsIn })
+          }
+        : (refusal ?? `ship "${id}" has no Destiny ball`);
+    } else if (module.category === 'prop') {
+      result = 'only the prop mod the ship flies (prop: true) runs; propMod.module picks it';
+    } else if (state === 'offline' && (module.slot === 'rig' || module.slot === 'subsystem')) {
+      result = `${module.slot === 'rig' ? 'rigs' : 'subsystems'} are always online`;
+    } else {
+      const refusal = this.modules.Switch(id, module.key, state, { boundary: this.world.tick, target: command.target, delay });
+      const live = refusal === null ? this.modules.State(id, module.key, this.world.tick) : null;
+      result = live
+        ? {
+            ...row,
+            state: live.state,
+            ...(live.at === undefined ? {} : { at: live.at }),
+            ...(live.stopsIn === undefined ? {} : { stopsIn: live.stopsIn }),
+            ...(live.activatesIn === undefined ? {} : { activatesIn: live.activatesIn }),
+            ...(live.respondsIn === undefined ? {} : { respondsIn: live.respondsIn }),
+            ...(live.target === undefined ? {} : { target: live.target }),
+            ...(live.effectiveness === undefined ? {} : { effectiveness: live.effectiveness })
+          }
+        : (refusal ?? `ship "${id}" fits no module ${module.key}`);
+    }
+    return result;
+  }
+
+  /**
+   * A fitted module's live state for get_state: the prop mod's from Destiny (off reads online), the activation layer's
+   * for the rest, else offline as fitted or online.
+   *
+   * @param id - The ship id.
+   * @param module - The module as the ship carries it.
+   * @param motion - The ship's Destiny motion.
+   * @returns The row's live part.
+   */
+  private ModuleRowState(id: string, module: ShipFitModule, motion: Maybe<ShipMotion>): ShipModuleRowState {
+    let row: ShipModuleRowState = { state: module.offline ? 'offline' : 'online' };
+    if (module.prop) {
+      const propMod = motion?.propMod;
+      if (propMod && propMod.state !== 'off') row = { state: propMod.state, ...(propMod.at === undefined ? {} : { at: propMod.at }), ...(propMod.stopsIn === undefined ? {} : { stopsIn: propMod.stopsIn }) };
+    } else {
+      row = (module.typeID == null ? null : this.modules.CycleState(id, module.key, module.typeID)) == null ? row : (this.modules.State(id, module.key, this.world.tick) ?? row);
+    }
+    return row;
+  }
+
+  /**
+   * A fitted ship's live defense: the damage model's HP, with its running local repairs and the remote repairs on it.
+   *
+   * @param id - The ship id.
+   * @returns The report; null when the model does not track the ship (the table path).
+   */
+  private LiveDefense(id: string): Maybe<DamageReport> {
+    if (!this.damage.Has(id)) return null;
+    const repairs = { shield: 0, armor: 0, structure: 0 };
+    for (const spec of this.modules.Running(id)) {
+      const { repair, cycleTime } = spec.activation;
+      if (repair && !repair.remote && cycleTime > 0) repairs[repair.layer] += repair.amount / cycleTime;
+    }
+    this.damage.SetRepairs(id, repairs);
+    this.damage.SetIncoming(
+      id,
+      this.modules.Incoming(id).flatMap(({ from, spec, effectiveness }) => (spec.activation.repair ? [{ from, module: spec.key, layer: spec.activation.repair.layer, amount: spec.activation.repair.amount, cycleTime: spec.activation.cycleTime, effectiveness }] : []))
+    );
+    return this.damage.Report(id);
   }
 
   /**
@@ -986,7 +1295,10 @@ export class Director {
       const target = PropModLookupTarget(module, rigSize);
       const propMod = ResolveShipPropMod({ module, rigSize, answer: target == null ? null : this.propMods.Cached(target) });
       const fitting = this.ResolveFitting(doc, answer, propMod);
-      flight = ResolveFlight({ published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma: fitting?.dogma, compute: (input) => this.fitLookup.ShipStats(input) });
+      const dogma = this.LiveDogma(doc.id, fitting?.dogma);
+      // Kept before the math, so a ship that cannot fly these states is not tried again every tick.
+      this.flownStates.set(doc.id, LiveStatesKey(dogma));
+      flight = ResolveFlight({ published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma, compute: (input) => this.fitLookup.ShipStats(input) });
     } catch (error) {
       console.error(`ship ${doc.id}: no flight numbers (${ErrorText(error)}); it keeps its previous physics`);
     }
@@ -1423,7 +1735,7 @@ export class Director {
     boosters?: ShipBoosterState;
     propMod: Maybe<ShipPropModState>;
     fit: Maybe<ShipFitReport>;
-    defense: Maybe<ShipDefenseReport>;
+    defense: Maybe<ShipDefenseReport | DamageReport>;
     capacitor: Maybe<ShipCapacitorReport>;
   } & Partial<ShipFleetMembership> &
     Omit<Partial<ShipMotion>, 'propMod'> {
@@ -1455,8 +1767,8 @@ export class Director {
       ...motion,
       physics,
       propMod: this.PropModState(doc, flight, motion),
-      fit: fitting ? ShipFitReportOf(fitting, (module) => ModuleState(module, motion)) : null,
-      defense: defense ? ShipDefenseReportOf(defense) : null,
+      fit: fitting ? ShipFitReportOf(fitting, (module) => this.ModuleRowState(doc.id, module, motion)) : null,
+      defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
       capacitor: capacitor ? ShipCapacitorReportOf(capacitor) : null,
       ...(boosters ? { boosters } : {})
     };
@@ -1502,18 +1814,13 @@ export class Director {
 }
 
 /**
- * A fitted module's live state for get_state: offline as fitted, the prop mod's from Destiny (off reads online), the
- * rest online (switch_modules comes later).
+ * The module states a flight was computed with, to tell when they changed.
  *
- * @param module - The module as the ship carries it.
- * @param motion - The ship's Destiny motion.
- * @returns The state.
+ * @param dogma - The live dogma input.
+ * @returns A key; empty without dogma.
  */
-function ModuleState(module: ShipFitModule, motion: Maybe<ShipMotion>): ShipModuleState {
-  let state: ShipModuleState = module.offline ? 'offline' : 'online';
-  const propMod = module.prop ? motion?.propMod.state : null;
-  if (propMod && propMod !== 'off') state = propMod;
-  return state;
+function LiveStatesKey(dogma: Maybe<ShipDogmaInput>): string {
+  return (dogma?.modules ?? []).map((module) => `${module.key}:${module.typeID}:${module.state}`).join(',');
 }
 
 /**

@@ -153,8 +153,9 @@ Per member: `fleet`, `wing`, `squad`, `role`, `commands`, `anchor` (`{ ship, ran
 `following` (`state`, `anchor`, `range`, `slot` `{ range, direction }`, `distance`, `slotError`, `warping`, `group`);
 its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop` once settled. Per fleet: the tree with
 `ships` and resolved anchors, `formation` (`ready`, `heading`, counts `following` / `inFormation` / `catchingUp` /
-`holding` / `warping` / `leading` / `detached` / `waiting`), `propMods` counts, and `command` on the fleet and every
-wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
+`holding` / `warping` / `leading` / `detached` / `waiting`), `propMods` counts, `modules` (every member's fitted module
+rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
+`squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
 
 ## Limits
 

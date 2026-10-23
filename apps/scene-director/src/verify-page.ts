@@ -113,9 +113,34 @@ interface ShipFitState {
   readonly key: string;
   readonly typeID?: number;
   readonly unknown: string[];
-  readonly modules: { readonly module: string; readonly name: string; readonly state: string; readonly prop?: true; readonly note?: string }[];
+  readonly modules: ShipModuleRowState[];
   readonly math: 'dogma' | 'table';
   readonly note?: string;
+}
+
+/**
+ * A fitted module's row in get_state's `fit.modules`.
+ */
+interface ShipModuleRowState {
+  readonly module: string;
+  readonly name: string;
+  readonly state: string;
+  readonly cycle?: { readonly number: number; readonly endsIn: number };
+  readonly stopsIn?: number;
+  readonly target?: string;
+  readonly effectiveness?: number;
+  readonly prop?: true;
+  readonly note?: string;
+}
+
+/**
+ * switch_modules' answer (the viewer's director.ts SwitchModulesResult).
+ */
+interface SwitchModulesResult {
+  readonly tick: number;
+  readonly state: string;
+  readonly ships: { readonly id: string; readonly modules: { readonly module: string; readonly name: string; readonly state: string; readonly at?: number; readonly stopsIn?: number; readonly target?: string; readonly effectiveness?: number }[] }[];
+  readonly skipped: { readonly id: string; readonly module?: string; readonly reason: string }[];
 }
 
 type DamageResists = Readonly<Record<'em' | 'thermal' | 'kinetic' | 'explosive', number>>;
@@ -123,7 +148,11 @@ type DamageResists = Readonly<Record<'em' | 'thermal' | 'kinetic' | 'explosive',
 /**
  * get_state's `defense` (the viewer's fittings.ts ShipDefenseReport).
  */
-type ShipDefenseState = Readonly<Record<'shield' | 'armor' | 'structure', { readonly hp: number; readonly max: number; readonly resists: DamageResists; readonly ehp: number }>> & { readonly ehp: number; readonly shieldRecharge: number };
+type ShipDefenseState = Readonly<Record<'shield' | 'armor' | 'structure', { readonly hp: number; readonly max: number; readonly resists: DamageResists; readonly ehp: number }>> & {
+  readonly ehp: number;
+  readonly shieldRecharge: number;
+  readonly incoming?: { readonly from: string; readonly module: string; readonly layer: string; readonly effectiveness: number }[];
+};
 
 interface ShipCapacitorState {
   readonly capacity: number;
@@ -1036,6 +1065,96 @@ try {
     const off = pairs.filter(([, theirs, ours]) => !Close(theirs, ours));
     Expect(!off.length, off.map(([what, theirs, ours]) => `${what}: tools-core ${theirs}, ours ${ours}`).join('; '));
     return `Rifter ${defense.shield.max} / ${defense.armor.max} / ${defense.structure.max} HP, capacitor ${capacitor.capacity} GJ in ${capacitor.rechargeTime} s: ${pairs.length} values match`;
+  });
+
+  // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.
+  const LOGI_FIT = ['[Guardian, Verify Logi]', 'Domination Thermal Armor Hardener', 'Damage Control II', '', '10MN Afterburner II', '', 'Large Remote Armor Repairer II', 'Large Remote Armor Repairer II'].join('\n');
+  const modulesScene = {
+    name: 'verify-modules',
+    ships: [
+      { id: 'logi', dna: 'ac3_t2:carthum:amarr', type: 'Guardian', fit: LOGI_FIT, position: [0, 0, 0] },
+      { id: 'tfi', dna: 'mb2_t1:minmatarnavy:minmatar', type: 'Tempest Fleet Issue', fit: '[Tempest Fleet Issue, Bare]', position: [3000, 0, 0] }
+    ]
+  };
+  const ModuleRow = (state: ViewerState, id: string, key: string): ShipModuleRowState => {
+    const row = ShipIn(state, id).fit?.modules.find((module) => module.module === key);
+    if (!row) throw new Error(`${id} has no module ${key}: ${JSON.stringify(ShipIn(state, id).fit)}`);
+    return row;
+  };
+  let modulesLoaded = false;
+  // Each module check runs on its own (--only): the first one to run loads the scene.
+  const LoadModulesScene = async (): Promise<ViewerState> => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 11987 }).catch(SkipWithoutSde);
+    if (!modulesLoaded) await call('load_scene', { scene: modulesScene });
+    modulesLoaded = true;
+    return WaitFor('the Guardian and TFI fits resolve', 60, (polled) => {
+      const table = ['logi', 'tfi'].map((id) => ShipIn(polled, id)).find((ship) => ship.fit?.math !== 'dogma' || !ship.defense);
+      return table ? `${table.id}: ${JSON.stringify(table.fit?.note ?? table.fit)}` : null;
+    });
+  };
+
+  await Check("switch_modules runs a Guardian's armor hardener on EVE's timing", async () => {
+    const before = await LoadModulesScene();
+    const thermal = ShipIn(before, 'logi').defense?.armor.resists.thermal ?? Number.NaN;
+    Expect(ModuleRow(before, 'logi', 'low-0').state === 'online', JSON.stringify(ModuleRow(before, 'logi', 'low-0')));
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['hardener'], state: 'active' });
+    Expect(on.ships[0]?.modules[0]?.module === 'low-0' && on.ships[0].modules[0].state === 'activating' && !on.skipped.length, JSON.stringify(on));
+    const running = await WaitFor('the hardener runs and raises thermal resist', 10, (polled) => {
+      const row = ModuleRow(polled, 'logi', 'low-0');
+      const now = ShipIn(polled, 'logi').defense?.armor.resists.thermal ?? Number.NaN;
+      return row.state === 'active' && row.cycle && now > thermal + 1 ? null : `${JSON.stringify(row)}, thermal ${now} (was ${thermal})`;
+    });
+    const raised = ShipIn(running, 'logi').defense?.armor.resists.thermal ?? Number.NaN;
+    const off = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['low-0'], state: 'online' });
+    const stopping = off.ships[0]?.modules[0];
+    Expect(stopping?.state === 'stopping' && (stopping.stopsIn ?? 0) > 0, JSON.stringify(off));
+    const passive = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['damage-control', 'weapon'], state: 'active' });
+    Expect(passive.skipped.some((skip) => skip.module === 'low-1' && /passive/.test(skip.reason)) && passive.skipped.some((skip) => skip.module === 'weapon'), JSON.stringify(passive.skipped));
+    // The Domination hardener cycles 24 s in SDE 3632936.
+    await WaitFor('the hardener stops at its cycle end and thermal resist falls back', 35, (polled) => {
+      const row = ModuleRow(polled, 'logi', 'low-0');
+      const now = ShipIn(polled, 'logi').defense?.armor.resists.thermal ?? Number.NaN;
+      return (row.state === 'online' || row.state === 'reactivating') && Close(now, thermal) ? null : `${JSON.stringify(row)}, thermal ${now} (was ${thermal})`;
+    });
+    return `thermal ${thermal} % -> ${raised} % while active, back after a ${stopping?.stopsIn} s stop; passive and unmatched selectors skipped`;
+  });
+
+  await Check('switch_modules prop matches switch_prop_mods', async () => {
+    await LoadModulesScene();
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['prop'], state: 'active' });
+    Expect(on.ships[0]?.modules[0]?.module === 'mid-0' && on.ships[0].modules[0].state === 'activating', JSON.stringify(on));
+    const state = await WaitFor('the AB runs as the prop mod', 10, (polled) => {
+      const ship = ShipIn(polled, 'logi');
+      const row = ModuleRow(polled, 'logi', 'mid-0');
+      return ship.propMod?.state === 'active' && row.state === 'active' && ship.physics?.maxVelocity === ship.propMod.maxVelocity ? null : `${JSON.stringify(row)}, propMod ${JSON.stringify(ship.propMod)}, maxVelocity ${ship.physics?.maxVelocity}`;
+    });
+    const offline = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['mid-0'], state: 'offline' });
+    Expect(!offline.ships.length && /never switched offline/.test(offline.skipped[0]?.reason ?? ''), JSON.stringify(offline));
+    const off = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['logi'], active: false });
+    Expect(off.ships[0]?.state === 'stopping', JSON.stringify(off));
+    const after = await call<ViewerState>('get_state');
+    Expect(ModuleRow(after, 'logi', 'mid-0').state === 'stopping', JSON.stringify(ModuleRow(after, 'logi', 'mid-0')));
+    return `mid-0 ${ModuleRow(state, 'logi', 'mid-0').name} active at ${ShipIn(state, 'logi').physics?.maxVelocity} m/s through Destiny; switch_prop_mods off reads stopping in its row; offline refused`;
+  });
+
+  await Check('remote reps take a target and stop when it is removed', async () => {
+    await LoadModulesScene();
+    const untargeted = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['remote-armor-repairer'], state: 'active' });
+    Expect(!untargeted.ships.length && untargeted.skipped.length === 2 && untargeted.skipped.every((skip) => /needs a target/.test(skip.reason)), JSON.stringify(untargeted));
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['remote-armor-repairer'], state: 'active', target: 'tfi' });
+    Expect(on.ships[0]?.modules.length === 2 && on.ships[0].modules.every((module) => module.state === 'activating' && module.target === 'tfi'), JSON.stringify(on));
+    const running = await WaitFor('both reps run on the TFI', 10, (polled) => {
+      const rows = ['high-0', 'high-1'].map((key) => ModuleRow(polled, 'logi', key));
+      const incoming = ShipIn(polled, 'tfi').defense?.incoming ?? [];
+      return rows.every((row) => row.state === 'active' && row.target === 'tfi' && row.effectiveness === 1) && incoming.length === 2 ? null : `${JSON.stringify(rows)}, incoming ${JSON.stringify(incoming)}`;
+    });
+    const incoming = ShipIn(running, 'tfi').defense?.incoming ?? [];
+    await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'tfi' }] });
+    await WaitFor('the reps stop at once when their target is removed', 5, (polled) => {
+      const rows = ['high-0', 'high-1'].map((key) => ModuleRow(polled, 'logi', key));
+      return rows.every((row) => row.state !== 'active' && row.state !== 'stopping' && !row.target && /target is gone/.test(row.note ?? '')) ? null : JSON.stringify(rows);
+    });
+    return `2 Large Remote Armor Repairer II on tfi (incoming ${JSON.stringify(incoming.map((repair) => repair.module))}); stopped with "its target is gone" on its removal`;
   });
 
   await Check('add_fleet_composition drops the TFIs fleet in formation', async () => {

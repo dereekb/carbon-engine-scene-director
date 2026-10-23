@@ -49,8 +49,9 @@
 - **Add, remove, place and physics apply at once** (they teleport).
 - **Movement orders wait for the next 1 s tick boundary**, as EVE applies commands before a tick, so the interval a
   ClientBall is interpolating is never disturbed. The drawn ship trails the reported state by up to a tick.
-- At a due boundary the order is: prop mods (`ApplyPropMods`: delayed switches due now, then the numbers) → pending
-  orders (`ApplyOrder`; a delayed one waits for its boundary) → formation warps (`ApplyFormationWarps`, sd-fleets
+- At a due boundary the order is: prop mods (`ApplyPropMods`: delayed switches due now, then the numbers) →
+  `OnBoundary` listeners (the fitted modules' cycles, `sd-fittings`; a siege or triage module's `SetPhysics` lands here)
+  → pending orders (`ApplyOrder`; a delayed one waits for its boundary) → formation warps (`ApplyFormationWarps`, sd-fleets
   sub-doc `orders`) → `Steer` (following) → evolve.
 - **Pilot delay**: `Order(id, order, { delay })`, `WarpInFormation(…, { delay })` and `SwitchPropMod(id, on, { delay })`
   take whole ticks (a fleet order's per-pilot response, `toPilotDelays`). A delayed order stays `pendingOrder` with
@@ -139,6 +140,12 @@ ball for `get_state.objects`.
   module active), so plates, rigs and the rest set mass, speed, agility and signature. `physics.math` is `dogma` or
   `table`; `ShipFlight` also carries `defense` and `capacitor` (get_state reports them beside `physics`, not in it).
   The ship flies the table path until the fit's lookups land, then retunes like a hull lookup.
+- **Running modules change the flight** (`switch_modules`, `sd-fittings`): the director flies a fitted ship with its
+  modules' live states, so siege and triage (maxVelocity −100 %, mass ×) and a suppressor's signature apply through
+  `SetPhysics` inside the `OnBoundary` hook, before orders: the prop mod's timing.
+- **Module-layer helpers**: `OnBoundary(listener)` (called with the boundary's master tick; a throwing listener is
+  logged and the rest run), `SurfaceDistance(a, b)` (ball to ball on the EVE radii, negative when overlapping; null
+  when either is gone) and `InWarp(id)` (proper warp). `CycleEnd` lives in `module-cycle.ts`; destiny.ts re-exports it.
 - The world accepts a max velocity of 0. `RequireValidPhysics` refuses a warp speed it cannot convert.
 
 ## Real-GPU evidence (2026-10-22, Windows Chrome, NVIDIA)

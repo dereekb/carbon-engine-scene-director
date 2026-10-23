@@ -6,3 +6,5 @@ export * from './categories';
 export * from './defense';
 export * from './dogma';
 export * from './typed-fit';
+export * from './switch';
+export * from './activation';

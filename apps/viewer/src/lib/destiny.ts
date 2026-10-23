@@ -65,10 +65,13 @@
 import type { Maybe } from '@dereekb/util';
 import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
+import { CycleEnd } from './module-cycle';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
 import { FleetFrame, FormationGoto, FramePoint, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, WarpFrame, type FormationGoto as FormationGotoResult } from './steering';
 import { DEFAULT_WARP_SPEED, LandingPoint, WarpExitTime, WarpFactor, WarpLength, WarpPhaseAt, type WarpProfile } from './warp';
+
+export { CycleEnd } from './module-cycle';
 
 /**
  * The replica's ego: a fixed ball at the origin, which makes ClientBall samples absolute.
@@ -206,11 +209,6 @@ export interface PropModSwitchResult {
 }
 
 /**
- * Slack for the float cycle arithmetic, in ticks.
- */
-const CYCLE_EPSILON = 1e-9;
-
-/**
  * Cruiser-class physics, for a ship added without any.
  */
 export const DEFAULT_SHIP_PHYSICS: ShipPhysics = { mass: 1.1e7, agility: 0.5, maxVelocity: 230, radius: 100, warpSpeed: DEFAULT_WARP_SPEED };
@@ -291,6 +289,11 @@ export interface WarpEvent {
 }
 
 export type WarpListener = (event: WarpEvent) => void;
+
+/**
+ * Called at a due tick boundary (OnBoundary) with its master tick.
+ */
+export type BoundaryListener = (boundary: number) => void;
 
 /**
  * A hull's class and size, from SOF.
@@ -604,6 +607,7 @@ export class DestinyWorld {
    */
   private readonly pendingAt = new Map<string, number>();
   private readonly warpListeners = new Set<WarpListener>();
+  private readonly boundaryListeners = new Set<BoundaryListener>();
   private readonly propModListeners = new Set<PropModListener>();
   /**
    * Prop mod events waiting for the end of the tick (or the call) that made them.
@@ -1046,6 +1050,46 @@ export class DestinyWorld {
   }
 
   /**
+   * Calls a listener at every due tick boundary, right after the prop mods apply and before orders, steering and the
+   * evolve: the fitted modules' cycles (modules.ts) and any physics they change (SetPhysics) land there, on the prop
+   * mod's timing. A throwing listener is logged and the rest still run.
+   *
+   * @param listener - Called with the boundary's master tick.
+   * @returns The unsubscribe.
+   */
+  OnBoundary(listener: BoundaryListener): () => void {
+    this.boundaryListeners.add(listener);
+    return () => {
+      this.boundaryListeners.delete(listener);
+    };
+  }
+
+  /**
+   * The surface-to-surface distance between two ships' balls, on their EVE radii (negative when they overlap).
+   *
+   * @param a - One ship id.
+   * @param b - The other.
+   * @returns Metres, or null when either has no ball.
+   */
+  SurfaceDistance(a: string, b: string): Maybe<number> {
+    const first = this.ships.get(a);
+    const second = this.ships.get(b);
+    const ballA = first ? this.master.GetBall(first.ballId) : null;
+    const ballB = second ? this.master.GetBall(second.ballId) : null;
+    return ballA && ballB ? Math.hypot(ballA.x - ballB.x, ballA.y - ballB.y, ballA.z - ballB.z) - ballA.radius - ballB.radius : null;
+  }
+
+  /**
+   * Whether a ship is in proper warp (past its align).
+   *
+   * @param id - The ship id.
+   * @returns True while it warps.
+   */
+  InWarp(id: string): boolean {
+    return this.InProperWarp(this.ships.get(id));
+  }
+
+  /**
    * Calls a listener for every prop mod that starts or stops, after the tick (or the SetPropModActive call) that made
    * it. A throwing listener is logged and the rest still run.
    *
@@ -1169,6 +1213,7 @@ export class DestinyWorld {
     const due = time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS);
     if (due) {
       this.ApplyPropMods();
+      this.DeliverBoundary();
       const boundary = this.master.currentTime;
       for (const [id, order] of [...this.pending]) {
         if ((this.pendingAt.get(id) ?? boundary) > boundary) continue;
@@ -1316,6 +1361,17 @@ export class DestinyWorld {
 
   private PropModEventOf(kind: PropModEvent['kind'], entry: ShipEntry, cause: PropModCause): void {
     this.propModEvents.push({ kind, id: entry.id, tick: this.master.currentTime, cause });
+  }
+
+  private DeliverBoundary(): void {
+    const boundary = this.master.currentTime;
+    for (const listener of this.boundaryListeners) {
+      try {
+        listener(boundary);
+      } catch (error) {
+        console.error(`an OnBoundary listener failed at tick ${boundary}`, error);
+      }
+    }
   }
 
   private DeliverPropModEvents(): void {
@@ -1824,23 +1880,6 @@ const DEFAULT_PROP_MOD_CYCLE_SECONDS = 10;
 
 function IsRunning(state: PropModState): boolean {
   return state === 'active' || state === 'stopping';
-}
-
-/**
- * The tick a module switched off stops at: the end of the cycle running at the boundary, rounded up to a tick.
- * On at 100 with a 10-tick cycle, off at 101 stops at 110 and off at 111 at 120; a 7.5-tick cycle off at 101 stops at
- * 108.
- *
- * @param input - When it started, the boundary the switch applies at, and its cycle in ticks.
- * @param input.since - The tick it started.
- * @param input.boundary - The tick boundary the switch applies at.
- * @param input.cycle - Its cycle, in ticks.
- * @returns The stop tick.
- */
-export function CycleEnd(input: { readonly since: number; readonly boundary: number; readonly cycle: number }): number {
-  const { since, boundary, cycle } = input;
-  const cycles = Math.max(1, Math.ceil((boundary - since) / cycle - CYCLE_EPSILON));
-  return Math.ceil(since + cycles * cycle - CYCLE_EPSILON);
 }
 
 function IsWarpFactor(warpSpeed: number): boolean {

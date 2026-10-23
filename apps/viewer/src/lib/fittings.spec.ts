@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { computeShipStats, type DogmaBundle, type FitTypeAnswer, fitTypeCategoryOf, readDogmaBundle, type SceneShip } from '@scene-director/scene';
-import { FitLookup, FleetModuleCountsOf, MAX_FIT_DOGMA_TYPE_IDS, ResolveShipFitting, ShipCapacitorReportOf, ShipDefenseReportOf, ShipFitReportOf, type ResolvedShipFitting, type ShipFitPropMod } from './fittings';
+import { FitLookup, FleetModuleCountsOf, MAX_FIT_DOGMA_TYPE_IDS, ResolveShipFitting, ShipCapacitorReportOf, ShipDefenseReportOf, ShipFitReportOf, ShipModuleSpecsOf, type ResolvedShipFitting, type ShipFitPropMod } from './fittings';
 import { ResolveFlight, type PublishedHull } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
 
@@ -210,10 +210,27 @@ describe('ResolveShipFitting', () => {
   });
 });
 
+describe('ShipModuleSpecsOf', () => {
+  it('gives the activation layer every resolved module but the prop mod, with how it activates', async () => {
+    const lookup = new FitLookup({ fetch: FixtureHub(), retryDelaysMs: [] });
+    const resolved = await Resolved(`[Rifter, Tackle]\n200mm Steel Plates II\nDamage Control II /OFFLINE\n\n5MN Microwarpdrive II\nStasis Webifier II\nWarp Scrambler II\n`, { lookup });
+    const specs = ShipModuleSpecsOf(resolved, lookup);
+    expect(specs.map((spec) => [spec.key, spec.activation.category, spec.offline, spec.activation.refusal == null, spec.activation.targeted])).toEqual([
+      ['low-0', 'other', false, false, false],
+      ['low-1', 'damage-control', true, false, false],
+      ['mid-1', 'web', false, true, true],
+      ['mid-2', 'scram', false, true, true]
+    ]);
+    const dogma = resolved.dogma ?? Fail('no dogma');
+    expect(lookup.Evaluate({ bundle: dogma.bundle, hullTypeID: RIFTER, modules: dogma.modules })).toBe(lookup.Evaluate({ bundle: dogma.bundle, hullTypeID: RIFTER, modules: dogma.modules }));
+    expect(ShipModuleSpecsOf({ ...resolved, dogma: null }, lookup)).toEqual([]);
+  });
+});
+
 describe('get_state reports', () => {
   it('reports the fit compactly, the defense rounded and the fleet counts by state', async () => {
     const resolved = await Resolved(`[Rifter, Plated]\n200mm Steel Plates II\nDamage Control II /OFFLINE\n\n5MN Microwarpdrive II\n\n\nWarrior II x2\n`);
-    const report = ShipFitReportOf(resolved, (module) => (module.offline ? 'offline' : module.prop ? 'active' : 'online'));
+    const report = ShipFitReportOf(resolved, (module) => ({ state: module.offline ? 'offline' : module.prop ? 'active' : 'online' }));
     expect(report).toEqual({
       name: 'Plated',
       key: 'inline',
