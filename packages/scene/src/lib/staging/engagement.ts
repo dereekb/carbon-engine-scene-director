@@ -10,6 +10,7 @@ import { freeShipsFront, placeFreeShips, planFreeShips, pushStagedFleet, pushSta
 import { readStagingDraft, toExpandExisting } from './draft';
 import { DEFAULT_SHIP_FORMATION, readShipFormation, type ShipFormation } from './formations';
 import { headingVectors, normalizeHeading, roundVector, tangentHeading } from './placement';
+import { readWarpIn, toArrivalLane, type WarpInRequest } from '../arrivals/arrival';
 import { normalizeStagingShipLines, readPositiveMetres, type StagingShipLine, toIdSlug, toShipListComposition } from './ships';
 
 /**
@@ -23,7 +24,7 @@ export const DEFAULT_ENGAGEMENT_RANGE = 20_000;
 export const ENGAGEMENT_TEAMS = ['blue', 'red'] as const;
 
 const ENGAGEMENT_KEYS = new Set<string>(['op', 'sides', 'range', 'center', 'near', 'heading', 'radii']);
-const SIDE_KEYS = new Set<string>(['composition', 'ships', 'team', 'fleet', 'name', 'formation', 'spacing', 'prefix']);
+const SIDE_KEYS = new Set<string>(['composition', 'ships', 'team', 'fleet', 'name', 'formation', 'spacing', 'prefix', 'warpIn']);
 
 /**
  * A side that makes free ships in a formation.
@@ -47,14 +48,19 @@ interface EngagementSide {
    */
   readonly fleet: Maybe<string>;
   readonly free: Maybe<FreeSide>;
+  /**
+   * The side lands from warp at its placements, flying in along its heading.
+   */
+  readonly warpIn: Maybe<WarpInRequest>;
 }
 
 /**
  * Applies `{ op: "stage_engagement", sides: [A, B], range?, center? | near?, heading?, radii? }`: two sides facing each
  * other with their front lines `range` metres apart, centred on the point (the sd-staging ref). Side A
  * faces `heading`, side B faces back. Each side is a composition or a ship list (a fleet), or free ships in a
- * formation (`fleet: false`), on its own team. Pure and synchronous: the stage_engagement tool resolves composition
- * names, hull names and celestials first.
+ * formation (`fleet: false`), on its own team. A side with `warpIn` (true, or `{ stagger?, together? }`) is recorded
+ * in the context's arrivals: the page lands it from warp at its placements, along its heading. Pure and synchronous:
+ * the stage_engagement tool resolves composition names, hull names and celestials first.
  *
  * @param operation - The operation.
  * @param context - The draft and where problems and warnings go.
@@ -108,7 +114,7 @@ interface ReadSideContext {
 
 function readSide(value: unknown, context: ReadSideContext): EngagementSide {
   const { index, where, problems, warnings } = context;
-  const fallback: EngagementSide = { where, team: ENGAGEMENT_TEAMS[index], composition: null, fleet: null, free: null };
+  const fallback: EngagementSide = { where, team: ENGAGEMENT_TEAMS[index], composition: null, fleet: null, free: null, warpIn: null };
   if (!isPlainObject(value)) {
     problems.push(`${where} must be an object { composition | ships, team?, fleet?, name? }`);
     return fallback;
@@ -122,6 +128,7 @@ function readSide(value: unknown, context: ReadSideContext): EngagementSide {
   if (typeof fleetValue === 'string') fleet = fleetValue;
   else if (fleetValue != null && fleetValue !== false) problems.push(`${where}.fleet must be a fleet id, or false for free ships in a formation`);
   for (const key of ['formation', 'spacing', 'prefix']) if (!free && value[key] != null) problems.push(`${where}.${key} needs fleet: false (free ships in a formation); a fleet side flies its formation around its FC`);
+  const warpIn = readWarpIn(value['warpIn'], { where: `${where}.warpIn`, problems, warnings, draft: {}, fromRefused: 'an engagement side flies in along its heading, facing the other side' });
 
   const hasComposition = value['composition'] != null;
   const hasShips = value['ships'] != null;
@@ -148,7 +155,7 @@ function readSide(value: unknown, context: ReadSideContext): EngagementSide {
       composition = readComposition(toShipListComposition({ id: fleet ?? toIdSlug(team, 'side'), name, lines: lines.lines }), { where: `${where}.ships`, problems, warnings });
     }
   }
-  return { where, team, composition, fleet, free: freeSide };
+  return { where, team, composition, fleet, free: freeSide, warpIn };
 }
 
 function readComposition(input: unknown, context: Pick<ReadSideContext, 'where' | 'problems' | 'warnings'>): Maybe<FleetComposition> {
@@ -201,9 +208,11 @@ function placeSide(side: EngagementSide, input: PlaceSideInput): void {
   const { position, heading, context } = input;
   const { draft: document, problems, warnings } = context;
   const draft = readStagingDraft(document);
+  const lane = toArrivalLane(heading);
   if (side.free) {
     const ships = placeFreeShips({ ...side.free, position, heading, template: { team: side.team, stats: null, propMod: null }, draft, where: side.where, problems, warnings });
     pushStagedShips(document, ships);
+    if (side.warpIn && ships.length) context.arrivals?.push({ where: side.where, group: ships[0].id, leader: ships[0].id, ships: ships.map((ship) => ship.id), lane, landing: 'document', stagger: side.warpIn.stagger, together: side.warpIn.together });
   } else if (side.composition) {
     const expanded = expandFleetComposition({ composition: side.composition, position, heading, fleet: side.fleet, team: side.team, existing: toExpandExisting(draft), where: side.where });
     problems.push(...expanded.problems);
@@ -213,6 +222,8 @@ function placeSide(side: EngagementSide, input: PlaceSideInput): void {
       pushStagedShips(document, expanded.ships);
       pushStagedFleet(document, expanded.fleet, context);
       mergeDraftFits(document, expanded.fits);
+      const { id, commander } = expanded.fleet;
+      if (side.warpIn) context.arrivals?.push({ where: side.where, group: id, fleet: id, leader: commander, ships: expanded.ships.map((ship) => ship.id), lane, landing: 'document', stagger: side.warpIn.stagger, together: side.warpIn.together });
     }
   }
 }

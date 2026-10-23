@@ -13,6 +13,7 @@ import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
 import { applyCombatOperation, COMBAT_OPERATIONS, normalizeSceneCombat, type SceneCombat } from './combat/document';
 import { fitTextOf, normalizeSceneFits, normalizeShipFit } from './fitting/fit';
+import { keepSceneArrivals, readWarpIn, type SceneArrival, toArrivalLane } from './arrivals/arrival';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -148,6 +149,10 @@ export interface SceneDocument {
 export interface NormalizedScene {
   readonly scene: SceneDocument;
   readonly warnings: string[];
+  /**
+   * applySceneOperations only: the groups its operations added arriving by warp (`warpIn`), for the page to land.
+   */
+  readonly arrivals?: readonly SceneArrival[];
 }
 
 /**
@@ -316,7 +321,8 @@ export function normalizeScene(input: unknown): NormalizedScene {
  * input is not modified. Operations run in order and all must succeed.
  *
  * Operations:
- *   { op: "add_ship", ship }
+ *   { op: "add_ship", ship, warpIn? }   warpIn (true, or { stagger?, together? }): it lands from warp at its placement,
+ *                                       along its rotation's yaw (the result's arrivals; the page plans it)
  *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot? } }
  *                                       each key replaces the ship's value (stats and propMod as a whole); null clears
  *                                       type, stats, propMod, fit and pilot
@@ -336,18 +342,19 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_anchor", fleet, squad, anchor: { ship?, range? } }   merged; null resets ship to the FC and range to the role default
  *                                       a ship taken out of a squad falls squads anchored on it back to their squad
  *                                       commander, then wing commander, then the FC, with a warning
- *   { op: "add_fleet_composition", composition, position, heading? | facing?, fleet?, team? }
+ *   { op: "add_fleet_composition", composition, position, heading? | facing?, fleet?, team?, warpIn? }
  *                                       adds a cjs-fleet/1 composition's ships in formation and its fleet, with free
  *                                       ids; every ship line needs its dna (see compositions/operation.ts)
  *   { op: "set_prop_mods", ships | fleet [, wing | squad], active?, module? }
  *                                       merged into each selected ship's propMod: active false and module null remove
  *                                       the key (see prop-mods/operation.ts)
  *   { op: "add_ships", dna, hull?, radius?, count?, formation?, spacing?, position? | near?, heading? | facing?, team?,
- *     name?, prefix?, stats?, propMod?, fleet?, radii? }
+ *     name?, prefix?, stats?, propMod?, fleet?, radii?, warpIn? }
  *                                       count ships of one hull, free in a formation, as a new fleet, or into a fleet's
  *                                       squad at their formation slots (see staging/add-ships.ts)
  *   { op: "stage_engagement", sides: [A, B], range?, center? | near?, heading?, radii? }
- *                                       two sides (compositions or ship lists) facing each other, fronts range apart;
+ *                                       two sides (compositions or ship lists) facing each other, fronts range apart
+ *                                       (sides[i].warpIn lands a side from warp);
  *                                       every ship line needs its dna (see staging/engagement.ts)
  *   { op: "set_fits", fits: { "<key>": "<EFT text>" | null } }
  *                                       merged into the document's fits; null deletes a key no ship uses (see
@@ -370,11 +377,12 @@ export function applySceneOperations(scene: SceneDocument, operations: unknown):
   const next = structuredClone(scene) as unknown as SceneDraft;
   const problems: string[] = [];
   const warnings: string[] = [];
+  const arrivals: SceneArrival[] = [];
 
   for (const [index, operation] of operations.entries()) {
     const where = `operations[${index}]`;
     if (isPlainObject(operation) && typeof operation['op'] === 'string') {
-      applyOperation(operation, { draft: next, where, problems, warnings });
+      applyOperation(operation, { draft: next, where, problems, warnings, arrivals });
     } else {
       problems.push(`${where} must be an object with an "op" string`);
     }
@@ -382,7 +390,8 @@ export function applySceneOperations(scene: SceneDocument, operations: unknown):
 
   if (problems.length) throw new SceneError(problems);
   const normalized = normalizeScene(next);
-  return { scene: normalized.scene, warnings: [...warnings, ...normalized.warnings] };
+  const arriving = keepSceneArrivals(arrivals, new Set(normalized.scene.ships.map((ship) => ship.id)));
+  return { scene: normalized.scene, warnings: [...warnings, ...normalized.warnings], ...(arriving.length ? { arrivals: arriving } : {}) };
 }
 
 function applyOperation(operation: JsonObject, context: FleetOperationContext & { readonly draft: SceneDraft }): void {
@@ -392,7 +401,14 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       const ship = operation['ship'];
       if (!isPlainObject(ship)) problems.push(`${where}.ship must be an object`);
       else if (next.ships.some((candidate) => candidate['id'] === ship['id'])) problems.push(`${where}: ship "${String(ship['id'])}" already exists`);
-      else next.ships.push(structuredClone(ship));
+      else {
+        const warpIn = readWarpIn(operation['warpIn'], { where: `${where}.warpIn`, problems, warnings: context.warnings, draft: next, fromRefused: 'add_ship lands along its rotation; turn the ship to face the way it flies in' });
+        next.ships.push(structuredClone(ship));
+        if (warpIn && typeof ship['id'] === 'string') {
+          const yaw = Array.isArray(ship['rotation']) && typeof ship['rotation'][0] === 'number' ? ship['rotation'][0] : 0;
+          context.arrivals?.push({ where, group: ship['id'], ships: [ship['id']], leader: ship['id'], lane: toArrivalLane(yaw), landing: 'document', stagger: warpIn.stagger, together: warpIn.together });
+        }
+      }
       break;
     }
     case 'update_ship': {

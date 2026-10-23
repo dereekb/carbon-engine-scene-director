@@ -67,8 +67,9 @@ finished their warps. Members under 150 km from their slot, unable to move, or i
 
 A ship can **arrive** from warp instead of aligning: `DestinyWorld.Arrive(id, { from, landing, at, factor?, leader?,
 roll? })` (`ArrivalRefusal`, `ArrivalOf`, `Arriving`, `WarpProfile`; math in `warp.ts`: `WarpRemainingAt`,
-`WarpDropOutTime`, `WarpInBackdate`, `WarpInExitTicks`). Spec: `destiny-warp-in.spec.ts`. The page-level planner,
-the tools' `warpIn` and the reports come in the later phases of the fleet warp-in plan.
+`WarpDropOutTime`, `WarpInBackdate`, `WarpInExitTicks`). Spec: `destiny-warp-in.spec.ts`. The page's planner
+(`arrivals.ts`: hidden lanes, staggered timing, formation landings) and the ops' `warpIn` are in `sd-staging`
+"Warp-in".
 
 - **Destiny's own NPC warp-in**: `CjsBallparkController.EntityWarpIn(id, x, y, z, factor)` (server fork `eadbdd1`,
   typed in `carbonenginejs-server.d.ts`): `WarpTo` at range 0, then `RealWarp` at once (no align), the effect stamp

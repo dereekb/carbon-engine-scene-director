@@ -1,5 +1,6 @@
 import { isPlainObject, type JsonObject, readId, readNumber, readString, readVector } from '../json';
 import type { FleetOperationContext } from '../fleets';
+import { readWarpIn, refuseWarpInFromWithHeading, toArrivalLane, toWarpInHeading } from '../arrivals/arrival';
 import type { SceneVector } from '../scene';
 import { expandFleetComposition, type ExpandFleetCompositionExisting } from './expand';
 import { normalizeFleetComposition } from './normalize';
@@ -10,9 +11,11 @@ import { normalizeFleetComposition } from './normalize';
 export const FLEET_COMPOSITION_OPERATIONS: ReadonlySet<string> = new Set(['add_fleet_composition']);
 
 /**
- * Applies `{ op: "add_fleet_composition", composition, position, heading?, facing?, fleet?, team? }`: expands the
- * composition (every ship line with its dna) at the FC's position and heading, and appends its ships and fleet to
- * the draft. Pure and synchronous, like every patch operation: it looks nothing up.
+ * Applies `{ op: "add_fleet_composition", composition, position, heading?, facing?, fleet?, team?, warpIn? }`: expands
+ * the composition (every ship line with its dna) at the FC's position and heading, and appends its ships and fleet to
+ * the draft. With `warpIn` (true, or `{ stagger?, together?, from? }`) the fleet is recorded in the context's
+ * arrivals: the page lands it from warp at those placements (`from` sets the heading, so not with heading or facing).
+ * Pure and synchronous, like every patch operation: it looks nothing up.
  *
  * @param operation - The operation.
  * @param context - The draft and where problems and warnings go.
@@ -26,7 +29,10 @@ export function applyFleetCompositionOperation(operation: JsonObject, context: F
 
   const position = operation['position'] === undefined ? null : readVector(operation['position'], `${where}.position`, problems);
   if (!position) problems.push(`${where}.position is required: the FC's [x, y, z] in metres`);
-  const heading = position ? readHeading(operation, { where, problems, position }) : 0;
+  const warpIn = readWarpIn(operation['warpIn'], { where: `${where}.warpIn`, problems, warnings, draft });
+  refuseWarpInFromWithHeading(operation, where, problems);
+  let heading = position ? readHeading(operation, { where, problems, position }) : 0;
+  if (position && warpIn?.from) heading = toWarpInHeading({ from: warpIn.from, landing: position, where, problems }) ?? heading;
   const fleet = operation['fleet'] == null ? null : readId(operation['fleet'], `${where}.fleet`, problems);
   const team = operation['team'] == null ? null : readString(operation['team'], `${where}.team`, problems);
   if (!normalized.composition || !position || problems.length > before) return;
@@ -42,6 +48,10 @@ export function applyFleetCompositionOperation(operation: JsonObject, context: F
   if (Array.isArray(draft['fleets'])) draft['fleets'].push(structuredClone(expanded.fleet));
   else problems.push(`${where}: the scene's fleets are not an array`);
   mergeDraftFits(draft, expanded.fits);
+  if (warpIn) {
+    const { id, commander } = expanded.fleet;
+    context.arrivals?.push({ where, group: id, fleet: id, leader: commander, ships: expanded.ships.map((ship) => ship.id), lane: toArrivalLane(heading), landing: 'document', stagger: warpIn.stagger, together: warpIn.together });
+  }
 }
 
 /**

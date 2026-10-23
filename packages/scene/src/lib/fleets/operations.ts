@@ -1,4 +1,5 @@
 import type { Maybe } from '@dereekb/util';
+import type { SceneArrivalCollector } from '../arrivals/arrival';
 import { isPlainObject, type JsonObject } from '../json';
 
 /**
@@ -22,6 +23,10 @@ export interface FleetOperationContext {
    * Receives the commands lost and anchors re-pointed by the fleet repairs.
    */
   readonly warnings: string[];
+  /**
+   * Receives the groups an operation adds arriving by warp (`warpIn`); absent where arrivals are not collected.
+   */
+  readonly arrivals?: SceneArrivalCollector;
 }
 
 /**

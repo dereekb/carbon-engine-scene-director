@@ -77,11 +77,12 @@ Exactly the anchors the fleet rules resolve; nothing re-derived.
   module name (group 46 listing; `PropModByName`), reports `propMods` (`module`, `typeID`, `from`: `sde` / `unknown` /
   `unchecked`); unknown warns and those ships fly the hull-sized default.
 - Tool args: `name` | `composition` (inline), `position` (the FC's), `heading` (yaw°) or `facing` (a point), `fleet?`,
-  `team?`, `scene?` (edit that document with no tab; result returned, not shown). Result = `patch_scene` result +
+  `team?`, `warpIn?` (land from warp: `sd-staging` "Warp-in"; `from` sets the heading), `scene?` (edit that document
+  with no tab; result returned, not shown). Result = `patch_scene` result +
   `added` (`fleet`, `commander`, `ships`), `hulls`, `propMods`.
 - Remove again: `{ "op": "remove_fleet", "fleet": "tfis", "withShips": true }`; look at it with
   `frame_camera { "target": "tfis-fc" }`. The raw op is `{ "op": "add_fleet_composition", "composition", "position",
-  "heading"? | "facing"?, "fleet"?, "team"? }` and composes with other ops in one patch.
+  "heading"? | "facing"?, "fleet"?, "team"?, "warpIn"? }` (its fleet recorded in the result's `arrivals`) and composes with other ops in one patch.
 
 ```sh
 node bin/scene-director.js call add_fleet_composition '{"name":"tfis","position":[0,0,80000],"heading":180,"team":"blue"}'

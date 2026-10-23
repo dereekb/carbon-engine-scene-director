@@ -593,7 +593,7 @@ export function toPilotDelays(input: PilotDelaysInput): Map<string, number> {
  * @param text - The seed.
  * @returns The hash over 2^32.
  */
-function unitHash(text: string): number {
+export function unitHash(text: string): number {
   let hash = 0x811c9dc5;
   for (let index = 0; index < text.length; index++) {
     hash ^= text.charCodeAt(index);

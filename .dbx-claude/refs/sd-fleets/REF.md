@@ -158,11 +158,20 @@ Per member: `fleet`, `wing`, `squad`, `role`, `commands`, `anchor` (`{ ship, ran
 `following` (`state`, `anchor`, `range`, `slot` `{ range, direction }`, `distance`, `slotError`, `warping`, `group`);
 its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop` once settled. Per fleet: the tree with
 `ships` and resolved anchors, `formation` (`ready`, `heading`, counts `following` / `inFormation` / `catchingUp` /
-`holding` / `warping` / `leading` / `detached` / `waiting`), `propMods` counts, `modules` (every member's fitted module
+`holding` / `warping` / `leading` / `detached` / `waiting` / `arriving`: still arriving by warp, `sd-staging`
+"Warp-in"), `propMods` counts, `modules` (every member's fitted module
 rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
 A fleet that lost ships (`sd-combat`) lists only its live members and adds `destroyed` (their ids) and `actingFor` (the
 dead FC its commander stands in for); a fleet with nobody alive is not listed.
+
+## Arriving fleets (`warpIn`)
+
+A fleet added with `warpIn` (`add_fleet_composition`, `add_ships` `fleet: { new }` or a join, a `stage_engagement` side)
+waits parked off-grid and lands staggered, the FC first (`sd-staging` "Warp-in"; Destiny side: `sd-destiny` doc
+`warp`, "Warp-in"). Its members keep their follows: a landed member holds (`holding`, `warping` naming the ship) until
+the FC, its anchor and its frame ship have landed, then forms up at its own speed; a member whose FC or anchor is
+still arriving holds too, so nobody flies off-grid. A join lands at its live slots around the FC.
 
 ## Limits
 

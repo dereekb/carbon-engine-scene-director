@@ -322,13 +322,17 @@
               "staging",
               "wedge",
               "sphere formation",
-              "opposing fleets"
+              "opposing fleets",
+              "warpIn",
+              "warp-in"
             ]
           },
           {
             "pathContains": [
               "packages/scene/src/lib/staging/",
-              "hub/staging"
+              "hub/staging",
+              "packages/scene/src/lib/arrivals/",
+              "viewer/src/lib/arrivals"
             ],
             "every": 12
           },

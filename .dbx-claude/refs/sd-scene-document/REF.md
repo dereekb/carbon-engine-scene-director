@@ -60,6 +60,10 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 
+The result is `{ scene, warnings, arrivals? }`: `arrivals` lists the groups a `warpIn` added (`sd-staging` "Warp-in");
+the director's `Apply` hands them to `Arrivals` (parked right after `AddShip`, before builds). The document never
+records them.
+
 **`applySceneOperations` stays synchronous and pure: it runs in the page.** Anything that needs tools-core (hull names,
 SDE radii, celestials, saved compositions) is resolved by the **hub tool of the same name**, which fills the op's data
 (`dna`, `radius`, `radii`, points) and forwards it. The raw op refuses what it cannot resolve and says to use the tool.

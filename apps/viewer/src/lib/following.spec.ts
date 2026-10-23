@@ -175,7 +175,7 @@ describe('FleetFollowing', () => {
     expect(d1?.slotError).toBeLessThanOrEqual(250);
     expect(rig.following.Report('fc')).toBeNull();
     expect(rig.following.Report('loner')).toBeNull();
-    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toEqual({ ready: true, heading: [0, 0], following: 4, inFormation: 3, catchingUp: 0, holding: 0, warping: 0, leading: 0, detached: 1, waiting: 0 });
+    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toEqual({ ready: true, heading: [0, 0], following: 4, inFormation: 3, catchingUp: 0, holding: 0, warping: 0, leading: 0, detached: 1, waiting: 0, arriving: 0 });
   });
 
   it('reports members holding while the FC is in warp, then catching up', () => {

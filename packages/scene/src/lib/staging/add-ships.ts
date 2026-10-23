@@ -14,6 +14,7 @@ import { headingToward, type NearDirection, normalizeHeading, readNearDirection,
 import { MAX_SHIP_ID_PREFIX_LENGTH, numberShipIds, readPositiveMetres, readStagingShipLine, shipLabel, stagedFitKey, type StagingShipLine, STAGING_WING_ID, toIdSlug, toShipListComposition } from './ships';
 import { mergeDraftFits, readDraftFits } from '../compositions/operation';
 import { chooseSceneFitKey, isInlineFit } from '../fitting/fit';
+import { readWarpIn, refuseWarpInFromWithHeading, toArrivalLane, toWarpInHeading, type WarpInRequest } from '../arrivals/arrival';
 
 /**
  * How many examples an overlap warning names.
@@ -25,7 +26,7 @@ const OVERLAP_EXAMPLES = 3;
  */
 const SLOT_MOVE_TOLERANCE = 1;
 
-const ADD_SHIPS_KEYS = new Set<string>(['op', 'dna', 'hull', 'radius', 'count', 'formation', 'spacing', 'position', 'near', 'heading', 'facing', 'team', 'name', 'prefix', 'stats', 'propMod', 'fleet', 'radii']);
+const ADD_SHIPS_KEYS = new Set<string>(['op', 'dna', 'hull', 'radius', 'count', 'formation', 'spacing', 'position', 'near', 'heading', 'facing', 'team', 'name', 'prefix', 'stats', 'propMod', 'fleet', 'radii', 'warpIn']);
 const NEAR_KEYS = new Set<string>(['ship', 'object', 'celestial', 'range', 'direction']);
 const NEW_FLEET_KEYS = new Set<string>(['new', 'id', 'name', 'squad']);
 const JOIN_KEYS = new Set<string>(['id', 'squad', 'wing']);
@@ -376,9 +377,11 @@ type FleetMode = { readonly mode: 'free' } | { readonly mode: 'new'; readonly sp
 
 /**
  * Applies `{ op: "add_ships", dna, hull?, radius?, count?, formation?, spacing?, position? | near?, heading? | facing?,
- * team?, name?, prefix?, stats?, propMod?, fleet?, radii? }`: `count` ships of one hull, free in a formation, as a new
- * fleet, into a fleet's squad, or as a new squad of a fleet (the sd-staging ref). Pure and synchronous: the
- * add_ships tool resolves hull names, celestials and radii first.
+ * team?, name?, prefix?, stats?, propMod?, fleet?, radii?, warpIn? }`: `count` ships of one hull, free in a formation,
+ * as a new fleet, into a fleet's squad, or as a new squad of a fleet (the sd-staging ref). With `warpIn` they are
+ * recorded in the context's arrivals: the page lands them from warp at their placements, or (joining a fleet) at
+ * their live formation slots. Pure and synchronous: the add_ships tool resolves hull names, celestials and radii
+ * first.
  *
  * @param operation - The operation.
  * @param context - The draft and where problems and warnings go.
@@ -397,23 +400,30 @@ export function applyAddShips(operation: JsonObject, context: FleetOperationCont
   const prefix = readStagingPrefix(operation['prefix'], `${where}.prefix`, problems);
   const radii = readStagingRadii(operation['radii'], `${where}.radii`, problems);
   const mode = readFleetMode(operation, read);
+  const joining = mode.mode === 'join' || mode.mode === 'squad';
+  const warpIn = readWarpIn(operation['warpIn'], { where: `${where}.warpIn`, problems, warnings, draft: document, fromRefused: joining ? "ships joining a fleet land at their formation slots, along its FC's heading" : null });
+  refuseWarpInFromWithHeading(operation, where, problems);
   if (problems.length > before) return;
 
-  if (mode.mode === 'join' || mode.mode === 'squad') {
-    joinFleet({ operation, line, count, template, prefix, radii, spec: mode.spec, newSquad: mode.mode === 'squad', context, draft });
+  if (joining) {
+    joinFleet({ operation, line, count, template, prefix, radii, spec: mode.spec, newSquad: mode.mode === 'squad', context, draft, warpIn });
     return;
   }
 
   const formation = mode.mode === 'free' && operation['formation'] != null ? readShipFormation(operation['formation'], `${where}.formation`, problems) : DEFAULT_SHIP_FORMATION;
   const spacing = mode.mode === 'free' && operation['spacing'] != null ? readPositiveMetres(operation['spacing'], `${where}.spacing`, problems) : null;
   const place = readPlace(operation, { read, radii, leadRadius: line.radius ?? 0 });
-  if (!place || problems.length > before) return;
+  const heading = place && warpIn?.from ? toWarpInHeading({ from: warpIn.from, landing: place.position, where, problems }) : place?.heading;
+  if (!place || heading == null || problems.length > before) return;
 
   if (mode.mode === 'new') {
-    addNewFleet({ line, count, template, prefix, spec: mode.spec, position: place.position, heading: place.heading, context, draft });
+    addNewFleet({ line, count, template, prefix, spec: mode.spec, position: place.position, heading, context, draft, warpIn });
   } else {
-    const ships = placeFreeShips({ lines: [{ ...line, count }], formation, spacing, position: place.position, heading: place.heading, prefix: prefix ?? toIdSlug(shipLabel(line)), template, draft, where, problems, warnings });
-    if (problems.length === before) pushStagedShips(document, ships);
+    const ships = placeFreeShips({ lines: [{ ...line, count }], formation, spacing, position: place.position, heading, prefix: prefix ?? toIdSlug(shipLabel(line)), template, draft, where, problems, warnings });
+    if (problems.length === before) {
+      pushStagedShips(document, ships);
+      if (warpIn && ships.length) context.arrivals?.push({ where, group: ships[0].id, leader: ships[0].id, ships: ships.map((ship) => ship.id), lane: toArrivalLane(heading), landing: 'document', stagger: warpIn.stagger, together: warpIn.together });
+    }
   }
 }
 
@@ -525,6 +535,7 @@ interface NewFleetInput {
   readonly heading: number;
   readonly context: FleetOperationContext;
   readonly draft: StagingDraft;
+  readonly warpIn: Maybe<WarpInRequest>;
 }
 
 /**
@@ -533,7 +544,7 @@ interface NewFleetInput {
  * @param input - The line, the fleet spec, the place and the draft.
  */
 function addNewFleet(input: NewFleetInput): void {
-  const { line, count, template, prefix, spec, position, heading, context, draft } = input;
+  const { line, count, template, prefix, spec, position, heading, context, draft, warpIn } = input;
   const { draft: document, where, problems, warnings } = context;
   const at = `${where}.fleet`;
   const before = problems.length;
@@ -559,6 +570,8 @@ function addNewFleet(input: NewFleetInput): void {
   pushStagedShips(document, ships);
   pushStagedFleet(document, expanded.fleet, context);
   mergeDraftFits(document, expanded.fits);
+  const { id, commander } = expanded.fleet;
+  if (warpIn) context.arrivals?.push({ where, group: id, fleet: id, leader: commander, ships: ships.map((ship) => ship.id), lane: toArrivalLane(heading), landing: 'document', stagger: warpIn.stagger, together: warpIn.together });
 }
 
 interface SquadSpec {
@@ -611,6 +624,7 @@ interface JoinFleetInput {
   readonly newSquad: boolean;
   readonly context: FleetOperationContext;
   readonly draft: StagingDraft;
+  readonly warpIn: Maybe<WarpInRequest>;
 }
 
 /**
@@ -619,7 +633,7 @@ interface JoinFleetInput {
  * @param input - The line, the fleet spec, the radii and the draft.
  */
 function joinFleet(input: JoinFleetInput): void {
-  const { line, count, template, prefix, radii, spec, newSquad, context, draft } = input;
+  const { line, count, template, prefix, radii, spec, newSquad, context, draft, warpIn } = input;
   const { draft: document, where, problems, warnings } = context;
   const at = `${where}.fleet`;
   const fleetId = readId(spec['id'], `${at}.id`, problems);
@@ -708,6 +722,8 @@ function joinFleet(input: JoinFleetInput): void {
     warnings.push(`${at}: no radius for ${unsized.length === 1 ? 'member' : 'members'} ${unsized.slice(0, OVERLAP_EXAMPLES).join(', ')}${unsized.length > OVERLAP_EXAMPLES ? ', ...' : ''} of fleet "${fleetId}"; the slots assume ${DEFAULT_FORMATION_RADIUS} m. The add_ships tool fills radii from the EVE data.`);
   warnSlotShift({ fleet, origin: commander.position, heading: fcYaw, radiusOf, slots, squadId, newSquad, at, warnings });
   warnFar({ ships: numbered.ids.map((id) => ({ position: slots.get(id) ?? commander.position })), where, warnings });
+  // They land at their live slots around the FC: the page reads where it is and where it faces when it plans them.
+  if (warpIn) context.arrivals?.push({ where, group: `${fleetId}/${squadId}`, fleet: fleetId, leader: fleet.commander, ships: numbered.ids, lane: toArrivalLane(fcYaw), landing: 'formation', stagger: warpIn.stagger, together: warpIn.together });
 }
 
 /**

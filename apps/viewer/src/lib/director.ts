@@ -190,6 +190,7 @@ import {
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { FleetFollowing, type ShipFollowingReport } from './following';
+import { Arrivals } from './arrivals';
 import { EncodePng, type CameraEye, type DrawnCamera, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ReadDressParts } from './celestials';
@@ -553,6 +554,10 @@ export class Director {
    */
   readonly orders: FleetOrders;
   /**
+   * Ships added with warpIn: parked off-grid, then landed from warp (arrivals.ts).
+   */
+  readonly arrivals: Arrivals;
+  /**
    * The scene location's system data from the hub, and its get_state report.
    */
   readonly location: LocationLookup;
@@ -710,6 +715,14 @@ export class Director {
     // Fleets fly and take orders as they are live: the destroyed taken out (toLiveFleetScene).
     this.following = new FleetFollowing({ world, scene: () => this.LiveFleets()?.scene ?? null, radiusOf: (id) => this.FormationRadius(id) });
     this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null });
+    this.arrivals = new Arrivals({
+      world,
+      placement: (id) => this.scene?.ships.find((doc) => doc.id === id) ?? null,
+      ready: (id) => this.ArrivalReady(id),
+      fleetReady: (fleet) => this.following.Ready(fleet),
+      groupOffsets: (fleet, leader, ships) => this.following.GroupOffsets(fleet, leader, ships),
+      followState: (id) => this.following.Report(id)?.state ?? null
+    });
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
@@ -778,7 +791,8 @@ export class Director {
     });
     this.modules = new ShipModules({
       SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
-      InWarp: (id) => world.InWarp(id),
+      // An arriving ship runs nothing until it lands, as in warp.
+      InWarp: (id) => world.InWarp(id) || world.Arriving(id),
       HasShip: live,
       HasObject: (id) => this.IsAuthoredObject(id),
       LockHold: (ship, target) => this.locks.Hold(ship, target, world.tick),
@@ -794,6 +808,8 @@ export class Director {
       this.LockEvents(this.locks.Boundary(boundary, this.WantedLocks()));
       this.Engagements(boundary);
       this.ModuleEvents(this.modules.Boundary(boundary));
+      // Arriving groups plan once ready; their warp-ins start at this boundary at the earliest.
+      this.arrivals.Boundary(boundary);
     });
     world.OnWarp((event) => {
       if (event.kind === 'enter') {
@@ -1386,6 +1402,7 @@ export class Director {
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
       ships,
+      ...(this.arrivals.Report().length ? { arrivals: this.arrivals.Report() } : {}),
       distances,
       objects: this.ObjectRows(),
       combat: this.SceneCombatState(),
@@ -1429,6 +1446,7 @@ export class Director {
     if (mode) camera.mode = mode;
     if (persist) return this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera }])));
     if (camera.target && !this.live.has(camera.target) && !this.objects.Has(camera.target)) throw new Error(`no ship or object "${camera.target}"`);
+    if (camera.target && this.world.Arriving(camera.target)) throw new Error(`ship "${camera.target}" is arriving by warp; frame it once it lands (get_state arrivals), or play the warp-in shot`);
     this.ApplyCamera(camera);
     return { camera: this.engine?.camera.Get() ?? null };
   }
@@ -1449,7 +1467,7 @@ export class Director {
     return run;
   }
 
-  private async Apply({ scene, warnings }: NormalizedScene, { restart = false }: ApplyOptions = {}): Promise<object> {
+  private async Apply({ scene, warnings, arrivals }: NormalizedScene, { restart = false }: ApplyOptions = {}): Promise<object> {
     // Changing the universe re-creates the scene's environment, which is
     // initialized with the device; a reload is the reliable way to do it (and
     // the reload trick CLAUDE.md names). A location's region nebula swaps in
@@ -1478,7 +1496,9 @@ export class Director {
     const objectBuilds = this.objects.Apply(diff.objects, scene);
     const stopped: string[] = [];
     const moduleEvents: ShipModuleEvent[] = [];
+    if (restart) this.arrivals.Clear();
     for (const doc of diff.removed) {
+      this.arrivals.Remove(doc.id);
       stopped.push(...this.world.RemoveShip(doc.id));
       this.flights.delete(doc.id);
       this.fittings.delete(doc.id);
@@ -1558,6 +1578,8 @@ export class Director {
         if (flight) this.flights.set(doc.id, flight);
       } else if (restart || !before || !SamePlacement(before, doc)) this.world.PlaceShip(doc);
     }
+    // Arriving ships park off-grid before anything is built, so a hull never shows at its landing.
+    const arrivalKeys = (arrivals ?? []).map((arrival) => this.arrivals.Add(arrival));
     const moved = new Set(diff.objects.moved.map((doc) => doc.id));
     const resized = new Set([...diff.objects.resized, ...diff.objects.rebuilt].map((doc) => doc.id));
     for (const doc of scene.objects ?? []) {
@@ -1583,6 +1605,8 @@ export class Director {
     for (const doc of builds) await this.Build(doc);
     for (const entry of objectBuilds) await this.objects.Build(entry);
     this.engine?.SetDrawReach(this.objects.Reach(scene), 'objects');
+    // Built and (usually) answered: plan now, so the result says when they land.
+    if (arrivalKeys.length) this.arrivals.Boundary(this.world.tick);
 
     const reframe = ReframesAfterEdit({ restart, cameraChanged: diff.camera, following: this.cameraFollow.following, removed: [...diff.removed, ...diff.objects.removed].map((doc) => doc.id) });
     if (reframe && JSON.stringify(scene.camera) !== this.appliedCamera) this.ApplyCamera(scene.camera);
@@ -1593,6 +1617,7 @@ export class Director {
       warnings,
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
       ...(scene.objects?.length || diff.objects.removed.length ? { objects: (scene.objects ?? []).map((doc) => this.ObjectReport(doc.id)) } : {}),
+      ...(arrivalKeys.length ? { arrivals: this.arrivals.Report(arrivalKeys) } : {}),
       changes: {
         added: diff.added.length,
         rebuilt: diff.rebuilt.length,
@@ -2454,6 +2479,19 @@ export class Director {
     return settled ? (this.flights.get(id)?.radius ?? this.world.Motion(id)?.physics.radius ?? null) : null;
   }
 
+  /**
+   * Whether an arriving ship may be planned: the hub answered its /ship-stats lookup (its warp speed and max velocity
+   * are the hull's) and its SOF build settled, so it is drawn before it lands.
+   *
+   * @param id - The ship id.
+   * @returns False while either is pending.
+   */
+  private ArrivalReady(id: string): boolean {
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    const status = this.live.get(id)?.status;
+    return Boolean(doc && this.hullStats.Cached(doc)) && status !== 'queued' && status !== 'building';
+  }
+
   private Retire(id: string): void {
     const entry = this.live.get(id);
     this.live.delete(id);
@@ -2703,7 +2741,7 @@ export class Director {
     const objects = this.scene?.objects ?? [];
     const docs = camera.target ? ships.filter((doc) => doc.id === camera.target) : ships;
     const object = camera.target && !docs.length ? (objects.find((doc) => doc.id === camera.target) ?? null) : null;
-    let spheres: WorldSphere[] = docs.map((doc) => this.WorldSphere(doc));
+    let spheres: WorldSphere[] = docs.map((doc) => this.WorldSphere(doc, { landing: true }));
     if (object) spheres = [this.ObjectSphere(object)];
     else if (!camera.target && !ships.length) spheres = objects.map((doc) => this.ObjectSphere(doc));
     if (spheres.length) {
@@ -2983,9 +3021,11 @@ export class Director {
   /**
    * A ship's bounding sphere in world space, centred on its ball; the ball alone when it is not built.
    */
-  private WorldSphere(doc: SceneShip): WorldSphere {
+  private WorldSphere(doc: SceneShip, { landing = false }: { readonly landing?: boolean } = {}): WorldSphere {
     const ship = this.live.get(doc.id)?.ship;
-    const position = vec3.fromValues(...(this.world.Motion(doc.id)?.position ?? doc.position));
+    // Framing puts a ship still arriving by warp at its landing, not off-grid.
+    const arriving = landing && this.world.Arriving(doc.id) ? this.world.ArrivalOf(doc.id)?.landing : null;
+    const position = vec3.fromValues(...(arriving ?? this.world.Motion(doc.id)?.position ?? doc.position));
     let sphere: WorldSphere;
     if (ship) {
       const centre = vec3.transformQuat(vec3.create(), ship.boundingSphereCenter, ship.rotationCurve?.value ?? DocumentRotation(doc.rotation));

@@ -27,7 +27,7 @@ import type { DestinyWorld, ShipFollow } from './destiny';
  * holding: stopped while its anchor or FC is in warp; it flies to its slot once that ship lands. warping: in a
  * formation warp, from the order until its group has landed. leading: it leads a wing or squad apart from its fleet.
  */
-export type FollowingState = 'in-formation' | 'catching-up' | 'holding' | 'warping' | 'leading' | 'detached' | 'waiting';
+export type FollowingState = 'in-formation' | 'catching-up' | 'holding' | 'warping' | 'leading' | 'detached' | 'waiting' | 'arriving';
 
 /**
  * A wing or squad flying apart from its fleet's formation on its leader.
@@ -103,7 +103,7 @@ export interface FleetFormationReport {
    */
   readonly heading: [number, number];
   /**
-   * The members that keep range on an anchor (all but the FC); the seven counts below split them.
+   * The members that keep range on an anchor (all but the FC); the eight counts below split them.
    */
   readonly following: number;
   readonly inFormation: number;
@@ -113,6 +113,10 @@ export interface FleetFormationReport {
   readonly leading: number;
   readonly detached: number;
   readonly waiting: number;
+  /**
+   * Members still arriving by warp (parked off-grid, scheduled or in their warp-in).
+   */
+  readonly arriving: number;
 }
 
 export interface FleetFollowingOptions {
@@ -370,6 +374,8 @@ export class FleetFollowing {
       report = { state: 'detached', anchor: anchor.ship, range: anchor.range, ...group };
     } else if (apart?.leader === id) {
       report = { state: 'leading', anchor: anchor.ship, range: anchor.range, ...group };
+    } else if (this.world.Arriving(id)) {
+      report = { state: 'arriving', anchor: anchor.ship, range: anchor.range, ...group };
     } else if (!follow || !motion || !anchorMotion) {
       report = { state: 'waiting', anchor: anchor.ship, range: anchor.range };
     } else {
@@ -406,7 +412,7 @@ export class FleetFollowing {
   FleetReport(fleet: Pick<SceneFleet, 'id' | 'commander'>): FleetFormationReport {
     const scene = this.scene();
     const document = scene?.fleets?.find((candidate) => candidate.id === fleet.id);
-    const counts: Record<FollowingState, number> = { 'in-formation': 0, 'catching-up': 0, holding: 0, warping: 0, leading: 0, detached: 0, waiting: 0 };
+    const counts: Record<FollowingState, number> = { 'in-formation': 0, 'catching-up': 0, holding: 0, warping: 0, leading: 0, detached: 0, waiting: 0, arriving: 0 };
     for (const [id, membership] of this.Memberships()) {
       if (membership.fleet !== fleet.id || !membership.anchor) continue;
       const state = this.Report(id)?.state;
@@ -422,7 +428,8 @@ export class FleetFollowing {
       warping: counts.warping,
       leading: counts.leading,
       detached: counts.detached,
-      waiting: counts.waiting
+      waiting: counts.waiting,
+      arriving: counts.arriving
     };
   }
 

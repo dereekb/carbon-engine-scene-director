@@ -113,6 +113,49 @@ skip object ids** (ids are unique across both), and a ship id an object holds is
   `fleet: false` free ships in `formation` (ids `<team>-01`…). Fleet ids: side's `fleet`, else composition id, else team.
 - Result `engagement` lists per side: team, fleet, commander, ships, lead.
 
+## Warp-in (`warpIn`)
+
+`add_ships` and `stage_engagement` `sides[i]` (and `add_fleet_composition`, `add_ship { ship, warpIn }`) take
+`warpIn: true | { stagger? (s, default 4, max 30), together? (default true), from? }`: the new ships wait parked
+off-grid and land from warp at their placements (Destiny's EntityWarpIn: `sd-destiny` doc `warp`, "Warp-in").
+
+- **Document layer** (`packages/scene/src/lib/arrivals/arrival.ts`): `readWarpIn`, `toArrivalLane`, `toWarpInHeading`,
+  `toArrivalOffsets` (seeded on group key + tick + ship with `unitHash` from `fleets/orders.ts`, continuous in
+  [0, stagger], the leader 0), `keepSceneArrivals`. Each op pushes a `SceneArrival { where, group, fleet?, leader?,
+  ships, lane, landing: document | formation, stagger, together }` into `FleetOperationContext.arrivals`;
+  `applySceneOperations` returns them as `arrivals` (only ships still in the result; none → no key). **The document
+  never records an arrival**: the ships are ordinary ships at their landings, so a document-only edit (`scene`, no tab)
+  just places them there.
+- **Lanes**: level, forward of the heading: free ships and new fleets along their heading, a side along its own
+  (B's is A's + 180°), `add_ship` along its rotation's yaw. `from` (a point, or a ship/object id off the draft; the hub
+  turns `{ celestial }` into a point) **sets the heading** (yaw from it to the lead's place) and is refused with
+  `heading` / `facing`, for joins, for engagement sides and for `add_ship`.
+- **Joins** (`fleet: { id, squad }`) land at their **live** formation slots: `landing: formation`, group
+  `<fleet>/<squad>`, leader = the fleet's FC (not in `ships`); the page reads the FC's live position and heading.
+- **The page** (`apps/viewer/src/lib/arrivals.ts`, node-tested; `Director.arrivals`): `Arrivals.Add` parks each ship
+  right after its ball exists and before any build (`ARRIVAL_PARK_DISTANCE` 4,000 km back along the lane, `at: null`),
+  so a hull never shows at its landing. `Boundary(tick)` (on `world.OnBoundary`, and once after an Apply's builds)
+  plans a group when every ship's `/ship-stats` answer and SOF build have settled (`Director.ArrivalReady`; a join
+  also `FleetFollowing.Ready`), or after `ARRIVAL_READY_TIMEOUT` (20 ticks, with a note). A ship with max velocity 0
+  is placed at its landing (dropped, noted).
+- **Planner** (`PlanArrivals`, pure over `DestinyWorld.WarpProfile`): `WarpInMinDistance` = the smallest lane (bisection
+  on log D) whose remaining distance a tick past the 5-tick backdate is ≥ `WARP_IN_HIDDEN_DISTANCE` (2,000 km);
+  `together`: target = the slowest hull's `WarpDropOutTime(D_min) − backdate` + its offset; by speed: its own + offset.
+  Start tick = boundary + ⌊wait⌋, the fractional rest absorbed by a longer lane (`WarpInDistanceFor`, still ≥ D_min).
+  The world's first ticks backdate less (`WarpInBackdate`): the plan settles it per start tick. Spec-pinned: exits on
+  the planned tick ±1, ≥ 2,000 km out on the first tick of the warp-in, within 1 km of the placement.
+- **Formation landings**: `FramePoint(FC origin, frame, GroupOffsets offset)` as `FleetOrders.Warp` predicts slots: the
+  FC's landing in its warp frame while it warps or arrives, else its position in its heading's frame; the lane follows
+  the FC's live heading (its arrival lane while it arrives).
+- **Reports**: the Apply result's and `get_state`'s `arrivals`: per group `{ group, fleet?, leader?, ships: [{ id,
+  state, landsIn?, note? }], state, counts, lands: { first, last } (s from now, once planned), together, stagger,
+  landing, notes? }`; ship states `waiting | scheduled | warping | landed | forming-up | formed | dropped` (formed = in
+  formation / leading, or a landed free ship under 1 m/s; dropped = placed, removed or refused). A group is kept
+  `ARRIVAL_FORMED_KEEP` (30 ticks) after it formed. A load or open clears them; a removed ship leaves its group.
+- **While arriving**: orders, prop mods, modules (the modules port's `InWarp` is `InWarp || Arriving`) and
+  `frame_camera` on it are refused; framing (`ApplyCamera`'s `WorldSphere(doc, { landing: true })`) puts it at its
+  landing; Follow the FC reports `following.state` `arriving` and `formation.arriving` counts it.
+
 ## Defaults
 
 | Argument | Default |
