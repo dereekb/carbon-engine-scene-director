@@ -25,6 +25,13 @@
  * on a patch that changes it. Each change posts the engine sound on the ship's
  * emitter (audio.ts, prop-mod-audio.ts).
  *
+ * Fits (fittings.ts): a ship with a fit flies by it once the hub has resolved
+ * its names and dogma: the dogma evaluator gives its flight numbers, HP,
+ * resists and capacitor (flight.ts's dogma path), its prop mod is the fit's
+ * own (shipPropModModuleOf), and get_state reports the fit's modules. Until
+ * then, and without the EVE data, it flies the table path. A fit change
+ * retunes the ship (the diff's `retuned`).
+ *
  * Fleets fly (Follow the FC, following.ts): every fleet member but the FC
  * keeps range on its resolved anchor in its formation slot, re-planned at the
  * end of every edit and whenever a radius settles. Ordering the FC moves its
@@ -56,9 +63,8 @@ import {
   toCelestialTargets,
   toLocationTargetReports,
   createEmptyScene,
-  DEFAULT_PROP_MOD_MODULE,
   diffScenes,
-  fitsPropMod,
+  fitTextOf,
   isFleetStructureOrder,
   normalizeFleetOrderRequest,
   toFleetOrderOperations,
@@ -66,7 +72,9 @@ import {
   normalizePropModSwitch,
   normalizeScene,
   normalizeShipOrderRequest,
+  PROP_MOD_MODULE_NONE,
   SceneError,
+  shipPropModModuleOf,
   selectFleetShips,
   toFleetMemberships,
   toFleetReports,
@@ -87,14 +95,17 @@ import {
   type CinemaCelestial,
   type CinemaScene,
   type CinemaShip,
-  type SceneVector
+  type SceneVector,
+  type ShipCapacitor,
+  type ShipDefense
 } from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayResult } from './cinema';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics } from './destiny';
+import { FitLookup, FleetModuleCountsOf, ResolveShipFitting, ShipCapacitorReportOf, ShipDefenseReportOf, ShipFitReportOf, type FleetModuleCounts, type ResolvedShipFitting, type ShipCapacitorReport, type ShipDefenseReport, type ShipFitModule, type ShipFitReport, type ShipModuleState } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -106,7 +117,7 @@ import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrd
 import { ObjectForward, SceneObjects } from './scene-objects';
 import { LocationDressing } from './location-dressing';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
-import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource } from './prop-mods';
+import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource, type ResolvedShipPropMod } from './prop-mods';
 import { ErrorText } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
@@ -282,6 +293,10 @@ export interface DirectorOptions {
    */
   readonly propMods?: PropModLookup;
   /**
+   * The hub's fit lookups (/fit/type, /dogma/types, /dogma/skills); a fresh one by default.
+   */
+  readonly fits?: FitLookup;
+  /**
    * `?audio=off`: the page never turns audio on.
    */
   readonly audioDisabled?: boolean;
@@ -363,10 +378,15 @@ export class Director {
   private readonly onChange: () => void;
   private readonly hullStats: HullStatsLookup;
   private readonly propMods: PropModLookup;
+  private readonly fitLookup: FitLookup;
   /**
    * What each ship flies with, as get_state reports it.
    */
   private readonly flights = new Map<string, ShipFlight>();
+  /**
+   * Each fitted ship's fit as last resolved (fittings.ts): the text applied, the typed modules and the dogma input.
+   */
+  private readonly fittings = new Map<string, ResolvedShipFitting>();
   /**
    * The camera following its target ship (camera.ts).
    */
@@ -385,9 +405,10 @@ export class Director {
   private appliedCamera: Maybe<string> = null;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), audioDisabled = false }: DirectorOptions) {
+  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), audioDisabled = false }: DirectorOptions) {
     this.hullStats = hullStats;
     this.propMods = propMods;
+    this.fitLookup = fits;
     this.engine = engine;
     this.engineError = engineError;
     this.store = store;
@@ -510,10 +531,11 @@ export class Director {
     const skipped: SwitchPropModsResult['skipped'] = [];
     for (const id of selected.ships) {
       const doc = docs.get(id);
-      const refusal = fitsPropMod(doc?.propMod) ? this.world.PropModRefusal(id, command.active) : `it fits no prop mod (propMod.module "${ShipPropModModule(doc)}")`;
+      const why = doc?.propMod?.module == null && doc?.fit ? 'its fit has no MWD or AB' : `propMod.module "${this.PropModModule(doc)}"`;
+      const refusal = this.FitsPropMod(doc) ? this.world.PropModRefusal(id, command.active) : `it fits no prop mod (${why})`;
       const result = refusal === null ? this.world.SwitchPropMod(id, command.active, { delay: delays.get(id) }) : null;
       if (result) {
-        const module = this.flights.get(id)?.propMod?.name ?? String(ShipPropModModule(doc));
+        const module = this.flights.get(id)?.propMod?.name ?? String(this.PropModModule(doc));
         ships.push({
           id,
           module,
@@ -628,6 +650,7 @@ export class Director {
   State(): object {
     const memberships = this.scene ? toFleetMemberships(this.scene) : new Map<string, ShipFleetMembership>();
     const ships = (this.scene?.ships ?? []).map((doc) => this.ShipState(doc, memberships.get(doc.id)));
+    const moduleRows = new Map(ships.map((ship) => [ship.id, ship.fit?.modules ?? []]));
     const distances = [];
     for (let a = 0; a < ships.length; a++) {
       for (let b = a + 1; b < ships.length; b++) {
@@ -656,6 +679,7 @@ export class Director {
             ...report,
             formation: this.following.FleetReport(report),
             propMods: this.FleetPropMods(report.ships),
+            modules: FleetModuleCountsOf(report.ships.flatMap((id) => moduleRows.get(id) ?? [])) satisfies FleetModuleCounts,
             command: this.orders.GroupReport({ fleet: report.id, kind: 'fleet', id: report.id }),
             wings: report.wings.map((wing) => ({
               ...wing,
@@ -733,6 +757,7 @@ export class Director {
     for (const doc of diff.removed) {
       stopped.push(...this.world.RemoveShip(doc.id));
       this.flights.delete(doc.id);
+      this.fittings.delete(doc.id);
       this.audio.Release(doc.id);
     }
     for (const doc of diff.objects.removed) stopped.push(...this.world.RemoveObject(doc.id));
@@ -747,6 +772,7 @@ export class Director {
     if (restart) {
       this.hullStats.ForgetFailures();
       this.propMods.ForgetFailures();
+      this.fitLookup.ForgetFailures();
     }
 
     // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place
@@ -771,8 +797,8 @@ export class Director {
     // The document's prop mod state applies at once, like a placement: on a load, for added ships, for ships whose
     // propMod.active changed, and off for a ship whose module became "none".
     const switching = new Map((restart ? scene.ships : [...diff.added, ...diff.switched]).map((doc) => [doc.id, doc]));
-    for (const doc of diff.retuned) if (!fitsPropMod(doc.propMod)) switching.set(doc.id, doc);
-    for (const doc of switching.values()) this.world.SetPropModActive(doc.id, doc.propMod?.active === true && fitsPropMod(doc.propMod));
+    for (const doc of diff.retuned) if (!this.FitsPropMod(doc)) switching.set(doc.id, doc);
+    for (const doc of switching.values()) this.world.SetPropModActive(doc.id, doc.propMod?.active === true && this.FitsPropMod(doc));
     if (restart) this.orders.Reset();
     stopped.push(...this.following.Reconcile({ regrouped: diff.regrouped.map((doc) => doc.id), restart }));
     await this.store.Put(CURRENT_KEY, scene);
@@ -843,7 +869,8 @@ export class Director {
 
   /**
    * Re-resolves a ship's flight numbers from what is known now, then once more when its /ship-stats lookup lands
-   * (if the ship still names the same hull by then), and again when its prop mod's /prop-mod lookup lands.
+   * (if the ship still names the same hull by then), again when its prop mod's /prop-mod lookup lands, and again when
+   * its fit's lookups land.
    *
    * @param id - The ship id.
    */
@@ -853,14 +880,39 @@ export class Director {
     const cached = this.hullStats.Cached(doc);
     this.SetFlight(doc, cached);
     this.LookupPropMod(doc, cached);
+    this.LookupFit(doc, cached);
     if (cached) return;
     const key = HullStatsKey(doc);
     void this.hullStats.Lookup(doc).then((answer) => {
       const current = this.scene?.ships.find((ship) => ship.id === id);
       if (!current || HullStatsKey(current) !== key) return;
       this.SetFlight(current, answer);
-      // The hull's size may pick a different hull-sized module.
+      // The hull's size may pick a different hull-sized module; its type lets the fit's dogma run.
       this.LookupPropMod(current, answer);
+      this.LookupFit(current, answer);
+      this.following.Reconcile();
+      this.onChange();
+    });
+  }
+
+  /**
+   * Starts a fitted ship's fit lookups when its fit is still pending (or waiting on the hull, to resolve its names
+   * meanwhile), and retunes the ship when they land, if it still has the same fit by then.
+   *
+   * @param doc - The current document ship.
+   * @param answer - Its /ship-stats answer; null while that lookup is in flight.
+   */
+  private LookupFit(doc: SceneShip, answer: Maybe<HullStatsAnswer>): void {
+    const resolved = this.fittings.get(doc.id);
+    if (!resolved || resolved.dogma || (!resolved.pending && answer)) return;
+    const { text } = resolved;
+    void this.fitLookup.Prepare({ text, typeIDs: resolved.typeIDs }).then(() => {
+      const current = this.scene?.ships.find((ship) => ship.id === doc.id);
+      if (!current || fitTextOf(current, this.scene) !== text) return;
+      const hull = this.hullStats.Cached(current);
+      this.SetFlight(current, hull);
+      // A prop mod that resolved meanwhile may need one more type.
+      if (this.fittings.get(current.id)?.pending) this.LookupFit(current, hull);
       this.following.Reconcile();
       this.onChange();
     });
@@ -883,6 +935,8 @@ export class Director {
       const now = current ? this.PropModTarget(current, hull) : null;
       if (!current || now == null || PropModKey(now) !== key) return;
       this.SetFlight(current, hull);
+      // A prop mod replacing the fit's own needs its dogma.
+      this.LookupFit(current, hull);
       this.onChange();
     });
   }
@@ -895,7 +949,7 @@ export class Director {
    * @returns It, or null for "none".
    */
   private PropModTarget(doc: SceneShip, answer: Maybe<HullStatsAnswer>): Maybe<string | number> {
-    return PropModLookupTarget(ShipPropModModule(doc), RigSizeOf({ published: answer?.hull, hull: this.live.get(doc.id)?.hull }));
+    return PropModLookupTarget(this.PropModModule(doc), RigSizeOf({ published: answer?.hull, hull: this.live.get(doc.id)?.hull }));
   }
 
   /**
@@ -916,7 +970,8 @@ export class Director {
   }
 
   /**
-   * A ship's flight numbers: its lookup answer, its SOF hull and its `stats`, through the max-skills pilot.
+   * A ship's flight numbers: its lookup answer, its SOF hull and its `stats`, through the max-skills pilot; a fitted
+   * ship's through the dogma evaluator once its fit has resolved. Keeps the ship's resolved fit for get_state.
    *
    * @param doc - The document ship.
    * @param answer - Its /ship-stats answer; null while the lookup is in flight.
@@ -926,15 +981,58 @@ export class Director {
     let flight: Maybe<ShipFlight> = null;
     try {
       const hull = this.live.get(doc.id)?.hull;
-      const module = ShipPropModModule(doc);
+      const module = this.PropModModule(doc);
       const rigSize = RigSizeOf({ published: answer?.hull, hull });
       const target = PropModLookupTarget(module, rigSize);
       const propMod = ResolveShipPropMod({ module, rigSize, answer: target == null ? null : this.propMods.Cached(target) });
-      flight = ResolveFlight({ published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod });
+      const fitting = this.ResolveFitting(doc, answer, propMod);
+      flight = ResolveFlight({ published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma: fitting?.dogma, compute: (input) => this.fitLookup.ShipStats(input) });
     } catch (error) {
       console.error(`ship ${doc.id}: no flight numbers (${ErrorText(error)}); it keeps its previous physics`);
     }
     return flight;
+  }
+
+  /**
+   * Resolves a ship's fit from the lookups so far and keeps it for get_state.
+   *
+   * @param doc - The document ship.
+   * @param answer - Its /ship-stats answer; null while the lookup is in flight.
+   * @param propMod - The prop mod it flies; null for "none".
+   * @returns The resolved fit; null for a ship without one.
+   */
+  private ResolveFitting(doc: SceneShip, answer: Maybe<HullStatsAnswer>, propMod: Maybe<ResolvedShipPropMod>): Maybe<ResolvedShipFitting> {
+    const fitting = ResolveShipFitting({
+      doc,
+      scene: this.scene,
+      lookup: this.fitLookup,
+      hullTypeID: answer?.hull?.typeID ?? null,
+      hullNote: answer ? answer.note : null,
+      propMod: propMod ? { module: propMod.module, typeID: propMod.stats.typeID, name: propMod.stats.name, explicit: doc.propMod?.module != null } : null
+    });
+    if (fitting) this.fittings.set(doc.id, fitting);
+    else this.fittings.delete(doc.id);
+    return fitting;
+  }
+
+  /**
+   * The prop mod a ship flies: its document's module, else its fit's MWD or AB, else the hull-sized microwarpdrive.
+   *
+   * @param doc - The document ship.
+   * @returns The canonical module.
+   */
+  private PropModModule(doc: Maybe<SceneShip>): PropModModule {
+    return shipPropModModuleOf(doc, fitTextOf(doc, this.scene));
+  }
+
+  /**
+   * Whether a ship flies a prop mod (its module is not "none").
+   *
+   * @param doc - The document ship.
+   * @returns True when it does.
+   */
+  private FitsPropMod(doc: Maybe<SceneShip>): boolean {
+    return this.PropModModule(doc) !== PROP_MOD_MODULE_NONE;
   }
 
   /**
@@ -1090,7 +1188,7 @@ export class Director {
     const counts: FleetPropModCounts = { activating: 0, active: 0, stopping: 0, off: 0, none: 0 };
     const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
     for (const id of ships) {
-      const state = fitsPropMod(docs.get(id)?.propMod) ? (this.world.Motion(id)?.propMod.state ?? 'off') : 'none';
+      const state = this.FitsPropMod(docs.get(id)) ? (this.world.Motion(id)?.propMod.state ?? 'off') : 'none';
       counts[state] += 1;
     }
     return counts;
@@ -1316,14 +1414,36 @@ export class Director {
   private ShipState(
     doc: SceneShip,
     membership: Maybe<ShipFleetMembership>
-  ): ShipReport & { name?: string; team?: string; worldPosition: number[]; radius: number; following?: ShipFollowingReport; boosters?: ShipBoosterState; propMod: Maybe<ShipPropModState> } & Partial<ShipFleetMembership> & Omit<Partial<ShipMotion>, 'propMod'> {
+  ): ShipReport & {
+    name?: string;
+    team?: string;
+    worldPosition: number[];
+    radius: number;
+    following?: ShipFollowingReport;
+    boosters?: ShipBoosterState;
+    propMod: Maybe<ShipPropModState>;
+    fit: Maybe<ShipFitReport>;
+    defense: Maybe<ShipDefenseReport>;
+    capacitor: Maybe<ShipCapacitorReport>;
+  } & Partial<ShipFleetMembership> &
+    Omit<Partial<ShipMotion>, 'propMod'> {
     const sphere = this.WorldSphere(doc);
     const motion = this.world.Motion(doc.id);
     const flight = this.flights.get(doc.id);
     const following = this.following.Report(doc.id);
     const ship = this.engine ? this.live.get(doc.id)?.ship : null;
     const boosters: Maybe<ShipBoosterState> = ship?.boosters ? { maxVel: ship.boosters.maxVel, intensity: Math.round(ship.GetBoosterIntensity() * 100) / 100, warpIntensity: Math.round(ship.boosters.warpIntensity * 100) / 100 } : null;
-    const physics = flight ? RunningFlight(flight, motion?.propMod.running === true) : motion?.physics;
+    // Defense and capacitor are reported beside physics, not in it.
+    let physics: Maybe<Omit<ShipFlight, 'defense' | 'capacitor'> | ShipPhysics> = motion?.physics;
+    let defense: Maybe<ShipDefense> = null;
+    let capacitor: Maybe<ShipCapacitor> = null;
+    if (flight) {
+      const { defense: flownDefense, capacitor: flownCapacitor, ...flown } = RunningFlight(flight, motion?.propMod.running === true);
+      physics = flown;
+      defense = flownDefense ?? null;
+      capacitor = flownCapacitor ?? null;
+    }
+    const fitting = this.fittings.get(doc.id);
     return {
       ...this.ShipReport(doc.id),
       name: doc.name,
@@ -1335,6 +1455,9 @@ export class Director {
       ...motion,
       physics,
       propMod: this.PropModState(doc, flight, motion),
+      fit: fitting ? ShipFitReportOf(fitting, (module) => ModuleState(module, motion)) : null,
+      defense: defense ? ShipDefenseReportOf(defense) : null,
+      capacitor: capacitor ? ShipCapacitorReportOf(capacitor) : null,
       ...(boosters ? { boosters } : {})
     };
   }
@@ -1348,12 +1471,12 @@ export class Director {
    * @returns The report; null for a ship fitting "none".
    */
   private PropModState(doc: SceneShip, flight: Maybe<ShipFlight>, motion: Maybe<ShipMotion>): Maybe<ShipPropModState> {
-    if (!fitsPropMod(doc.propMod)) return null;
+    if (!this.FitsPropMod(doc)) return null;
     const propMod = flight?.propMod;
     const report = motion?.propMod;
     const note = [report?.note, propMod?.note].filter(Boolean).join('; ');
     return {
-      module: propMod?.module ?? ShipPropModModule(doc),
+      module: propMod?.module ?? this.PropModModule(doc),
       ...(propMod ? { name: propMod.name, typeID: propMod.typeID, kind: propMod.kind, size: propMod.size, source: propMod.source } : {}),
       ...(note ? { note } : {}),
       state: report?.state ?? 'off',
@@ -1379,13 +1502,18 @@ export class Director {
 }
 
 /**
- * The prop mod a ship fits: its document's module, else the hull-sized microwarpdrive.
+ * A fitted module's live state for get_state: offline as fitted, the prop mod's from Destiny (off reads online), the
+ * rest online (switch_modules comes later).
  *
- * @param doc - The document ship.
- * @returns The canonical module.
+ * @param module - The module as the ship carries it.
+ * @param motion - The ship's Destiny motion.
+ * @returns The state.
  */
-function ShipPropModModule(doc: Maybe<SceneShip>): PropModModule {
-  return doc?.propMod?.module ?? DEFAULT_PROP_MOD_MODULE;
+function ModuleState(module: ShipFitModule, motion: Maybe<ShipMotion>): ShipModuleState {
+  let state: ShipModuleState = module.offline ? 'offline' : 'online';
+  const propMod = module.prop ? motion?.propMod.state : null;
+  if (propMod && propMod !== 'off') state = propMod;
+  return state;
 }
 
 /**

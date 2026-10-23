@@ -100,6 +100,34 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly warp?: ShipWarpState;
   readonly boosters?: { readonly maxVel: number; readonly intensity: number; readonly warpIntensity: number };
   readonly propMod?: Maybe<ShipPropModState>;
+  readonly fit?: Maybe<ShipFitState>;
+  readonly defense?: Maybe<ShipDefenseState>;
+  readonly capacitor?: Maybe<ShipCapacitorState>;
+}
+
+/**
+ * get_state's `fit` (the viewer's fittings.ts ShipFitReport).
+ */
+interface ShipFitState {
+  readonly name: string;
+  readonly key: string;
+  readonly typeID?: number;
+  readonly unknown: string[];
+  readonly modules: { readonly module: string; readonly name: string; readonly state: string; readonly prop?: true; readonly note?: string }[];
+  readonly math: 'dogma' | 'table';
+  readonly note?: string;
+}
+
+type DamageResists = Readonly<Record<'em' | 'thermal' | 'kinetic' | 'explosive', number>>;
+
+/**
+ * get_state's `defense` (the viewer's fittings.ts ShipDefenseReport).
+ */
+type ShipDefenseState = Readonly<Record<'shield' | 'armor' | 'structure', { readonly hp: number; readonly max: number; readonly resists: DamageResists; readonly ehp: number }>> & { readonly ehp: number; readonly shieldRecharge: number };
+
+interface ShipCapacitorState {
+  readonly capacity: number;
+  readonly rechargeTime: number;
 }
 
 interface ShipPropModState {
@@ -178,7 +206,7 @@ interface ViewerState {
   readonly simulation: { readonly tick: number; readonly seconds: number };
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
+  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
@@ -630,7 +658,7 @@ try {
     const nowhere = await refusal({ id: 'rifter', order: { type: 'warp' } });
     Expect(/exactly one of point or target/u.test(nowhere), nowhere);
     const nobody = await refusal({ id: 'rifter', order: { type: 'orbit', target: 'nobody', range: 1000 } });
-    Expect(/order\.target "nobody" is not a ship in the scene/u.test(nobody), nobody);
+    Expect(/order\.target "nobody" is not a ship/u.test(nobody), nobody);
     const itself = await refusal({ id: 'rifter', order: { type: 'approach', target: 'rifter' } });
     Expect(/order\.target must be another ship/u.test(itself), itself);
     const rangeless = await refusal({ id: 'rifter', order: { type: 'keep-at-range', target: 'punisher' } });
@@ -976,6 +1004,40 @@ try {
     return 'restored';
   });
 
+  await Check("the dogma path matches tools-core's evaluation on a bare hull", async () => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 587 }).catch(SkipWithoutSde);
+    await call('load_scene', { scene: { name: 'verify-fit', ships: [{ id: 'bare', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', fit: '[Rifter, Bare]' }] } });
+    const state = await WaitFor("the bare Rifter's fit resolves", 60, (polled) => {
+      const fit = ShipIn(polled, 'bare').fit;
+      return fit?.math === 'dogma' ? null : JSON.stringify(fit);
+    });
+    const { defense, capacitor } = ShipIn(state, 'bare');
+    if (!defense || !capacitor) throw new Error(`no defense or capacitor: ${JSON.stringify({ defense, capacitor })}`);
+    // Shield, Armor and Hull Upgrades, Mechanics, Capacitor Management and Operation at V: the skills these sections use.
+    const skills = [3419, 3394, 3392, 3416, 3418, 3417].map((typeID) => ({ typeID, level: 5 }));
+    const response = await fetch(`${toolsCore.url}/eve/${status.build}/dogma/evaluate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ typeID: 587, profile: { mode: 'manual', skills }, sections: ['defense', 'capacitor'] }) });
+    Expect(response.ok, `dogma/evaluate answered ${response.status}`);
+    const { effective } = (await response.json()) as { effective: Record<string, number> };
+    const pairs: [string, number, number][] = [
+      ['shield hp', effective['shieldCapacity'], defense.shield.max],
+      ['armor hp', effective['armorHP'], defense.armor.max],
+      ['structure hp', effective['hp'], defense.structure.max],
+      ['capacitor', effective['capacitorCapacity'], capacitor.capacity],
+      ['capacitor recharge', effective['rechargeRate'] / 1000, capacitor.rechargeTime],
+      ['shield recharge', effective['shieldRechargeRate'] / 1000, defense.shieldRecharge]
+    ];
+    const layers = { shield: 'shield', armor: 'armor', structure: '' } as const;
+    for (const [layer, prefix] of Object.entries(layers) as [keyof typeof layers, string][]) {
+      for (const type of ['em', 'thermal', 'kinetic', 'explosive'] as const) {
+        const name = `${prefix}${prefix ? type[0].toUpperCase() + type.slice(1) : type}DamageResonance`;
+        pairs.push([`${layer} ${type} resist`, Math.round((1 - effective[name]) * 10_000) / 100, defense[layer].resists[type]]);
+      }
+    }
+    const off = pairs.filter(([, theirs, ours]) => !Close(theirs, ours));
+    Expect(!off.length, off.map(([what, theirs, ours]) => `${what}: tools-core ${theirs}, ours ${ours}`).join('; '));
+    return `Rifter ${defense.shield.max} / ${defense.armor.max} / ${defense.structure.max} HP, capacitor ${capacitor.capacity} GJ in ${capacitor.rechargeTime} s: ${pairs.length} values match`;
+  });
+
   await Check('add_fleet_composition drops the TFIs fleet in formation', async () => {
     await call('load_scene', { scene: { name: 'verify-fleets', ships: [{ id: 'bystander', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
     const result = await call<AddedFleetResult>('add_fleet_composition', { name: 'tfis', position: [0, 0, 80000], heading: 180, team: 'blue' });
@@ -1073,7 +1135,11 @@ try {
       Expect(!astray, `${astray?.id} ${JSON.stringify(astray?.following)}`);
     }
     const running = members.map((id) => ShipIn(state, id)).filter((ship) => ship.propMod?.state === 'active');
-    const slow = running.find((ship) => (ship.speed ?? 0) <= (base.get(ship.id) ?? Infinity));
+    // Every running module flies faster numbers; the agile ships are already past their base speed. Fitted capitals
+    // (plates, rigs, the MWD's mass) take longer than the 20 s to get there.
+    const unboosted = running.find((ship) => (ship.physics?.maxVelocity ?? 0) <= (base.get(ship.id) ?? Infinity));
+    Expect(!unboosted, `${unboosted?.id} flies ${unboosted?.physics?.maxVelocity} m/s with its prop mod, base ${base.get(unboosted?.id ?? '')}`);
+    const slow = running.find((ship) => (ship.speed ?? 0) <= (base.get(ship.id) ?? Infinity) && (ship.physics?.alignTime ?? Infinity) < 20);
     Expect(running.length === 40 && !slow, slow ? `${slow.id} at ${slow.speed} m/s, base ${base.get(slow.id)}` : `${running.length} members running`);
     const logi = await call<SwitchPropModsResult>('switch_prop_mods', { fleet: 'tfis', squad: 'logi', active: false });
     Expect(logi.ships.length === 8 && logi.ships.every((ship) => ship.id.startsWith('tfis-logi-') && ship.state === 'stopping'), JSON.stringify(logi.ships));
@@ -1082,6 +1148,30 @@ try {
     await call('switch_prop_mods', { fleet: 'tfis', active: false });
     const fc = ShipIn(state, 'tfis-fc');
     return `41 on (${JSON.stringify(counts)}), FC at ${fc.speed} m/s; every member in formation or catching up above its base speed; the 8 logi stopping`;
+  });
+
+  await Check('a fitted TFIs fleet reports fit-driven defense', async () => {
+    const added = tfis;
+    if (!added) throw new Skipped('the TFIs fleet was not added');
+    const started = Date.now();
+    const state = await WaitFor('every TFIs fit resolves', 90, (polled) => {
+      const table = added.added.ships.map((id) => ShipIn(polled, id)).filter((ship) => ship.fit?.math !== 'dogma');
+      return table.length ? `${table.length} on the table path, ${table[0].id}: ${JSON.stringify(table[0].fit?.note)}` : null;
+    });
+    const seconds = (Date.now() - started) / 1000;
+    const fc = ShipIn(state, 'tfis-fc');
+    const scene = await call<{ fits?: Record<string, string> }>('get_scene');
+    const text = scene.fits?.['tfis/tfi'];
+    if (!text || !fc.fit || !fc.defense) throw new Error(`tfis-fc: ${JSON.stringify({ fit: fc.fit, defense: fc.defense, key: Object.keys(scene.fits ?? {}) })}`);
+    Expect(fc.fit.key === 'tfis/tfi' && fc.fit.typeID === 17732 && !fc.fit.unknown.length, JSON.stringify({ key: fc.fit.key, typeID: fc.fit.typeID, unknown: fc.fit.unknown }));
+    // The prop mod may still be stopping from the check before.
+    const offline = fc.fit.modules.filter((module) => !module.prop && module.state !== 'online');
+    Expect(fc.fit.modules.length === 23 && !offline.length && fc.fit.modules.some((module) => module.prop), `${fc.fit.modules.length} modules, not online: ${JSON.stringify(offline)}`);
+    const answer = await call<ShipStatsAnswer & { stats: { defense?: { armor: { hp: number } } } }>('ship_stats', { type: 'Tempest Fleet Issue', fit: text });
+    const armor = answer.stats.defense?.armor.hp ?? Number.NaN;
+    Expect(Close(Math.round(armor * 10) / 10, fc.defense.armor.max), `armor: ship_stats ${armor}, get_state ${fc.defense.armor.max}`);
+    const counts = state.fleets.find((fleet) => fleet.id === 'tfis')?.modules;
+    return `44 fits on dogma in ${seconds.toFixed(1)} s; tfis-fc armor ${fc.defense.armor.max} HP (ship_stats ${armor.toFixed(1)}), EHP ${fc.defense.ehp}, 23 modules online; fleet modules ${JSON.stringify(counts)}`;
   });
 
   await Check('compositions save, list, add by name with a unique id, and delete', async () => {

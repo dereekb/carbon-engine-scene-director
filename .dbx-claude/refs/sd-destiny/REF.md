@@ -134,6 +134,11 @@ ball for `get_state.objects`.
   `distances`.
 - Lookups are cached per page session (one per EVE type or DNA `hull:faction:race`). A ship flies class values until
   its lookup lands, then retunes mid-flight. A failed lookup is logged once and retried on the next load/open or reload.
+- **A fitted ship flies by its fit** once the hub has resolved its fit (`fittings.ts`, `sd-fittings`): `ResolveFlight`
+  takes `dogma` and runs the dogma path of `computeShipStats` (modules online; the prop mod's running numbers with its
+  module active), so plates, rigs and the rest set mass, speed, agility and signature. `physics.math` is `dogma` or
+  `table`; `ShipFlight` also carries `defense` and `capacitor` (get_state reports them beside `physics`, not in it).
+  The ship flies the table path until the fit's lookups land, then retunes like a hull lookup.
 - The world accepts a max velocity of 0. `RequireValidPhysics` refuses a warp speed it cannot convert.
 
 ## Real-GPU evidence (2026-10-22, Windows Chrome, NVIDIA)

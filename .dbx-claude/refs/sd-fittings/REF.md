@@ -5,14 +5,13 @@
 > itself (numbers, switching, audio): `sd-ship-stats`; compositions and `cjs-fleet/1`: `sd-fleets` → `compositions`;
 > `add_ships` / `stage_engagement`: `sd-staging`.
 
-**Status (2026-10-22)**: slices C1-C3 of the fitted-modules plan
+**Status (2026-10-22)**: slices C1-C4 of the fitted-modules plan
 (`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) are in: fits
-are parsed and ride on scene ships, the hub resolves fit names and serves dogma bundles, and the dogma evaluator
-computes a fitted ship's HP, resists, capacitor, targeting and flight numbers, which `ship_stats` reports for a `fit`
-(below). Not yet: the page flying fitted ships and reporting HP / resists (C4), module activation (`switch_modules`) and
-the damage model (C5), module effects and sounds (C6). Until C4 the page ignores a fit except through the prop mod a
-composition line writes into `propMod`. Research behind the design: the dbx-claude note
-`fitted-modules-dogma-and-module-effects-research`.
+are parsed and ride on scene ships, the hub resolves fit names and serves dogma bundles, the dogma evaluator computes a
+fitted ship's HP, resists, capacitor, targeting and flight numbers (`ship_stats` reports them for a `fit`), and the page
+flies fitted ships by their fit and reports their modules, defense and capacitor in `get_state` (below). Not yet:
+module activation (`switch_modules`) and the damage model (C5), module effects and sounds (C6). Research behind the
+design: the dbx-claude note `fitted-modules-dogma-and-module-effects-research`.
 
 ## Files
 
@@ -38,6 +37,8 @@ composition line writes into `propMod`. Research behind the design: the dbx-clau
 | `apps/scene-director/src/lib/hub/sde-client.ts` | `SdeClient`: build pin, `GetJson` / `PostJson`, `Cached`, `Type`, `TypeDogma` (with the default effect), failure mapping, readers; `ShipData` delegates to it |
 | `apps/scene-director/src/lib/hub/dogma-data.ts` | `DogmaData` (`TypeByName`, `Bundle`, `Skills`), `FIXED_ATTRIBUTE_IDS`, `MAX_DOGMA_TYPE_IDS` |
 | `apps/scene-director/src/lib/hub/dogma-data.testing.ts` | `DogmaFixture`, `DogmaRoutes` (tools-core routes rebuilt from the fixture), `MakeRoutedDogmaData`, `MakeFakeDogmaData` |
+| `apps/viewer/src/lib/fittings.ts` | the page's fit lookups (`FitLookup`), `ResolveShipFitting`, the get_state reports (`ShipFitReportOf`, `ShipDefenseReportOf`, `ShipCapacitorReportOf`, `FleetModuleCountsOf`); node-tested over the fixture (`fittings.spec.ts`) |
+| `apps/viewer/src/lib/flight.ts` / `director.ts` | `ResolveFlight`'s `dogma` path; the director's `ResolveFitting`, `LookupFit`, `PropModModule` / `FitsPropMod`, get_state's `fit` / `defense` / `capacitor` and fleet `modules` |
 
 ## Fits in the document
 
@@ -92,8 +93,9 @@ is `{ name, charge?, offline?, section, slot, line }`, an item line `{ name, qua
 
 `shipPropModModuleOf(ship, fitText)`: `propMod.module` if set; else, with a fit, `readEftPropMod` (the first module
 line, in written order, naming an MWD or AB, offline ones included; never cargo), `"none"` when it has none; else
-`DEFAULT_PROP_MOD_MODULE` (the hull-sized MWD). The page's director adopts it in C4; today it still reads
-`propMod.module ?? DEFAULT_PROP_MOD_MODULE`, which matches for composition ships (their `propMod` is explicit).
+`DEFAULT_PROP_MOD_MODULE` (the hull-sized MWD). The page's director uses it everywhere it asks what a ship flies
+(`PropModModule`, `FitsPropMod`): a fitted ship without an MWD or AB fits none, and `switch_prop_mods` skips it with "it
+fits no prop mod (its fit has no MWD or AB)".
 
 ## Names and dogma from tools-core (hub)
 
@@ -229,6 +231,43 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   `fitNote`. The `GET /ship-stats` route takes no fit (query length).
 - **Not modelled**: implants and boosters, command burst buffs, heat, drones, fitting resources and slot counts, a live
   capacitor, the effects of targeted modules on their targets, server tick rounding.
+
+## The page: fitted ships fly by their fit (`fittings.ts`)
+
+- **`FitLookup`** (one per page session, the director's `fits` option): `/fit/type?name=&hull=` once per exact name,
+  `/dogma/types?ids=` for every id asked for in one turn of the event loop (at most 200 per request), `/dogma/skills`
+  once; every answer lands in one merged bundle. A name the EVE data lacks (400 / 404) is `unknown`; no answer, 502,
+  503 or 504 is retried after 1 s and 3 s (a 44-ship load once met a dropped tools-core connection, which a cached
+  failure would have kept for the whole session), then cached as unavailable. Failures are forgotten on every load /
+  open (`ForgetFailures`). `Prepare({ text, typeIDs })` runs a fit's names, then its types and the skills; it never
+  rejects. `ShipStats` memoizes `computeShipStats` per bundle and input, so the 44 TFIs ships evaluate their 13 fits once
+  per bundle (~2 ms each).
+- **`ResolveShipFitting({ doc, scene, lookup, hullTypeID, hullNote, propMod })`** is synchronous over the caches and
+  returns `{ text, key, fitting, modules, dogma, pending, note, typeIDs }` (null without a fit). Pending names keep the
+  text's provisional keys and are not `unknown` yet. `dogma` is set once every name has settled, the hull's type is known
+  (the ship's `/ship-stats` answer: a ship flies as its `type`, whatever its fit's header says), and the hull, modules,
+  charges and skills are in the bundle; otherwise `note` says why (`resolving 3 of the fit's 40 names`, `waiting for the
+  hull's EVE type`, `the fit's modules need the EVE data: ...`) and the ship flies the table path. A module type the SDE
+  lacks is left out with a note.
+- **The prop module** (`WithPropMod`, after the names land): the fit's first group-46 module. An explicit
+  `propMod.module` that names another (by type, or by name; `mwd` / `ab` always by type) replaces it (same key, a note);
+  on a fit with none, the ship's prop mod is added as the next `mid-<n>` (`prop: true`, a note); `"none"` leaves the fit's
+  own offline. A non-explicit mismatch (the `/prop-mod` lookup still pending, its stand-in differing) keeps the fit's.
+- **The director**: `Flight` resolves the fit beside the prop mod and passes `dogma` to `ResolveFlight` (`sd-destiny`
+  physics); `Retune` calls `LookupFit` after `SetFlight`, which `Prepare`s a pending fit (or a fit waiting on its hull,
+  to resolve the names meanwhile) and retunes the ship when it lands, if its fit text is unchanged; a resolution still
+  pending then (a replacing prop mod's type) prepares once more. The prop mod lookup's and the hull lookup's callbacks
+  call it too. A fit change arrives as `retuned` (`sd-scene-document`).
+- **`get_state`** per ship: `fit` (null without one) `{ name, key, hull, typeID?, unknown, modules: [{ module, name,
+  state, charge?, prop?, note? }], drones, math, note? }`, rows compact; `defense` `{ shield | armor | structure: { hp,
+  max, resists, ehp }, ehp, shieldRecharge }` (C4: hp = max, the static evaluation); `capacitor` (rounded; with the prop
+  mod's drain while it runs). Both null on the table path. Module states in C4: `offline` (`/OFFLINE`, or the prop
+  module under `"none"`), `online`, and the prop module's Destiny state while it runs (`off` reads `online`). Per fleet,
+  `modules` counts every member's rows by state (offline, online, activating, active, stopping, reactivating).
+- **verify-page**: "the dogma path matches tools-core's evaluation on a bare hull" (a Rifter with `[Rifter, Bare]`: 18
+  HP, resist and capacitor values equal `dogma/evaluate` with Shield / Armor / Hull Upgrades, Mechanics, Capacitor
+  Management and Operation at V); "a fitted TFIs fleet reports fit-driven defense" (all 44 on dogma, `tfis-fc` armor
+  52,527.2 HP = `ship_stats { fit }` for `tfis/tfi`, 23 modules online, 2026-10-22).
 
 ## Why not tools-core's `fitting/parse`
 

@@ -73,7 +73,7 @@ branch of `applyOperation` in `scene.ts`.
 | `rebuilt` | DNA changed: rebuild that ship; it keeps flying |
 | `moved` | placement changed: put that ship at rest there (ends its order) |
 | `relabelled` | name/team only |
-| `retuned` | `type`, `stats`, `pilot`, `propMod.module` or the resolved fit text (`fitTextOf`) changed: new flight numbers, no rebuild |
+| `retuned` | `type`, `stats`, `pilot`, `propMod.module` or the resolved fit text (`fitTextOf`) changed: new flight numbers, no rebuild; a fitted ship re-resolves its fit and flies the table path until it lands (`sd-fittings`) |
 | `switched` | `propMod.active` changed: switch at once (no cycle wait). A ship can be in `retuned` too |
 | `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild |
 | `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |

@@ -11,6 +11,9 @@
  * - Warp speed is the hull's warpSpeedMultiplier (AU/s; no skill changes it), else its class value.
  * - A prop mod (prop-mods.ts) runs through the same math: `propMod` is the ship's running numbers, which
  *   RunningFlight swaps in while the module runs. `maxVelocity` and the rest stay prop-mod-off.
+ * - A fitted ship whose fit has resolved (fittings.ts) flies the dogma path instead: the same computeShipStats with
+ *   `dogma`, its modules online (the prop mod's running numbers with that module active), and reports its defense and
+ *   capacitor. `math` says which path ran.
  * - Lookups are cached per page session by the hub's own key (the EVE type, else the DNA's hull:faction:race); failures
  *   are cached with the hub's message until ForgetFailures (every load_scene / open_scene).
  *
@@ -18,7 +21,23 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { computeShipStats, HULL_STAT_OVERRIDE_KEYS, type HullSizeClass, type HullStatOverrides, type HullStats, type PropModKind, type PropModModule, type RigSize, type SceneShip } from '@scene-director/scene';
+import {
+  computeShipStats,
+  HULL_STAT_OVERRIDE_KEYS,
+  type HullSizeClass,
+  type HullStatOverrides,
+  type HullStats,
+  type PropModKind,
+  type PropModModule,
+  type RigSize,
+  type SceneShip,
+  type ShipCapacitor,
+  type ShipDefense,
+  type ShipDogmaInput,
+  type ShipStats,
+  type ShipStatsInput,
+  type ShipStatsMath
+} from '@scene-director/scene';
 import type { ShipHull, ShipPhysics, ShipPropMod } from './destiny';
 import type { PropModSource, ResolvedShipPropMod } from './prop-mods';
 import { DEFAULT_WARP_SPEED } from './warp';
@@ -58,6 +77,10 @@ export interface ShipFlightPropMod extends ShipPropMod {
    */
   readonly signatureRadius: number;
   readonly alignTime: number;
+  /**
+   * The capacitor with the module running (the dogma path).
+   */
+  readonly capacitor?: ShipCapacitor;
 }
 
 /**
@@ -87,6 +110,18 @@ export interface ShipFlight extends ShipPhysics {
    */
   readonly note?: string;
   readonly propMod?: ShipFlightPropMod;
+  /**
+   * `dogma` for a fitted ship whose fit resolved, else `table` (the hull's published values and the skill table).
+   */
+  readonly math: ShipStatsMath;
+  /**
+   * HP, resists and EHP per layer (the dogma path); absent on the table path.
+   */
+  readonly defense?: ShipDefense;
+  /**
+   * The capacitor with the modules online (the dogma path); absent on the table path.
+   */
+  readonly capacitor?: ShipCapacitor;
 }
 
 export interface ResolveFlightInput {
@@ -110,6 +145,14 @@ export interface ResolveFlightInput {
    * The ship's prop mod; null or absent when it fits none.
    */
   readonly propMod?: Maybe<ResolvedShipPropMod>;
+  /**
+   * The ship's resolved fit (fittings.ts): the dogma path runs, `published` then gives only the type and radius.
+   */
+  readonly dogma?: Maybe<ShipDogmaInput>;
+  /**
+   * computeShipStats, or a memoized one (FitLookup.ShipStats).
+   */
+  readonly compute?: (input: ShipStatsInput) => ShipStats;
 }
 
 export type ShipClass = 'frigate' | 'destroyer' | 'cruiser' | 'battlecruiser' | 'battleship' | 'capital' | 'titan';
@@ -207,16 +250,26 @@ export function ClassHull(hull: Maybe<ShipHull>): HullStats {
  * @throws {RangeError} From computeShipStats, when a value is out of range.
  */
 export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
-  const { published, note, hull, overrides, propMod } = input;
+  const { published, note, hull, overrides, propMod, dogma } = input;
+  const compute = input.compute ?? computeShipStats;
   const pinned = HULL_STAT_OVERRIDE_KEYS.every((key) => overrides?.[key] != null);
   let source: FlightSource = 'class';
   if (pinned) source = 'stats';
-  else if (published) source = 'sde';
+  else if (published || dogma) source = 'sde';
   const base = source === 'class' ? ClassHull(hull) : (published?.published ?? null);
-  const stats = computeShipStats({ hull: source === 'stats' ? null : base, overrides });
-  const running = propMod ? computeShipStats({ hull: source === 'stats' ? null : base, overrides, propMod: propMod.stats }) : null;
+  let stats: ShipStats;
+  let running: Maybe<ShipStats> = null;
+  if (dogma) {
+    stats = compute({ hull: null, overrides, dogma });
+    const propModKey = dogma.propModKey;
+    if (propMod && propModKey != null) running = compute({ hull: null, overrides, dogma: { ...dogma, modules: (dogma.modules ?? []).map((module) => (module.key === propModKey ? { ...module, state: 'active' } : module)) } });
+  } else {
+    stats = compute({ hull: source === 'stats' ? null : base, overrides });
+    if (propMod) running = compute({ hull: source === 'stats' ? null : base, overrides, propMod: propMod.stats });
+  }
   let radius = DEFAULT_FLIGHT_RADIUS;
-  if (IsPositive(published?.published.radius)) radius = published.published.radius;
+  if (IsPositive(stats.radius) && dogma) radius = stats.radius;
+  else if (IsPositive(published?.published.radius)) radius = published.published.radius;
   else if (IsPositive(hull?.radius)) radius = hull.radius;
   const warpSpeed = [stats.warpSpeedMultiplier, published?.published.warpSpeedMultiplier].find(IsPositive) ?? ClassHull(hull).warpSpeedMultiplier ?? DEFAULT_WARP_SPEED;
   return {
@@ -244,16 +297,20 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
             maxVelocity: running.maxVelocity,
             signatureRadius: running.signatureRadius,
             alignTime: running.alignTime,
-            cycleTime: running.propModCycleTime ?? DEFAULT_PROP_MOD_CYCLE_TIME
+            cycleTime: running.propModCycleTime ?? DEFAULT_PROP_MOD_CYCLE_TIME,
+            ...(running.capacitor ? { capacitor: running.capacitor } : {})
           }
         }
-      : {})
+      : {}),
+    math: stats.math,
+    ...(stats.defense ? { defense: stats.defense } : {}),
+    ...(stats.capacitor ? { capacitor: stats.capacitor } : {})
   };
 }
 
 /**
- * The numbers a ship flies now: its prop mod's mass, max velocity, signature radius and align time while the module
- * runs, else its own.
+ * The numbers a ship flies now: its prop mod's mass, max velocity, signature radius, align time and capacitor while the
+ * module runs, else its own.
  *
  * @param flight - The ship's flight.
  * @param running - Whether its prop mod runs.
@@ -261,7 +318,7 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
  */
 export function RunningFlight(flight: ShipFlight, running: boolean): ShipFlight {
   const propMod = running ? flight.propMod : null;
-  return propMod ? { ...flight, mass: propMod.mass, maxVelocity: propMod.maxVelocity, signatureRadius: propMod.signatureRadius, alignTime: propMod.alignTime } : flight;
+  return propMod ? { ...flight, mass: propMod.mass, maxVelocity: propMod.maxVelocity, signatureRadius: propMod.signatureRadius, alignTime: propMod.alignTime, ...(propMod.capacitor ? { capacitor: propMod.capacitor } : {}) } : flight;
 }
 
 /**
