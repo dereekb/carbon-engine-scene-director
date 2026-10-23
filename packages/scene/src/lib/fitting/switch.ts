@@ -27,8 +27,9 @@ export interface ModuleSwitch extends FleetSelection {
    */
   readonly target?: string;
   /**
-   * How slowly the pilots respond, 0 (at once, the default) to 1 (very delayed): each ship switches after its own
-   * pseudo-random time, up to `delay` × MAX_FLEET_ORDER_DELAY seconds (toPilotDelays), as switch_prop_mods does.
+   * How slowly the pilots respond, 0 (at once) to 1 (very delayed): each ship switches after its own pseudo-random
+   * time, up to `delay` × MAX_FLEET_ORDER_DELAY seconds (toPilotDelays), as switch_prop_mods does. Unset, each pilot answers after
+   * its reaction (ships[].pilot, or its personality fleet's draw), else at once.
    */
   readonly delay?: number;
 }
@@ -66,7 +67,7 @@ export function normalizeModuleSwitch(input: unknown, where = 'switch'): ModuleS
       modules: selectors,
       state: state as ModuleSwitchState,
       ...(typeof target === 'string' && target.trim() ? { target: target.trim() } : {}),
-      ...(typeof delay === 'number' && delay > 0 ? { delay } : {})
+      ...(typeof delay === 'number' ? { delay } : {})
     };
   }
   if (problems.length) throw new SceneError(problems);

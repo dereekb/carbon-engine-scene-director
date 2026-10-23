@@ -12,13 +12,17 @@
   templates, the 9 built-ins, the document's `personalities`, `fleets[].personality` and `ships[].pilot`
   (`sd-scene-document`); S4 (2026-10-23) the hub library: saved templates on disk, the five tools, and
   `personality` on `add_fleet_composition`, `stage_engagement` sides and `add_ships`' new fleet; **S5 (2026-10-23) the
-  pure policy** in `packages/scene` (below): picture, traits, succession, targeting, movement, `stepFleetBrain`. Nothing
-  on the page calls it yet.
-- **Not yet**: S6 pilot reactions in `toPilotDelays` and `order_fleet` `free-fire` (`pickFreeFireTarget` is ready),
-  S7 the brain running on the page (`fleet-commanders` builds the picture with `toFleetPicture`, draws traits, runs
-  succession and `stepFleetBrain`; get_state `fc`, manual levers; `set_fleet_personality` then re-arms them), S8
-  real-GPU evidence. **Today a fleet stores its personality and pilots their traits; nothing on the page acts on
-  them** (tools.ts and the MCP instructions say so; S6/S7 rewrite those phrases).
+  pure policy** in `packages/scene` (below): picture, traits, succession, targeting, movement, `stepFleetBrain`; **S6
+  (2026-10-23) reactions and free fire**: orders given without `delay` reach each pilot after its reaction (its
+  `pilot.reaction`, else its personality fleet's draw: `Director.ReactionOf` over `toFleetPilotTraits`; `sd-fleets`
+  doc `orders`), and `order_fleet { type: "free-fire", on }` (`FleetCommanders` free fire, `FleetTargets` free picks
+  with `pickFreeFireTarget`; `sd-fleets` doc `targets`). `Director.ShipReach` / `FreeFireView` are ready for S7's
+  picture port.
+- **Not yet**: S7 the brain running on the page (`fleet-commanders` builds the picture with `toFleetPicture`, draws
+  command traits, runs succession and `stepFleetBrain`; get_state `fc` and `pilot`, manual levers;
+  `set_fleet_personality` then re-arms them), S8 real-GPU evidence. **Today a fleet's personality only times its
+  pilots' reactions; no FC brain runs** (tools.ts `set_fleet_personality`, the scene format's `personality` line and the
+  MCP instructions say so; S7 rewrites those phrases). The free-fire verify-page check has not run on tools-core.
 
 ## Files
 

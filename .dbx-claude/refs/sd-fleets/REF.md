@@ -25,7 +25,7 @@
 | `fleets/group.ts` | `FleetGroup`, `toFleetGroupKey`, `describeFleetGroup` (shared by `orders.ts` and `targets.ts`; `orders.ts` re-exports them) |
 | `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
 | `apps/viewer/src/lib/fleet-succession.ts` | the heir of a dead FC flies on with its order (`CaptureFleetHeirs`, `HeirOrderOf`, `InheritFleetOrders`; node-tested) |
-| `apps/viewer/src/lib/fleet-commanders.ts` | `FleetCommanders`: the live call book order_fleet's targets order edits, spliced over the document by `toLiveFleetScene` (node-tested; sub-doc `targets`) |
+| `apps/viewer/src/lib/fleet-commanders.ts` | `FleetCommanders`: the live call book order_fleet's targets order edits, spliced over the document by `toLiveFleetScene`, and each group's free fire (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-targets.ts` | `FleetTargets`: the targeting lever: members lock, pre-lock and shoot their groups' called primaries (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
 | `apps/viewer/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
@@ -185,8 +185,9 @@ its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop`
 rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
 Called targets (sub-doc `targets`): a fleet, wing or squad that calls reports `targets` (its live list) and `called` (`primary`,
-`queue`, `skipped` with why, `following`); a member reports `target.source` (`own` | `called`) and `call` (`state`:
-following, holding, stood-down, own-target, responding, in-warp, no-primary or logi; `group`, `primary`, `respondsIn`).
+`queue`, `skipped` with why, `following`); a member reports `target.source` (`own` | `called` | `free`) and `call` (`state`:
+following, holding, stood-down, own-target, responding, in-warp, free-fire, no-primary or logi; `group`, `primary`,
+`respondsIn`, `free`, `picksIn`); a group with free fire on reports `freeFire: true`.
 Logi auto-repair (`sd-logi`): a member with remote repairers or with auto-repair on reports `autoRepair` (`state`,
 `on`, `policy` and their `source`s, `target`, `reason`, `why`, `hps`, `preLocks`, `unreachable`); a fleet with remote
 repairers reports `autoRepair` (`logi`, `repairing`, `locking`, `idle`, `outOfRange`, `manual`, `off`, and `targets`:
@@ -203,7 +204,9 @@ drop | next | clear } }` edits the group's **live** list at once, never the docu
 squad); removing a called ship or object prunes it from both; a kill never edits either. Each member takes the nearest call in its chain (squad, wing, fleet; the FC the
 fleet's only, logi their own squad's only): every member without its own target locks it, pre-locks the next two and
 fires, moving on at the boundary after the primary dies, warps off or is removed. Own targets (set_target, engage,
-switch_modules) win; cease_fire holds (unlock stands down) until the group calls again. Status: delivered (real-GPU
+switch_modules) win; cease_fire holds (unlock stands down) until the group calls again. `order_fleet { type:
+"free-fire", on }` lets members with no call pick the nearest hostile in their own reach (sub-doc `targets`). Orders
+without `delay` reach each pilot after its reaction (sub-doc `orders`). Status: delivered (real-GPU
 evidence 2026-10-23: the guns re-converge on the next primary 1 tick after the kill).
 
 ## Arriving fleets (`warpIn`)

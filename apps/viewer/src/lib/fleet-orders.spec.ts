@@ -52,7 +52,11 @@ class Rig {
   readonly world = new DestinyWorld();
   readonly commanders = new FleetCommanders();
   readonly following = new FleetFollowing({ world: this.world, scene: () => this.Live(), radiusOf: (id) => FLIGHTS.get(id)?.radius ?? null });
-  readonly orders = new FleetOrders({ world: this.world, following: this.following, scene: () => this.Live() });
+  /**
+   * Each pilot's reaction (Director.ReactionOf); empty: everyone answers at once.
+   */
+  readonly reactions = new Map<string, number>();
+  readonly orders = new FleetOrders({ world: this.world, following: this.following, scene: () => this.Live(), reactionOf: (id) => this.reactions.get(id) });
   now = CLOCK_EPOCH_TICKS;
   private live: Maybe<{ readonly scene: SceneDocument; readonly version: number; readonly view: SceneDocument }> = null;
 
@@ -305,6 +309,16 @@ describe('FleetOrders', () => {
     rig.Until(() => rig.Phase('fc') === 'landed', 120);
     rig.Until(() => rig.InFormation(MEMBERS), 90);
     rig.Until(() => rig.Command('fleet', 'f').state === 'idle', 60);
+  });
+
+  it("times a move given without a delay by the pilots' reactions; delay 0 and a fleet warp never wait on them", () => {
+    const rig = new Rig();
+    for (const id of MEMBERS) rig.reactions.set(id, 0);
+    const moved = rig.Order({ fleet: 'f', order: { type: 'stop' } });
+    expect(moved.delays?.['fc']).toBe(0);
+    for (const id of MEMBERS) expect(moved.delays?.[id], id).toBeGreaterThanOrEqual(5);
+    expect(rig.Order({ fleet: 'f', delay: 0, order: { type: 'stop' } }).delays).toBeUndefined();
+    expect(rig.Order({ fleet: 'f', order: WARP }).delays).toBeUndefined();
   });
 
   it('records document orders: break-off sets the home, regroup restores it', () => {

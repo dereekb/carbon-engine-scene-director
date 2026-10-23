@@ -15,6 +15,8 @@
  * - anchor and break-off are document edits the director applies; here they only record the order.
  * - delay (0 to 1): each pilot but the giver responds after its own time (toPilotDelays): the leader's order and each
  *   ship's formation warp wait that many ticks, and a formation warp also waits for its leader's order to apply.
+ *   Without a delay a move waits on the pilots' reactions (options.reactionOf); warps and regroups never do (a fleet
+ *   warp is simultaneous).
  *
  * Node-tested: it imports the world's and FleetFollowing's types only.
  */
@@ -48,6 +50,10 @@ export interface FleetOrdersOptions {
   readonly world: DestinyWorld;
   readonly following: FleetFollowing;
   readonly scene: () => Maybe<SceneDocument>;
+  /**
+   * A pilot's reaction (0..1) for an order given without a delay; absent or null: it answers at once.
+   */
+  readonly reactionOf?: (ship: string) => Maybe<number>;
 }
 
 /**
@@ -114,6 +120,7 @@ export class FleetOrders {
   private readonly world: DestinyWorld;
   private readonly following: FleetFollowing;
   private readonly scene: () => Maybe<SceneDocument>;
+  private readonly reactionOf?: (ship: string) => Maybe<number>;
   private readonly last = new Map<string, LastRecord>();
   private readonly warps = new Map<string, WarpRecord>();
   private readonly regroups = new Map<string, readonly string[]>();
@@ -121,6 +128,7 @@ export class FleetOrders {
   constructor(options: FleetOrdersOptions) {
     this.world = options.world;
     this.following = options.following;
+    this.reactionOf = options.reactionOf;
     this.scene = options.scene;
     this.world.OnWarp((event) => {
       if (event.kind !== 'exit') return;
@@ -156,13 +164,15 @@ export class FleetOrders {
     const order = request.order;
     const key = toFleetGroupKey(group);
     const tick = options.tick ?? this.world.tick;
-    const delays = toPilotDelays({ key, tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer });
+    const simultaneous = order.type === 'warp' || order.type === 'regroup';
+    const delays = toPilotDelays({ key, tick, delay: request.delay, ships: resolved.ships, issuer: resolved.issuer, reactionOf: simultaneous ? undefined : this.reactionOf });
     let result: FleetOrderResult;
     if (order.type === 'warp') result = this.Warp(resolved, order, delays);
     else if (order.type === 'regroup') result = this.Regroup(resolved, delays);
-    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
+    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets' || order.type === 'free-fire') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
     else result = this.Move(resolved, order, delays);
-    if (request.delay && order.type !== 'anchor' && order.type !== 'break-off') result = { ...result, delays: Object.fromEntries(delays) };
+    const waits = (request.delay ?? 0) > 0 || [...delays.values()].some((delay) => delay > 0);
+    if (waits && order.type !== 'anchor' && order.type !== 'break-off') result = { ...result, delays: Object.fromEntries(delays) };
     this.last.set(key, { order, by: resolved.issuer, tick: result.tick });
     return result;
   }

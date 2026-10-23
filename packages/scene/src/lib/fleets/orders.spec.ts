@@ -5,7 +5,7 @@ import { applySceneOperations, normalizeScene, type SceneDocument } from '../sce
 import { catchSceneError, makeFleetScene, TFI_FLEET_SCENE } from './fleets.spec-helper';
 import { toFleetMemberships } from './membership';
 import { CELESTIAL_TARGET_REFUSAL } from '../weapons/target';
-import { DEFAULT_BREAK_OFF_RANGE, FLEET_ORDER_TYPES, FLEET_STRUCTURE_ORDER_TYPES, isFleetDocumentOrder, isFleetStructureOrder, MAX_FLEET_ORDER_DELAY, normalizeFleetOrderRequest, toPilotDelays, resolveFleetOrderRequest, toFleetGroupKey, toFleetOrderOperations } from './orders';
+import { DEFAULT_BREAK_OFF_RANGE, FLEET_ORDER_TYPES, FLEET_STRUCTURE_ORDER_TYPES, isFleetDocumentOrder, isFleetFreeFireOrder, isFleetShipOrder, isFleetStructureOrder, MAX_FLEET_ORDER_DELAY, normalizeFleetOrderRequest, toPilotDelays, resolveFleetOrderRequest, toFleetGroupKey, toFleetOrderOperations } from './orders';
 import { FLEET_TARGETS_ACTIONS, MAX_CALLED_TARGETS } from './targets';
 
 /**
@@ -53,7 +53,7 @@ const WARP = { type: 'warp', point: [0, 0, 400000] } as const;
 
 describe('normalizeFleetOrderRequest', () => {
   it('lists the ship orders, then the document orders', () => {
-    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets']);
+    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets', 'free-fire']);
   });
 
   it('round-trips every order type with its defaults filled', () => {
@@ -241,9 +241,9 @@ describe('toFleetOrderOperations', () => {
 });
 
 describe('pilot delays', () => {
-  it('takes a delay in [0, 1], dropping 0', () => {
+  it('takes a delay in [0, 1], keeping an explicit 0', () => {
     expect(normalize({ fleet: 'f', delay: 0.5, order: STOP })).toEqual({ fleet: 'f', delay: 0.5, order: STOP });
-    expect(normalize({ fleet: 'f', delay: 0, order: STOP })).toEqual({ fleet: 'f', order: STOP });
+    expect(normalize({ fleet: 'f', delay: 0, order: STOP })).toEqual({ fleet: 'f', delay: 0, order: STOP });
     for (const delay of [-0.1, 1.5, 'slow']) expect(problemsOf({ fleet: 'f', delay, order: STOP })).toEqual([`order_fleet.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to ${MAX_FLEET_ORDER_DELAY} s)`]);
   });
 
@@ -263,6 +263,30 @@ describe('pilot delays', () => {
     expect(toPilotDelays({ ...input, tick: 1235 })).not.toEqual(delays);
     for (const value of toPilotDelays({ ...input, delay: 0.3 }).values()) expect(value).toBeLessThanOrEqual(3);
     for (const value of toPilotDelays({ ...input, delay: 0 }).values()) expect(value).toBe(0);
+  });
+
+  it("answers after each pilot's reaction when no delay is given; an explicit delay wins", () => {
+    const ships = Array.from({ length: 40 }, (_, index) => `s${index}`);
+    const reactions = new Map<string, number>(ships.map((ship, index) => [ship, index % 4 === 0 ? 1 : index % 4 === 1 ? 0 : 0.5]));
+    reactions.delete('s3');
+    const input = { key: 'f', tick: 77, ships, issuer: 's1', reactionOf: (ship: string) => reactions.get(ship) };
+    const delays = toPilotDelays(input);
+    expect(delays.get('s1')).toBe(0);
+    expect(delays.get('s3')).toBe(0);
+    for (const [ship, value] of delays) {
+      const reaction = reactions.get(ship);
+      expect(Number.isInteger(value)).toBe(true);
+      if (ship === 's1' || reaction == null || reaction === 1) expect(value, ship).toBe(0);
+      else if (reaction === 0) expect(value, ship).toBeGreaterThanOrEqual(5);
+      else {
+        expect(value, ship).toBeGreaterThanOrEqual(2);
+        expect(value, ship).toBeLessThanOrEqual(5);
+      }
+    }
+    expect(toPilotDelays(input)).toEqual(delays);
+    expect([...toPilotDelays({ ...input, delay: 0 }).values()].every((value) => value === 0)).toBe(true);
+    expect(toPilotDelays({ ...input, delay: 1 })).toEqual(toPilotDelays({ key: 'f', tick: 77, delay: 1, ships, issuer: 's1' }));
+    expect([...toPilotDelays({ ...input, reactionOf: undefined }).values()].every((value) => value === 0)).toBe(true);
   });
 
   it('spreads ids that differ only in their last character (composition ids)', () => {
@@ -303,6 +327,20 @@ describe('targets orders', () => {
     expect(problemsOf({ fleet: 'f', order: TARGETS({ queue: [] }) })).toEqual(['order_fleet.order.queue must be a non-empty array of ship or object ids']);
     expect(problemsOf({ fleet: 'f', order: TARGETS({ set: ['gfc', 'gfc'] }) })).toEqual(['order_fleet.order.set[1] "gfc" is named more than once']);
     expect(problemsOf({ fleet: 'f', order: TARGETS({ drop: 'gfc' }) })).toEqual(['order_fleet.order.drop must be a non-empty array of ship or object ids']);
+  });
+
+  it('reads free fire: on is a boolean, nothing else', () => {
+    const order = normalize({ fleet: 'f', squad: 'dps', order: { type: 'free-fire', on: true } }).order;
+    expect(order).toEqual({ type: 'free-fire', on: true });
+    expect(isFleetFreeFireOrder(order)).toBe(true);
+    expect(isFleetDocumentOrder(order)).toBe(false);
+    expect(isFleetShipOrder(order)).toBe(false);
+    expect(isFleetShipOrder(normalize({ fleet: 'f', order: STOP }).order)).toBe(true);
+    expect(normalize({ fleet: 'f', order: { type: 'free-fire', on: false } }).order).toEqual({ type: 'free-fire', on: false });
+    expect(problemsOf({ fleet: 'f', order: { type: 'free-fire' } })).toEqual(['order_fleet.order.on must be true (each member without a call picks its own target) or false (free fire ends)']);
+    expect(problemsOf({ fleet: 'f', order: { type: 'free-fire', on: 'yes', range: 5 } })).toEqual(['order_fleet.order.range is not a free-fire order field', 'order_fleet.order.on must be true (each member without a call picks its own target) or false (free fire ends)']);
+    expect(resolve({ fleet: 'f', squad: 'dps', order: { type: 'free-fire', on: true } })).toMatchObject({ issuer: 'a1', ships: ['a1', 'a2', 'a3'] });
+    expect(toFleetOrderOperations(TWO_WINGS(), resolve({ fleet: 'f', order: { type: 'free-fire', on: true } }))).toEqual([]);
   });
 
   it('is a document order, not a structure order', () => {

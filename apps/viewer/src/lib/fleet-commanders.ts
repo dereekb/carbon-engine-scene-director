@@ -1,14 +1,15 @@
 /**
- * The page's fleet command state: the live call book. order_fleet's targets order edits a group's live list here at
- * once, as moves and warps fly at once, and never writes the document: the document's `targets` are the opening calls a
- * load starts with, so a reload replays the same fight.
+ * The page's fleet command state: the live call book and free fire. order_fleet's targets order edits a group's live
+ * list here at once, as moves and warps fly at once, and never writes the document: the document's `targets` are the
+ * opening calls a load starts with, so a reload replays the same fight. Its free-fire order turns a group's free fire on
+ * or off here (FleetTargets picks the targets); the document has no free fire, so a load ends it.
  *
  * - The book overlays the document (Overlay → toLiveFleetScene), so FleetTargets, FleetFollowing, FleetOrders and
  *   get_state read the live calls with no change of their own. `[]` shadows the document's list: the group calls
  *   nothing.
  * - A load clears it (Clear). A patch (AfterEdit) drops a group's live call when the group is gone or the patch edited
  *   its document list (beyond pruning a removed id), and prunes removed ships and objects from the live lists, with
- *   remove_ship's warning.
+ *   remove_ship's warning; a group gone also ends its free fire.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
@@ -57,11 +58,15 @@ export class FleetCommanders {
    * The live calls by group key (toFleetGroupKey).
    */
   private readonly calls = new Map<string, LiveCall>();
+  /**
+   * The groups with free fire on, by group key.
+   */
+  private readonly freeFire = new Map<string, FleetGroup>();
   private overlay: LiveFleetOverlay = {};
   private changes = 0;
 
   /**
-   * Bumped on every change, so a memo of the live view keys on it.
+   * Bumped on every change to the calls, so a memo of the live view keys on it (free fire is not in the view).
    */
   get version(): number {
     return this.changes;
@@ -92,6 +97,37 @@ export class FleetCommanders {
   }
 
   /**
+   * Turns a group's free fire on or off.
+   *
+   * @param group - The fleet, wing or squad.
+   * @param on - Whether its members without a call pick their own targets.
+   */
+  SetFreeFire(group: FleetGroup, on: boolean): void {
+    const key = toFleetGroupKey(group);
+    if (on) this.freeFire.set(key, group);
+    else this.freeFire.delete(key);
+  }
+
+  /**
+   * Whether a group has free fire on.
+   *
+   * @param group - The fleet, wing or squad.
+   * @returns True when it is on.
+   */
+  FreeFireOf(group: FleetGroup): boolean {
+    return this.freeFire.has(toFleetGroupKey(group));
+  }
+
+  /**
+   * The groups with free fire on, for FleetTargets.Sync.
+   *
+   * @returns Their group keys.
+   */
+  FreeFireKeys(): ReadonlySet<string> {
+    return new Set(this.freeFire.keys());
+  }
+
+  /**
    * Brings the book in line with a patched document: a group gone or whose document list the patch edited drops its
    * live call (the document's new list stands), and ids no longer in the scene leave the live lists.
    *
@@ -101,6 +137,7 @@ export class FleetCommanders {
    */
   AfterEdit(before: Pick<SceneDocument, 'fleets'>, after: Pick<SceneDocument, 'ships' | 'objects' | 'fleets'>): string[] {
     const warnings: string[] = [];
+    for (const [key, group] of [...this.freeFire]) if (!hasGroup(after, group)) this.freeFire.delete(key);
     if (!this.calls.size) return warnings;
     const ids = new Set([...after.ships.map((doc) => doc.id), ...(after.objects ?? []).map((doc) => doc.id)]);
     let changed = false;
@@ -137,9 +174,10 @@ export class FleetCommanders {
   }
 
   /**
-   * Forgets every live call (a load: the document's calls open the fight again).
+   * Forgets every live call and free fire (a load: the document's calls open the fight again).
    */
   Clear(): void {
+    this.freeFire.clear();
     if (!this.calls.size) return;
     this.calls.clear();
     this.Changed();

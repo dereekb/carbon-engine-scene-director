@@ -6,7 +6,7 @@ describe('normalizeModuleSwitch', () => {
   it('reads the selectors, the state, a target, a delay and the selection', () => {
     expect(normalizeModuleSwitch({ fleet: 'tfis', squad: 'logi', modules: ['remote-armor-repairer'], state: 'active', target: ' tfis-fc ' })).toEqual({ fleet: 'tfis', squad: 'logi', modules: ['remote-armor-repairer'], state: 'active', target: 'tfis-fc' });
     expect(normalizeModuleSwitch({ ships: ['a'], modules: [' mid-2 ', 'Damage Control II'], state: 'offline', delay: 0.5 })).toEqual({ ships: ['a'], modules: ['mid-2', 'Damage Control II'], state: 'offline', delay: 0.5 });
-    expect(normalizeModuleSwitch({ ships: ['a'], modules: ['all'], state: 'online', delay: 0 })).toEqual({ ships: ['a'], modules: ['all'], state: 'online' });
+    expect(normalizeModuleSwitch({ ships: ['a'], modules: ['all'], state: 'online', delay: 0 })).toEqual({ ships: ['a'], modules: ['all'], state: 'online', delay: 0 });
   });
 
   it('requires selectors, a known state and exactly one of ships and fleet', () => {

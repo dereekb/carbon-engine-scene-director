@@ -1,8 +1,9 @@
 /**
  * Fleet orders: what the order_fleet tool takes (one plain object, which a timeline beat will embed unchanged), who
  * may give it (EVE's rule: the FC orders the fleet, a wing commander only their wing, a squad commander only their
- * squad), which ship the group flies on (its leader), and the document ops its anchor, break-off, regroup and targets
- * orders compile to. The page flies the rest (the viewer's FleetOrders and FleetTargets).
+ * squad), which ship the group flies on (its leader), the document ops its anchor, break-off, regroup and targets
+ * orders compile to, and each pilot's response time. The page flies the rest (the viewer's FleetOrders and
+ * FleetTargets) and keeps free fire live (FleetCommanders).
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -26,10 +27,10 @@ export type FleetStructureOrderType = (typeof FLEET_STRUCTURE_ORDER_TYPES)[numbe
 
 /**
  * What a fleet, wing or squad can be ordered: order_ship's movement orders and warp, then the document orders (the
- * anchor orders, then the called targets). Written out rather than spread from SHIP_ORDER_TYPES: `../orders` and this
- * module import each other through `../scene`.
+ * anchor orders, then the called targets), then free fire. Written out rather than spread from SHIP_ORDER_TYPES:
+ * `../orders` and this module import each other through `../scene`.
  */
-export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets'] as const;
+export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets', 'free-fire'] as const;
 
 export type FleetOrderType = (typeof FLEET_ORDER_TYPES)[number];
 
@@ -39,7 +40,7 @@ export type FleetOrderType = (typeof FLEET_ORDER_TYPES)[number];
 export const DEFAULT_BREAK_OFF_RANGE = DEFAULT_ANCHOR_RANGES.logi;
 
 /**
- * Seconds the slowest pilot takes to respond to a fleet order given with `delay` 1.
+ * Seconds the slowest pilot takes to respond to a fleet order given with `delay` 1, or to any order with reaction 0.
  */
 export const MAX_FLEET_ORDER_DELAY = 10;
 
@@ -85,9 +86,20 @@ export type FleetStructureOrder = FleetAnchorOrder | FleetBreakOffOrder | FleetR
 export type FleetDocumentOrder = FleetStructureOrder | FleetTargetsOrder;
 
 /**
- * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, or a document order.
+ * Free fire for a fleet, wing or squad (`on`), or its end: each member with no call to take (not logi, no own target,
+ * not stood down) picks the nearest hostile within its own reach after its reaction, and picks again the same way when
+ * that target is gone; a call wins once there is one. Live, like a targets order: the page keeps it (FleetCommanders),
+ * never the document.
  */
-export type FleetOrder = ShipOrder | FleetDocumentOrder;
+export interface FleetFreeFireOrder {
+  readonly type: 'free-fire';
+  readonly on: boolean;
+}
+
+/**
+ * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, a document order, or free fire.
+ */
+export type FleetOrder = ShipOrder | FleetDocumentOrder | FleetFreeFireOrder;
 
 /**
  * What order_fleet takes: one plain object, which a timeline beat will embed unchanged.
@@ -101,8 +113,9 @@ export interface FleetOrderRequest {
    */
   readonly by?: string;
   /**
-   * How slowly the pilots respond, 0 (at once, the default) to 1 (very delayed): each ship but the giver takes its own
-   * pseudo-random time, up to `delay` × MAX_FLEET_ORDER_DELAY seconds (toPilotDelays).
+   * How slowly the pilots respond, 0 (at once) to 1 (very delayed): each ship but the giver takes its own pseudo-random
+   * time, up to `delay` × MAX_FLEET_ORDER_DELAY seconds (toPilotDelays). Unset, each pilot answers after its reaction
+   * (ships[].pilot, or its personality fleet's draw), else at once.
    */
   readonly delay?: number;
   readonly order: FleetOrder;
@@ -160,6 +173,26 @@ export function isFleetDocumentOrder(order: FleetOrder): order is FleetDocumentO
 }
 
 /**
+ * Whether a fleet order turns free fire on or off.
+ *
+ * @param order - A normalized fleet order.
+ * @returns True for free-fire.
+ */
+export function isFleetFreeFireOrder(order: FleetOrder): order is FleetFreeFireOrder {
+  return order.type === 'free-fire';
+}
+
+/**
+ * Whether a fleet order flies the group: order_ship's movement orders and warp.
+ *
+ * @param order - A normalized fleet order.
+ * @returns False for the document orders and free fire.
+ */
+export function isFleetShipOrder(order: FleetOrder): order is ShipOrder {
+  return !isFleetDocumentOrder(order) && !isFleetFreeFireOrder(order);
+}
+
+/**
  * Validates what order_fleet takes: `fleet` (required), `wing` or `squad` narrowing it, `by`, and `order`, a movement
  * or warp order (normalizeShipOrder's rules) or a document order. Unknown keys are problems.
  *
@@ -191,7 +224,7 @@ export function normalizeFleetOrderRequest(input: unknown, context: FleetOrderRe
         ...(selection.wing ? { wing: selection.wing } : {}),
         ...(selection.squad ? { squad: selection.squad } : {}),
         ...(typeof by === 'string' ? { by } : {}),
-        ...(typeof delay === 'number' && delay > 0 ? { delay } : {}),
+        ...(typeof delay === 'number' ? { delay } : {}),
         order
       };
     }
@@ -216,6 +249,7 @@ function readFleetOrder(input: unknown, context: ReadOrderContext, problems: str
   // Read at call time, not at load: see FLEET_ORDER_TYPES.
   else if ((SHIP_ORDER_TYPES as readonly string[]).includes(type)) order = readShipOrder(input, context, problems);
   else if (type === 'targets') order = readFleetTargetsOrder(input, context, problems);
+  else if (type === 'free-fire') order = readFreeFireOrder(input, where, problems);
   else order = readStructureOrder(input, type as FleetStructureOrderType, context, problems);
   return order;
 }
@@ -229,6 +263,14 @@ function readShipOrder(input: JsonObject, context: ReadOrderContext, problems: s
     problems.push(...error.problems);
   }
   return order;
+}
+
+function readFreeFireOrder(input: JsonObject, where: string, problems: string[]): Maybe<FleetFreeFireOrder> {
+  const before = problems.length;
+  for (const key of Object.keys(input)) if (key !== 'type' && key !== 'on') problems.push(`${where}.${key} is not a free-fire order field`);
+  const on = input['on'];
+  if (typeof on !== 'boolean') problems.push(`${where}.on must be true (each member without a call picks its own target) or false (free fire ends)`);
+  return problems.length > before ? null : { type: 'free-fire', on: on === true };
 }
 
 const STRUCTURE_KEYS: Readonly<Record<FleetStructureOrderType, ReadonlySet<string>>> = {
@@ -375,7 +417,7 @@ export function resolveFleetOrderRequest(scene: Pick<SceneDocument, 'ships' | 'f
   else if (group.kind === 'wing' && wing) leader = wingLeader({ wing, fc, issuer: inGroup.has(issuer) ? issuer : null, inGroup });
 
   const order = request.order;
-  const target = isFleetDocumentOrder(order) ? null : shipOrderTarget(order);
+  const target = isFleetShipOrder(order) ? shipOrderTarget(order) : null;
   if (target && inGroup.has(target)) throw new SceneError([`${where}.order.target: ${describeFleetGroup(group)} cannot target one of its own ships ("${target}")`]);
   if (isFleetTargetsOrder(order)) {
     const own = new Set(selected.ships);
@@ -569,9 +611,9 @@ export interface PilotDelaysInput {
    */
   readonly tick: number;
   /**
-   * The request's delay, 0 to 1.
+   * The request's delay, 0 to 1. Given, it wins over every reaction (0: all at once).
    */
-  readonly delay: number;
+  readonly delay?: Maybe<number>;
   /**
    * The ships that respond.
    */
@@ -580,20 +622,36 @@ export interface PilotDelaysInput {
    * The ship giving the order: it responds at once.
    */
   readonly issuer: string;
+  /**
+   * A ship's reaction, 0..1 (higher is faster: ships[].pilot, or its personality fleet's draw), for an order given with
+   * no delay; null answers at once. Warps and regroups pass none: a fleet warp is simultaneous.
+   */
+  readonly reactionOf?: (ship: string) => Maybe<number>;
 }
 
 /**
- * Each pilot's response time to a fleet order, in whole seconds (Destiny ticks): uniform in [0, delay ×
- * MAX_FLEET_ORDER_DELAY], drawn from a hash of the group key, the tick and the ship id, so the same order at the same
- * tick (a timeline replay) responds the same way. The giver responds at once.
+ * Each pilot's response time to a fleet order, in whole seconds (Destiny ticks), from a hash of the group key, the tick
+ * and the ship id (`u`, in [0, 1)), so the same order at the same tick (a timeline replay) responds the same way. The
+ * giver responds at once.
  *
- * @param input - The seed, the delay, the ships and the giver.
+ * - With a delay: uniform, `round(delay × MAX_FLEET_ORDER_DELAY × u)`.
+ * - Without one, from the ship's reaction `r`: `round((1 − r) × MAX_FLEET_ORDER_DELAY × (0.5 + 0.5u))`, so reaction 1
+ *   answers at once and 0 within 5 to 10 s. A ship with no reaction answers at once.
+ *
+ * @param input - The seed, the delay or the reactions, the ships and the giver.
  * @returns Seconds per ship, in `ships` order; all 0 for a delay of 0.
  */
 export function toPilotDelays(input: PilotDelaysInput): Map<string, number> {
-  const { key, tick, delay, ships, issuer } = input;
-  const most = Math.max(0, Math.min(1, delay)) * MAX_FLEET_ORDER_DELAY;
-  return new Map(ships.map((ship) => [ship, ship === issuer || most === 0 ? 0 : Math.round(most * unitHash(`${key}|${tick}|${ship}`))]));
+  const { key, tick, delay, ships, issuer, reactionOf } = input;
+  const most = delay == null ? 0 : Math.max(0, Math.min(1, delay)) * MAX_FLEET_ORDER_DELAY;
+  const delayOf = (ship: string): number => {
+    const reaction = delay == null && ship !== issuer ? reactionOf?.(ship) : null;
+    let seconds = 0;
+    if (ship !== issuer && most > 0) seconds = Math.round(most * unitHash(`${key}|${tick}|${ship}`));
+    else if (reaction != null) seconds = Math.round((1 - Math.max(0, Math.min(1, reaction))) * MAX_FLEET_ORDER_DELAY * (0.5 + 0.5 * unitHash(`${key}|${tick}|${ship}`)));
+    return seconds;
+  };
+  return new Map(ships.map((ship) => [ship, delayOf(ship)]));
 }
 
 /**

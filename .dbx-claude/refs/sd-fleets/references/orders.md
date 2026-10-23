@@ -113,13 +113,27 @@ follow-the-FC). An FC giving a wing or squad warp does not warp itself.
 - **`regroup`'s live half**: every ship of the group apart or detached rejoins its fleet formation, and those 150 km or
   more from their slot warp to it in formation with the FC (against the FC's landing if it is warping).
 
-## Pilot delay
+## Pilot delay and reactions
 
-`delay` (0–1) on `order_fleet` and `switch_prop_mods`: every ship but the giver responds after its own time,
-`toPilotDelays`: uniform in [0, delay × `MAX_FLEET_ORDER_DELAY` (10 s)] in whole ticks, from an FNV-1a hash of the
-group key, the tick and the ship id, so the same order at the same tick responds the same way. The tick is the world's
-absolute tick, which keeps counting across loads: keying it on scene ticks (so a timeline replay draws the same delays)
-is the timeline's T3.
+`delay` (0–1) on `order_fleet`, `switch_prop_mods` and `switch_modules`: every ship but the giver responds after its own
+time, `toPilotDelays`: uniform in [0, delay × `MAX_FLEET_ORDER_DELAY` (10 s)] in whole ticks, from an FNV-1a hash of the
+group key, the tick and the ship id (`u`), so the same order at the same tick responds the same way. The tick is the
+world's absolute tick, which keeps counting across loads: keying it on scene ticks (so a timeline replay draws the same
+delays, and the same reactions) is the timeline's T3.
+
+- **Reactions** (S6 of the fleet-personalities plan): an order **without** `delay` reaches each pilot after its reaction
+  `r` (`reactionOf`): `round((1 − r) × 10 s × (0.5 + 0.5u))`, so reaction 1 answers at once and 0 in 5–10 s. A pilot
+  with no reaction answers at once (ships outside personality fleets with no authored trait behave as before).
+  `Director.ReactionOf`: the ship's `pilot.reaction`, else its personality fleet's seeded draw (`toFleetPilotTraits`,
+  `sd-personalities`), memoized per document (`PilotReactions`).
+- **An explicit delay wins**, `delay: 0` included: the normalizers now keep `delay: 0` (before, 0 was dropped), so a
+  model saying "at once" gets it whatever the reactions.
+- **Warps and regroups never take reactions** (EVE's fleet warp is simultaneous): `FleetOrders.Fly` passes no
+  `reactionOf` for them; their explicit `delay` still staggers. Moving on after a kill stays instant (pre-locks).
+- Where reactions apply: order_fleet moves (only the leader's delay matters: the rest follow; the FC giving a fleet
+  move is the issuer), targets and free-fire orders (`FleetTargets.Respond` / `FreeFire`), switch_prop_mods and
+  switch_modules (also on `ships` selections), and a free-firer's re-pick (`FleetTargetsPort.FreeFireDelay`).
+- The result's `delays` appears when any pilot waits (or a delay was given).
 
 - `DestinyWorld.Order(id, order, { delay })` keeps the pending order until its boundary (`pendingAt`);
   `WarpInFormation` and `SwitchPropMod` take the same delay (a queued switch is re-checked when made; the document's

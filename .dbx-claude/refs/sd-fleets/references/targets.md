@@ -6,7 +6,9 @@ What a fleet, wing or squad shoots at, called the way an EVE FC calls it. Code: 
 page lever `apps/viewer/src/lib/fleet-targets.ts` (`FleetTargets`, node-tested) and its Director wiring. Plan: `~/.claude/plans/fleet-targeting-lever-called-primaries-and-a-target-queue-per-fleet-wing-or-squa.md`.
 
 **Status: delivered** (the document, the order, the call rules; the page lever: members lock, pre-lock and shoot the
-call, own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary`; the real-GPU look, below).
+call, own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary`; the real-GPU look, below). **Free
+fire** (2026-10-23, S6 of the fleet-personalities plan; below) is node-tested, its verify-page check not yet run on
+tools-core.
 
 ## The document: `targets` on fleets, wings and squads
 
@@ -124,12 +126,50 @@ Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`):
 - Ships in no fleet take no calls. Members flying apart or detached still take calls: targeting is independent of
   formation.
 
+## Free fire: `order_fleet { order: { type: "free-fire", on } }`
+
+A fleet, wing or squad lets its members pick their own targets (EVE's "free fire"), live like a call: the page keeps it
+(`FleetCommanders.SetFreeFire` / `FreeFireOf` / `FreeFireKeys`; not in the overlay, so `version` does not bump; a load
+or the group's removal ends it), never the document. `readFreeFireOrder`: `on` must be a boolean, no other keys;
+`isFleetFreeFireOrder`, `isFleetShipOrder` (moves and warps only); `toFleetOrderOperations` gives none.
+
+- **Who**: a member whose chain (`plan.chain`: squad, wing, fleet; the FC the fleet's only) has free fire on, **not
+  logi**, with no own target, not stood down, and **no primary to take**. Precedence: own > called > free; a call
+  takes over at once (no reaction: pre-lock rules), and when it runs out the member picks again after its reaction.
+- **The pick** (`FleetTargets.FreePick`, `pickFreeFireTarget`): the nearest hostile within the ship's own reach (ties:
+  id) from the port's `FreeFireView(ship)`: `Director.FreeFireView` lists ships of **another team** (both teamed; no
+  team, no hostiles) not destroyed, dead, in warp or arriving, by `world.SurfaceDistance`, and reach
+  `toFleetTargetingReach('falloff', ShipReach(id))`: its weapons' longest optimal + falloff (a launcher's mean missile
+  range), capped at its lock range (`Director.ShipReach`, reused by S7's picture). A pick is kept while its status is
+  `live` and it stays in that reach; else it is dropped at once and the next pick waits `FreeFireDelay(ship, tick)`
+  ticks (`toPilotDelays` with the pilot's reaction, key `free-fire`), recorded in `picksAt`. Nothing in reach at due:
+  it picks as soon as something is.
+- **The order** (`Director.FreeFireOrder`, synchronous, routed before targets in `OrderFleet`; `boundary` option for
+  S7's brain): `SetFreeFire`, then on `on` `FleetTargets.FreeFire(ships, PilotDelays(...), tick)` (Respond's semantics:
+  a delayed pilot keeps what it shoots and any hold until due; its first pick is due at that tick, not after a second
+  reaction), `SyncFleetTargets()`, `Fly` (records `command.last`). Returns order_fleet's fields plus `freeFire` and
+  `ships: [{ id, target, source?, respondsIn? }]`. Off clears every free pick at the next sync.
+- **cease_fire**: `hold` keeps a free pick unarmed (`Armed()` skips held ships), `stand-down` clears it; an armed
+  free-firer counts as engaged. **set_target null** on a free-firer is skipped: `it has no own target: it free-fires on
+  "r1" under fleet "b"'s free fire (cease_fire holds its fire; order_fleet free-fire off ends it)`.
+- **get_state**: `target.source: "free"`, `call: { state: "free-fire", group (the free-fire group), free?: the pick,
+  picksIn?: s }` (state order: `own-target`, `stood-down`, `responding`, `in-warp`, `logi`, `free-fire`, `no-primary`,
+  `holding`, `following`); a group with free fire on adds `freeFire: true` (`CalledState`). A logi member under a free
+  fleet reports no `call` (it never free-fires).
+- Specs: `fleet-targets.spec.ts` "FleetTargets free fire" (nearest in reach, logi and other fleets out, a call wins at
+  once, re-pick after reaction on a kill or leaving reach, an order's delays vs a re-pick's, own wins, hold / stand-down
+  / off), `fleet-commanders.spec.ts` (free fire kept out of the view, dropped with its group, cleared on a load),
+  `orders.spec.ts` "reads free fire". verify-page: `free fire: members with no call pick …` (bfc, p1 with reaction 0,
+  p2, logi g1 vs two teamed Tempests; not yet run on tools-core).
+
 ## The page lever: `FleetTargets` (`apps/viewer/src/lib/fleet-targets.ts`)
 
-Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ target, group }` the lever gave),
+Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ target, group }` the lever gave), `free`
+(ship → its free-fire pick) and `picksAt` (ship → the tick its next pick is due),
 `holds` (ship → `hold` | `stand-down`), `responds` (ship → response tick), `lastCalls` (group key → its list's JSON),
 `primaries` (group key → live primary), and the last plans and group calls (for the reports). Port:
-`FleetTargetsPort { Status, CanTarget, TargetOf, tickSeconds }`.
+`FleetTargetsPort { Status, CanTarget, TargetOf, tickSeconds, FreeFireView?, FreeFireDelay? }`. `Sync(scene, tick,
+freeFire?)` takes the group keys with free fire on (`FleetCommanders.FreeFireKeys()`).
 
 - **`Sync(scene, tick)`** → `{ changes: [{ ship, target, group }], primaries: CalledPrimaryChange[] }`, over the live
   fleet view:

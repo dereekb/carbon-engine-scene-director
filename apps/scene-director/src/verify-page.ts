@@ -108,7 +108,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly propMod?: Maybe<ShipPropModState>;
   readonly fit?: Maybe<ShipFitState>;
   readonly fitNote?: string;
-  readonly target?: Maybe<{ readonly id: string; readonly kind: 'ship' | 'object'; readonly distance: Maybe<number>; readonly source?: 'own' | 'called' }>;
+  readonly target?: Maybe<{ readonly id: string; readonly kind: 'ship' | 'object'; readonly distance: Maybe<number>; readonly source?: 'own' | 'called' | 'free' }>;
   readonly call?: ShipCallState;
   readonly autoRepair?: ShipAutoRepairState;
   readonly shots?: number;
@@ -583,6 +583,8 @@ interface ShipCallState {
   readonly group?: { readonly fleet: string; readonly kind: string; readonly id: string };
   readonly primary?: string;
   readonly respondsIn?: number;
+  readonly free?: string;
+  readonly picksIn?: number;
 }
 
 /**
@@ -2160,6 +2162,50 @@ try {
     const kept = await call<{ fleets?: { targets?: string[] }[] }>('get_scene');
     Expect(Show(kept.fleets?.[0]?.targets) === '["r2"]', Show(kept.fleets?.[0]));
     return `loaded call fired on r1; remove_ship r1 warned "${removed.warnings.find((warning) => /no longer calls/u.test(warning))}", list ${Show(doc.fleets?.[0]?.targets)}, members on r2; refused: ${Show({ ...refusals, dead, empty })}; a live call on r4 pruned at its removal ("${pruned.warnings.find((warning) => /r4/u.test(warning))}"), nobody called at tick ${shadowed.simulation.tick}, the document still ${Show(kept.fleets?.[0]?.targets)}`;
+  });
+
+  await Check('free fire: members with no call pick the nearest hostile in reach after their reaction; a call wins, off ends it', async () => {
+    const Team = <T extends object>(ship: T, team: string, extra: object = {}) => ({ ...ship, team, ...extra });
+    const ships = [Team(Punisher('bfc', [0, 0, 0]), 'blue'), Team(Punisher('p1', [0, 0, 1200]), 'blue', { pilot: { reaction: 0 } }), Team(Punisher('p2', [0, 0, -1200]), 'blue'), Team(Punisher('g1', [-1500, 0, 0]), 'blue'), Team(Tempest('r1', [3000, 0, 0]), 'red'), Team(Tempest('r2', [3000, 0, 5000]), 'red')];
+    const fleets = [
+      {
+        id: 'b',
+        commander: 'bfc',
+        wings: [
+          {
+            id: 'w',
+            squads: [
+              { id: 'dps', role: 'dps', members: ['p1', 'p2'] },
+              { id: 'g', role: 'logi', members: ['g1'] }
+            ]
+          }
+        ]
+      }
+    ];
+    await LoadCombatScene(ships, { death: 'flag' }, { fleets });
+    const order = await call<FleetTargetsOrderResult & { readonly freeFire?: boolean }>('order_fleet', { fleet: 'b', order: { type: 'free-fire', on: true } });
+    const reaction = order.delays?.['p1'] ?? 0;
+    Expect(order.freeFire === true && reaction >= 5 && reaction <= 10 && !order.delays?.['p2'], `p1 (reaction 0) answers in 5-10 s, p2 (none) at once: ${Show(order)}`);
+    const Free = (state: ViewerState, id: string, target: string): boolean => ShipIn(state, id).target?.id === target && ShipIn(state, id).target?.source === 'free' && ShipIn(state, id).call?.state === 'free-fire';
+    const picked = await WaitFor('bfc and p2 pick r1 at once and fire; g1 (logi) does not', 10, (polled) => {
+      const fired = ['bfc', 'p2'].every((id) => (ShipIn(polled, id).combat?.lastHits ?? []).some((row) => row.target === 'r1'));
+      return Free(polled, 'bfc', 'r1') && Free(polled, 'p2', 'r1') && ShipIn(polled, 'g1').target == null && ShipIn(polled, 'p1').call?.state === 'responding' && fired ? null : Show({ targets: Targets(polled, ['bfc', 'p1', 'p2', 'g1']), calls: ['bfc', 'p1', 'p2', 'g1'].map((id) => ShipIn(polled, id).call) });
+    });
+    const late = await WaitFor('p1 picks r1 after its reaction', 15, (polled) => (Free(polled, 'p1', 'r1') ? null : Show(ShipIn(polled, 'p1').call)), 1);
+    const p1At = late.simulation.tick - order.tick;
+    Expect(Math.abs(p1At - reaction) <= 1, `p1 picked ${p1At} ticks after the order, its reaction ${reaction}`);
+    const kept = await call<{ skipped: { id: string; reason: string }[] }>('set_target', { ships: ['p2'], target: null });
+    Expect(/free-fires on "r1"/u.test(kept.skipped[0]?.reason ?? ''), Show(kept));
+    await call('order_fleet', { fleet: 'b', delay: 0, order: { type: 'targets', set: ['r2'] } });
+    const all = ['bfc', 'p1', 'p2'];
+    await WaitFor('a call (delay 0) takes every free-firer onto r2 at once', 5, (polled) => (OnCall(polled, all, 'r2') ? null : Targets(polled, all)));
+    await call('order_fleet', { fleet: 'b', delay: 0, order: { type: 'targets', clear: true } });
+    const back = await WaitFor('the call cleared: bfc and p2 pick r1 again at once, p1 after its reaction', 20, (polled) => (all.every((id) => Free(polled, id, 'r1')) ? null : Targets(polled, all)), 1);
+    await call('order_fleet', { fleet: 'b', order: { type: 'free-fire', on: false } });
+    const off = await WaitFor('free fire off clears the picks', 5, (polled) => (all.every((id) => ShipIn(polled, id).target == null) ? null : Targets(polled, all)));
+    const tree = CalledOf(off) as Maybe<CalledTree & { readonly freeFire?: boolean }>;
+    Expect(!tree?.freeFire, Show(tree));
+    return `free fire at tick ${order.tick}: bfc, p2 on r1 by tick ${picked.simulation.tick}, p1 (reaction 0) ${p1At} ticks later (its delay ${reaction}); set_target null skipped p2; a call took all three onto r2, clearing it gave r1 back (tick ${back.simulation.tick}); off cleared them`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

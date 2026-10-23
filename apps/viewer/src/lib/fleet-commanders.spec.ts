@@ -84,4 +84,25 @@ describe('FleetCommanders', () => {
     commanders.AfterEdit(edited, gone);
     expect(commanders.CallOf(DPS)).toBeNull();
   });
+
+  it('keeps free fire per group, out of the live view, until its group goes or a load', () => {
+    const scene = MakeScene();
+    const commanders = new FleetCommanders();
+    const version = commanders.version;
+    commanders.SetFreeFire(DPS, true);
+    commanders.SetFreeFire(WHOLE, true);
+    expect(commanders.FreeFireOf(DPS)).toBe(true);
+    expect([...commanders.FreeFireKeys()]).toEqual(['f/squad/dps', 'f']);
+    expect(commanders.version).toBe(version);
+    expect(Live(scene, commanders)).toBe(scene);
+    commanders.SetFreeFire(WHOLE, false);
+    expect(commanders.FreeFireOf(WHOLE)).toBe(false);
+
+    const removed = applySceneOperations(scene, [{ op: 'remove_squad', fleet: FLEET, squad: 'dps' }]).scene;
+    commanders.AfterEdit(scene, removed);
+    expect(commanders.FreeFireOf(DPS)).toBe(false);
+    commanders.SetFreeFire(WHOLE, true);
+    commanders.Clear();
+    expect(commanders.FreeFireKeys().size).toBe(0);
+  });
 });

@@ -11,7 +11,7 @@ describe('normalizePropModSwitch', () => {
 
   it('takes a pilot delay in [0, 1], dropping 0', () => {
     expect(normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 0.4 })).toEqual({ fleet: 'tfis', active: true, delay: 0.4 });
-    expect(normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 0 })).toEqual({ fleet: 'tfis', active: true });
+    expect(normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 0 })).toEqual({ fleet: 'tfis', active: true, delay: 0 });
     expect(catchSceneError(() => normalizePropModSwitch({ active: true, fleet: 'tfis', delay: 2 })).problems).toEqual(['switch.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to 10 s)']);
   });
 

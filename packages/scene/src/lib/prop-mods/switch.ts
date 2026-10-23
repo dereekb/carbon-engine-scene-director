@@ -13,8 +13,9 @@ export interface PropModSwitch extends FleetSelection {
    */
   readonly active: boolean;
   /**
-   * How slowly the pilots respond, 0 (at once, the default) to 1 (very delayed): each ship switches after its own
-   * pseudo-random time, up to `delay` × MAX_FLEET_ORDER_DELAY seconds (toPilotDelays), as fleet orders do.
+   * How slowly the pilots respond, 0 (at once) to 1 (very delayed): each ship switches after its own pseudo-random
+   * time, up to `delay` × MAX_FLEET_ORDER_DELAY seconds (toPilotDelays), as fleet orders do. Unset, each pilot answers after
+   * its reaction (ships[].pilot, or its personality fleet's draw), else at once.
    */
   readonly delay?: number;
 }
@@ -42,7 +43,7 @@ export function normalizePropModSwitch(input: unknown, where = 'switch'): PropMo
     const selection = readFleetSelection(input, where, problems);
     const delay = input['delay'];
     if (delay != null && (typeof delay !== 'number' || !Number.isFinite(delay) || delay < 0 || delay > 1)) problems.push(`${where}.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to ${MAX_FLEET_ORDER_DELAY} s)`);
-    result = { ...selection, active: active === true, ...(typeof delay === 'number' && delay > 0 ? { delay } : {}) };
+    result = { ...selection, active: active === true, ...(typeof delay === 'number' ? { delay } : {}) };
   }
   if (problems.length) throw new SceneError(problems);
   return result;

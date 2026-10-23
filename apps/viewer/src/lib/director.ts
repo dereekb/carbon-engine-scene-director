@@ -90,7 +90,15 @@ import {
   diffScenes,
   fitTextOf,
   isFleetDocumentOrder,
+  isFleetFreeFireOrder,
   isFleetTargetsOrder,
+  type FleetFreeFireOrder,
+  type FleetReachNumbers,
+  type FreeFirePickInput,
+  resolveFleetPersonality,
+  shipPilotTraits,
+  toFleetPilotTraits,
+  toFleetTargetingReach,
   type CalledTargetStatus,
   calledTargetsOf,
   describeFleetGroup,
@@ -832,10 +840,14 @@ export class Director {
    */
   readonly autoRepair: AutoRepair;
   /**
-   * The live call book order_fleet's targets order edits (fleet-commanders.ts); the live fleet view splices it over the
-   * document.
+   * The live call book order_fleet's targets order edits, and free fire (fleet-commanders.ts); the live fleet view
+   * splices the calls over the document.
    */
   private readonly commanders = new FleetCommanders();
+  /**
+   * Each pilot's reaction (ReactionOf), for the document it was worked out from.
+   */
+  private reactions: Maybe<{ readonly scene: SceneDocument; readonly reactions: ReadonlyMap<string, number> }> = null;
   private readonly killListeners = new Set<KillListener>();
   private readonly primaryListeners = new Set<PrimaryListener>();
   /**
@@ -924,7 +936,7 @@ export class Director {
     this.onChange = onChange;
     // Fleets fly and take orders as they are live: the destroyed taken out (toLiveFleetScene).
     this.following = new FleetFollowing({ world, scene: () => this.LiveFleets()?.scene ?? null, radiusOf: (id) => this.FormationRadius(id) });
-    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null });
+    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null, reactionOf: (id) => this.ReactionOf(id) });
     this.arrivals = new Arrivals({
       world,
       placement: (id) => this.scene?.ships.find((doc) => doc.id === id) ?? null,
@@ -1027,7 +1039,10 @@ export class Director {
       TargetOf: (id) => this.targets.Of(id),
       get tickSeconds() {
         return world.master.tickInterval / 1000;
-      }
+      },
+      // Free fire: what a member can pick from, and its pilot's reaction before it picks again.
+      FreeFireView: (id) => this.FreeFireView(id),
+      FreeFireDelay: (id, tick) => toPilotDelays({ key: 'free-fire', tick, ships: [id], issuer: '', reactionOf: (ship) => this.ReactionOf(ship) }).get(id) ?? 0
     });
     this.shots = new ShotQueue(world.master.tickInterval / 1000);
     this.missiles = new MissileFlights(world.master.tickInterval / 1000);
@@ -1215,7 +1230,8 @@ export class Director {
 
   /**
    * Orders a fleet, wing or squad (order_fleet): resolved against the live fleets, given by a ship commanding the
-   * group. Moves, warps and targets act at once (live, not saved: targets edit the live call book, CallTargets); anchor,
+   * group. Moves, warps, targets and free fire act at once (live, not saved: targets edit the live call book,
+   * CallTargets; free fire turns the group's on or off, FreeFireOrder); anchor,
    * break-off and regroup edit the document's anchors through the edit queue, as patch_scene does, then run their live
    * half (regroup's rejoins and warps back; every document order records `command.last` at the tick it was given).
    *
@@ -1228,6 +1244,7 @@ export class Director {
   OrderFleet(input: unknown): Promise<object> {
     const { request, resolved } = this.FleetRequest(input);
     if (isFleetTargetsOrder(request.order)) return Promise.resolve({ ...this.CallTargets(request), ...resolved });
+    if (isFleetFreeFireOrder(request.order)) return Promise.resolve({ ...this.FreeFireOrder(request), ...resolved });
     if (!isFleetDocumentOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
       // Resolved against the document current at its turn in the queue; the tick is captured before the edit, which
@@ -1345,11 +1362,111 @@ export class Director {
     const targets = toFleetTargetList(calledTargetsOf(scene, resolved.group), resolved.group, order, { statusOf, own: fleetGroupShips(scene, resolved.group) });
     this.commanders.SetCall(resolved.group, targets);
     // Each pilot but the giver takes the new call after its response time; the order re-arms the group's holds.
-    this.fleetTargets.Respond(resolved.ships, toPilotDelays({ key: toFleetGroupKey(resolved.group), tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer }), tick);
+    this.fleetTargets.Respond(resolved.ships, this.PilotDelays(request, resolved, tick), tick);
     // An unchanged list still re-arms and reports. At a boundary its own sync starts the locks at the boundary.
     if (options.boundary == null) this.SyncFleetTargets();
     const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
     return { ...result, ...this.CallResult(resolved), ...(warnings.length ? { warnings } : {}) };
+  }
+
+  /**
+   * order_fleet's free-fire order, live and synchronous: resolved on the live fleets, the group's free fire turned on or
+   * off (the call book), each pilot but the giver picking after its response time (FleetTargets.FreeFire re-arms the
+   * group as a targets order does), the members synced, then `command.last` recorded. Off clears the free picks at the
+   * sync. Never saved: a load ends free fire.
+   *
+   * @param request - The normalized order_fleet request, its order a free-fire order.
+   * @param options - `boundary`: called at that tick boundary, so the boundary's own SyncFleetTargets picks.
+   * @returns order_fleet's fields plus freeFire and each ship's target.
+   * @throws {SceneError} When the request names an unknown group or a giver without command of it.
+   */
+  private FreeFireOrder(request: FleetOrderRequest, options: { readonly boundary?: number } = {}): object {
+    const order = request.order as FleetFreeFireOrder;
+    const resolved = this.orders.Resolve(request);
+    const tick = this.world.tick;
+    this.commanders.SetFreeFire(resolved.group, order.on);
+    if (order.on) this.fleetTargets.FreeFire(resolved.ships, this.PilotDelays(request, resolved, tick), tick);
+    if (options.boundary == null) this.SyncFleetTargets();
+    const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
+    const ships = resolved.ships.map((id) => {
+      const source = this.fleetTargets.Source(id);
+      const respondsIn = this.fleetTargets.Report(id, tick)?.respondsIn;
+      return { id, target: this.targets.Of(id), ...(source ? { source } : {}), ...(respondsIn != null ? { respondsIn } : {}) };
+    });
+    return { ...result, freeFire: order.on, ships };
+  }
+
+  /**
+   * Each pilot's response to a live fleet order: the request's delay, else each pilot's reaction (ReactionOf).
+   *
+   * @param request - The request.
+   * @param resolved - It resolved.
+   * @param tick - The tick it was given.
+   * @returns Ticks per ship.
+   */
+  private PilotDelays(request: FleetOrderRequest, resolved: ResolvedFleetOrder, tick: number): Map<string, number> {
+    return toPilotDelays({ key: toFleetGroupKey(resolved.group), tick, delay: request.delay, ships: resolved.ships, issuer: resolved.issuer, reactionOf: (id) => this.ReactionOf(id) });
+  }
+
+  /**
+   * A pilot's reaction for an order given with no delay: its ships[].pilot.reaction, else its personality fleet's seeded
+   * draw (toFleetPilotTraits), else none (it answers at once). Memoized per document.
+   *
+   * @param id - The ship.
+   * @returns Its reaction, 0..1, or null.
+   */
+  private ReactionOf(id: string): Maybe<number> {
+    const scene = this.scene;
+    if (!scene) return null;
+    if (this.reactions?.scene !== scene) this.reactions = { scene, reactions: PilotReactions(scene) };
+    return this.reactions.reactions.get(id) ?? null;
+  }
+
+  /**
+   * What a free-firing member can pick from (FleetTargets): the ships of another team that are not destroyed, in warp
+   * or arriving, by surface distance, and its own reach (ShipReach, optimal + falloff capped at its lock range). A ship
+   * with no team has no hostiles.
+   *
+   * @param id - The member.
+   * @returns The view, or null.
+   */
+  private FreeFireView(id: string): Maybe<FreeFirePickInput> {
+    const docs = this.scene?.ships ?? [];
+    const team = docs.find((doc) => doc.id === id)?.team;
+    if (!team) return null;
+    const hostiles: { id: string; distance: number }[] = [];
+    for (const doc of docs) {
+      if (!doc.team || doc.team === team || this.combat.IsDestroyed(doc.id) || this.IsDead(doc.id) || this.world.InWarp(doc.id) || this.world.Arriving(doc.id)) continue;
+      const distance = this.world.SurfaceDistance(id, doc.id);
+      if (distance != null) hostiles.push({ id: doc.id, distance });
+    }
+    return { hostiles, reach: toFleetTargetingReach('falloff', this.ShipReach(id)) };
+  }
+
+  /**
+   * A ship's own reach: its lock range, and its weapons' longest optimal and optimal + falloff (a launcher's mean
+   * missile range for both); 0 where it has none.
+   *
+   * @param id - The ship.
+   * @returns Metres.
+   */
+  private ShipReach(id: string): FleetReachNumbers {
+    let optimal = 0;
+    let falloff = 0;
+    for (const key of this.modules.WeaponKeys(id)) {
+      const spec = this.modules.Spec(id, key);
+      const turret = spec?.combat;
+      const missile = spec?.missile;
+      if (turret) {
+        optimal = Math.max(optimal, turret.optimal);
+        falloff = Math.max(falloff, turret.optimal + (turret.falloff ?? 0));
+      }
+      if (missile) {
+        optimal = Math.max(optimal, missile.range.mean);
+        falloff = Math.max(falloff, missile.range.mean);
+      }
+    }
+    return { lock: this.LockTargeting(id)?.maxTargetRange ?? 0, optimal, falloff };
   }
 
   /**
@@ -1415,7 +1532,7 @@ export class Director {
     if (selected.problems.length) throw new SceneError(selected.problems);
     const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
     const key = `prop-mods|${command.fleet ?? ''}|${command.wing ?? ''}|${command.squad ?? ''}`;
-    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay ?? 0, ships: selected.ships, issuer: '' });
+    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay, ships: selected.ships, issuer: '', reactionOf: (ship) => this.ReactionOf(ship) });
     const ships: SwitchedPropMod[] = [];
     const skipped: SwitchPropModsResult['skipped'] = [];
     for (const id of selected.ships) {
@@ -1464,7 +1581,7 @@ export class Director {
     if (problems.length) throw new SceneError(problems);
     const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
     const key = `modules|${command.fleet ?? ''}|${command.wing ?? ''}|${command.squad ?? ''}`;
-    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay ?? 0, ships: selected.ships, issuer: '' });
+    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay, ships: selected.ships, issuer: '', reactionOf: (ship) => this.ReactionOf(ship) });
     const ships: SwitchModulesResult['ships'] = [];
     const skipped: SwitchModulesResult['skipped'] = [];
     const notes: string[] = [];
@@ -1538,6 +1655,7 @@ export class Director {
       else if (this.world.InWarp(id)) reason = 'it is in warp';
       else if (target && kind === 'ship' && this.world.InWarp(target)) reason = `its target "${target}" is in warp`;
       else if (!target && this.fleetTargets.Source(id) === 'called') reason = this.FollowsCallReason(id);
+      else if (!target && this.fleetTargets.Source(id) === 'free') reason = this.FreeFireReason(id);
       if (reason) {
         skipped.push({ id, reason });
         continue;
@@ -1555,7 +1673,12 @@ export class Director {
     }
     // A cleared own target hands the ship its group's call at once.
     if (!target && ships.length) this.SyncFleetTargets();
-    const rows = target ? ships : ships.map((row) => (this.fleetTargets.Source(row.id) === 'called' ? { ...row, target: this.targets.Of(row.id), source: 'called' as const } : row));
+    const rows = target
+      ? ships
+      : ships.map((row) => {
+          const source = this.fleetTargets.Source(row.id);
+          return source === 'called' || source === 'free' ? { ...row, target: this.targets.Of(row.id), source } : row;
+        });
     this.onChange();
     return { tick: this.world.tick, target: target ?? null, ships: rows, skipped };
   }
@@ -1570,6 +1693,18 @@ export class Director {
     const call = this.fleetTargets.CallOf(id);
     const group = call ? `${describeFleetGroup(call.group)}'s call on "${call.target}"` : "its group's call";
     return `it has no own target: it follows ${group} (cease_fire holds its fire; order_fleet targets drop or clear ends the call)`;
+  }
+
+  /**
+   * Why set_target null skips a ship that free-fires: it has no own target to clear.
+   *
+   * @param id - The ship.
+   * @returns The reason.
+   */
+  private FreeFireReason(id: string): string {
+    const free = this.fleetTargets.FreeOf(id);
+    const pick = free ? `"${free.target}" under ${describeFleetGroup(free.group)}'s free fire` : "under its group's free fire";
+    return `it has no own target: it free-fires on ${pick} (cease_fire holds its fire; order_fleet free-fire off ends it)`;
   }
 
   /**
@@ -3668,7 +3803,7 @@ export class Director {
   private SyncFleetTargets(boundary?: number): void {
     const scene = this.LiveFleets()?.scene ?? this.scene;
     if (!scene) return;
-    const { changes, primaries } = this.fleetTargets.Sync(scene, this.world.tick);
+    const { changes, primaries } = this.fleetTargets.Sync(scene, this.world.tick, this.commanders.FreeFireKeys());
     const requestedAt = boundary == null ? undefined : boundary - 1;
     for (const { ship, target } of changes) this.SetShipTarget(ship, target, { requestedAt });
     if (changes.length || primaries.length) this.onChange();
@@ -4311,7 +4446,8 @@ export class Director {
   }
 
   /**
-   * A ship's target for get_state, with where it came from: `called` when its group's call gave it, else `own`.
+   * A ship's target for get_state, with where it came from: `called` when its group's call gave it, `free` its own pick
+   * under free fire, else `own`.
    */
   private TargetState(id: string): Maybe<ShipTargetReport & { readonly source?: ShipTargetSource }> {
     const report = this.targets.Report(id);
@@ -4346,11 +4482,11 @@ export class Director {
 
   /**
    * A fleet's, wing's or squad's `called` for get_state: its live primary and queue, the entries skipped with why, and
-   * how many members follow it; omitted when it calls no targets.
+   * how many members follow it; omitted when it calls no targets. `freeFire: true` while its free fire is on.
    */
-  private CalledState(group: FleetGroup): { called?: FleetGroupCalledReport } {
+  private CalledState(group: FleetGroup): { called?: FleetGroupCalledReport; freeFire?: true } {
     const called = this.fleetTargets.GroupReport(group);
-    return called ? { called } : {};
+    return { ...(called ? { called } : {}), ...(this.commanders.FreeFireOf(group) ? { freeFire: true as const } : {}) };
   }
 
   /**
@@ -4644,6 +4780,29 @@ function ToVector(value: ArrayLike<number>): SceneVector {
 function DrawnCameraReport(drawn: Maybe<DrawnCamera>): Maybe<object> {
   const round = (value: number, scale: number): number => Math.round(value * scale) / scale;
   return drawn ? { eye: drawn.eye.map((value) => round(value, 100)), look: drawn.look.map((value) => round(value, 100)), up: drawn.up.map((value) => round(value, 1000)), fov: round(drawn.fov, 100), near: round(drawn.near, 1000), far: Math.round(drawn.far) } : null;
+}
+
+/**
+ * Every pilot's reaction: personality fleets' members their seeded draws (toFleetPilotTraits), then each ship's
+ * authored ships[].pilot.reaction over it. Ships with neither are left out (they answer at once).
+ *
+ * @param scene - The document.
+ * @returns Reaction by ship id.
+ */
+function PilotReactions(scene: SceneDocument): Map<string, number> {
+  const reactions = new Map<string, number>();
+  const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
+  const seed = sceneCombatOf(scene).seed;
+  for (const fleet of scene.fleets ?? []) {
+    const personality = fleet.personality ? resolveFleetPersonality({ name: fleet.personality, personalities: scene.personalities }).personality : null;
+    if (!personality) continue;
+    for (const [id, traits] of toFleetPilotTraits({ fleet, personality, pilotOf: (ship) => shipPilotTraits(docs.get(ship)?.pilot), seed })) reactions.set(id, traits.reaction);
+  }
+  for (const doc of scene.ships) {
+    const reaction = shipPilotTraits(doc.pilot).reaction;
+    if (reaction != null) reactions.set(doc.id, reaction);
+  }
+  return reactions;
 }
 
 /**
