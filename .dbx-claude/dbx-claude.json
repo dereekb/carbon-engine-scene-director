@@ -506,6 +506,8 @@
               "packages/scene/src/lib/fitting/",
               "hub/dogma-data",
               "hub/sde-client",
+              "hub/ship-stats-tool",
+              "packages/scene/src/lib/stats/ship-stats",
               "apps/viewer/src/lib/fittings",
               "apps/viewer/src/lib/modules",
               "apps/viewer/src/lib/module-cycle",
