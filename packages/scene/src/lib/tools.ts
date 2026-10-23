@@ -17,6 +17,7 @@ import { PROP_MOD_MODULE_AB, PROP_MOD_MODULE_MWD, PROP_MOD_MODULE_NONE } from '.
 import { CELESTIAL_KINDS, DEFAULT_STARGATE_LOCATION_RANGE, DEFAULT_STATION_LOCATION_RANGE, LOCATION_NEARBY_LIMIT, MAP_SEARCH_KINDS } from './location';
 import { DEFAULT_ENGAGEMENT_RANGE, DEFAULT_NEAR_SHIP_RANGE, ENGAGEMENT_TEAMS, NEAR_DIRECTIONS, SHIP_FORMATION_ALIASES, SHIP_FORMATIONS } from './staging';
 import { DEFAULT_OBJECT_RADIUS, MAX_OBJECTS_PER_OPERATION, OBJECT_NEAREST_SHIPS } from './objects/object';
+import { ASTEROID_FIELD_SHAPES, DEFAULT_FIELD_COUNT, DEFAULT_FIELD_RADIUS, DEFAULT_ROCK_SIZE, MAX_FIELD_MODELS, MAX_FIELD_ORES, MAX_FIELD_ROCKS } from './asteroids/field';
 import { BUILT_IN_FLEET_PERSONALITY_NAMES } from './personalities/examples';
 import { MAX_FLEET_REACH } from './personalities/normalize';
 import {
@@ -86,6 +87,7 @@ dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find 
 "fleets" (optional) groups ships into EVE fleets: [{ "id", "name"?, "commander": "<FC ship id>", "personality"?: "<built-in or personalities key>", "wings": [{ "id", "name"?, "commander"?, "squads": [{ "id", "name"?, "role": "${SQUAD_ROLES.join('|')}", "commander"?: "<a member>", "members": ["<ship id>"], "anchor"?: { "ship"?: "<ship id; default the FC>", "range"?: <metres, surface to surface; default logi ${DEFAULT_ANCHOR_RANGES.logi}, others ${DEFAULT_ANCHOR_UP_RANGE}> }, "home"?: { "ship"?, "range"? }, "targets"?, "autoRepair"? }], "targets"?, "autoRepair"? }], "targets"?: ["<ship or object id>"], "autoRepair"?: { "on"?: true|false, "policy"?: "urgent"|"damaged"|"shot-at" } }] (home is set by order_fleet break-off: the anchor regroup restores; targets, on a fleet, wing or squad, are its opening called targets in kill order, which a load starts the fight with and order_fleet's targets order then changes live: the first live one is its primary, the live rest its queue; autoRepair, on a fleet, wing or squad, is its logi auto-repair, each key taken from the nearest group that sets it (squad, wing, fleet), by default on for logi squads with policy urgent). A squad anchored on one of its own members (a logi anchor) puts that ship at range off the FC, and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m. A ship holds positions in one fleet and sits in at most one squad. Fleet members keep range on their anchors in formation behind the FC (get_state "following"). "team" is independent of fleets.
 "location" (optional) puts the scene at a real EVE place: { "system": <solar system id>, "name"?: "<system>", "region"?: "<region>", "origin": [x, y, z] (system metres: where the scene's [0, 0, 0] sits; the star is at [0, 0, 0]), "anchor"?: { "celestial": <id>, "name"?, "kind"?: "${CELESTIAL_KINDS.join('|')}", "offset"?: [x, y, z] (metres from the celestial's centre to the origin) } }. Use the set_location tool to fill it from a name. Ships stay in scene metres around the origin. A location dresses the scene: the region's nebula replaces environment.universe (which applies only without a location), and the star, nearby planets and moons, and NPC stations and stargates are drawn around the origin.
 "objects" (optional) are static EVE objects: stations, stargates, Upwell structures, large collidable objects and wrecks: [{ "id", "dna": "<SOF DNA>", "type"?: <EVE type id or name>, "name"?, "position": [x, y, z], "rotation": [yaw, pitch, roll], "radius"?: <metres: the type's SDE radius, or a wreck's model radius> }]. Ids are unique across ships and objects. The add_objects tool fills dna and radius from a type. Objects never move; ships can approach, keep at range on, orbit and warp to them (ranges on radius, else the model's bounding radius, else ${DEFAULT_OBJECT_RADIUS} m). Objects never collide with ships.
+"asteroidFields" (optional) are seeded asteroid fields: [{ "id", "name"?, "position": [x, y, z] (the centre), "rotation": [yaw, pitch, roll], "shape": ${ASTEROID_FIELD_SHAPES.join(' | ')}, "radius", "innerRadius"?, "thickness"? and "arc"? (disc and ring), "count" (at most ${MAX_FIELD_ROCKS.toLocaleString('en-US')}), "size": [min, max] (rock radii, metres), "seed", "ores": [{ "ore"?, "type"?, "faction"?, "weight"?, "rocks": { "small": [dna, ...], "medium": [...], "large": [...] } }] }]. The seed expands a field into the same rocks everywhere; ids are unique across ships, objects and fields; the whole field fits the scene's ${formatSceneDistance(MAX_SCENE_DISTANCE)}. Rocks are scenery: no Destiny balls, not order targets. The add_asteroid_field tool fills ores from EVE ore names. The page does not draw fields yet.
 Scene extent: a ship or object position more than ${formatSceneDistance(MAX_SCENE_DISTANCE)} from [0, 0, 0] is refused, as an EVE grid; placements past ${formatSceneDistance(LARGE_SCENE_DISTANCE)} warn. Use set_location to move the origin.`;
 
 const FLEET_COMPOSITION_FORMAT = String.raw`Fleet composition (${FLEET_COMPOSITION_SCHEMA}): a doctrine fleet to drop into a scene. Metres.
@@ -365,11 +367,14 @@ const TOOL_LIST: ToolDefinition[] = [
 { "op": "update_object", "id", "set": { "dna"?, "type"?, "name"?, "position"?, "rotation"?, "radius"? } }   (null clears type, name and radius)
 { "op": "move_object", "id", "position"? | "near"?, "heading"? | "facing"? | "rotation"? }   (what is not given is kept)
 { "op": "remove_object", "id" }
+{ "op": "add_asteroid_field", "ores": [{ "rocks", "ore"?, "weight"?, ... }], "id"?, "prefix"?, "name"?, "shape"?, "radius"?, "innerRadius"?, "thickness"?, "arc"?, "count"?, "size"?, "seed"?, "position"? | "near"?: { "ship" | "object", "range"?, "direction"? }, "heading"? | "facing"? | "rotation"?, "radii"? }   (the add_asteroid_field tool resolves ore names and celestials first)
+{ "op": "update_asteroid_field", "id", "set": { "name"?, "ores"?, "shape"?, "radius"?, "innerRadius"?, "thickness"?, "arc"?, "count"?, "size"?, "seed"?, "position"?, "rotation"? } }   (ores is replaced whole; null clears name, innerRadius, thickness and arc)   { "op": "remove_asteroid_field", "id" }
 { "op": "add_cue", "cue": { "id"?, "at", "name"?, "<action>": { ... } } }   { "op": "update_cue", "id", "set": { "at"?, "name"?, "<action>"? } }   (an action replaces the cue's; name null clears)   { "op": "remove_cue", "id" }   { "op": "set_timeline", "timeline": { "cues": [...] } | null }   { "op": "clear_timeline" }
 Taking a ship out of a squad (remove_ship, remove_from_fleet, move_to_squad, remove_squad, remove_wing) falls a squad anchored on it back to its squad commander, then its wing commander, then the FC, with a warning; a fleet commander must be replaced (update_fleet) or its fleet removed first. Removing a fleet, wing or squad keeps its ships in the scene, unless remove_fleet has "withShips": true. Removing a ship or object (remove_ship, remove_object, remove_fleet withShips) also takes it off every fleet's, wing's and squad's called targets, with a warning. Removing a ship, object, fleet, wing or squad drops the timeline cues and ship steps naming it (a ships selection or targets list just loses it), with a warning; a patch_scene cue that no longer applies refuses the removal, naming the cue.
 Changing dna rebuilds that ship (it keeps flying); changing position or rotation puts it there at rest. Changing type, stats or the fit text a ship uses (its fit, or the fits entry it names) retunes the ship without a rebuild; stats replaces the whole override object and null clears it. Changing a ship's propMod.module retunes it; changing propMod.active switches its prop mod at once, with no cycle wait (changes.switched counts them); switch_prop_mods is the live, EVE-timed switch.
 Removing a ship stops the ships approaching, keeping range on or orbiting it (changes.stopped counts them).
 Removing an object stops the ships approaching, keeping range on or orbiting it (changes.stopped). Moving one makes them chase it. Changing an object's dna rebuilds it.
+Changing an asteroid field's position or rotation moves it; any other key rebuilds its rocks from its seed (a higher count keeps the earlier rocks).
 A location change moves the scene in its system, not the ships in the scene.
 Fleet edits re-plan the following ships at once (a squad set to its own anchor and range breaks off, and rejoins when set back); a removed anchor's followers re-anchor through the fallback above and keep flying. Moving a following ship puts it there at rest and it flies back to its slot; moving the FC makes its fleet follow. Ships whose following ends (they left their fleet, it was removed, or they became its FC) stop, and changes.stopped counts them.`,
     inputSchema: {
@@ -646,6 +651,48 @@ ${FLEET_PERSONALITY_FORMAT}`,
         ...OBJECT_LINE_PROPERTIES,
         scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
       }
+    }
+  },
+  {
+    name: 'add_asteroid_field',
+    where: 'hub',
+    description: `Adds a seeded asteroid field to the viewer's live scene: EVE's own rock models of the ores you name ("Veldspar", "Scordite", "Dark Ochre", "Arkonor", "Blue Ice", "Common Moon Asteroids", ...; resolved through tools-core to their SOF rock sets: four small, four medium and four large models per ore), scattered without overlap in a sphere, disc or ring.
+- ores (1 to ${MAX_FIELD_ORES}, at most ${MAX_FIELD_MODELS} models in all): names, or { ore, weight? }, { faction, weight?, name? } (a SOF rock faction, e.g. "ore_pyrrhotite"), { rocks: [dna, ...] | { small, medium, large }, weight?, name? }. weight is the share of rocks (default 1).
+- shape (sphere default; disc and ring lie in the field's local XZ plane and take thickness and arc, degrees around its local +Z; ring has a hole, innerRadius, default 0.6 × radius; a sphere with innerRadius is a shell), radius (metres, default ${DEFAULT_FIELD_RADIUS.toLocaleString('en-US')}), count (rocks, default ${DEFAULT_FIELD_COUNT}, at most ${MAX_FIELD_ROCKS.toLocaleString('en-US')}), size [min, max] (rock radii in metres, default [${DEFAULT_ROCK_SIZE.join(', ')}], log-uniform; the three model sizes split the range in thirds), seed (the same seed and settings give the same rocks; a higher count keeps the first rocks; default from the id).
+- The place: position (the centre) or near { ship | object | celestial, range?, direction? }: the field's edge range off the reference's surface (default ${DEFAULT_NEAR_SHIP_RANGE} m off a ship or object, set_location's defaults off a celestial). An asteroid belt of the scene's location centres the field on it (range from its centre, default 0), with the belt's radius when radius is not given. Turned by rotation, heading or facing (a point, a ship or object id, or { celestial }); default the near reference's heading.
+- The whole field (centre, radius and largest rock) must fit the scene's ${formatSceneDistance(MAX_SCENE_DISTANCE)}. Rocks are scenery: no Destiny balls, not order targets, nothing collides with them. Rocks that cannot be placed without overlap are dropped, with a warning.
+- replace: true with an existing id replaces that field in the same patch. Atomic: any problem (an unknown or unmapped ore, a place outside the scene) adds nothing. Pass scene to add to that document with no tab (returned, not shown).
+- Returns added { id, name, position, rotation, shape, radius, count, placed, envelope, digest }, ores [{ ore, type, group, faction, models: { small, medium, large }, from (sde, faction or given), skipped? }], warnings and the patch_scene result. patch_scene's update_asteroid_field and remove_asteroid_field edit fields. The page does not draw fields yet: they are validated and stored. Needs a prepared SDE in tools-core.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ores: {
+          type: 'array',
+          minItems: 1,
+          maxItems: MAX_FIELD_ORES,
+          items: { anyOf: [{ type: 'string' }, { type: 'object' }] },
+          description: 'Ore names ("Veldspar"), { ore, weight? }, { faction, weight?, name? } or { rocks, weight?, name? }.'
+        },
+        id: { type: 'string' },
+        name: { type: 'string' },
+        prefix: { type: 'string', description: 'The id prefix (default the name or first ore slug): "<prefix>-01".' },
+        shape: { type: 'string', enum: [...ASTEROID_FIELD_SHAPES] },
+        radius: { type: 'number', description: 'Metres.' },
+        innerRadius: { type: 'number', description: 'Metres: a hole (disc, ring) or an empty core (sphere).' },
+        thickness: { type: 'number', description: 'Metres (disc, ring).' },
+        arc: { type: 'number', description: 'Degrees of the circle filled, centred on local +Z (disc, ring).' },
+        count: { type: 'integer', minimum: 1, maximum: MAX_FIELD_ROCKS },
+        size: { type: 'array', items: { type: 'number' }, minItems: 2, maxItems: 2, description: '[min, max] rock radii, metres.' },
+        seed: { type: 'integer', minimum: 0, maximum: 4294967295 },
+        position: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3 },
+        near: { type: 'object', description: '{ ship | object | celestial, range?, direction? }' },
+        heading: { type: 'number', description: 'Yaw degrees.' },
+        facing: { description: 'A point [x, y, z], a ship or object id, or { celestial }.' },
+        rotation: { type: 'array', items: { type: 'number' }, minItems: 3, maxItems: 3, description: '[yaw, pitch, roll] degrees.' },
+        replace: { type: 'boolean', description: 'With an existing id: replace that field in the same patch.' },
+        scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
+      },
+      required: ['ores']
     }
   },
   {

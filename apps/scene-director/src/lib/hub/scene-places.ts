@@ -89,6 +89,10 @@ export interface ResolvedPlace {
   readonly position: SceneVector;
   readonly heading: Maybe<number>;
   readonly reference: SceneVector;
+  /**
+   * The celestial a celestial place is off.
+   */
+  readonly celestial?: { readonly id: number; readonly name: string; readonly kind: MapCelestial['kind']; readonly radius: Maybe<number> };
 }
 
 /**
@@ -232,10 +236,12 @@ export class ScenePlaces {
    * @param context - The document and the lead's radius.
    * @param context.before - The document.
    * @param context.leadRadius - The lead's EVE radius (0 for an engagement centre).
+   * @param context.beltCentred - An asteroid belt centres the lead on it: its range runs from the belt's centre and the
+   *   lead radius is not added (add_asteroid_field).
    * @returns The place.
    */
-  async ResolvePlace(near: unknown, context: { readonly before: SceneDocument; readonly leadRadius: number }): Promise<ResolvedPlace> {
-    const { before, leadRadius } = context;
+  async ResolvePlace(near: unknown, context: { readonly before: SceneDocument; readonly leadRadius: number; readonly beltCentred?: boolean }): Promise<ResolvedPlace> {
+    const { before, leadRadius, beltCentred = false } = context;
     if (!IsRecord(near)) throw new ToolError('near must be an object { ship | object | celestial, range?, direction? }');
     const problems: string[] = [];
     const direction = near['direction'] == null ? null : readNearDirection(near['direction'], 'near.direction', problems);
@@ -261,7 +267,7 @@ export class ScenePlaces {
       ThrowProblems(placed.problems);
       place = { position: placed.point as SceneVector, heading: placed.heading, reference: object.position };
     } else if (near['celestial'] != null) {
-      place = await this.PlaceOffCelestial({ celestial: near['celestial'], range, direction, leadRadius, location: before.location ?? null });
+      place = await this.PlaceOffCelestial({ celestial: near['celestial'], range, direction, leadRadius, beltCentred, location: before.location ?? null });
     } else {
       throw new ToolError('near needs ship (a ship id), object (an object id) or celestial (a celestial of the scene location, by name or id)');
     }
@@ -304,11 +310,12 @@ export class ScenePlaces {
     return resolved;
   }
 
-  private async PlaceOffCelestial(input: { readonly celestial: unknown; readonly range: Maybe<number>; readonly direction: Maybe<NearDirection>; readonly leadRadius: number; readonly location: Maybe<SceneLocation> }): Promise<ResolvedPlace> {
-    const { range, direction, leadRadius, location } = input;
+  private async PlaceOffCelestial(input: { readonly celestial: unknown; readonly range: Maybe<number>; readonly direction: Maybe<NearDirection>; readonly leadRadius: number; readonly beltCentred: boolean; readonly location: Maybe<SceneLocation> }): Promise<ResolvedPlace> {
+    const { range, direction, beltCentred, location } = input;
     if (!location) throw new ToolError('near.celestial: the scene has no location; set_location first, or give position');
     if (typeof direction === 'string' && (SHIP_RELATIVE_DIRECTIONS as readonly string[]).includes(direction)) throw new ToolError(`near.direction "${direction}" follows a ship's heading; off a celestial use sun, away, origin or [x, y, z]`);
     const celestial = await this.ResolveCelestial(input.celestial, location);
+    const leadRadius = beltCentred && celestial.kind === 'asteroidBelt' ? 0 : input.leadRadius;
     let toward: Maybe<'sun' | 'away' | SceneVector> = null;
     if (direction === 'origin') toward = [location.origin[0] - celestial.position[0], location.origin[1] - celestial.position[1], location.origin[2] - celestial.position[2]];
     else if (direction != null) toward = direction as 'sun' | 'away' | SceneVector;
@@ -317,7 +324,7 @@ export class ScenePlaces {
     const point = ToScene(placement.origin as SceneVector, location);
     const distance = Math.hypot(...point);
     if (distance > MAX_SCENE_DISTANCE) throw new ToolError(`${celestial.name} is ${formatSceneDistance(distance)} from the scene origin, outside the scene's ${formatSceneDistance(MAX_SCENE_DISTANCE)}; set_location there first`);
-    return { position: point, heading: null, reference: ToScene(celestial.position, location) };
+    return { position: point, heading: null, reference: ToScene(celestial.position, location), celestial: { id: celestial.id, name: celestial.name, kind: celestial.kind, radius: celestial.radius } };
   }
 
   /**

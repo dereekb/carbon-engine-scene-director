@@ -61,7 +61,7 @@ export function formatSceneDistance(metres: number): string {
 
 export interface LargeSceneWarningInput {
   readonly positions: readonly SceneVector[];
-  readonly noun: 'ship' | 'object';
+  readonly noun: 'ship' | 'object' | 'asteroid field';
   /**
    * Where the operation sits.
    */

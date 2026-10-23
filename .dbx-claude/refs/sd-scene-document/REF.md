@@ -40,6 +40,11 @@
   bounding radius where the SDE has none or gives a wreck its 14 m placeholder; without one the page takes the SOF
   bounding radius once built, else 1,000 m). **Ids are unique across ships and objects**; ship-id and composition-id generators skip
   object ids. Detail: `sd-objects`.
+- `asteroidFields?` (`asteroids/field.ts`): seeded fields of SOF rock DNAs (`id`, `name?`, `position`, `rotation`,
+  `shape`, `radius`, `innerRadius?`, `thickness?`, `arc?`, `count`, `size`, `seed`, `ores`); shape, radius, count, size
+  and the seed are written in. **Ids are unique across ships, objects and fields**, and every id generator skips field
+  ids. The whole field (centre + radius + largest rock) must fit the extent. `camera.target` may name a field. Not drawn
+  yet (A1: `normalizeScene` warns while there are fields). Detail: `sd-asteroid-fields`.
 - **The scene extent** (`extent.ts`, the user's rule of 2026-10-22, "just like the game"): every ship and object
   document position is **refused past `MAX_SCENE_DISTANCE` (10,000 km)** from the origin (`readScenePosition`), and
   placements past `LARGE_SCENE_DISTANCE` (2,000 km) warn (`largeSceneWarning`). Live orders are not bounded: a goto
@@ -67,6 +72,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
 | timeline | `add_cue { cue }` / `update_cue { id, set }` (an action replaces the cue's and clears `adds`) / `remove_cue { id }` / `set_timeline { timeline \| null }` / `clear_timeline` | `timeline/operations.ts` (`sd-timeline`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
+| asteroid fields | `add_asteroid_field` (flat; every ore needs `rocks`; place as `add_objects`, `near` range to the field's edge) / `update_asteroid_field { id, set }` (`ores` replaced whole; `null` clears `name`, `innerRadius`, `thickness`, `arc`; position / rotation is a move) / `remove_asteroid_field` (clears `camera.target`) | `asteroids/operations.ts` (`sd-asteroid-fields`) |
 
 The result is `{ scene, warnings, arrivals? }`: `arrivals` lists the groups a `warpIn` added (`sd-staging` "Warp-in");
 the director's `Apply` hands them to `Arrivals` (parked right after `AddShip`, before builds). The document never
@@ -120,6 +126,7 @@ Without a timeline in it, normalizing it never projects, and cue-added ids never
 | `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild (a `targets` or `autoRepair` edit flags `fleets` only: no re-follow) |
 | `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |
 | `objects` (`SceneObjectsDiff`: `added` / `removed` / `rebuilt` / `moved` / `resized`) | `SceneObjects.Apply` builds, retires or re-places the models; `DestinyWorld` adds, re-adds (moved, resized, rebuilt) or `RemoveObject`s the static ball, which halts ships flying at it (`sd-destiny`) |
+| `asteroidFields` (`SceneAsteroidFieldsDiff`: `added` / `removed` / `rebuilt` (any rock key) / `moved` (position, rotation only); a name change is none) | nothing yet (A1); A2 builds, re-places or retires the field's instanced root |
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 | `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |

@@ -9,6 +9,7 @@ export * from './lib/location';
 export * from './lib/prop-mods';
 export * from './lib/staging';
 export * from './lib/objects';
+export * from './lib/asteroids';
 export * from './lib/extent';
 export * from './lib/cinema';
 export * from './lib/waypoints';

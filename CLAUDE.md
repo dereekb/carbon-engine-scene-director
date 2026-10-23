@@ -37,6 +37,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
 - `sd-fittings`: fits (EFT) on ships and the parser; later the dogma evaluator, module activation, the damage model and
   module effects
 - `sd-locations`: the document's location, tools-core map quirks, name resolution (doc: `dressing`)
+- `sd-asteroid-fields`: asteroid fields: the `asteroidFields` document field, the seeded expansion, ore resolution and
+  `add_asteroid_field`, the instanced rock drawing
 - `sd-cinema`: the cinematic camera: hardpoints, the shot spec and moves, waypoints, `FreeCamera`, takeover, letterbox
 - `sd-weapons`: turrets on every ship (the fit's or default guns), mounting, targets, firing on the weapon cycle,
   impacts, and the shot hook Combat rules builds on

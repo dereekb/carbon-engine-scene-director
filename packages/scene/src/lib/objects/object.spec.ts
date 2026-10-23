@@ -40,7 +40,7 @@ describe('normalizeSceneObjects', () => {
     expect(scene.camera.target).toBe('astra');
     expect(scene.objects?.[0].type).toBe(35832);
     expect(normalizeScene(scene).scene).toEqual(scene);
-    expect(catchSceneError(() => normalizeScene({ camera: { target: 'nobody' } })).problems).toEqual(['camera.target "nobody" is not a ship or object id']);
+    expect(catchSceneError(() => normalizeScene({ camera: { target: 'nobody' } })).problems).toEqual(['camera.target "nobody" is not a ship, object or asteroid field id']);
   });
 });
 

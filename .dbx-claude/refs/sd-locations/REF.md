@@ -70,6 +70,9 @@ node bin/scene-director.js call set_location '{"celestial":"Perimeter gate","sys
 | stargate | 2,500 m | `"sun"` |
 | asteroid belt | 0 m from its centre (not solid) | `"sun"` |
 
+`add_asteroid_field { near: { celestial: <belt> } }` centres the field on the belt (range from its centre, the belt's
+SDE radius as the field radius by default; `ScenePlaces.ResolvePlace({ beltCentred })`, `sd-asteroid-fields`).
+
 - `set_location` only sets the location; its result names the region nebula (a passed `nebula` arg is ignored with a
   warning). **It no longer writes `environment.universe`.**
 - `GET /map/system?id=<system>&origin=<x>,<y>,<z>`: system, star (light + model), region nebula, every celestial with

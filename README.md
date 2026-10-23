@@ -169,6 +169,7 @@ connected tab.
 | `stage_engagement` | hub | two sides facing each other at a range around a point or a celestial |
 | `search_objects` | hub | EVE types to place: stations, gates, structures, LCOs, wrecks, with their SOF DNA and radius |
 | `add_objects` | hub | static objects by type name or id at a place off a ship, object or celestial, singly or in a formation |
+| `add_asteroid_field` | hub | a seeded field of EVE ore rocks (sphere, disc or ring) at a place off a ship, object or celestial; an asteroid belt centres it (stored and validated; drawing comes next) |
 | `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location and its targets, objects |
 | `order_ship` | page | a live movement order on a point, ship, object or `celestial:<id>`, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
@@ -223,6 +224,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Fleets, anchors, Follow the FC, fleet orders | [`sd-fleets`](.dbx-claude/refs/sd-fleets/REF.md), with [fleet orders and fleet warp](.dbx-claude/refs/sd-fleets/references/orders.md), [fleet compositions](.dbx-claude/refs/sd-fleets/references/compositions.md) and the TFIs example |
 | Building scenes: `add_ships`, `stage_engagement` | [`sd-staging`](.dbx-claude/refs/sd-staging/REF.md) |
 | Objects: stations, gates, structures, wrecks; `add_objects`, `search_objects` | [`sd-objects`](.dbx-claude/refs/sd-objects/REF.md) |
+| Asteroid fields: seeded ore belts, `add_asteroid_field`, instanced rocks | [`sd-asteroid-fields`](.dbx-claude/refs/sd-asteroid-fields/REF.md) |
 | The cinematic camera: hardpoints, shots, moves, waypoints, letterbox | [`sd-cinema`](.dbx-claude/refs/sd-cinema/REF.md) |
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
 | Fittings: EFT fits on ships, the parser, fit keys | [`sd-fittings`](.dbx-claude/refs/sd-fittings/REF.md) |

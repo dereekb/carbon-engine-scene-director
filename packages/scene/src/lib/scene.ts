@@ -8,6 +8,8 @@ import { normalizeShipPropMod, type SceneShipPropMod } from './prop-mods/prop-mo
 import { applyPropModOperation, PROP_MOD_OPERATIONS } from './prop-mods/operation';
 import { applyStagingOperation, STAGING_OPERATIONS } from './staging/operation';
 import { applyObjectOperation, OBJECT_OPERATIONS } from './objects/operations';
+import { applyAsteroidFieldOperation, ASTEROID_FIELD_OPERATIONS } from './asteroids/operations';
+import { ASTEROID_FIELDS_NOT_DRAWN_WARNING, diffAsteroidFields, normalizeAsteroidFields, type SceneAsteroidField, type SceneAsteroidFieldsDiff } from './asteroids/field';
 import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneObjectsDiff } from './objects/object';
 import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
@@ -141,6 +143,11 @@ export interface SceneDocument {
    */
   objects?: SceneObject[];
   /**
+   * Seeded asteroid fields (see asteroids/field.ts): EVE ore rocks in a sphere, disc or ring, scenery with no Destiny
+   * balls. Ids are unique across ships, objects and fields. Omitted when there are none.
+   */
+  asteroidFields?: SceneAsteroidField[];
+  /**
    * EFT fit text by key, for the ships' `fit`. A fleet composition adds its fits here once, under
    * `<composition id>/<fit key>`. Unused keys stay until set_fits deletes them. Omitted when there are none.
    */
@@ -210,6 +217,10 @@ export interface SceneDiff {
    */
   readonly objects: SceneObjectsDiff;
   /**
+   * What changed in the asteroid fields.
+   */
+  readonly asteroidFields: SceneAsteroidFieldsDiff;
+  /**
    * Whether the combat settings changed: the seed takes effect for later shots, the death mode for later deaths.
    */
   readonly combat: boolean;
@@ -224,7 +235,7 @@ export interface SceneDiff {
  */
 type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', 'personalities', 'combat', 'timeline']);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'asteroidFields', 'fits', 'personalities', 'combat', 'timeline']);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders']);
 
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
@@ -309,9 +320,13 @@ export function normalizeScene(input: unknown): NormalizedScene {
   const objects = normalizeSceneObjects({ input: input['objects'], shipIds: ids });
   problems.push(...objects.problems);
   warnings.push(...objects.warnings);
+  const fields = normalizeAsteroidFields({ input: input['asteroidFields'], takenIds: new Set([...ids, ...objects.ids]) });
+  problems.push(...fields.problems);
+  warnings.push(...fields.warnings);
+  if (fields.fields) warnings.push(ASTEROID_FIELDS_NOT_DRAWN_WARNING);
   const target = scene.camera.target;
-  if (target != null && !ids.has(target) && !objects.ids.has(target)) {
-    problems.push(`camera.target "${target}" is not a ship or object id`);
+  if (target != null && !ids.has(target) && !objects.ids.has(target) && !fields.ids.has(target)) {
+    problems.push(`camera.target "${target}" is not a ship, object or asteroid field id`);
   }
   const personalities = normalizeScenePersonalities(input['personalities']);
   problems.push(...personalities.problems);
@@ -321,6 +336,7 @@ export function normalizeScene(input: unknown): NormalizedScene {
   warnings.push(...fleets.warnings);
   if (fleets.fleets) scene.fleets = fleets.fleets;
   if (objects.objects) scene.objects = objects.objects;
+  if (fields.fields) scene.asteroidFields = fields.fields;
   if (fits.fits) scene.fits = fits.fits;
   if (personalities.personalities) scene.personalities = personalities.personalities;
   const combat = normalizeSceneCombat(input['combat']);
@@ -384,6 +400,10 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "update_object", id, set }   { op: "move_object", id, position? | near?, heading? | facing? | rotation? }
  *   { op: "remove_object", id }   static objects (see objects/operations.ts); add_objects needs dna, which the
  *                                       add_objects tool resolves from a type
+ *   { op: "add_asteroid_field", ores, shape?, radius?, count?, size?, seed?, position? | near?, ... }
+ *   { op: "update_asteroid_field", id, set }   { op: "remove_asteroid_field", id }
+ *                                       seeded asteroid fields (see asteroids/operations.ts); every ore needs rocks,
+ *                                       which the add_asteroid_field tool resolves from an ore name
  *   { op: "set_personalities", personalities: { "<key>": template | null } }
  *                                       merged into the document's personalities; null deletes a key no fleet uses
  *                                       (see personalities/document.ts)
@@ -484,6 +504,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (PROP_MOD_OPERATIONS.has(String(operation['op']))) applyPropModOperation(operation, context);
       else if (STAGING_OPERATIONS.has(String(operation['op']))) applyStagingOperation(operation, context);
       else if (OBJECT_OPERATIONS.has(String(operation['op']))) applyObjectOperation(operation, context);
+      else if (ASTEROID_FIELD_OPERATIONS.has(String(operation['op']))) applyAsteroidFieldOperation(operation, context);
       else if (FIT_OPERATIONS.has(String(operation['op']))) applyFitOperation(operation, context);
       else if (COMBAT_OPERATIONS.has(String(operation['op']))) applyCombatOperation(operation, context);
       else if (PERSONALITY_OPERATIONS.has(String(operation['op']))) applyPersonalityOperation(operation, context);
@@ -517,6 +538,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     regrouped: [],
     location: !sameJson(before?.location ?? null, after.location ?? null),
     objects: diffSceneObjects(before?.objects ?? [], after.objects ?? []),
+    asteroidFields: diffAsteroidFields(before?.asteroidFields ?? [], after.asteroidFields ?? []),
     combat: !sameJson(before?.combat ?? null, after.combat ?? null),
     orders: []
   };

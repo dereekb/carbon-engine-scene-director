@@ -400,6 +400,45 @@
         ]
       },
       {
+        "name": "sd-asteroid-fields",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "asteroid field",
+              "asteroid fields",
+              "asteroidFields",
+              "add_asteroid_field",
+              "update_asteroid_field",
+              "remove_asteroid_field",
+              "asteroid belt",
+              "ore belt",
+              "rock models",
+              "SceneFields",
+              "AsteroidData",
+              "Veldspar",
+              "instanced rocks"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/asteroids/",
+              "hub/asteroid-data",
+              "hub/asteroid-fields",
+              "apps/viewer/src/lib/asteroid-fields",
+              "apps/viewer/src/lib/scene-fields"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__add_asteroid_field"
+            ]
+          }
+        ]
+      },
+      {
         "name": "sd-cinema",
         "delivery": "read",
         "tone": "hint",

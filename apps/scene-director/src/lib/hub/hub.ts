@@ -44,6 +44,8 @@ import { Locations } from './locations';
 import { Staging } from './staging';
 import { ObjectData, type ObjectDataApi } from './object-data';
 import { ObjectTools } from './objects';
+import { AsteroidData, type AsteroidDataApi } from './asteroid-data';
+import { AsteroidFieldTools } from './asteroid-fields';
 import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
@@ -125,6 +127,11 @@ export interface HubOptions {
    */
   readonly objectData?: ObjectDataApi;
   /**
+   * EVE ores and their SOF rock sets, for add_asteroid_field; over `objectData` and ShipData's pinned SDE build when
+   * omitted.
+   */
+  readonly asteroidData?: AsteroidDataApi;
+  /**
    * Serves ranged audio reads from local copies of tools-core's banks (audio-cache.ts); without one every read is
    * proxied to tools-core.
    */
@@ -181,6 +188,8 @@ export class Hub implements ToolCaller {
   readonly staging: Staging;
   readonly objectData: ObjectDataApi;
   readonly objects: ObjectTools;
+  readonly asteroidData: AsteroidDataApi;
+  readonly asteroidFields: AsteroidFieldTools;
   private readonly log: (line: string) => void;
   private readonly audioCache: Maybe<AudioBankCache>;
   private readonly pages: WebSocket[] = [];
@@ -203,6 +212,7 @@ export class Hub implements ToolCaller {
     weaponData,
     mapData,
     objectData,
+    asteroidData,
     audioCache = null,
     log = LogToStderr
   }: HubOptions = {}) {
@@ -215,6 +225,7 @@ export class Hub implements ToolCaller {
     this.weaponData = weaponData ?? new WeaponData({ sde });
     this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
     this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), resourceBuild: () => this.toolsCore.ResolveBuild() });
+    this.asteroidData = asteroidData ?? new AsteroidData({ objectData: this.objectData, url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild() });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
     const page = {
       Connected: () => this.pages.length > 0,
@@ -227,6 +238,7 @@ export class Hub implements ToolCaller {
     this.locations = new Locations({ mapData: this.mapData, page });
     this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, personalities: this.fleetPersonalities, page });
     this.objects = new ObjectTools({ objectData: this.objectData, shipData: this.shipData, mapData: this.mapData, page });
+    this.asteroidFields = new AsteroidFieldTools({ asteroidData: this.asteroidData, shipData: this.shipData, mapData: this.mapData, page });
     this.log = log;
     this.audioCache = audioCache;
   }
@@ -327,7 +339,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.fleetPersonalities.Call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.fleetPersonalities.Call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args) ?? this.asteroidFields.Call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'list_shots':

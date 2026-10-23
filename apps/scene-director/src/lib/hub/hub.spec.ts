@@ -17,6 +17,7 @@ import { MakeFakeShipData, SDE, TFI_DNA, UnpreparedSdeRoutes } from './ship-data
 import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
 import type { ToolsCoreApi } from './tools-core';
 import { MakeFakeObjectData } from './object-data.testing';
+import { MakeFakeAsteroidData } from './asteroid-data.testing';
 import { MakeFakeDogmaData } from './dogma-data.testing';
 import { MakeFakeWeaponData } from './weapon-data.testing';
 import { AudioBankCache } from './audio-cache';
@@ -209,6 +210,16 @@ describe('objects', () => {
       expect(added).toMatchObject({ added: [{ id: 'astra', radius: 45000 }], loaded: false });
     } finally {
       await objectsHub.Stop();
+    }
+  });
+
+  it('add_asteroid_field is a hub tool over the injected asteroid data', async () => {
+    const fieldsHub = await StartHub({ asteroidData: MakeFakeAsteroidData().asteroidData });
+    try {
+      const added = (await fieldsHub.Call('add_asteroid_field', { scene: { name: 'x' }, ores: ['Veldspar'], id: 'belt', count: 40 })) as { added: { id: string; placed: number }; loaded: boolean };
+      expect(added).toMatchObject({ added: { id: 'belt', placed: 40 }, loaded: false });
+    } finally {
+      await fieldsHub.Stop();
     }
   });
 });

@@ -7,6 +7,9 @@
 > refusal: `sd-destiny`; `near` / `facing` and `ScenePlaces`: `sd-staging`; the location's own stations and gates as
 > targets: `sd-locations`.
 
+Asteroid fields (seeded ore rocks, draw-only, no balls) are their own area: `sd-asteroid-fields`. Ids are unique across
+ships, objects and fields.
+
 ## Files
 
 | File | Role |

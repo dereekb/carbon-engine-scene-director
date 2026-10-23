@@ -4,6 +4,9 @@
 > `packages/scene/src/lib/staging/` or `apps/scene-director/src/lib/hub/staging.ts`. Fleet rules they rely on:
 > `sd-fleets`.
 
+Generated ship, object and composition ids skip every ship, object and **asteroid field** id (`stagingTakenIds`,
+`toExpandExisting`; `StagingDraft.fields`, `sd-asteroid-fields`).
+
 ## Split: hub resolves, op is pure
 
 - `hub/staging.ts` resolves every name first: hull names → SOF DNA + EVE radius (tools-core SDE, as
