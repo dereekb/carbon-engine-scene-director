@@ -429,6 +429,31 @@ describe('CinemaRig over MCP', () => {
     Close(later, cut, 3);
   });
 
+  it('anchors warp-in on an arriving ship at once, clips for it once incoming, and releases other shots on it', () => {
+    const landing: SceneVector = [0, 0, 0];
+    const parked = Ship('a', [0, 0, -3e9]);
+    const arriving = (ship: CinemaShip, incoming: boolean): CinemaScene => ({
+      ...Scene([Ship('b', [0, 0, 5000])]),
+      arriving: [ship],
+      ...(incoming ? { incoming: [{ centre: ship.frameCentre, radius: ship.frameRadius }] } : {}),
+      warpOf: (id) => (id === 'a' ? { phase: 'arriving', landing } : null)
+    });
+    const rig = new CinemaRig();
+    rig.Play({ shot: 'warp-in', ship: 'a' }, 0);
+    const first = rig.Frame(0, () => arriving(parked, false));
+    // Downstream of the landing: the lane runs from the parked ship (-Z) to the landing (+Z).
+    expect(first?.pose.eye[2]).toBeGreaterThan(0);
+    expect(first?.far).toBeLessThan(1e6);
+    const streaking = Ship('a', [0, 0, -1.5e6]);
+    const frame = rig.Frame(SECOND, () => arriving(streaking, true));
+    Close(frame?.pose.eye ?? [0, 0, 0], first?.pose.eye ?? [0, 0, 0], 3);
+    expect(frame?.far).toBeGreaterThan(1.5e6);
+    const chase = new CinemaRig();
+    chase.Play({ hardpoint: { name: 'chase', ship: 'a' } }, 0);
+    expect(chase.Frame(0, () => arriving(parked, false))).toBeNull();
+    expect(chase.Report().note).toMatch(/still arriving by warp: play warp-in, or wait for it to land/u);
+  });
+
   it('scales a radius path by the subject', () => {
     const subject = {
       centre: [0, 0, 0] as SceneVector,

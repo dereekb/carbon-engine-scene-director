@@ -72,14 +72,20 @@ export interface CinemaObject extends CinemaSphere {
 }
 
 /**
- * A ship's warp phases as the camera reads them (Destiny's ShipWarp.phase).
+ * A ship's warp phases as the camera reads them: Destiny's ShipWarp.phase, or `arriving` for a ship still landing from
+ * warp (parked off-grid, scheduled or in its warp-in: the arrival report).
  */
-export const CINEMA_WARP_PHASES = ['aligning', 'warping', 'exiting', 'landed'] as const;
+export const CINEMA_WARP_PHASES = ['aligning', 'warping', 'exiting', 'landed', 'arriving'] as const;
 export type CinemaWarpPhase = (typeof CINEMA_WARP_PHASES)[number];
 
 /**
- * A ship's warp: its phase and where it lands (Destiny's landing point once in warp, the estimate while aligning),
- * origin-relative scene metres.
+ * Why a hardpoint other than warp-landing has no pose on a subject that has not landed yet.
+ */
+export const CINEMA_ARRIVING_NOTE = 'still arriving by warp: play warp-in, or wait for it to land';
+
+/**
+ * A ship's warp: its phase and where it lands (Destiny's landing point once in warp, the estimate while aligning, an
+ * arrival's landing), origin-relative scene metres.
  */
 export interface CinemaWarp {
   readonly phase: CinemaWarpPhase;
@@ -87,7 +93,20 @@ export interface CinemaWarp {
 }
 
 export interface CinemaScene {
+  /**
+   * The ships on grid: every drawn ship but those still arriving.
+   */
   readonly ships: readonly CinemaShip[];
+  /**
+   * Ships still arriving by warp (parked off-grid, scheduled or in their warp-in), as drawn: out of `ships`, so no
+   * framing, clearance or team counts them until they land; only warp-landing frames them (at their landings).
+   */
+  readonly arriving?: readonly CinemaShip[];
+  /**
+   * The drawn spheres of arriving ships in their warp-in within the hidden distance of their landings: the clip planes
+   * reach them (so the streak in is drawn), nothing else does.
+   */
+  readonly incoming?: readonly CinemaSphere[];
   /**
    * A ship's warp, or null when it is not warping: read lazily, only by the warp-landing hardpoint.
    */
@@ -188,17 +207,31 @@ export function groupFrame(ships: readonly CinemaShip[], leader: CinemaShip = sh
 export interface SelectedCinemaGroup {
   readonly ships: CinemaShip[];
   readonly leader: Maybe<CinemaShip>;
+  /**
+   * The selected ships still arriving by warp (in `ships` too with `arriving: true`).
+   */
+  readonly arriving: CinemaShip[];
   readonly problems: string[];
 }
 
 /**
  * The drawn ships of a fleet selection (fleets/selection.ts) and its leader: the fleet's commander, the wing's
- * commander, the squad's commander, else the first ship selected.
+ * commander, the squad's commander, else the first ship selected. Ships still arriving by warp are left out of `ships`
+ * unless `arriving` (warp-landing frames them); a selection of arriving ships only has the CINEMA_ARRIVING_NOTE
+ * problem.
+ *
+ * @param scene - The drawn scene.
+ * @param selection - The fleet, wing, squad or ships.
+ * @param options - `arriving`: keep ships still arriving by warp in `ships`.
  */
-export function selectCinemaGroup(scene: CinemaScene, selection: FleetSelection): SelectedCinemaGroup {
-  const { ships: ids, problems } = selectFleetShips({ ships: scene.ships, fleets: scene.fleets ?? [] }, selection, 'subject');
-  const byId = new Map(scene.ships.map((ship) => [ship.id, ship]));
-  const ships = ids.flatMap((id) => byId.get(id) ?? []);
+export function selectCinemaGroup(scene: CinemaScene, selection: FleetSelection, { arriving = false }: { readonly arriving?: boolean } = {}): SelectedCinemaGroup {
+  const pool = [...scene.ships, ...(scene.arriving ?? [])];
+  const { ships: ids, problems } = selectFleetShips({ ships: pool, fleets: scene.fleets ?? [] }, selection, 'subject');
+  const byId = new Map(pool.map((ship) => [ship.id, ship]));
+  const landed = new Set(scene.ships.map((ship) => ship.id));
+  const selected = ids.flatMap((id) => byId.get(id) ?? []);
+  const incoming = selected.filter((ship) => !landed.has(ship.id));
+  const ships = arriving ? selected : selected.filter((ship) => landed.has(ship.id));
   const fleet = selection.fleet == null ? null : (scene.fleets ?? []).find((candidate) => candidate.id === selection.fleet);
   let leaderId: Maybe<string> = null;
   if (fleet && selection.wing != null) {
@@ -210,8 +243,8 @@ export function selectCinemaGroup(scene: CinemaScene, selection: FleetSelection)
     leaderId = fleet.commander;
   }
   const leader = (leaderId ? ships.find((ship) => ship.id === leaderId) : null) ?? ships[0] ?? null;
-  if (!ships.length && !problems.length) problems.push('subject: the selection holds no ships');
-  return { ships, leader, problems };
+  if (!ships.length && !problems.length) problems.push(incoming.length ? CINEMA_ARRIVING_NOTE : 'subject: the selection holds no ships');
+  return { ships, leader, arriving: incoming, problems };
 }
 
 /**

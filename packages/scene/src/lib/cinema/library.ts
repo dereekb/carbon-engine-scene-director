@@ -142,7 +142,7 @@ export const CAMERA_SHOT_LIBRARY: readonly CameraShotLibraryEntry[] = [
   },
   {
     name: 'warp-in',
-    description: 'waits at the landing of a fleet, wing, squad or ship in warp, looking back up the lane as it streaks in and settles (cuts there: a blend would swing across the lane)',
+    description: 'waits at the landing of a fleet, wing, squad or ship in warp, or still arriving by warp (warpIn: play it right after the add, before they land), looking back up the lane as it streaks in and settles (cuts there: a blend would swing across the lane)',
     subject: 'group',
     options: ['fleet', 'wing', 'squad', 'ships', 'ship', 'side'],
     example: { shot: 'warp-in', fleet: 'tfis' },

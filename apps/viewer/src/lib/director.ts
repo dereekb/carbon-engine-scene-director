@@ -122,9 +122,11 @@ import {
   scaleVec,
   normalizeHardpointSubject,
   toHardpointListing,
+  distanceVec,
   type CinemaCelestial,
   type CinemaScene,
   type CinemaShip,
+  type CinemaSphere,
   type CinemaWarp,
   type HardpointListing,
   type SceneVector,
@@ -192,7 +194,7 @@ import {
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { FleetFollowing, type ShipFollowingReport } from './following';
-import { Arrivals } from './arrivals';
+import { Arrivals, WARP_IN_HIDDEN_DISTANCE } from './arrivals';
 import { EncodePng, type CameraEye, type DrawnCamera, type Engine, type EngineStats } from './engine';
 import type { ToolHandler } from './link';
 import { ReadDressParts } from './celestials';
@@ -2932,6 +2934,8 @@ export class Director {
    */
   private CinemaScene(now: number): CinemaScene {
     const ships: CinemaShip[] = [];
+    const arriving: CinemaShip[] = [];
+    const incoming: CinemaSphere[] = [];
     for (const doc of this.scene?.ships ?? []) {
       const curves = this.world.Curves(doc.id);
       if (!curves) continue;
@@ -2940,7 +2944,7 @@ export class Director {
       const velocity = curves.translation.GetValueDotAt__Ticks(now, vec3.create());
       const ship = this.engine ? this.live.get(doc.id)?.ship : null;
       const centre = ship ? vec3.add(vec3.create(), vec3.transformQuat(vec3.create(), ship.boundingSphereCenter, rotation), position) : position;
-      ships.push({
+      const drawn: CinemaShip = {
         id: doc.id,
         position: ToVector(position),
         rotation: [rotation[0], rotation[1], rotation[2], rotation[3]],
@@ -2948,10 +2952,19 @@ export class Director {
         frameCentre: ToVector(centre),
         frameRadius: ship?.boundingSphereRadius || UNBUILT_RADIUS,
         ...(doc.team ? { team: doc.team } : {})
-      });
+      };
+      // A ship still arriving by warp stays out of framing; once streaking in near its landing the clips reach it.
+      const arrival = this.world.Arriving(doc.id) ? this.world.ArrivalOf(doc.id) : null;
+      if (!arrival) ships.push(drawn);
+      else {
+        arriving.push(drawn);
+        if (arrival.state === 'warping' && distanceVec(drawn.frameCentre, arrival.landing) < WARP_IN_HIDDEN_DISTANCE) incoming.push({ centre: drawn.frameCentre, radius: drawn.frameRadius });
+      }
     }
     return {
       ships,
+      arriving,
+      incoming,
       fleets: this.scene?.fleets ?? [],
       sunDirection: this.SunDirection(),
       celestials: this.CinemaCelestials(),
@@ -2968,11 +2981,16 @@ export class Director {
   }
 
   /**
-   * A ship's warp for the warp-landing hardpoint, read lazily from the Destiny master.
+   * A ship's warp for the warp-landing hardpoint, read lazily: an unfinished arrival first (`arriving`, its landing),
+   * else the Destiny master's warp.
    */
   private CinemaWarp(id: string): Maybe<CinemaWarp> {
-    const warp = this.world.Motion(id)?.warp;
-    return warp ? { phase: warp.phase, landing: warp.landing } : null;
+    const arrival = this.world.Arriving(id) ? this.world.ArrivalOf(id) : null;
+    const warp = arrival ? null : this.world.Motion(id)?.warp;
+    let result: Maybe<CinemaWarp> = null;
+    if (arrival) result = { phase: 'arriving', landing: arrival.landing };
+    else if (warp) result = { phase: warp.phase, landing: warp.landing };
+    return result;
   }
 
   /**

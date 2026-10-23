@@ -18,7 +18,7 @@ import type { SceneVector } from '../scene';
 import { MIN_WARP_DISTANCE } from '../orders';
 import { fitDistance, viewHalfExtents } from './framing';
 import type { CameraPose } from './pose';
-import { aheadOf, engagementFrame, findLandmark, groupFrame, landmarkFrame, nearestEnemyCentroid, nearestOtherShip, sceneFocus, selectCinemaGroup, shipFrame, type CinemaLandmark, type CinemaScene, type CinemaShip, type SubjectFrame } from './subjects';
+import { aheadOf, CINEMA_ARRIVING_NOTE, engagementFrame, findLandmark, groupFrame, landmarkFrame, nearestEnemyCentroid, nearestOtherShip, sceneFocus, selectCinemaGroup, shipFrame, type CinemaLandmark, type CinemaScene, type CinemaShip, type CinemaWarp, type SubjectFrame } from './subjects';
 import { addScaledVec, addVec, crossVec, distanceVec, dotVec, fromFrame, lengthVec, normalizeVec, orthogonalizeVec, scaleVec, subVec, WORLD_UP } from './vectors';
 
 export type HardpointKind = 'ship' | 'group' | 'engagement' | 'landmark';
@@ -65,7 +65,7 @@ export interface ShipHardpointRow {
 /**
  * What warp-landing does, for a ship or a group.
  */
-const WARP_LANDING_DESCRIPTION = "at the landing point of the group's warp, ahead of it and to one side, looking back up the warp lane, so the ships streak in and stop in front of the lens; a group with no warp is framed where it is; the eye and look hold once a warp is known";
+const WARP_LANDING_DESCRIPTION = "at the landing point of the group's warp (or of its arrival by warp, warpIn), ahead of it and to one side, looking back up the warp lane, so the ships streak in and stop in front of the lens; a group with no warp is framed where it is; the eye and look hold once a warp is known";
 
 export const SHIP_HARDPOINTS: readonly ShipHardpointRow[] = [
   { name: 'chase', direction: [-1, 0, 0.2], fill: 0.4, fov: 50, up: 'frame', look: [0.8, 0, 0], description: 'behind and a little above, looking past the hull along its heading' },
@@ -289,6 +289,8 @@ function resolveShipHardpoint(ref: HardpointRef, scene: CinemaScene, anchor: May
   const row = SHIP_HARDPOINTS.find((candidate) => candidate.name === ref.name);
   const ship = ref.ship == null ? null : scene.ships.find((candidate) => candidate.id === ref.ship);
   if (!row) return { pose: null, subject: null, note: `no ship hardpoint "${ref.name}" (${SHIP_HARDPOINT_NAMES.join(', ')})` };
+  const arriving = ship || ref.ship == null ? null : scene.arriving?.find((candidate) => candidate.id === ref.ship);
+  if (arriving) return row.special === 'warp-landing' ? resolveWarpLanding(ref, scene, [arriving], arriving, arriving.id, ref.fov ?? row.fov, ref.fill ?? row.fill, anchor) : { pose: null, subject: null, note: `ship ${arriving.id} is ${CINEMA_ARRIVING_NOTE}` };
   if (!ship) return { pose: null, subject: null, note: ref.ship == null ? `hardpoint "${ref.name}" needs a ship` : `no ship "${ref.ship}" in the scene` };
   const frame = shipFrame(ship, ref.bank === true);
   const fov = ref.fov ?? row.fov;
@@ -346,9 +348,10 @@ function flyby(frame: SubjectFrame, fov: number, anchor: Maybe<SceneVector>): Re
 /**
  * Warp-landing: downstream of the group's landing, WARP_LANDING_YAW to one side and WARP_LANDING_PITCH up, looking back
  * up the lane at where the formation settles. While the reference ship aligns, the landing formation is its formation
- * where it stands, moved to the landing and turned to the lane; once in warp, the landings themselves. The eye and look are anchored on the
- * first frame that sees a warp in progress; a landed one frames its landing unanchored, since Destiny keeps reporting a
- * landed warp until the next one resolves.
+ * where it stands, moved to the landing and turned to the lane; once in warp, the landings themselves. Ships still
+ * arriving by warp count as in warp from the start: their landings are known, the lane runs from where they wait. The
+ * eye and look are anchored on the first frame that sees a warp in progress; a landed one frames its landing
+ * unanchored, since Destiny keeps reporting a landed warp until the next one resolves.
  *
  * @param ref - The hardpoint (`side`).
  * @param scene - The drawn scene (`warpOf`).
@@ -369,19 +372,21 @@ function resolveWarpLanding(ref: HardpointRef, scene: CinemaScene, ships: readon
     return { pose: { eye: [...anchor.eye], look: [...anchor.look], up, fov }, subject, anchor, note: `holding on the landing of ${label}'s warp` };
   }
   const warpOf = scene.warpOf ?? (() => null);
-  const leaderWarp = warpOf(leader.id);
   let reference: CinemaShip = leader;
-  let warp = leaderWarp;
-  if (!warp) {
+  let warp = warpOf(leader.id);
+  // A ship still to land from warp outranks a landed leader (the first of a staggered arrival is down already).
+  const pick = (accept: (candidate: CinemaWarp) => boolean): void => {
     for (const ship of ships) {
       const candidate = warpOf(ship.id);
-      if (candidate) {
+      if (candidate && accept(candidate)) {
         reference = ship;
         warp = candidate;
         break;
       }
     }
-  }
+  };
+  if (warp?.phase === 'landed') pick((candidate) => candidate.phase === 'arriving');
+  if (!warp) pick(() => true);
   const lead = shipFrame(reference);
   let centre: SceneVector;
   let radius: number;
@@ -456,8 +461,9 @@ function resolveGroupHardpoint(ref: HardpointRef, scene: CinemaScene, anchor: Ma
   const row = GROUP_HARDPOINTS.find((candidate) => candidate.name === ref.name);
   if (!row) return { pose: null, subject: null, note: `no group hardpoint "${ref.name}" (${GROUP_HARDPOINT_NAMES.join(', ')})` };
   const selection = ref.ships ? { ships: ref.ships } : { fleet: ref.fleet, ...(ref.wing == null ? {} : { wing: ref.wing }), ...(ref.squad == null ? {} : { squad: ref.squad }) };
-  const group = selectCinemaGroup(scene, selection);
-  if (!group.leader) return { pose: null, subject: null, note: group.problems.join('; ') || 'the group has no ships' };
+  // Warp-landing frames ships still arriving by warp too (at their landings); every other hardpoint only the landed.
+  const group = selectCinemaGroup(scene, selection, { arriving: row.name === 'warp-landing' });
+  if (!group.leader) return { pose: null, subject: null, note: group.arriving.length && !group.ships.length ? `${groupLabel(ref)} ${(ref.ships?.length ?? 0) > 1 ? 'are' : 'is'} ${CINEMA_ARRIVING_NOTE}` : group.problems.join('; ') || 'the group has no ships' };
   const fov = ref.fov ?? row.fov;
   const fill = ref.fill ?? row.fill;
   if (row.name === 'warp-landing') return resolveWarpLanding(ref, scene, group.ships, group.leader, groupLabel(ref), fov, fill, anchor);
@@ -737,7 +743,7 @@ function subjectReport(subject: HardpointSubject, scene: CinemaScene, kind: Hard
   if (kind === 'ship') {
     const ship = scene.ships.find((candidate) => candidate.id === subject.ship);
     if (ship) frame = shipFrame(ship, subject.bank === true);
-    ids = { ship: subject.ship };
+    ids = { ship: subject.ship, ...(scene.arriving?.some((candidate) => candidate.id === subject.ship) ? { arriving: true } : {}) };
   } else if (kind === 'group') {
     const selection = subject.ships ? { ships: subject.ships } : { fleet: subject.fleet, ...(subject.wing == null ? {} : { wing: subject.wing }), ...(subject.squad == null ? {} : { squad: subject.squad }) };
     const group = selectCinemaGroup(scene, selection);
@@ -745,6 +751,7 @@ function subjectReport(subject: HardpointSubject, scene: CinemaScene, kind: Hard
       frame = groupFrame(group.ships, group.leader);
       extra = { leader: group.leader.id, count: group.ships.length };
     }
+    if (group.arriving.length) extra = { ...extra, arriving: group.arriving.length };
     ids = subject.ships ? { ships: subject.ships } : { fleet: subject.fleet, ...(subject.wing == null ? {} : { wing: subject.wing }), ...(subject.squad == null ? {} : { squad: subject.squad }) };
   } else if (kind === 'landmark') {
     const landmark: Maybe<CinemaLandmark> = findLandmark(scene, subject);
@@ -759,7 +766,9 @@ function subjectReport(subject: HardpointSubject, scene: CinemaScene, kind: Hard
       extra = { teams: engagement.teams, a: roundVec(engagement.a, 100), b: roundVec(engagement.b, 100) };
     }
   }
-  return frame ? { kind, ...ids, centre: roundVec(frame.centre, 100), radius: round(frame.radius, 10), forward: roundVec(frame.forward, 1000), up: roundVec(frame.up, 1000), starboard: roundVec(frame.starboard, 1000), ...extra } : null;
+  // A subject still arriving by warp has no frame yet, but says so.
+  const arriving = ids['arriving'] != null || extra['arriving'] != null;
+  return frame ? { kind, ...ids, centre: roundVec(frame.centre, 100), radius: round(frame.radius, 10), forward: roundVec(frame.forward, 1000), up: roundVec(frame.up, 1000), starboard: roundVec(frame.starboard, 1000), ...extra } : arriving ? { kind, ...ids, ...extra } : null;
 }
 
 function round(value: number, scale: number): number {

@@ -550,7 +550,8 @@ export class CinemaRig {
       if (run.blendFrom) pose = blendPoses(run.blendFrom, pose, Ease(shot.transition.easing, t / shot.transition.duration));
     }
     // The hulls a path or the pose's eye rides on are exempt from clearance: the shot puts the eye there on purpose.
-    const spheres = cinemaSpheres(scene);
+    // Ships streaking in from warp only stretch the clip planes, so the streak is drawn.
+    const spheres = [...cinemaSpheres(scene), ...(scene.incoming ?? [])];
     const eye = shot.clearance === false ? pose.eye : clearHulls(pose.eye, cinemaSpheres(scene, new Set(cameraPathAnchors(shot))), shot.clearance ?? HULL_CLEARANCE);
     pose = { ...pose, eye };
     const { near, far } = cameraClips({ eye, spheres, reach: scene.reach ?? 0 });

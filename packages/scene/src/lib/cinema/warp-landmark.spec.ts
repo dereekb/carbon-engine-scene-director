@@ -4,7 +4,9 @@ import type { SceneVector } from '../scene';
 import {
   cameraPathAnchors,
   cameraShotSubjects,
+  cinemaSpheres,
   distanceVec,
+  engagementFrame,
   dotVec,
   fitDistance,
   groupFrame,
@@ -118,6 +120,64 @@ describe('warp-landing', () => {
     const ship = resolveHardpoint({ name: 'warp-landing', ship: 'fc' }, scene);
     const group = resolveHardpoint({ name: 'warp-landing', ships: ['fc'] }, scene);
     expect(ship.pose?.eye).toEqual(group.pose?.eye);
+  });
+});
+
+describe('warp-landing on arrivals', () => {
+  const fleets: SceneFleet[] = [{ id: 'blue', commander: 'fc', wings: [{ id: 'main', squads: [{ id: 's1', role: 'dps', members: ['m1', 'm2'] }] }] }];
+  // Landing at the origin in formation, parked 3,000 km out along -X (they warp in along +X).
+  const landings: Record<string, SceneVector> = { fc: [0, 0, 0], m1: [-800, 0, 600], m2: [-800, 0, -600] };
+  const parked = (): CinemaShip[] => Object.entries(landings).map(([id, landing]) => Ship(id, [landing[0] - 3e9, landing[1], landing[2]], { yaw: 90 }));
+  const arriving = (id: string): CinemaWarp | null => (landings[id] ? { phase: 'arriving', landing: landings[id] } : null);
+  const others = [Ship('enemy', [0, 0, 20000], { team: 'red' })];
+
+  it('frames the landings, anchored at once, looking back up the lane from where they wait', () => {
+    const resolved = resolveHardpoint({ name: 'warp-landing', fleet: 'blue' }, Scene(others, { fleets, arriving: parked(), warpOf: arriving }));
+    const pose = resolved.pose as CameraPose;
+    expect(resolved.anchor?.look).toBeDefined();
+    expect(distanceVec(pose.look, [-1600 / 3, 0, 0])).toBeLessThan(1);
+    // Downstream of the landing (+X) and looking back toward the parked ships (-X).
+    expect(pose.eye[0]).toBeGreaterThan(0);
+    expect(dotVec(Forward(pose), [-1, 0, 0])).toBeGreaterThan(Math.cos(40 * DEGREES));
+    expect(resolved.note).toMatch(/arriving/u);
+    // A lone arriving ship too.
+    const ship = resolveHardpoint({ name: 'warp-landing', ship: 'm1' }, Scene(others, { fleets, arriving: parked(), warpOf: arriving }));
+    expect(distanceVec(ship.pose?.look ?? [0, 0, 0], landings['m1'])).toBeLessThan(1);
+    expect(ship.anchor).toBeDefined();
+  });
+
+  it('anchors on a member still arriving once the leader has landed', () => {
+    const ships = parked();
+    const fc = Ship('fc', [0, 0, 0], { yaw: 90 });
+    const warpOf = (id: string): CinemaWarp | null => (id === 'fc' ? { phase: 'landed', landing: [0, 0, 0] } : arriving(id));
+    const resolved = resolveHardpoint({ name: 'warp-landing', fleet: 'blue' }, Scene([fc, ...others], { fleets, arriving: ships.filter((ship) => ship.id !== 'fc'), warpOf }));
+    expect(resolved.anchor).toBeDefined();
+    expect(distanceVec(resolved.pose?.look ?? [0, 0, 0], [-1600 / 3, 0, 0])).toBeLessThan(1);
+    // Other hardpoints frame only the landed.
+    const behind = resolveHardpoint({ name: 'behind-fc', fleet: 'blue' }, Scene([fc, ...others], { fleets, arriving: ships.filter((ship) => ship.id !== 'fc'), warpOf }));
+    expect(behind.subject?.centre).toEqual(fc.frameCentre);
+  });
+
+  it('gives other hardpoints on an all-arriving subject no pose, with a note', () => {
+    const scene = Scene(others, { fleets, arriving: parked(), warpOf: arriving });
+    const note = /still arriving by warp: play warp-in, or wait for it to land/u;
+    for (const ref of [
+      { name: 'behind-fc', fleet: 'blue' },
+      { name: 'top-down', ships: ['m1', 'm2'] },
+      { name: 'chase', ship: 'fc' },
+      { name: 'flyby', ship: 'm2' }
+    ]) {
+      const resolved = resolveHardpoint(ref, scene);
+      expect(resolved.pose).toBeNull();
+      expect(resolved.note).toMatch(note);
+    }
+    // The engagement, the spheres and the listing leave them out until they land.
+    expect(cinemaSpheres(scene)).toHaveLength(1);
+    expect(engagementFrame(scene)?.centre).toEqual(others[0].frameCentre);
+    const listing = toHardpointListing({ fleet: 'blue' }, scene);
+    expect(listing.subject?.['arriving']).toBe(3);
+    expect(listing.hardpoints.find((entry) => entry.name === 'warp-landing')?.eye).toBeDefined();
+    expect(toHardpointListing({ ship: 'fc' }, scene).subject?.['arriving']).toBe(true);
   });
 });
 

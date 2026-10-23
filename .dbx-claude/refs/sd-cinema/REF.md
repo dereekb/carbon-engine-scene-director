@@ -76,7 +76,7 @@ append after the library's. Every library move is scale-free (an allow-list spec
 | `into-sun` | engagement | 16 s | `into-sun`, blend 2 s, `orbit` up 12° + `zoom` 42°, look lag 0.4 |
 | `into-celestial` | engagement (`celestial` \| `object`) | 16 s | as into-sun on `into-celestial` |
 | `battle-fly-through` | engagement | 18 s | base `overlook`; a subject-frame radii path from port to starboard across the axis, low; zoom 30° then 55° over halves; eye lag 0.15, look 0.6 |
-| `warp-in` | group or ship (`side`) | holds | `warp-landing`, **cut** (a blend would swing across the lane), look lag 0.3 |
+| `warp-in` | group or ship (`side`) | holds | `warp-landing`, **cut** (a blend would swing across the lane), look lag 0.3; on ships still arriving by warp (`warpIn`) too |
 | `establishing` | landmark (`object` \| `celestial`) | 14 s | `establishing`, blend 2 s, `push` ×0.85 |
 | `chase` | ship | holds | `chase`, blend 1.5 s, eye lag 0.35, look 0.15 |
 | `hero` | ship (`side`, default port) | 10 s | `hero-<side>`, `orbit` subject-up ±25° toward the beam (+ port, a spec pins it) + `push` ×0.85 |
@@ -121,7 +121,20 @@ with the SOF bounding radius (100 m until built); `[forward, starboard, up]` coe
   (`MIN_WARP_LANDING_RADIUS`), the eye `fitDistance(R)` downstream, 25° to `side` (starboard default) and 12° up, looking
   back up the lane. The eye and look anchor on the first frame that sees a warp; **an anchor appearing after the first
   frame resets the rig's lag smoothing**, so the camera cuts to the landing instead of smearing across the lane. No warp:
-  it frames the group where it is, with a note. Arrivals with a `WarpEntry` (Fleet warp-in, later) frame the same way.
+  it frames the group where it is, with a note.
+- **Arrivals (`warpIn`)**: `CinemaScene.arriving` holds the ships with an unfinished arrival (`world.Arriving`: parked
+  off-grid, scheduled or in their warp-in) as drawn, **out of `ships`**, so no framing, clearance, team, engagement,
+  landmark focus or waypoint anchor sees them until they land. `CinemaScene.incoming` is their drawn spheres once in
+  their warp-in within `WARP_IN_HIDDEN_DISTANCE` (2,000 km) of the landing: only `cameraClips` reads it (the rig adds it
+  to the clip spheres), so the far plane reaches the streak. `CinemaWarp(id)` reads the arrival first: phase
+  **`arriving`** (in `CINEMA_WARP_PHASES`) with the arrival's landing, else the Destiny warp. `warp-landing` (group or
+  ship) selects from `ships + arriving` (`selectCinemaGroup(…, { arriving: true })`) and treats `arriving` like
+  `warping`: it frames the landings and anchors on the first frame; the lane is landing minus the parked (or
+  streaking) drawn centre. A landed leader with members still arriving (a staggered arrival) hands the reference to the
+  first arriving member, so the shot still anchors. Every other group or ship hardpoint frames only the landed ships;
+  an all-arriving subject has no pose and the note `… is still arriving by warp: play warp-in, or wait for it to
+  land` (a playing shot releases with it). `list_hardpoints`' subject says `arriving` (a ship: true; a group: the
+  count), with no frame until something landed.
 - **Landmarks** frame from the landmark toward the scene's focus (`sceneFocus`: the engagement centre, or the origin).
   `establishing` puts the eye beyond the ships, pitched 8° up, at a distance clamped between 1.5 × focus radius + 2 km
   and the distance where the ships still fill 12 % of the frame; `hero` swings ±50° / 15° up on a 30° lens;
@@ -187,10 +200,12 @@ Catmull-Rom walked by arc length, resolved and measured again every frame becaus
   the **drawn** ClientBall samples (`world.Curves(id)` translation, rotation, velocity), never the Destiny master,
   which runs up to a tick ahead. A paused clock holds the shot; lag is exponential smoothing on scene seconds.
 - It runs without a renderer too (aspect 16:9), which is how verify-page checks it headless.
-- Per frame: resolve the hardpoint → moves → lag → `clearHulls` → `cameraClips` (near = half the nearest surface
-  distance, 0.5 m inside a hull's sphere, never below far / 2e6; far = max(1e5, 1.1 × (farthest sphere + reach))).
-- `CinemaScene` is built only while a shot plays: ships, fleets, the sun direction (the scene's, else away from the
-  location's star, else down), the location's celestials and the objects' spheres (cleared and usable as anchors).
+- Per frame: resolve the hardpoint → moves → lag → `clearHulls` → `cameraClips` (hulls plus `incoming`; near = half
+  the nearest surface distance, 0.5 m inside a hull's sphere, never below far / 2e6; far = max(1e5, 1.1 × (farthest
+  sphere + reach))).
+- `CinemaScene` is built only while a shot plays: ships (arriving ones apart, above), fleets, the sun direction (the
+  scene's, else away from the location's star, else down), the location's celestials and the objects' spheres
+  (cleared and usable as anchors).
 
 ## Takeover, release and cuts
 
