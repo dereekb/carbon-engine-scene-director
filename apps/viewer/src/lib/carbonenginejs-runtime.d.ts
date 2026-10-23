@@ -528,12 +528,97 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly overlayEffects: readonly EveMeshOverlayEffect[];
     AddOverlayEffect(overlay: EveMeshOverlayEffect): void;
     RemoveOverlayEffect(overlay: EveMeshOverlayEffect): void;
+    /**
+     * The mounted turret sets. Add and remove them with `addChild` / `removeChild` and `{ listNotify: ship }`: the
+     * ship's OnListModified then rebuilds the turret positions and registers the set.
+     */
+    readonly turretSets: readonly EveTurretSet[];
+    /**
+     * The hull's authored locators (`locator_turret_1a`, ...).
+     */
+    readonly locators: readonly { GetName(): string }[];
+    /**
+     * Binds every turret set to its locators (bones preferred on an animated hull, once its geometry has loaded).
+     */
+    RebuildTurretPositions(): void;
+    /**
+     * Consecutive classic turret slots with an `a` locator.
+     */
+    GetTurretLocatorCount(): number;
+    readonly animationUpdater: { GetAnimationBoneList(): string[] } | null;
+    /**
+     * Arms the impact overlay with the remaining shield, armor and hull fractions; no impacts draw before a call.
+     */
+    SetImpactDamageState(shield: number, armor: number, hull: number, doCreateArmorImpacts?: boolean): void;
+  }
+
+  /**
+   * A gun's target holder (EveTurretSet.target).
+   */
+  export class EveTurretTarget {
+    /**
+     * Sets or (with null) clears the object the set aims at.
+     */
+    SetTargetable(object: EveSpaceObject2 | EveShip2 | null): boolean;
+  }
+
+  /**
+   * A turret's firing effect (muzzle flashes, tracers or beams): one per set, loaded by the page (the set stores only
+   * its path). Its `play_start` curve set carries audio curves the page cuts.
+   */
+  export class EveTurretFiringFX {
+    startCurveSet: TriCurveSet | null;
+    stopCurveSet: TriCurveSet | null;
+    sourceObserver: object | null;
+    destinationObserver: object | null;
+    /**
+     * Seconds one burst draws.
+     */
+    GetFiringDuration(): number;
+  }
+
+  /**
+   * One fitted weapon's turret models on a hull's locators: a set binds every lettered locator of its slot.
+   */
+  export class EveTurretSet {
+    /**
+     * 1-9 for a classic `locator_turret_` set; -1 (the default) mounts nothing.
+     */
+    slotNumber: number;
+    readonly locatorName: string;
+    readonly firingEffectResPath: string;
+    readonly firingEffect: EveTurretFiringFX | null;
+    readonly target: EveTurretTarget;
+    /**
+     * INVALID 0, DEACTIVE 1, IDLE 2, TARGETING 3, FIRING 4, RELOADING 5.
+     */
+    state: number;
+    isOnline: boolean;
+    playMovementSound: boolean;
+    turretMovementObserver: object | null;
+    SetFiringEffect(effect: EveTurretFiringFX | null): void;
+    SetTargetObject(object: EveSpaceObject2 | EveShip2 | null): boolean;
+    EnterStateIdle(): void;
+    EnterStateTargeting(): void;
+    EnterStateFiring(): void;
+    EnterStateDeactive(): void;
+    EnterStateReloading(): void;
+    ForceStateDeactive(): void;
+    ForceStateTargeting(): void;
+    SetShotMissed(missed: boolean): void;
+    /**
+     * Turns the set's LOD off and loads its high-detail geometry now.
+     */
+    FreezeHighDetailLOD(): void;
+    StartControllers(): void;
+    Destruct(): void;
   }
 
   /**
    * A named set of curves played together (an effect's `play_start`).
    */
   export interface TriCurveSet {
+    readonly curves: readonly object[];
     GetName(): string;
     Play(): void;
     PlayFrom(time: number): void;
@@ -756,6 +841,14 @@ declare module '@carbonenginejs/runtime/sof' {
     BuildValuesFromDNAAsync(dna: string): Promise<CjsModelValues>;
     GetBuildDiagnostics(): Promise<unknown[] | null>;
     GetHullData(name: string): Promise<EveSofHullData | null>;
+    /**
+     * Paints a turret set with a SOF faction's turret material (async: it awaits the faction's data).
+     */
+    SetupTurretMaterialFromFaction(turretSet: object, factionName: string): Promise<void>;
+    /**
+     * Paints a turret set from a ship DNA's faction.
+     */
+    SetupTurretMaterialFromDNA(turretSet: object, dna: string): Promise<void>;
   }
 
   /**
@@ -1052,5 +1145,15 @@ declare module '@carbonenginejs/runtime/audio' {
      * Drives culling, the Web Audio backend and log flushing, once per frame.
      */
     Process(frame: CjsAudioFrame): unknown;
+  }
+
+  /**
+   * A curve that posts sound events at its keys' times on its observer's emitter (a firing effect's `PlayTurretFX`).
+   * With `length` 0 it never posts.
+   */
+  export class AudEventCurve {
+    length: number;
+    keys: object[];
+    sourceTriObserver: object | null;
   }
 }

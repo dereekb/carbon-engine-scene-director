@@ -114,7 +114,9 @@ import {
   type ShipDefense,
   type ShipDogmaInput,
   type ModuleSwitch,
-  type ModuleSwitchState
+  type ModuleSwitchState,
+  defaultWeaponsOf,
+  type DefaultWeapons
 } from '@scene-director/scene';
 import type { SceneClock } from './clock';
 import { PageAudio } from './audio';
@@ -156,10 +158,13 @@ import { ModuleFxCommands } from './module-fx';
 import { ShipModules, type ShipModuleEvent } from './modules';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource, type ResolvedShipPropMod } from './prop-mods';
-import { ErrorText } from './resources';
+import { ErrorText, ResourceValues } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
+import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
+import { ShipTurrets, type TurretsReport } from './turrets';
+import { WeaponLookup } from './weapon-lookup';
 
 /**
  * Radius assumed for a ship that is not built yet, for framing and distances.
@@ -356,6 +361,10 @@ export interface DirectorOptions {
    */
   readonly fits?: FitLookup;
   /**
+   * The hub's /weapon lookups (the turret graphics); a fresh one by default.
+   */
+  readonly weapons?: WeaponLookup;
+  /**
    * `?audio=off`: the page never turns audio on.
    */
   readonly audioDisabled?: boolean;
@@ -438,6 +447,15 @@ export class Director {
   private readonly hullStats: HullStatsLookup;
   private readonly propMods: PropModLookup;
   private readonly fitLookup: FitLookup;
+  private readonly weapons: WeaponLookup;
+  /**
+   * Weapon types whose /weapon lookup is in flight: when one lands every ship syncs its turrets.
+   */
+  private readonly weaponRequests = new Set<number>();
+  /**
+   * The default weapons of ships without a fit, per hull type and DNA race (defaultWeaponsOf).
+   */
+  private readonly defaultWeapons = new Map<string, DefaultWeapons>();
   /**
    * What each ship flies with, as get_state reports it.
    */
@@ -458,6 +476,10 @@ export class Director {
    * The running modules' drawn effects (module-effects.ts); null without a renderer.
    */
   private readonly moduleEffects: Maybe<ModuleEffects>;
+  /**
+   * Every ship's guns on its drawn hull (turrets.ts); null without a renderer.
+   */
+  private readonly turrets: Maybe<ShipTurrets>;
   /**
    * Per fitted ship: the module specs last given to the activation layer, and the module states its flight was
    * computed with.
@@ -482,10 +504,11 @@ export class Director {
   private appliedCamera: Maybe<string> = null;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), audioDisabled = false }: DirectorOptions) {
+  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), weapons = new WeaponLookup(), audioDisabled = false }: DirectorOptions) {
     this.hullStats = hullStats;
     this.propMods = propMods;
     this.fitLookup = fits;
+    this.weapons = weapons;
     this.engine = engine;
     this.engineError = engineError;
     this.store = store;
@@ -519,6 +542,7 @@ export class Director {
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
+    this.turrets = engine ? new ShipTurrets({ files: new TurretFiles({ read: (path) => ResourceValues(path) }), detachAudio: (build) => this.audio.Detached(build) }) : null;
     this.modules = new ShipModules({
       SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
       InWarp: (id) => world.InWarp(id),
@@ -720,6 +744,14 @@ export class Director {
   }
 
   /**
+   * Keeps every ship's guns on its hull for the frame (an animated hull rebinds them to its bones once they load). Runs
+   * between world.Tick and engine.Frame.
+   */
+  DriveTurrets(): void {
+    this.turrets?.Frame();
+  }
+
+  /**
    * Feeds every built ship's booster set from its drawn ball speed, for the frame at `now`. Runs between world.Tick
    * and engine.Frame; the ClientBall caches its sample per time, so the renderer draws the same velocity.
    *
@@ -846,8 +878,8 @@ export class Director {
         });
       }
     }
-    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport> } & EngineStats) | { available: false; reason: string } = this.engine
-      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null }
+    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport>; turrets: Maybe<TurretsReport> } & EngineStats) | { available: false; reason: string } = this.engine
+      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null, turrets: this.turrets?.Report() ?? null }
       : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
@@ -966,6 +998,8 @@ export class Director {
       this.hullStats.ForgetFailures();
       this.propMods.ForgetFailures();
       this.fitLookup.ForgetFailures();
+      this.weapons.ForgetFailures();
+      this.turrets?.ForgetFailures();
       // A load restarts every module online (or offline as fitted) and every ship at full HP.
       moduleEvents.push(...this.modules.Clear(this.world.tick));
       this.damage.Clear();
@@ -1056,6 +1090,7 @@ export class Director {
         this.engine.AddShip(ship);
         entry.ship = ship;
         entry.status = 'ready';
+        this.SyncTurrets(doc.id);
       } else {
         entry.status = 'validated';
       }
@@ -1106,12 +1141,26 @@ export class Director {
    * @param answer - Its /ship-stats answer; null while that lookup is in flight.
    */
   private LookupFit(doc: SceneShip, answer: Maybe<HullStatsAnswer>): void {
+    const hullTypeID = answer?.hull?.typeID;
+    // A ship without a fit flies its default weapons, which need the hull's dogma record first.
+    if (!doc.fit && hullTypeID != null && this.fitLookup.TypePending(hullTypeID)) {
+      const key = HullStatsKey(doc);
+      void this.fitLookup.LookupTypes([hullTypeID]).then(() => {
+        const current = this.scene?.ships.find((ship) => ship.id === doc.id);
+        if (!current || current.fit || HullStatsKey(current) !== key) return;
+        const hull = this.hullStats.Cached(current);
+        this.SetFlight(current, hull);
+        this.LookupFit(current, hull);
+        this.onChange();
+      });
+      return;
+    }
     const resolved = this.fittings.get(doc.id);
     if (!resolved || resolved.dogma || (!resolved.pending && answer)) return;
     const { text } = resolved;
     void this.fitLookup.Prepare({ text, typeIDs: resolved.typeIDs }).then(() => {
       const current = this.scene?.ships.find((ship) => ship.id === doc.id);
-      if (!current || fitTextOf(current, this.scene) !== text) return;
+      if (!current || this.FitTextOf(current) !== text) return;
       const hull = this.hullStats.Cached(current);
       this.SetFlight(current, hull);
       // A prop mod that resolved meanwhile may need one more type.
@@ -1170,6 +1219,7 @@ export class Director {
     if (defense) this.damage.SetDefense(doc.id, defense);
     else this.damage.Remove(doc.id);
     this.ModuleOutputs(stoppedByRefit);
+    this.SyncTurrets(doc.id);
   }
 
   /**
@@ -1341,7 +1391,29 @@ export class Director {
     } else {
       row = (module.typeID == null ? null : this.modules.CycleState(id, module.key, module.typeID)) == null ? row : (this.modules.State(id, module.key, this.world.tick) ?? row);
     }
+    if (module.weapon) {
+      const mount = this.WeaponMount(id, module);
+      if (mount) row = { ...row, mount };
+    }
     return row;
+  }
+
+  /**
+   * A weapon module's turret set on the drawn hull: the graphic's lookup while it is pending or failed, then the
+   * mount's (turrets.ts).
+   *
+   * @param id - The ship id.
+   * @param module - The weapon module.
+   * @returns The mount; null without a renderer or a type.
+   */
+  private WeaponMount(id: string, module: ShipFitModule): Maybe<TurretMountReport> {
+    if (!this.turrets || module.typeID == null) return null;
+    const answer = this.weapons.Cached(module.typeID);
+    let mount: Maybe<TurretMountReport>;
+    if (!answer) mount = { state: 'loading' };
+    else if (!answer.weapon) mount = { state: 'failed', error: answer.note ?? 'no weapon graphic' };
+    else mount = this.turrets.MountOf(id, module.key) ?? { state: 'loading' };
+    return mount;
   }
 
   /**
@@ -1407,11 +1479,97 @@ export class Director {
       lookup: this.fitLookup,
       hullTypeID: answer?.hull?.typeID ?? null,
       hullNote: answer ? answer.note : null,
-      propMod: propMod ? { module: propMod.module, typeID: propMod.stats.typeID, name: propMod.stats.name, explicit: doc.propMod?.module != null } : null
+      propMod: propMod ? { module: propMod.module, typeID: propMod.stats.typeID, name: propMod.stats.name, explicit: doc.propMod?.module != null } : null,
+      fallback: this.DefaultFallback(doc, answer)
     });
     if (fitting) this.fittings.set(doc.id, fitting);
     else this.fittings.delete(doc.id);
     return fitting;
+  }
+
+  /**
+   * The default weapons of a ship without a fit (defaultWeaponsOf over the hull's dogma record), memoized per hull type
+   * and DNA race.
+   *
+   * @param doc - The document ship.
+   * @param answer - Its /ship-stats answer; null while the lookup is in flight.
+   * @returns Them; null for a ship with a fit, without the hull's EVE type, or while the hull's dogma is pending.
+   */
+  private DefaultWeaponsOf(doc: SceneShip, answer: Maybe<HullStatsAnswer>): Maybe<DefaultWeapons> {
+    const typeID = answer?.hull?.typeID;
+    const record = doc.fit || typeID == null ? null : this.fitLookup.Bundle()?.types[typeID];
+    if (!record) return null;
+    const sofRace = doc.dna.split(':')[2] ?? null;
+    const key = `${typeID}|${sofRace ?? ''}`;
+    let weapons = this.defaultWeapons.get(key);
+    if (!weapons) {
+      weapons = defaultWeaponsOf({ hull: record, sofRace });
+      this.defaultWeapons.set(key, weapons);
+    }
+    return weapons;
+  }
+
+  /**
+   * The fit a ship without one flies: its default weapons, keyed "default".
+   */
+  private DefaultFallback(doc: SceneShip, answer: Maybe<HullStatsAnswer>): Maybe<{ readonly text: string; readonly key: string }> {
+    const text = this.DefaultWeaponsOf(doc, answer)?.text;
+    return text ? { text, key: 'default' } : null;
+  }
+
+  /**
+   * The fit text a ship resolves: its own, else its default weapons'.
+   */
+  private FitTextOf(doc: SceneShip): Maybe<string> {
+    return doc.fit ? fitTextOf(doc, this.scene) : (this.DefaultWeaponsOf(doc, this.hullStats.Cached(doc))?.text ?? null);
+  }
+
+  /**
+   * Why a ship without a fit has no default weapons fit (get_state's `fitNote`).
+   *
+   * @param doc - The document ship.
+   * @returns The reason; null when the ship has a fit or one resolved.
+   */
+  private FitNote(doc: SceneShip): Maybe<string> {
+    if (doc.fit || this.fittings.has(doc.id)) return null;
+    const answer = this.hullStats.Cached(doc);
+    const typeID = answer?.hull?.typeID;
+    let note: string;
+    if (!answer) note = "waiting for the hull's EVE type";
+    else if (typeID == null) note = ['no default weapons: the hull has no EVE type', answer.note].filter(Boolean).join('; ');
+    else if (this.fitLookup.TypeFailure(typeID)) note = `no default weapons: ${this.fitLookup.TypeFailure(typeID)}`;
+    else note = this.DefaultWeaponsOf(doc, answer)?.note ?? "loading the hull's dogma for its default weapons";
+    return note;
+  }
+
+  /**
+   * Mounts a ship's weapons on its built hull (turrets.ts): its resolved fit's weapon modules (its own fit's or its
+   * default weapons'), each once its /weapon graphic has landed. A landing graphic syncs every ship again.
+   *
+   * @param id - The ship id.
+   */
+  private SyncTurrets(id: string): void {
+    const turrets = this.turrets;
+    const entry = this.live.get(id);
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    if (!turrets || !entry || !doc) return;
+    const resolved = this.fittings.get(id);
+    for (const module of resolved?.modules ?? []) {
+      const typeID = module.typeID;
+      if (!module.weapon || typeID == null || this.weapons.Cached(typeID) || this.weaponRequests.has(typeID)) continue;
+      this.weaponRequests.add(typeID);
+      void this.weapons.Lookup(typeID).then(() => {
+        this.weaponRequests.delete(typeID);
+        for (const shipId of this.fittings.keys()) this.SyncTurrets(shipId);
+        this.onChange();
+      });
+    }
+    turrets.Sync(
+      id,
+      entry.ship,
+      doc.dna,
+      TurretMountsOf(resolved, (typeID) => this.weapons.Cached(typeID)?.weapon ?? null)
+    );
   }
 
   /**
@@ -1452,6 +1610,8 @@ export class Director {
   private Retire(id: string): void {
     const entry = this.live.get(id);
     this.live.delete(id);
+    // The sets come off the hull first: they are the page's, and RetireShips must not find them on it.
+    this.turrets?.Remove(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
     RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()]);
@@ -1838,6 +1998,7 @@ export class Director {
     boosters?: ShipBoosterState;
     propMod: Maybe<ShipPropModState>;
     fit: Maybe<ShipFitReport>;
+    fitNote?: string;
     defense: Maybe<ShipDefenseReport | DamageReport>;
     capacitor: Maybe<ShipCapacitorReport>;
   } & Partial<ShipFleetMembership> &
@@ -1859,6 +2020,7 @@ export class Director {
       capacitor = flownCapacitor ?? null;
     }
     const fitting = this.fittings.get(doc.id);
+    const fitNote = this.FitNote(doc);
     return {
       ...this.ShipReport(doc.id),
       name: doc.name,
@@ -1871,6 +2033,7 @@ export class Director {
       physics,
       propMod: this.PropModState(doc, flight, motion),
       fit: fitting ? ShipFitReportOf(fitting, (module) => this.ModuleRowState(doc.id, module, motion)) : null,
+      ...(fitNote ? { fitNote } : {}),
       defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
       capacitor: capacitor ? ShipCapacitorReportOf(capacitor) : null,
       ...(boosters ? { boosters } : {})

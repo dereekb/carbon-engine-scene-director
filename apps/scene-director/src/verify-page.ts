@@ -101,6 +101,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly boosters?: { readonly maxVel: number; readonly intensity: number; readonly warpIntensity: number };
   readonly propMod?: Maybe<ShipPropModState>;
   readonly fit?: Maybe<ShipFitState>;
+  readonly fitNote?: string;
   readonly defense?: Maybe<ShipDefenseState>;
   readonly capacitor?: Maybe<ShipCapacitorState>;
 }
@@ -111,6 +112,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
 interface ShipFitState {
   readonly name: string;
   readonly key: string;
+  readonly default?: true;
   readonly typeID?: number;
   readonly unknown: string[];
   readonly modules: ShipModuleRowState[];
@@ -129,6 +131,8 @@ interface ShipModuleRowState {
   readonly stopsIn?: number;
   readonly target?: string;
   readonly effectiveness?: number;
+  readonly charge?: string;
+  readonly mount?: { readonly locator?: string; readonly state: string; readonly models?: number; readonly error?: string };
   readonly prop?: true;
   readonly note?: string;
 }
@@ -1086,6 +1090,34 @@ try {
     return `Rifter ${defense.shield.max} / ${defense.armor.max} / ${defense.structure.max} HP, capacitor ${capacitor.capacity} GJ in ${capacitor.rechargeTime} s: ${pairs.length} values match`;
   });
 
+  await Check('an unfitted ship gets default guns sized for its hull and race', async () => {
+    const answer = await call<ShipStatsAnswer>('ship_stats', { dna: 'mf1_t1:minmatarbase:minmatar' }).catch(SkipWithoutSde);
+    const ships = [
+      { id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar', position: [0, 0, 0] },
+      { id: 'punisher', dna: 'af1_t1:amarrbase:amarr', type: 'Punisher', position: [2500, 0, 0] }
+    ];
+    await call('load_scene', { scene: { name: 'verify-default-guns', ships } });
+    const state = await WaitFor('both default fits resolve', 60, (polled) => {
+      const pending = ships.map((ship) => ShipIn(polled, ship.id)).find((ship) => ship.fit?.math !== 'dogma');
+      return pending ? `${pending.id}: ${JSON.stringify(pending.fit?.note ?? pending.fitNote ?? pending.fit)}` : null;
+    });
+    const expected = { rifter: ['200mm AutoCannon II', 'EMP S', 3], punisher: ['Small Focused Pulse Laser II', 'Multifrequency S', 4] } as const;
+    for (const [id, [gun, charge, count]] of Object.entries(expected)) {
+      const fit = ShipIn(state, id).fit;
+      const highs = fit?.modules.filter((module) => module.module.startsWith('high-')) ?? [];
+      const keys = Array.from({ length: count }, (_unused, index) => `high-${index}`);
+      Expect(fit?.key === 'default' && fit.default === true, `${id} fit: ${JSON.stringify(fit && { key: fit.key, default: fit.default })}`);
+      Expect(highs.map((module) => module.module).join() === keys.join() && highs.every((module) => module.name === gun && module.charge === charge), `${id} highs: ${JSON.stringify(highs)}`);
+      Expect(
+        fit?.modules.some((module) => module.module === 'mid-0' && module.prop),
+        `${id} has no mid-0 prop row: ${JSON.stringify(fit?.modules)}`
+      );
+    }
+    const rifter = ShipIn(state, 'rifter').physics;
+    for (const key of ['mass', 'agility', 'maxVelocity', 'alignTime', 'signatureRadius'] as const) Expect(rifter && Close(rifter[key], answer.stats[key]), `${key}: page ${rifter?.[key]}, ship_stats ${answer.stats[key]}`);
+    return `rifter 3 x 200mm AutoCannon II (EMP S), punisher 4 x Small Focused Pulse Laser II (Multifrequency S), both on dogma with a mid-0 prop row; the rifter flies ship_stats' ${rifter?.maxVelocity} m/s`;
+  });
+
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.
   const LOGI_FIT = ['[Guardian, Verify Logi]', 'Domination Thermal Armor Hardener', 'Damage Control II', '', '10MN Afterburner II', '', 'Large Remote Armor Repairer II', 'Large Remote Armor Repairer II'].join('\n');
   const modulesScene = {
@@ -1111,6 +1143,14 @@ try {
       return table ? `${table.id}: ${JSON.stringify(table.fit?.note ?? table.fit)}` : null;
     });
   };
+
+  await Check('a fit without guns gets no default guns', async () => {
+    const state = await LoadModulesScene();
+    const fits = ['logi', 'tfi'].map((id) => ShipIn(state, id).fit);
+    const guns = fits.flatMap((fit) => fit?.modules.filter((module) => module.module.startsWith('high-') && /cannon|laser|railgun|blaster|launcher/iu.test(module.name)) ?? []);
+    Expect(fits.every((fit) => fit && fit.key === 'inline' && !fit.default) && !guns.length, JSON.stringify({ keys: fits.map((fit) => fit?.key), guns }));
+    return 'the Guardian logi fit and the bare TFI keep their own fits: no guns';
+  });
 
   await Check("switch_modules runs a Guardian's armor hardener on EVE's timing", async () => {
     const before = await LoadModulesScene();
@@ -1310,6 +1350,14 @@ try {
     Expect(Close(Math.round(armor * 10) / 10, fc.defense.armor.max), `armor: ship_stats ${armor}, get_state ${fc.defense.armor.max}`);
     const counts = state.fleets.find((fleet) => fleet.id === 'tfis')?.modules;
     return `44 fits on dogma in ${seconds.toFixed(1)} s; tfis-fc armor ${fc.defense.armor.max} HP (ship_stats ${armor.toFixed(1)}), EHP ${fc.defense.ehp}, 23 modules online; fleet modules ${JSON.stringify(counts)}`;
+  });
+
+  await Check("a fit's guns load their charges from cargo", async () => {
+    if (!tfis) throw new Skipped('the TFIs fleet was not added');
+    const state = await call<ViewerState>('get_state');
+    const guns = ShipIn(state, 'tfis-fc').fit?.modules.filter((module) => /Repeating Cannon/u.test(module.name)) ?? [];
+    Expect(guns.length === 6 && guns.every((module) => module.charge === 'Barrage L' && /loaded from cargo/u.test(module.note ?? '')), JSON.stringify(guns));
+    return `tfis-fc ${guns.map((module) => module.module).join(', ')} load Barrage L from cargo`;
   });
 
   await Check('compositions save, list, add by name with a unique id, and delete', async () => {

@@ -262,8 +262,13 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   open (`ForgetFailures`). `Prepare({ text, typeIDs })` runs a fit's names, then its types and the skills; it never
   rejects. `ShipStats` memoizes `computeShipStats` per bundle and input, so the 44 TFIs ships evaluate their 13 fits once
   per bundle (~2 ms each).
-- **`ResolveShipFitting({ doc, scene, lookup, hullTypeID, hullNote, propMod })`** is synchronous over the caches and
-  returns `{ text, key, fitting, modules, dogma, pending, note, typeIDs }` (null without a fit). Pending names keep the
+- **`ResolveShipFitting({ doc, scene, lookup, hullTypeID, hullNote, propMod, fallback })`** is synchronous over the
+  caches and returns `{ text, key, default?, fitting, modules, dogma, pending, note, typeIDs }` (null without a fit or a
+  fallback). `fallback: { text, key }` is the fit of a ship without one: the director's default weapons fit
+  (`sd-weapons`), keyed `default` and flagged `default: true`; the ship's own fit always wins. So **an unfitted ship
+  with an SDE hull rides the dogma path too**. After `WithPropMod`, `loadCargoCharges` gives each turret without a
+  charge the first fitting cargo charge (rows show `charge` and the note `loaded from cargo` / `no charge loaded`), and
+  the charge enters dogma as `chargeTypeID`. Pending names keep the
   text's provisional keys and are not `unknown` yet. `dogma` is set once every name has settled, the hull's type is known
   (the ship's `/ship-stats` answer: a ship flies as its `type`, whatever its fit's header says), and the hull, modules,
   charges and skills are in the bundle; otherwise `note` says why (`resolving 3 of the fit's 40 names`, `waiting for the
@@ -277,7 +282,9 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   physics); `Retune` calls `LookupFit` after `SetFlight`, which `Prepare`s a pending fit (or a fit waiting on its hull,
   to resolve the names meanwhile) and retunes the ship when it lands, if its fit text is unchanged; a resolution still
   pending then (a replacing prop mod's type) prepares once more. The prop mod lookup's and the hull lookup's callbacks
-  call it too. A fit change arrives as `retuned` (`sd-scene-document`).
+  call it too. A fit change arrives as `retuned` (`sd-scene-document`). For a ship without a fit, `LookupFit` first
+  runs `LookupTypes([hull])` (the default weapons need the hull's dogma record) and retunes when it lands; its "same fit"
+  check compares the text it resolved, the document's or the default's (`FitTextOf`).
 - **`get_state`** per ship: `fit` (null without one) `{ name, key, hull, typeID?, unknown, modules: [{ module, name,
   state, charge?, prop?, note? }], drones, math, note? }`, rows compact; `defense` `{ shield | armor | structure: { hp,
   max, resists, ehp }, ehp, shieldRecharge }` (C4: hp = max, the static evaluation); `capacitor` (rounded; with the prop

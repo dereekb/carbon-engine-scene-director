@@ -141,6 +141,10 @@ ball for `get_state.objects`.
   module active), so plates, rigs and the rest set mass, speed, agility and signature. `physics.math` is `dogma` or
   `table`; `ShipFlight` also carries `defense` and `capacitor` (get_state reports them beside `physics`, not in it).
   The ship flies the table path until the fit's lookups land, then retunes like a hull lookup.
+- **An unfitted ship flies its default weapons fit** once the EVE data knows its hull (`sd-weapons`): the same dogma
+  path, so `physics.math` is `dogma` for every ship with an SDE hull. Turrets and charges touch no flight attribute, so
+  a bare hull flies its table numbers (the parity spec, `fittings.spec.ts`); hulls with speed traits now get them. A
+  ship whose hull has no EVE type (class values) or no weapon hardpoints keeps the table path (`fit: null`, `fitNote`).
 - **Running modules change the flight** (`switch_modules`, `sd-fittings`): the director flies a fitted ship with its
   modules' live states, so siege and triage (maxVelocity −100 %, mass ×) and a suppressor's signature apply through
   `SetPhysics` inside the `OnBoundary` hook, before orders: the prop mod's timing.

@@ -7,8 +7,8 @@
 **Status (2026-10-23)**: the turrets plan
 (`~/.claude/plans/turrets-on-every-ship-mount-from-the-parsed-fit-target-fire-on-the-weapon-cycle.md`) lands in four
 slices. **W1 is in**: the runtime-free half in `packages/scene` (default weapons, turret slots, charges, the weapon
-graphic) and the hub's `/weapon` route. Still to come: W2 mounting (the page's default fit, `WeaponLookup`,
-`ShipTurrets`), W3 `set_target` and firing on the weapon cycle with impacts and the `Director.OnShot` hook, W4 turret
+graphic) and the hub's `/weapon` route. **W2 is in**: the page's default fit, cargo charges, `WeaponLookup` and
+mounting (`ShipTurrets`). Still to come: W3 `set_target` and firing on the weapon cycle with impacts and the `Director.OnShot` hook, W4 turret
 sounds. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
@@ -24,6 +24,10 @@ sounds. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 | `fitting/categories.ts` | `WEAPON_KIND_EFFECTS` (42 turret, 40 launcher), `weaponKindOf`; `typeEftFit` sets `FittedModule.weapon` when the bundle has the module's effects |
 | `apps/scene-director/src/lib/hub/weapon-data.ts` | `WeaponData` (`Weapon(typeID)`) over `SdeClient`, cached per hub |
 | `hub/weapon-data.testing.ts` | `WeaponRoutes`, `MakeRoutedWeaponData`, `MakeFakeWeaponData` over the captured records |
+| `apps/viewer/src/lib/weapon-lookup.ts` | `WeaponLookup`: the page's `/weapon` lookups (node-tested) |
+| `apps/viewer/src/lib/turret-plan.ts` | `TurretMountsOf`, `TurretMountsKey`, `HighIndexOf`, `TurretFiles`, `TurretFileFacts`, the mount report types (node-tested) |
+| `apps/viewer/src/lib/turrets.ts` | `ShipTurrets` (runtime): mount, remount, the animated-hull rebind, report |
+| `apps/viewer/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `DriveTurrets` |
 
 ## Default weapons (`defaultWeaponsOf`)
 
@@ -69,6 +73,70 @@ Ferox 6 × 250mm Railgun II, Megathron 7 × Neutron Blaster Cannon II, Tornado 8
 3 × Dual Giga Pulse Laser II, Caracal 5 × Heavy Missile Launcher II, Vedmak 1 × Heavy Entropic Disintegrator II,
 Stormbringer 1 × Medium Vorton Projector II, Apostle none.
 
+### On the page (W2)
+
+- `Director.DefaultWeaponsOf(doc, answer)` runs `defaultWeaponsOf` over the hull's dogma record (the bundle's
+  `types[<hull type>]`) with the DNA's race, memoized per (hull type, race); null for a ship with a fit, without the
+  hull's EVE type, or while the hull's dogma is pending. `ResolveFitting` passes its text as `ResolveShipFitting`'s
+  `fallback: { text, key: 'default' }` (`sd-fittings`), so the default fit runs the whole pipeline: typed fit,
+  `WithPropMod` (the document's prop mod, the hull-sized MWD by default, joins as `mid-0`), cargo charges, dogma,
+  activation specs, get_state rows and `switch_modules` (turrets are still refused activation until W3).
+- `LookupFit` first asks `LookupTypes([hull])` for an unfitted ship and retunes when it lands, then prepares the
+  default text's names like a document fit.
+- get_state: `fit.key: 'default'` with `default: true`; `fit: null` with `fitNote` when there is none (no EVE type, no
+  weapon hardpoints, the hull's dogma failed or still loading). A ship that gains a `fit` drops the default at once.
+
+## Mounting (W2)
+
+- **`WeaponLookup`**: one `GET /weapon?type=` per weapon type per page session, retried after 1 s / 3 s on no answer,
+  502, 503, 504; failures kept until `ForgetFailures` (every load / open). A landing graphic syncs every ship.
+- **`TurretMountsOf(resolved, graphicOf)`**: one mount per weapon module (`weapon` set) with a type and a graphic,
+  offline ones included, high slots by index first: `{ key, typeID, name, kind, resPath, faction, highIndex }`.
+  `TurretMountsKey` changes with them.
+- **`TurretFiles`**: the turret `.black` and its firing effect as values, once per path (`ResourceValues`); the facts
+  read off them (`TurretFileFacts`): `locatorName`, `firingEffectResPath`, the deploy / pack movement events, the
+  firing effect's sound curves (`PlayTurretFX` → `fireEvents`, `PlayTurretImpact` → `impactEvents`). A failed effect
+  only sets `fxError` (the set mounts without one).
+- **`ShipTurrets.Sync(id, ship, dna, mounts)`** (`Director.SyncTurrets`, after a build and every `SetFlight`): when the
+  hull object, the DNA or the mounts key changed, every set comes off and fresh ones mount: load the files, assign
+  slots over `ship.locators` names (+ bones), hydrate set and effect detached with their audio cut (`sd-runtime`), set
+  `slotNumber`, `FreezeHighDetailLOD()` (unless `?turretlod=on`), paint (`SetupTurretMaterial`: the graphic's faction,
+  else the ship's DNA), then, if nothing changed meanwhile, state IDLE, `addChild(… { listNotify: ship })` in mount
+  order and `StartControllers()`. `Frame` (`Director.DriveTurrets`, each frame) rebinds an animated hull's sets once
+  its bones load. `Remove(id)` on retire, before `RetireShips`.
+- **get_state**: each weapon row's `mount: { locator, state: loading | mounted | failed | unplaced, models?, error? }`
+  (with a renderer only; `loading` while the graphic is pending, `failed` with the hub's note when the type has none);
+  `renderer.turrets: { sets, loading, failed, unplaced, errors }` (the 5 latest errors, each also a `console.warn`).
+- **verify-page** (headless, 2026-10-23): "an unfitted ship gets default guns sized for its hull and race" (a Rifter
+  3 × 200mm AutoCannon II with EMP S, a `type: 'Punisher'` 4 × Small Focused Pulse Laser II with Multifrequency S, both
+  `key: 'default'` on dogma with a `mid-0` prop row; the Rifter flies `ship_stats`' numbers), "a fit's guns load their
+  charges from cargo" (`tfis-fc`'s six cannons: Barrage L), "a fit without guns gets no default guns" (the modules
+  scene's logi and bare TFI).
+
+### Real-GPU evidence: mounting (2026-10-23, Windows Chrome, RTX 40 series, SDE 3632936)
+
+Own hub on 5521; artifacts in `.scratch/turrets-gpu/` on dbxpc. Scene: unfitted Rifter, Punisher, Ferox, Megathron,
+Apocalypse, Tornado, Revelation and Caracal (`add_ships` by hull name), then the TFIs fleet and 20 Rifters.
+
+- **Every set mounted**: 8 hulls → 44 sets, then 72 ships → 241 sets; 0 failed, 0 unplaced, `gpuErrors` 0, no
+  `console.warn`. Default fits as the table says (the Tornado 8 × 800mm, EMP L; the Megathron 7 × Neutron Blaster
+  Cannon II, Antimatter Charge L; the Ferox 6 × 250mm Railgun II); every ship on dogma.
+- **Slots**: classic sets on `locator_turret_<high slot + 1>`, two models each (the Rifter's slot 1 three: a, b, c);
+  the Revelation's Dual Giga Pulse Lasers on `locator_xl_1-3`; the Caracal's launchers report `locator_turret_1-5`
+  (its hull has no launcher locators, so the engine and `assignTurretSlots` both fall back to the classic slots); the
+  TFI's interleaved cannons on `locator_turret_1, 2, 4, 5, 7, 8` with Barrage L from cargo.
+- **Drawn**: in a probe every set held `models` turrets, geometry loaded at LOD 3 (disabled, frozen), its firing effect
+  set, state IDLE, each turret placed inside its hull's bounding radius and `visible` on screen. A display A/B on the
+  Punisher at 55 m shows the four pulse lasers on its upper hull, gone with the sets hidden (`punisher-on.jpeg` /
+  `-off.jpeg`); on the Apocalypse at 900 m the guns are too small against the 775 m hull to tell apart (set radius
+  13.5 m). The animated hulls (Rifter, Revelation, Caracal) rebound to their bones (`bonesBound`).
+- **Audio**: `audio.gameObjects` was the same with every set mounted, all removed, and remounted fresh (2, with 0 page
+  emitters; the baseline does not come from turrets).
+- **Remount**: removing every ship's sets and syncing again mounted all 241 afresh.
+- **Cost** (fleet view, 72 ships at ~12 km, 241 sets): frozen LOD 17.1 fps with turrets vs 21.3 without; `?turretlod=on`
+  10.6 vs 26.8 (every set at LOD 1, 504 turret models drawn): the runtime's LOD is the slower one here, so frozen high
+  detail stays the default (follow-up: turret LOD for large fleets).
+
 ## Charges (`loadCargoCharges`)
 
 - A charge fits a module when the module's chargeGroup1-5 (604, 605, 606, 609, 610) hold the charge's group and the
@@ -77,8 +145,9 @@ Stormbringer 1 × Medium Vorton Projector II, Apostle none.
   `chargeNote: 'loaded from cargo'`; with none that fits, `'no charge loaded'` (it fires on its own numbers). A loaded
   charge is kept; launchers and modules or charges the bundle lacks are left alone.
 - The TFIs doctrine fits load no charges: the TFI's guns load `Barrage L`, the Revelation's `Conflagration XL`.
-- `fittingTypeIDs` returns the cargo charges' ids too, so their dogma lands with the fit in one request. W2 runs
-  `loadCargoCharges` after `WithPropMod` and passes the charge to dogma as `chargeTypeID`.
+- `fittingTypeIDs` returns the cargo charges' ids too, so their dogma lands with the fit in one request. The page runs
+  `loadCargoCharges` after `WithPropMod` (generic over the module type, so the page's notes ride along) and passes the
+  charge to dogma as `chargeTypeID`.
 
 ## Turret slots (`assignTurretSlots`)
 

@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { computeShipStats, type DogmaBundle, type FitTypeAnswer, fitTypeCategoryOf, readDogmaBundle, type SceneShip } from '@scene-director/scene';
+import { computeShipStats, defaultWeaponsOf, type DogmaBundle, FLEET_COMPOSITION_EXAMPLES, type FitTypeAnswer, fitTypeCategoryOf, normalizeFleetComposition, readDogmaBundle, type SceneShip } from '@scene-director/scene';
 import { FitLookup, FleetModuleCountsOf, MAX_FIT_DOGMA_TYPE_IDS, ResolveShipFitting, ShipCapacitorReportOf, ShipDefenseReportOf, ShipFitReportOf, ShipModuleSpecsOf, type ResolvedShipFitting, type ShipFitPropMod } from './fittings';
 import { ResolveFlight, type PublishedHull } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
@@ -207,6 +207,59 @@ describe('ResolveShipFitting', () => {
     expect(none.modules[1]).toMatchObject({ key: 'mid-0', offline: true, note: 'propMod.module "none": left offline' });
     expect(none.dogma).toMatchObject({ propModKey: null });
     expect(none.dogma?.modules?.[1]).toMatchObject({ state: 'offline' });
+  });
+});
+
+describe('default weapons and cargo charges', () => {
+  it("flies an unfitted Rifter's default guns as its fit, at the bare hull's numbers", async () => {
+    const lookup = new FitLookup({ fetch: FixtureHub(), retryDelaysMs: [] });
+    const text = defaultWeaponsOf({ hull: FIXTURE.types[RIFTER] }).text ?? Fail('no default weapons');
+    const input = { doc: Ship('', { fit: undefined }), scene: null, lookup, hullTypeID: RIFTER, propMod: PropMod(440), fallback: { text, key: 'default' } };
+    let resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    for (let round = 0; round < 3 && (round === 0 || resolved.pending); round++) {
+      await lookup.Prepare({ text, typeIDs: resolved.typeIDs });
+      resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    }
+    expect(resolved).toMatchObject({ key: 'default', default: true, pending: false, note: null });
+    expect(resolved.modules.map((module) => [module.key, module.name, module.charge?.name ?? null])).toEqual([
+      ['high-0', '200mm AutoCannon II', 'EMP S'],
+      ['high-1', '200mm AutoCannon II', 'EMP S'],
+      ['high-2', '200mm AutoCannon II', 'EMP S'],
+      ['mid-0', '5MN Microwarpdrive II', null]
+    ]);
+    expect(resolved.modules.slice(0, 3).every((module) => module.weapon === 'turret')).toBe(true);
+    expect(ShipFitReportOf(resolved, () => ({ state: 'online' }))).toMatchObject({ key: 'default', default: true, math: 'dogma' });
+    // Turrets and charges touch no flight attribute: the default fit flies the bare hull's table numbers.
+    const propMod = ResolveShipPropMod({ module: '5MN Microwarpdrive II', rigSize: 1, answer: null });
+    const dogma = ResolveFlight({ published: RIFTER_HULL, hull: null, overrides: null, propMod, dogma: resolved.dogma });
+    const table = ResolveFlight({ published: RIFTER_HULL, hull: null, overrides: null, propMod });
+    expect(dogma.math).toBe('dogma');
+    for (const key of ['mass', 'maxVelocity', 'agility', 'signatureRadius', 'alignTime', 'radius', 'warpSpeed'] as const) expect(dogma[key]).toBeCloseTo(table[key], 9);
+    // The ship's own fit always wins over the fallback.
+    const own = ResolveShipFitting({ ...input, doc: Ship(PLATED) });
+    expect(own?.key).toBe('inline');
+    expect(own?.default).toBeUndefined();
+    expect(ResolveShipFitting({ ...input, fallback: null })).toBeNull();
+  });
+
+  it("loads a TFI's guns with the first fitting charge in its cargo, Barrage L, and notes it", async () => {
+    const fits = normalizeFleetComposition({ input: FLEET_COMPOSITION_EXAMPLES[0] }).composition?.fits ?? {};
+    const text = fits['tfi'] ?? Fail('no TFI fit');
+    const lookup = new FitLookup({ fetch: FixtureHub(), retryDelaysMs: [] });
+    const input = { doc: Ship(text, { dna: 'mb2_t1:minmatarbase:minmatar' }), scene: null, lookup, hullTypeID: 17732, propMod: null };
+    let resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    for (let round = 0; round < 3 && (round === 0 || resolved.pending); round++) {
+      await lookup.Prepare({ text, typeIDs: resolved.typeIDs });
+      resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    }
+    const guns = resolved.modules.filter((module) => module.weapon === 'turret');
+    expect(guns.map((module) => module.key)).toEqual(['high-0', 'high-1', 'high-3', 'high-4', 'high-6', 'high-7']);
+    expect(guns.every((module) => module.charge?.name === 'Barrage L' && module.chargeNote === 'loaded from cargo')).toBe(true);
+    // The loaded charge enters dogma with its gun.
+    const barrage = BY_NAME.get('Barrage L')?.typeID;
+    expect(resolved.dogma?.modules?.find((module) => module.key === 'high-0')?.chargeTypeID).toBe(barrage);
+    const row = ShipFitReportOf(resolved, () => ({ state: 'online' })).modules.find((module) => module.module === 'high-0');
+    expect(row).toMatchObject({ charge: 'Barrage L', note: 'loaded from cargo' });
   });
 });
 

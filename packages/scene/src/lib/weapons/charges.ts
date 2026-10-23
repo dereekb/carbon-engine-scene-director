@@ -57,10 +57,10 @@ export function chargeFitsModule(module: Pick<DogmaTypeRecord, 'attributes'>, ch
  * @param bundle - The dogma bundle holding the modules and charges.
  * @returns The modules, turrets with their charges and notes.
  */
-export function loadCargoCharges(modules: readonly FittedModule[], charges: readonly FitItem[], bundle: Maybe<DogmaBundle>): ChargedModule[] {
-  return modules.map((module): ChargedModule => {
+export function loadCargoCharges<T extends FittedModule>(modules: readonly T[], charges: readonly FitItem[], bundle: Maybe<DogmaBundle>): (T & ChargedModule)[] {
+  return modules.map((module): T & ChargedModule => {
     const record = module.typeID == null ? null : bundle?.types[module.typeID];
-    let loaded: ChargedModule = module;
+    let loaded: T & ChargedModule = module;
     if (record && !module.charge && weaponKindOf(record.effects) === 'turret') {
       const charge = charges.find((item) => {
         const chargeRecord = item.typeID == null ? null : bundle?.types[item.typeID];

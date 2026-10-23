@@ -17,6 +17,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import type { ShipModuleSpec } from './modules';
+import type { TurretMountReport } from './turret-plan';
 import {
   computeShipStats,
   DAMAGE_TYPES,
@@ -30,11 +31,13 @@ import {
   evaluateShipDogma,
   type EvaluateShipDogmaInput,
   type EftFit,
+  type ChargedModule,
   type FittedModule,
   type FitTypeAnswer,
   fitTextOf,
   fittingTypeIDs,
   isInlineFit,
+  loadCargoCharges,
   mergeDogmaBundles,
   moduleActivationOf,
   normalizePropModName,
@@ -470,10 +473,19 @@ export interface ShipFitPropMod {
 }
 
 /**
- * A module as the ship carries it: the typed fit's, with why it differs from the fit.
+ * A module as the ship carries it: the typed fit's, with why it differs from the fit, and the charge a turret loaded
+ * from cargo (loadCargoCharges).
  */
-export interface ShipFitModule extends FittedModule {
+export interface ShipFitModule extends ChargedModule {
   readonly note?: string;
+}
+
+/**
+ * The fit a ship without one flies (the director's default weapons fit), keyed like a document fit.
+ */
+export interface ShipFitFallback {
+  readonly text: string;
+  readonly key: string;
 }
 
 export interface ResolveShipFittingInput {
@@ -495,6 +507,10 @@ export interface ResolveShipFittingInput {
    * The prop mod the ship flies; null for "none".
    */
   readonly propMod?: Maybe<ShipFitPropMod>;
+  /**
+   * The fit of a ship without one (its default weapons); never used when the ship has a fit.
+   */
+  readonly fallback?: Maybe<ShipFitFallback>;
 }
 
 export interface ResolvedShipFitting {
@@ -503,15 +519,20 @@ export interface ResolvedShipFitting {
    */
   readonly text: string;
   /**
-   * The ship's `fit`: a key of the document's fits, or "inline".
+   * The ship's `fit`: a key of the document's fits, or "inline"; the fallback's key for a ship without one.
    */
   readonly key: string;
+  /**
+   * Set when the fit is the fallback (the ship has no fit of its own).
+   */
+  readonly default?: true;
   /**
    * The typed fit; while names are pending its keys are the text's, and pending names are not `unknown` yet.
    */
   readonly fitting: ShipFitting;
   /**
-   * The modules as the ship carries them: the prop mod replaced, added or left offline (ShipFitPropMod).
+   * The modules as the ship carries them: the prop mod replaced, added or left offline (ShipFitPropMod), turrets
+   * without a charge loaded from cargo.
    */
   readonly modules: ShipFitModule[];
   /**
@@ -536,9 +557,11 @@ export interface ResolvedShipFitting {
  * @returns The resolution; null for a ship without a fit.
  */
 export function ResolveShipFitting(input: ResolveShipFittingInput): Maybe<ResolvedShipFitting> {
-  const { doc, scene, lookup, hullTypeID, hullNote, propMod } = input;
-  const text = fitTextOf(doc, scene);
-  if (!text || !doc.fit) return null;
+  const { doc, scene, lookup, hullTypeID, hullNote, propMod, fallback } = input;
+  const own = doc.fit ? fitTextOf(doc, scene) : null;
+  const text = own ?? fallback?.text;
+  if (!text) return null;
+  const key = own && doc.fit ? (isInlineFit(doc.fit) ? 'inline' : doc.fit) : (fallback?.key ?? 'default');
   const fit = lookup.Parse(text);
   const names = eftTypeNames(fit);
   const answers = names.map((name) => lookup.Name(name));
@@ -548,7 +571,10 @@ export function ResolveShipFitting(input: ResolveShipFittingInput): Maybe<Resolv
   const typed = typeEftFit(fit, { answer: (name) => lookup.Name(name)?.type ?? null, bundle });
   const fitting = pendingNames.length ? { ...typed, unknown: typed.unknown.filter((name) => !pendingNames.includes(name)) } : typed;
   // While names are pending the fit's own prop mod may not be typed yet: nothing is added or replaced until they land.
-  const { modules, propModKey, extraTypeID } = pendingNames.length ? { modules: fitting.modules, propModKey: null, extraTypeID: null } : WithPropMod(fitting, propMod ?? null);
+  const withPropMod = pendingNames.length ? { modules: fitting.modules, propModKey: null, extraTypeID: null } : WithPropMod(fitting, propMod ?? null);
+  const { propModKey, extraTypeID } = withPropMod;
+  // A turret without a charge takes the first one in cargo that fits it, once the bundle holds both.
+  const modules: ShipFitModule[] = pendingNames.length ? withPropMod.modules : loadCargoCharges(withPropMod.modules, fitting.charges, bundle);
   const typeIDs = [hullTypeID, extraTypeID].filter((id): id is number => id != null);
   const needed = [...typeIDs, ...fittingTypeIDs({ ...fitting, modules })];
   let note: Maybe<string> = null;
@@ -574,7 +600,7 @@ export function ResolveShipFitting(input: ResolveShipFittingInput): Maybe<Resolv
     dogma = { bundle, hullTypeID, modules: toDogmaModules({ ...fitting, modules }), propModKey };
     if (typeFailure) note = `left out of dogma: ${typeFailure}`;
   }
-  return { text, key: isInlineFit(doc.fit) ? 'inline' : doc.fit, fitting, modules, dogma, pending, note, typeIDs };
+  return { text, key, ...(own ? {} : { default: true as const }), fitting, modules, dogma, pending, note, typeIDs };
 }
 
 interface WithPropModResult {
@@ -676,6 +702,10 @@ export interface ShipModuleRowState {
   readonly target?: string;
   readonly targetDistance?: number;
   readonly effectiveness?: number;
+  /**
+   * A weapon's turret set on the drawn hull (with a renderer).
+   */
+  readonly mount?: TurretMountReport;
   readonly note?: string;
 }
 
@@ -685,9 +715,13 @@ export interface ShipModuleRowState {
 export interface ShipFitReport {
   readonly name: string;
   /**
-   * The key of the document's fits, or "inline".
+   * The key of the document's fits, or "inline"; "default" for the default weapons of a ship without a fit.
    */
   readonly key: string;
+  /**
+   * Set for a ship's default weapons fit (never in the document).
+   */
+  readonly default?: true;
   readonly hull: string;
   /**
    * The hull's EVE type the fit's dogma runs on.
@@ -715,12 +749,13 @@ export function ShipFitReportOf(resolved: ResolvedShipFitting, stateOf: (module:
   return {
     name: fitting.name,
     key: resolved.key,
+    ...(resolved.default ? { default: true as const } : {}),
     hull: fitting.hull,
     ...(dogma ? { typeID: dogma.hullTypeID } : {}),
     unknown: fitting.unknown,
     modules: modules.map((module) => {
       const { note, ...live } = stateOf(module);
-      const notes = [module.note, note].filter(Boolean).join('; ');
+      const notes = [module.note, module.chargeNote, note].filter(Boolean).join('; ');
       return { module: module.key, name: module.name, ...live, ...(module.charge ? { charge: module.charge.name } : {}), ...(module.prop ? { prop: true as const } : {}), ...(notes ? { note: notes } : {}) };
     }),
     drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),

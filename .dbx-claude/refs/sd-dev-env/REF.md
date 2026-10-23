@@ -99,6 +99,7 @@ provider). Do not sink time into headless GPU.
 | `?fog=on` | keep the template's distance fog (dropped by default: it fogs planets as background, washes the frame, and a far camera sees a glowing disc) |
 | `?tier=lo\|hi` | shader tier (default `depth`) |
 | `?audio=off` | no audio |
+| `?turretlod=on` | the runtime's own turret LOD (default: every turret set frozen at high detail, `sd-weapons`) |
 
 ## Real-GPU findings are dated evidence
 

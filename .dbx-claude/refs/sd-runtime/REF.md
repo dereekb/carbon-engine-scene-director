@@ -19,7 +19,8 @@
   `.d.ts` first, so a wrong rename fails to compile (see the naming rules in `sd-workspace`).
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
-  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`. The full facade drags in the renderer and the `runtime-dist/`
+  `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
+  `weapon-lookup.ts`, `turret-plan.ts`. The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)
@@ -116,6 +117,36 @@ and `EveShip2.isAnimated` / `overlayEffects` / `AddOverlayEffect` / `RemoveOverl
   placed by curves; `useLodLevel = false` on the whole tree, or small on screen its curve sets step at 1 Hz.
 - **Retire**: stretches and roots go through `RetireShips([root], retained)` with every other live root; the
   director adds `ModuleEffects.Roots()` to the ships', dressing's and objects' retained sets.
+
+## Turrets (`turrets.ts`)
+
+Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `EveTurretSet`, `EveTurretTarget`,
+`EveTurretFiringFX`, `AudEventCurve` (audio), `TriCurveSet.curves`, and `EveShip2.turretSets` / `locators` /
+`RebuildTurretPositions` / `GetTurretLocatorCount` / `animationUpdater` / `SetImpactDamageState`;
+`EveSOF.SetupTurretMaterialFromFaction` / `SetupTurretMaterialFromDNA`.
+
+- **Mount with `listNotify`**: `addChild(ship, 'turretSets', set, { listNotify: ship })`. A plain `addChild` leaves the
+  set unpositioned and unregistered (`turretSets` is a plain array); the notify runs `EveMobile.OnListModified`, which
+  rebuilds every set's positions. Remove with `removeChild(…, { listNotify: ship })`, then `set.Destruct()`. The ship's
+  `_turrets` never shrinks, so a new slot assignment needs fresh sets: the page remounts a ship from scratch.
+- **Order**: XL, launcher, atomic and chain sets are numbered by the engine in `turretSets` order, so a ship's sets are
+  added together in mount order after all of them are painted.
+- **Slots**: a classic set mounts on `slotNumber` (1-9) and binds `locator_turret_<n>a, b, …`; `locators` holds the
+  names on every hull, and an animated hull binds bone transforms only once its geometry loads, so `Frame` calls
+  `RebuildTurretPositions()` once then.
+- **Geometry**: hydration leaves it unloaded (it loads at LOD HIGHEST / DISABLED only); `FreezeHighDetailLOD()` loads it
+  now. `?turretlod=on` keeps the runtime's LOD instead.
+- **States**: some files author TARGETING (`state: 3`); the page sets IDLE (2) before mounting, since
+  `EnterStateTargeting` from TARGETING does nothing.
+- **Firing effect**: the set stores `firingEffectResPath` (a `.red`, read as `.black`) and never loads it; the page
+  hydrates one `EveTurretFiringFX` per set and calls `SetFiringEffect`.
+- **The audio cut**: sets and effects hydrate inside `PageAudio.Detached`, then `playMovementSound = false`,
+  `turretMovementObserver = null`, the effect's `sourceObserver` / `destinationObserver = null`, and every
+  `AudEventCurve` in its start / stop curve sets gets `length = 0` and no keys (a length-0 curve never posts; the
+  files' curves end at t = 1, so they would). The page posts turret sounds itself (W4).
+- **Paint**: `SetupTurretMaterial` (`ships.ts`) uses the shared SOF; a faction awaits its data.
+- **Retire**: `EveTurretSet` is in `SHIP_RESOURCE_TYPES`; the director takes a ship's sets off (`ShipTurrets.Remove`)
+  before `RetireShips`.
 
 ## Audio (`audio.ts`)
 

@@ -14,6 +14,7 @@ import {
   EveChildLineSet,
   EveSOF,
   EveSpherePin,
+  EveTurretSet,
   Tr2CurveLineSet,
   Tr2DirectInstanceData,
   Tr2GrannyPrimitiveSet,
@@ -126,6 +127,19 @@ export function BuildShipValues(dna: string): Promise<ShipBuild> {
     () => undefined
   );
   return run;
+}
+
+/**
+ * Paints a turret set with the shared SOF: its graphic's own faction, else the ship's DNA.
+ *
+ * @param set - The turret set (hydrated, not yet mounted).
+ * @param paint - The graphic's SOF faction (null when it names none) and the ship's DNA.
+ * @returns Settles once the material is applied (a faction loads its data first).
+ */
+export async function SetupTurretMaterial(set: EveTurretSet, paint: { readonly faction: Maybe<string>; readonly dna: string }): Promise<void> {
+  const sof = await GetSof();
+  if (paint.faction) await sof.SetupTurretMaterialFromFaction(set, paint.faction);
+  else await sof.SetupTurretMaterialFromDNA(set, paint.dna);
 }
 
 /**
@@ -340,7 +354,8 @@ function EachModel(root: object, visit: (model: object) => void): void {
   for (const model of blue.FindAllReferences(root).keys()) visit(model);
 }
 
-const SHIP_RESOURCE_TYPES = [Tr2GrannyPrimitiveSet, Tr2ParticleSystem, Tr2InstancedMesh, Tr2RuntimeInstanceData, Tr2DirectInstanceData, EveChildBehaviorSystem, Tr2ImpostorManager, EveSpherePin, EveChildLineSet, Tr2CurveLineSet];
+// Turret sets are the page's (turrets.ts) but ride on the hull: a removed hull's sets go with it.
+const SHIP_RESOURCE_TYPES = [Tr2GrannyPrimitiveSet, Tr2ParticleSystem, Tr2InstancedMesh, Tr2RuntimeInstanceData, Tr2DirectInstanceData, EveChildBehaviorSystem, Tr2ImpostorManager, EveSpherePin, EveChildLineSet, Tr2CurveLineSet, EveTurretSet];
 const MANAGED_SET_TYPES = [EveChildLineSet, EveSpherePin, Tr2ImpostorManager];
 
 /**
