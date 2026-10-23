@@ -94,6 +94,8 @@ import {
   isFleetStanceOrder,
   type ResolvedShipStance,
   resolveShipStances,
+  type ShipOverview,
+  toShipOverview,
   type StanceOrder,
   stanceOfOrder,
   isFleetTargetsOrder,
@@ -235,6 +237,7 @@ import {
   type ShipModuleRowState
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
+import { CombatProfileOf, HeadingVectorOf, IncomingRepsOf, RemainingEhpOf, TackleOn } from './pilot-facts';
 import { type FleetCommandReport, FleetCommanders, type ShipPilotReport } from './fleet-commanders';
 import { CaptureFleetHeirs, InheritFleetOrders } from './fleet-succession';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
@@ -1370,6 +1373,7 @@ export class Director {
       open_scene: ({ name, timeline }) => this.Open(name, { paused: TimelineStartPaused(timeline) }),
       delete_scene: async ({ name }) => ({ deleted: await this.store.Delete(RequireName(name)), name }),
       get_state: () => this.State(),
+      get_overview: (args) => this.Overview(args),
       timeline: (args) => this.Timeline(args),
       time_control: (args) => this.TimeControl(args),
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
@@ -4652,6 +4656,13 @@ export class Director {
       }
       const target = this.targets.Of(doc.id);
       const away = this.combat.IsDestroyed(doc.id) || this.world.InWarp(doc.id) || this.world.Arriving(doc.id);
+      const health = this.damage.Health(doc.id);
+      const flight = this.flights.get(doc.id);
+      const profile = CombatProfileOf({ flight, specs: this.modules.Specs(doc.id), maxHp: max });
+      const { scrammed, webFactor } = TackleOn(this.modules.Targeting(doc.id));
+      const locks = this.locks.Of(doc.id).flatMap((lock) => (lock.state === 'waiting' ? [] : [{ target: lock.target, state: lock.state }]));
+      const shooting = this.modules.FiringAt(doc.id);
+      const incomingReps = IncomingRepsOf(this.modules.Incoming(doc.id));
       facts.push({
         id: doc.id,
         ...(doc.team != null ? { team: doc.team } : {}),
@@ -4665,10 +4676,41 @@ export class Director {
         ...(target ? { target } : {}),
         ...(away ? { away: true } : {}),
         reach: this.ShipReach(doc.id),
-        attackedBy: this.combat.Attackers(doc.id, tick)
+        attackedBy: this.combat.Attackers(doc.id, tick),
+        ...(doc.name ? { name: doc.name } : {}),
+        velocity: motion.velocity,
+        heading: HeadingVectorOf(motion.heading),
+        ...(profile ? { profile } : {}),
+        ...(motion.propMod.running ? { propModOn: true } : {}),
+        ...(scrammed ? { scrammed } : {}),
+        ...(webFactor !== 1 ? { webFactor } : {}),
+        ...(health ? { remainingEhp: RemainingEhpOf(health, flight?.defense), layers: { shield: this.LayerFraction(health.shield), armor: this.LayerFraction(health.armor), hull: this.LayerFraction(health.structure) } } : {}),
+        ...(locks.length ? { locks } : {}),
+        ...(shooting.length ? { shooting } : {}),
+        ...(incomingReps > 0 ? { incomingReps } : {})
       });
     }
     return facts;
+  }
+
+  private LayerFraction(layer: { readonly hp: number; readonly max: number }): number {
+    return layer.max > 0 ? layer.hp / layer.max : 1;
+  }
+
+  /**
+   * get_overview: the overview from one ship (toShipOverview over BrainFacts, with its live stance).
+   *
+   * @throws {Error} When ship is missing or not a live ship, or a cut is not a positive number.
+   */
+  private Overview(args: Record<string, unknown>): ShipOverview {
+    const { ship, within, limit, target, envelope } = args;
+    if (typeof ship !== 'string' || !ship) throw new Error('ship must be a ship id');
+    if (within != null && (typeof within !== 'number' || !(within > 0))) throw new Error('within must be metres above 0');
+    if (limit != null && (typeof limit !== 'number' || !Number.isInteger(limit) || limit < 1)) throw new Error('limit must be a whole number of rows, at least 1');
+    if (target != null && typeof target !== 'string') throw new Error('target must be a ship id');
+    if (envelope != null && typeof envelope !== 'boolean') throw new Error('envelope must be true or false');
+    if (!this.scene?.ships.some((doc) => doc.id === ship)) throw new Error(`ship "${ship}" is not in the scene`);
+    return toShipOverview({ ship, ships: this.BrainFacts(), within, limit, target, envelope, stance: this.ResolvedStances().get(ship) });
   }
 
   /**

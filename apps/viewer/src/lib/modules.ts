@@ -482,6 +482,28 @@ export class ShipModules {
   }
 
   /**
+   * A ship's fitted modules, whatever their state.
+   *
+   * @param id - The ship id.
+   * @returns Their specs, in fit order.
+   */
+  Specs(id: string): ShipModuleSpec[] {
+    return [...(this.ships.get(id)?.values() ?? [])].map((entry) => entry.spec);
+  }
+
+  /**
+   * The targets a ship's running weapons fire at.
+   *
+   * @param id - The ship id.
+   * @returns Distinct target ids, in fit order.
+   */
+  FiringAt(id: string): string[] {
+    const targets = new Set<string>();
+    for (const entry of this.ships.get(id)?.values() ?? []) if (IsWeapon(entry) && entry.cycle.running && entry.target) targets.add(entry.target);
+    return [...targets];
+  }
+
+  /**
    * A ship's remote repairers that can run (no activation refusal), whatever their state.
    *
    * @param id - The ship id.

@@ -2,9 +2,9 @@
 
 > How a ship decides its own range and maneuvering from both sides' numbers, and the stances that tell it to. The
 > plan is `~/.claude/plans/i-want-to-work-woolly-flame.md` (slices P1-P6). **Status: P1 (the pure math in
-> `packages/scene/src/lib/piloting/`) and P2 (stances in the document and as live orders) have landed.** `get_overview`
-> (P3), the page's pilots (P4), the outside-program driver (P5) and the dbxpc evidence (P6) are still to come; until
-> P4 no pilot flies a stance: the page checks, keeps and resolves them only. Related refs: `sd-destiny` (the parks, orders, the legacy orbit),
+> `packages/scene/src/lib/piloting/`), P2 (stances in the document and as live orders) and P3 (`get_overview`, the
+> ship-relative overview) have landed.** The page's pilots (P4), the outside-program driver (P5) and the dbxpc evidence
+> (P6) are still to come; until P4 no pilot flies a stance: the page checks, keeps and resolves them only. Related refs: `sd-destiny` (the parks, orders, the legacy orbit),
 > `sd-combat` (hit chance, missile application), `sd-fleets` (Follow the FC), `sd-personalities` (the FC brain's
 > `toFleetMove`, which keeps moving personality fleets until a stance takes its `move` lever in P4).
 
@@ -43,9 +43,12 @@ tackle `tackle`, logi `support`). A ship's own stance flies that ship alone.
 | `ideal.ts` | `idealRangeOf`: scoring, constraints, ties, the window, `auto`, dictation |
 | `maneuvers.ts` | kite away, close in / spiral, threat centroid and burn out, out of reach, support point, lever bands and orders, re-aim |
 | `pilot.ts` | `stepShipPilot`: picture + stance + memory → `order_ship` / `switch_prop_mods` calls with `why` |
+| `overview.ts` | `toShipOverview` (get_overview), `toPilotContact` (page facts → a picture contact), `overviewRelationOf` |
 | `piloting.spec-helper.ts` | fixture profiles (Rifter, Punisher, Caracal, Megathron: max skills, default weapons, baked MWD) |
 
-Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbitOf` against the parks.
+Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbitOf` against the parks;
+`apps/viewer/src/lib/pilot-facts.ts` builds the page's side of the facts (`CombatProfileOf`, `TackleOn`,
+`RemainingEhpOf`, `IncomingRepsOf`, `HeadingVectorOf`).
 
 ## Stances in the document and as live orders (P2)
 
@@ -85,6 +88,34 @@ Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbi
   wing in its fleet), so removing it prunes the cue. A ship `orders` step may be a stance order (completion `given`).
 - Tools: the scene format's `stance` paragraph (`STANCE_TEXT` in `tools.ts`), the patch_scene `set` lists, order_ship
   and order_fleet's stance lines and `set` / `clear` schemas (order_fleet's `set` is array | object).
+
+## get_overview (P3)
+
+- **One facts port for both brains**: `Director.BrainFacts` (the FC brains' `FleetShipFacts`) also carries, per live
+  ship, `name`, `velocity`, `heading` (`HeadingVectorOf(motion.heading)`), `profile` (`CombatProfileOf`: the flight
+  off and `RunningFlight` on, τ from mass × agility, the turret / launcher combat numbers of its online modules,
+  point / scram / web ranges by `activation.category` with the web's factor from its maxVelocity postPercent, remote
+  repairers as HP/s with optimal and falloff, lock range from `flight.targeting` else `TABLE_PATH_LOCK_RANGE` 50 km;
+  EHP from `flight.defense`, else max HP), `propModOn`, `scrammed` / `webFactor` (`TackleOn` over
+  `ShipModules.Targeting`: a scram's `blocksMicrowarpdrive`, webs multiplied at their applied effectiveness),
+  `remainingEhp` (each layer's HP × its EHP / HP), `layers`, `locks` (locking / locked), `shooting`
+  (`ShipModules.FiringAt`: running weapons' targets) and `incomingReps` (`ShipModules.Incoming`). `toFleetPicture`
+  ignores them. The profile is rebuilt each call (no cache yet).
+- **`toShipOverview`** (pure, `overview.ts`): rows are every other non-`away` ship within `within` (default 250 km,
+  surface to surface), nearest first then id, cut at `limit` (25); `counts` gives hostile / friendly / neutral in
+  range, `beyond` and `cut`. Relation by team only (both set and equal friendly, different hostile, else neutral).
+  Columns from `relativeMotionOf` (`radial` positive while opening, `angular` rad/s, `bearing` off this ship's nose,
+  `aspect` off its nose). A non-friendly row gets `incomingDps` (its weapons on this ship at this geometry, this ship's
+  live signature and speed; 0 beyond its lock range), `outgoingDps` and `hitChance` (this ship's turrets, paper-DPS
+  weighted); a friendly row gets `repairs` when this ship fits remote reps. `targeting` / `shooting` are the row's
+  lock and fire on this ship. The envelope's focus: `target` (an unknown one warns and falls back), else its own
+  target, else the nearest hostile with a profile; weighed by `idealRangeOf` for the pilot stance's ideal type, else
+  `auto`, with `propMods` from the stance; `inWindow` compares the range now; `envelope: true` adds `points` (out / in
+  at every candidate range in the ideal's posture and prop mod state); `envelope: false` drops it. Null envelope while
+  its profile is pending (a warning). Numbers are rounded (m to 1, m/s to 0.1, rad/s to 4 decimals).
+- **The tool**: `get_overview { ship, within?, limit?, target?, envelope? }`, `where: 'page'`, `Director.Overview`
+  (checks the args, then `toShipOverview` over `BrainFacts` with `ResolvedStances().get(ship)`); read-only, not
+  journaled. verify-page: "get_overview measures the fight from one ship".
 
 ## Destiny facts the math stands on
 

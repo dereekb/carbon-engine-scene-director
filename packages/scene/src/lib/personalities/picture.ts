@@ -4,6 +4,7 @@ import { toFleetShipOrder } from '../fleets/live';
 import type { ShipFleetMembership } from '../fleets/membership';
 import type { ShipOrder } from '../orders';
 import type { SceneVector } from '../scene';
+import type { ShipCombatProfile } from '../piloting/profile';
 import type { FleetReach, FleetTargetRole } from './personality';
 
 /**
@@ -146,6 +147,62 @@ export interface FleetShipFacts extends Omit<FleetPictureShip, 'role' | 'command
    */
   readonly reach?: FleetReachNumbers;
   readonly attackedBy?: readonly string[];
+  /**
+   * What the pilots and get_overview read beyond the FC brain's view (sd-piloting); toFleetPicture ignores them.
+   */
+  readonly name?: string;
+  /**
+   * m/s.
+   */
+  readonly velocity?: SceneVector;
+  /**
+   * Where its nose points (a unit vector).
+   */
+  readonly heading?: SceneVector;
+  /**
+   * Its combat profile; absent while its numbers are pending.
+   */
+  readonly profile?: ShipCombatProfile;
+  readonly propModOn?: boolean;
+  /**
+   * A scram holds it (its MWD cannot run).
+   */
+  readonly scrammed?: boolean;
+  /**
+   * The speed multiplier of the webs on it (1 or unset: none).
+   */
+  readonly webFactor?: number;
+  /**
+   * Effective HP left: each layer's HP over its omni resonance.
+   */
+  readonly remainingEhp?: number;
+  /**
+   * HP left over max per layer, 0..1.
+   */
+  readonly layers?: ShipLayerFractions;
+  /**
+   * Its locks started or done.
+   */
+  readonly locks?: readonly ShipLockFact[];
+  /**
+   * The ships its running weapons fire at.
+   */
+  readonly shooting?: readonly string[];
+  /**
+   * HP per second remote repairers land on it now.
+   */
+  readonly incomingReps?: number;
+}
+
+export interface ShipLayerFractions {
+  readonly shield: number;
+  readonly armor: number;
+  readonly hull: number;
+}
+
+export interface ShipLockFact {
+  readonly target: string;
+  readonly state: 'locking' | 'locked';
 }
 
 export interface FleetPictureInput {

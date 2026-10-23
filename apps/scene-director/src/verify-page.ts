@@ -30,6 +30,7 @@ import {
   type SceneObjectStateReport,
   type SceneVector,
   type ShipFleetMembership,
+  type ShipOverview,
   type ShipScriptReport,
   type TimelineSummary,
   type TimeReport,
@@ -1667,6 +1668,33 @@ try {
   // A WaitFor test's problem must never be undefined (JSON.stringify(undefined) is).
   const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
   const ShipGuns = (state: ViewerState, id: string): ShipModuleRowState[] => ShipIn(state, id).fit?.modules.filter((module) => module.combat) ?? [];
+
+  await Check('get_overview measures the fight from one ship', async () => {
+    const ships = [
+      { ...Rifter('rifter', [0, 0, 0]), team: 'blue' },
+      { ...Punisher('punisher', [8000, 0, 0]), team: 'red' },
+      { ...Rifter('wing', [0, 0, 3000]), team: 'blue' }
+    ];
+    await LoadCombatScene(ships, { death: 'flag' });
+    await call<SetTargetResult>('set_target', { ships: ['punisher'], target: 'rifter' });
+    await call<SwitchModulesResult>('switch_modules', { ships: ['punisher'], modules: ['turret'], state: 'active' });
+    await WaitFor('the punisher fires on the rifter', 20, (polled) => ((ShipIn(polled, 'punisher').combat?.shots ?? 0) > 0 ? null : Show(ShipIn(polled, 'punisher').locks)));
+    const overview = await call<ShipOverview>('get_overview', { ship: 'rifter', envelope: true });
+    const [wing, punisher] = overview.rows;
+    Expect(wing?.id === 'wing' && wing.relation === 'friendly' && punisher?.id === 'punisher' && punisher.relation === 'hostile', Show(overview.rows.map((row) => [row.id, row.relation, row.distance])));
+    Expect(punisher.distance > 7000 && punisher.distance < 8000, `punisher at ${punisher.distance} m`);
+    Expect(punisher.targeting === 'locked' && punisher.shooting === true && punisher.target === 'rifter', Show(punisher));
+    Expect((punisher.incomingDps ?? 0) > 0 && (punisher.outgoingDps ?? 0) > 0 && punisher.hitChance != null && (punisher.reach ?? 0) > 0, Show(punisher));
+    const envelope = overview.envelope;
+    Expect(envelope?.focus === 'punisher' && envelope.for === 'auto' && envelope.ideal != null && (envelope.points?.length ?? 0) > 5, Show(envelope));
+    Expect((overview.ship.lockRange ?? 0) > 0 && (overview.ship.reach ?? 0) > 0 && (overview.ship.ehp ?? 0) > 0 && overview.stance?.type === 'in-line', Show({ ship: overview.ship, stance: overview.stance }));
+    const refused = await call('get_overview', { ship: 'nobody' }).then(
+      () => 'answered',
+      (error: unknown) => String(error)
+    );
+    Expect(/not in the scene/u.test(refused), refused);
+    return `rifter sees punisher at ${punisher.distance} m (in ${punisher.incomingDps} / out ${punisher.outgoingDps} dps, hit ${punisher.hitChance}); ${envelope?.ideal?.type} ideal ${envelope?.ideal?.ideal} m in ${Show(envelope?.ideal?.window)}`;
+  });
 
   await Check("set_target locks with EVE's lock time and the guns wait for the lock", async () => {
     await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [5000, 0, 0])], { death: 'flag' });

@@ -174,6 +174,7 @@ connected tab.
 | `add_objects` | hub | static objects by type name or id at a place off a ship, object or celestial, singly or in a formation |
 | `add_asteroid_field` | hub | a seeded field of EVE ore rocks (sphere, disc or ring) at a place off a ship, object or celestial; an asteroid belt centres it, drawn instanced |
 | `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location and its targets, objects |
+| `get_overview` | page | EVE's overview from one ship: every ship near it with distance, radial and transversal velocity, angular, bearing, aspect, reach, tackle, the DPS each side applies now, locks and fire; its stance and the ideal range against its focus |
 | `order_ship` | page | a live movement order on a point, ship, object or `celestial:<id>`, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
 | `switch_modules` | page | fitted modules active, online or offline on EVE's timing (hardeners, reps, remote reps on a target, siege, guns firing at the ship's target, ...) |
