@@ -13,8 +13,10 @@
   with the `retarget` switch option (the beam restarts on the new target), and every repair landing is tallied in
   `CombatRules` (get_state `combat.repairs`, scene `combat.repaired`). The accessors the controller needs are built
   (Seams). The lock gate, `LockAims` and the retarget: `sd-fittings` (Targeted modules); the tallies: `sd-combat`.
-- **Not yet**: L3 (the page's `AutoRepair`, the `auto_repair` tool, get_state `autoRepair`, verify-page `logi:`
-  checks), L4 (the real-GPU look). Until L3, remote repairers run only through `switch_modules`.
+- **L3 in** (2026-10-23): the page's `AutoRepair` controller (`apps/viewer/src/lib/auto-repair.ts`, node-tested) runs
+  every boundary, the `auto_repair` tool, get_state `autoRepair` per member and per fleet, `switch_modules` taking a
+  logi over, and the four verify-page `logi:` checks (evidence below).
+- **Not yet**: L4 (the real-GPU look: TFIs against 10 Ferox, beams, fps, GPU errors).
 
 ## Files
 
@@ -23,6 +25,8 @@
 | `packages/scene/src/lib/logi/auto-repair.ts` | `SceneAutoRepair`, `AUTO_REPAIR_POLICIES`, `REMOTE_REPAIRER_CATEGORIES`, `readSceneAutoRepair` (normalize), `resolveAutoRepair`, `autoRepairOf`, the command (`normalizeAutoRepairCommand`, `toAutoRepairOperations`) |
 | `packages/scene/src/lib/logi/selection.ts` | `chooseRepairTargets`, `repairModuleHps`, `repairChoiceWhy`, the `REPAIR_*` constants |
 | `packages/scene/src/lib/fleets/fleet.ts`, `normalize.ts` | the field on `SceneFleet` / `SceneWing` / `SceneSquad`, read by `readSceneAutoRepair` |
+| `apps/viewer/src/lib/auto-repair.ts` | `AutoRepair` (the page controller, `AutoRepairPort`), `AutoRepairReport` / `AutoRepairFleetReport`, `AUTO_REPAIR_STATES`; node-tested (`auto-repair.spec.ts`, a fake port) |
+| `apps/viewer/src/lib/director.ts` | the port, `SyncAutoRepair`, `AutoRepairCondition`, `SetAutoRepair` (the tool), the `SwitchModules` takeover, get_state |
 
 `fleets/normalize.ts` imports the reader; nothing in `logi/` imports `normalize.ts` (the same cycle-safe shape as
 `fleets/targets.ts`).
@@ -58,6 +62,69 @@
 wing with squad and unknown keys. `toAutoRepairOperations` merges into the group's field (a value sets its key, `null`
 deletes it, an emptied field becomes `autoRepair: null`) and returns one `update_*` op, or none when nothing changes; an
 unknown group is a `SceneError`. A timeline cues the command or the op.
+
+## The page half (`AutoRepair`, L3)
+
+- **Where it runs.** `Director`'s boundary listener: `SyncFleetTargets(boundary)` → `SyncAutoRepair(boundary)` →
+  `LockEvents(locks.Boundary(boundary, WantedLocks()))`. A rep it switches on joins `LockAims` at the same boundary,
+  so its lock starts there and the gate starts the rep the boundary its lock completes. `Apply` calls it after
+  `SyncFleetTargets()` (new settings decide at once; switches apply at the next boundary); a restart `Clear`s it,
+  removals and `Destroy` `Forget` the ship.
+- **The port.** `Scene` (the live fleet view), `Condition` (`ready`, `destroyed` (either death mode), `in-warp` (warp or
+  arriving), `waiting` (no ball, or the fit has no dogma yet)), `Health` (`DamageModel.Health`), `Taken`
+  (`TakenSince(…, REPAIR_PRESSURE_SECONDS)`), `HostileLocks` (`Lockers` outside the fleet and not on the member's
+  team), `SurfaceDistance`, `Targeting` (`LockTargeting`), `Locks`, `RemoteRepairers`, `IncomingReps`
+  (`modules.Incoming`: amount × effectiveness / cycle, keyed `from` + module key), `Switch` (`modules.Switch` at
+  `world.tick`).
+- **A pass** (`Sync`): settings resolve; a ship whose resolved settings changed loses its manual mark; ships that left
+  every fleet are let go (owned reps switched online). Per fleet in order: the logi, the candidates (`otherReps` =
+  incoming reps it does not own), `chooseRepairTargets`, then each choice: reaching modules
+  `Switch(active, target, { retarget: true })` unless already engaged on it (a refusal goes to `note`), its idle
+  modules and a layer with no target switch `online` (owned ones only). It returns whether it switched anything
+  (`onChange`).
+- **Owned modules only.** The controller touches only modules it switched on (`owned`, with the target it asked).
+  Turning off stops them at their cycle end (the last cycle lands); reps it never owned are left alone.
+- **Manual takeover.** `SwitchModules` on a ship whose selected modules include a remote repairer and `IsAuto(id)`
+  (resolved on, fits one, not already manual) calls `Manual(id)` (let go, no switch) and adds a result `notes` line.
+  `SetAutoRepair` always `Rearm`s the group's ships (their engaged reps are adopted as owned, their targets as the
+  incumbents); a resolved-settings change does the same; a load clears it.
+- **Pre-locks.** `PreLocks()` (≤ `REPAIR_PRE_LOCKS` per logi) join `WantedLocks` after `LockAims`, the ship's target and
+  the lever's pre-locks, only while the ship's set is under `maxLocks` (a logi with no target gets a set of its own).
+
+## get_state and the tool
+
+- **Per member** (`autoRepair`, for a member with remote repairers or with auto-repair on): `{ state, on, policy,
+  source, policySource, target?, reason?, why, since? (s on the target), layer?, modules? ([{ module, state }]), hps?,
+  preLocks?, unreachable?, note?, layers? }`. `state` is the first that applies: `destroyed`, `in-warp`, `waiting`,
+  `no-repairers`, `off`, `manual`, `repairing` (a module on the target is active or stopping), `locking` (they wait on
+  the lock or the next cycle start), `out-of-range`, `idle`. The flat fields are its main layer (the most nominal
+  HP/s); another layer goes in `layers`. `combat.repairs` (L2) beside it.
+- **Per fleet** (`fleets[].autoRepair`, omitted without remote repairers): `{ logi, repairing, locking, idle,
+  outOfRange, manual, off, targets: [{ target, logi, hps }] }`; `targets` counts repairing and locking logi.
+- **`auto_repair`** (`SetAutoRepair`, through `Serialize`; hub `SLOW_TOOLS`): normalize → `selectFleetShips` (problems
+  throw) → `toAutoRepairOperations` → `Apply` when there are ops → `Rearm` → `SyncAutoRepair`. Returns `{ fleet, wing?,
+  squad?, autoRepair (the group's field after, or null), ships: [{ id, on, policy, source, state, target?, reason? }],
+  operations, …the patch result (builds) }`.
+
+## Verify-page evidence (L3, 2026-10-23, SDE 3632936, headless)
+
+`--only "logi:"`, each check its own scene, death flag; a Guardian (`LOGI_AUTO_FIT`: two Large Remote Armor Repairer
+II) 30 km behind its FC Punisher, default-fit red Rifters 3 km off the Punishers:
+
+- **Lock and landing**: engaged at tick 6; the pre-lock at 9, first damage at 10, both reps active at 14 (the 4.486 s
+  lock), first landing at 19 (nominal 512, one row restoring 179.3 HP); `idle → locking → repairing`, reason
+  `under-fire`, effectiveness 1 at 30 km, two `defense.incoming` rows.
+- **Hold vs. no reps**: the unrepped Punisher (its fleet's squad `{ on: false }`) dies 27 s in (1633 HP taken); the
+  repped one holds at armor 388/625 (1493 taken, 809 repaired); the off logi reports `off` with its reps online.
+- **Split**: two Guardians on two shot Punishers take one each (`fleets[0].autoRepair.targets` two rows of one logi,
+  170.7 HP/s each).
+- **The tool**: `on: false` writes `{ on: false }` (one `update_squad`), the reps stop by their cycle end and
+  `incoming` empties; `{ on: null, policy: "damaged" }` repairs again (`policySource: squad`); a manual
+  `switch_modules … online` holds `manual` for 10 s under fire; `on: true` hands it back; `ships`, a bad policy,
+  nothing to set and an unknown fleet are refused.
+
+The 502s from tools-core's resource proxy (hull materials) during these runs only stop hulls drawing; balls, fits and
+combat run.
 
 ## The selection (`chooseRepairTargets`, one pass per fleet)
 
@@ -113,5 +180,8 @@ Rifter puts ~103 HP/s into a bare Punisher (438 / 625 / 563 HP). Two Guardians o
   switched remote repairer's target; L3's controller passes `retarget: true` and lets the boundary's lock sweep
   (`LockAims`) start its locks. verify-page "remote reps take a target…" pins the lock (1.937 s Guardian → TFI) and the
   first landing (6 ticks after activation, nominal 512, amount 0 on full armor).
-- L3's page controller runs `chooseRepairTargets` per fleet in the boundary listener, before the lock sweep.
+- L3 (built): the page controller runs `chooseRepairTargets` per fleet in the boundary listener, before the lock sweep
+  (The page half).
+- The automatic camera can read `FleetReport().targets` (whom the logi hold up); the timeline cues `auto_repair`'s
+  command or its `update_*` op.
 - Missiles' damage feeds `takenWindow` through `CombatRules`, so pressure includes it with no change here.

@@ -107,6 +107,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly fitNote?: string;
   readonly target?: Maybe<{ readonly id: string; readonly kind: 'ship' | 'object'; readonly distance: Maybe<number>; readonly source?: 'own' | 'called' }>;
   readonly call?: ShipCallState;
+  readonly autoRepair?: ShipAutoRepairState;
   readonly shots?: number;
   readonly defense?: Maybe<ShipDefenseState>;
   readonly capacitor?: Maybe<ShipCapacitorState>;
@@ -198,6 +199,40 @@ interface ShipCombatState {
 }
 
 /**
+ * A fleet member's logi auto-repair in get_state (the viewer's auto-repair.ts AutoRepairReport).
+ */
+interface ShipAutoRepairState {
+  readonly state: string;
+  readonly on: boolean;
+  readonly policy: string;
+  readonly source: string;
+  readonly policySource: string;
+  readonly target?: string;
+  readonly reason?: string;
+  readonly why: string;
+  readonly since?: number;
+  readonly layer?: string;
+  readonly modules?: { readonly module: string; readonly state: string }[];
+  readonly hps?: number;
+  readonly preLocks?: string[];
+  readonly note?: string;
+}
+
+/**
+ * A fleet's logi auto-repair in get_state (the viewer's auto-repair.ts AutoRepairFleetReport).
+ */
+interface FleetAutoRepairState {
+  readonly logi: number;
+  readonly repairing: number;
+  readonly locking: number;
+  readonly idle: number;
+  readonly outOfRange: number;
+  readonly manual: number;
+  readonly off: number;
+  readonly targets: { readonly target: string; readonly logi: string[]; readonly hps: number }[];
+}
+
+/**
  * A ship's repair tallies in get_state (the viewer's combat.ts ShipRepairReport).
  */
 interface ShipRepairsState {
@@ -274,6 +309,7 @@ interface SwitchModulesResult {
   readonly state: string;
   readonly ships: { readonly id: string; readonly modules: { readonly module: string; readonly name: string; readonly state: string; readonly at?: number; readonly stopsIn?: number; readonly target?: string; readonly nextTarget?: string; readonly effectiveness?: number; readonly cycleTime?: number }[] }[];
   readonly skipped: { readonly id: string; readonly module?: string; readonly reason: string }[];
+  readonly notes?: string[];
 }
 
 /**
@@ -435,7 +471,7 @@ interface ViewerState {
   readonly ships: ShipState[];
   readonly arrivals?: ArrivalGroupState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: (FleetReport & { readonly actingFor?: string; readonly destroyed?: string[]; readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
+  readonly fleets: (FleetReport & { readonly actingFor?: string; readonly destroyed?: string[]; readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport; readonly autoRepair?: FleetAutoRepairState })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
@@ -2230,6 +2266,161 @@ try {
       return rows.every((row) => row.state !== 'active' && row.state !== 'stopping' && !row.target && /target is gone/.test(row.note ?? '')) ? null : JSON.stringify(rows);
     });
     return `2 Large Remote Armor Repairer II on tfi after a ${lock?.lockTime} s lock (held at tick ${held.simulation.tick}, active by ${activeAt}; incoming ${JSON.stringify(incoming.map((repair) => repair.module))}); first landings ${JSON.stringify(first.slice(0, 2).map((row) => ({ tick: row.tick, amount: row.amount, nominal: row.nominal })))}; stopped with "its target is gone" on its removal`;
+  });
+
+  // Logi auto-repair (L3): Guardians with two Large Remote Armor Repairer II in a logi squad repair the fleet member a
+  // default-fit Rifter shoots, on their own. Each check loads its own scene; death flag (no explosions to wait out).
+  const LOGI_AUTO_FIT = ['[Guardian, Verify Auto Logi]', 'Damage Control II', '', '10MN Afterburner II', '', 'Large Remote Armor Repairer II', 'Large Remote Armor Repairer II'].join('\n');
+  const Guardian = (id: string, position: SceneVector) => ({ id, dna: GUARDIAN_DNA, type: 'Guardian', fit: LOGI_AUTO_FIT, position });
+  const Red = (ship: { readonly id: string }) => ({ ...ship, team: 'red' });
+  const LogiFleet = (id: string, commander: string, logi: string[], extra: { readonly dps?: string[]; readonly autoRepair?: object } = {}) => ({
+    id,
+    commander,
+    wings: [{ id: `${id}-w`, squads: [...(extra.dps ? [{ id: `${id}-dps`, role: 'dps', members: extra.dps }] : []), { id: id === 'b' ? 'logi' : `${id}-logi`, role: 'logi', members: logi, ...(extra.autoRepair ? { autoRepair: extra.autoRepair } : {}) }] }]
+  });
+  const RepRows = (state: ViewerState, id: string): ShipModuleRowState[] => (ShipIn(state, id).fit?.modules ?? []).filter((module) => module.name === 'Large Remote Armor Repairer II');
+  const ArmorOf = (state: ViewerState, id: string): { hp: number; max: number } => ShipIn(state, id).defense?.armor ?? { hp: Number.NaN, max: Number.NaN };
+  const WaitLogiIdle = (id: string) =>
+    WaitFor(`${id} auto-repair is idle before the fight`, 20, (polled) => {
+      const autoRepair = ShipIn(polled, id).autoRepair;
+      return autoRepair?.state === 'idle' ? null : Show(autoRepair);
+    });
+  const LoadLogiCheckOne = async (): Promise<ViewerState> => {
+    await LoadCombatScene([Punisher('b1', [0, 0, 0]), Guardian('g1', [0, 0, -30000]), Red(Rifter('r1', [0, 0, 3000]))], { death: 'flag' }, { fleets: [LogiFleet('b', 'b1', ['g1'])] });
+    return WaitLogiIdle('g1');
+  };
+
+  await Check('logi: a logi locks the shot member and lands its reps at cycle end', async () => {
+    const before = await LoadLogiCheckOne();
+    const idle = ShipIn(before, 'g1').autoRepair;
+    Expect(idle?.state === 'idle' && idle.on && idle.source === 'default' && idle.policy === 'urgent', `before the fight: ${Show(idle)}`);
+    const engaged = await call<EngageResult>('engage', { ships: ['r1'], target: 'b1' });
+    const start = engaged.tick;
+    let lockAt: Maybe<number> = null;
+    let takenAt: Maybe<number> = null;
+    let activeAt: Maybe<number> = null;
+    const states: string[] = [];
+    const landed = await WaitFor('g1 lands its first reps on b1', 40, (polled) => {
+      const tick = polled.simulation.tick;
+      const g1 = ShipIn(polled, 'g1');
+      const b1 = ShipIn(polled, 'b1');
+      if (lockAt == null && (g1.locks ?? []).some((lock) => lock.target === 'b1')) lockAt = tick;
+      const firstTaken = (b1.combat?.lastTaken ?? []).map((row) => row.tick).sort((a, b) => a - b)[0];
+      if (takenAt == null && firstTaken != null) takenAt = firstTaken;
+      const rows = RepRows(polled, 'g1');
+      if (activeAt == null && rows.length === 2 && rows.every((row) => row.state === 'active' && row.target === 'b1')) activeAt = tick;
+      const state = g1.autoRepair?.state ?? 'none';
+      if (states[states.length - 1] !== state) states.push(state);
+      return (b1.combat?.repairs?.lastReceived ?? []).some((row) => row.from === 'g1') ? null : `g1 ${Show(g1.autoRepair)}, reps ${Show(rows)}`;
+    });
+    const g1 = ShipIn(landed, 'g1');
+    const b1 = ShipIn(landed, 'b1');
+    Expect(lockAt != null && takenAt != null && lockAt <= takenAt + 1, `lock at ${lockAt}, first damage at ${takenAt}`);
+    Expect(states.includes('locking') && states.indexOf('locking') < states.indexOf('repairing'), `states ${states.join(' -> ')}`);
+    Expect(g1.autoRepair?.target === 'b1' && g1.autoRepair.reason === 'under-fire', Show(g1.autoRepair));
+    const rows = RepRows(landed, 'g1');
+    Expect(rows.length === 2 && rows.every((row) => row.target === 'b1' && row.effectiveness === 1), `reps ${Show(rows)}`);
+    const incoming = (b1.defense?.incoming ?? []).filter((row) => row.from === 'g1');
+    Expect(incoming.length === 2, `b1 incoming ${Show(b1.defense?.incoming)}`);
+    const first = (b1.combat?.repairs?.lastReceived ?? []).filter((row) => row.from === 'g1');
+    Expect(activeAt != null && first.every((row) => Math.abs(row.tick - ((activeAt ?? 0) + 6)) <= 1 && row.nominal === 512), `active at ${activeAt}: ${Show(first)}`);
+    Expect(
+      first.some((row) => row.amount > 0),
+      `b1's armor rises at the landing: ${Show(first)}, armor ${Show(ArmorOf(landed, 'b1'))}`
+    );
+    return `engaged at ${start}: lock at ${lockAt}, first damage ${takenAt}, reps active ${activeAt}, first landing ${first[0]?.tick} (${first.map((row) => String(row.amount) + '/' + String(row.nominal)).join(', ')}); ${states.join(' -> ')}; why "${g1.autoRepair?.why}"`;
+  });
+
+  await Check('logi: reps hold a member up; the same fight without auto-repair kills it', async () => {
+    await LoadCombatScene(
+      [Punisher('b1', [0, 0, 0]), Guardian('g1', [0, 0, -30000]), Punisher('c1', [20000, 0, 0]), Guardian('h1', [20000, 0, -30000]), Red(Rifter('r1', [0, 0, 3000])), Red(Rifter('r3', [20000, 0, 3000]))],
+      { death: 'flag' },
+      { fleets: [LogiFleet('b', 'b1', ['g1']), LogiFleet('c', 'c1', ['h1'], { autoRepair: { on: false } })] }
+    );
+    await WaitLogiIdle('g1');
+    await call<EngageResult>('engage', { ships: ['r1'], target: 'b1' });
+    const engaged = await call<EngageResult>('engage', { ships: ['r3'], target: 'c1' });
+    const dead = await WaitFor('c1 dies without reps', 45, (polled) => (ShipIn(polled, 'c1').destroyed ? null : `c1 armor ${Show(ArmorOf(polled, 'c1'))}, structure ${Show(ShipIn(polled, 'c1').defense?.structure?.hp)}`));
+    const b1 = ShipIn(dead, 'b1');
+    const c1 = ShipIn(dead, 'c1');
+    const armor = ArmorOf(dead, 'b1');
+    Expect(!b1.destroyed && armor.hp >= 0.4 * armor.max && (b1.combat?.repairs?.received ?? 0) >= 600, `b1 ${Show({ destroyed: b1.destroyed, armor, repairs: b1.combat?.repairs })}`);
+    const h1 = ShipIn(dead, 'h1');
+    Expect(h1.autoRepair?.state === 'off' && RepRows(dead, 'h1').every((row) => row.state === 'online'), `h1 ${Show(h1.autoRepair)}, reps ${Show(RepRows(dead, 'h1'))}`);
+    const [takenB, takenC] = [b1.combat?.taken ?? 0, c1.combat?.taken ?? 0];
+    Expect(Math.abs(takenB - takenC) <= 0.25 * Math.max(takenB, takenC), `taken b1 ${takenB}, c1 ${takenC}`);
+    // A Destiny tick is 1 s.
+    const seconds = dead.simulation.tick - engaged.tick;
+    return `c1 died ${seconds.toFixed(0)} s in (taken ${takenC.toFixed(0)} HP); b1 held at armor ${armor.hp.toFixed(0)}/${armor.max.toFixed(0)} (taken ${takenB.toFixed(0)}, repaired ${b1.combat?.repairs?.received.toFixed(0)}); h1 ${h1.autoRepair?.state}`;
+  });
+
+  await Check('logi: two logi split over two shot members', async () => {
+    await LoadCombatScene([Punisher('b1', [0, 0, 0]), Punisher('b2', [1500, 0, 0]), Guardian('g1', [0, 0, -30000]), Guardian('g2', [1000, 0, -30000]), Red(Rifter('r1', [0, 0, 3000])), Red(Rifter('r2', [1500, 0, 3000]))], { death: 'flag' }, { fleets: [LogiFleet('b', 'b1', ['g1', 'g2'], { dps: ['b2'] })] });
+    await WaitLogiIdle('g2');
+    await call<EngageResult>('engage', { ships: ['r1'], target: 'b1' });
+    await call<EngageResult>('engage', { ships: ['r2'], target: 'b2' });
+    const split = await WaitFor('g1 and g2 repair b1 and b2', 25, (polled) => {
+      const reports = ['g1', 'g2'].map((id) => ShipIn(polled, id).autoRepair);
+      const targets = new Set(reports.map((report) => report?.target));
+      const fleet = polled.fleets.find((row) => row.id === 'b')?.autoRepair;
+      return reports.every((report) => report?.state === 'repairing') && targets.has('b1') && targets.has('b2') && fleet?.targets.length === 2 && fleet.targets.every((row) => row.logi.length === 1) ? null : `${Show(reports.map((report) => [report?.state, report?.target, report?.reason]))}, fleet ${Show(fleet)}`;
+    });
+    const fleet = split.fleets.find((row) => row.id === 'b')?.autoRepair;
+    return `targets ${Show(fleet?.targets)}; g1 "${ShipIn(split, 'g1').autoRepair?.why}", g2 "${ShipIn(split, 'g2').autoRepair?.why}"`;
+  });
+
+  await Check('logi: auto_repair turns a squad off and on; switch_modules takes a logi over until auto_repair hands it back', async () => {
+    await LoadLogiCheckOne();
+    await call<EngageResult>('engage', { ships: ['r1'], target: 'b1' });
+    await WaitFor('g1 repairs b1', 20, (polled) => (ShipIn(polled, 'g1').autoRepair?.state === 'repairing' ? null : Show(ShipIn(polled, 'g1').autoRepair)));
+    const off = await call<{ autoRepair: Maybe<{ on?: boolean; policy?: string }>; operations: { op: string }[] }>('auto_repair', { fleet: 'b', squad: 'logi', on: false });
+    Expect(off.autoRepair?.on === false && off.operations.length === 1 && off.operations[0]?.op === 'update_squad', Show(off));
+    const document = await call<{ fleets?: { wings: { squads: { id: string; autoRepair?: object }[] }[] }[] }>('get_scene');
+    const squad = document.fleets?.[0]?.wings[0]?.squads.find((row) => row.id === 'logi');
+    Expect(Show(squad?.autoRepair) === Show({ on: false }), `get_scene squad ${Show(squad)}`);
+    const stopped = await WaitFor('g1 turns off and its reps stop at their cycle end', 8, (polled) => {
+      const rows = RepRows(polled, 'g1');
+      const incoming = (ShipIn(polled, 'b1').defense?.incoming ?? []).filter((row) => row.from === 'g1');
+      return ShipIn(polled, 'g1').autoRepair?.state === 'off' && rows.every((row) => row.state === 'online') && !incoming.length ? null : `${Show(ShipIn(polled, 'g1').autoRepair?.state)}, reps ${Show(rows.map((row) => row.state))}, incoming ${incoming.length}`;
+    });
+    const damaged = await call<{ autoRepair: Maybe<{ on?: boolean; policy?: string }> }>('auto_repair', { fleet: 'b', squad: 'logi', on: null, policy: 'damaged' });
+    Expect(Show(damaged.autoRepair) === Show({ policy: 'damaged' }), Show(damaged));
+    await WaitFor('g1 repairs again on policy damaged', 15, (polled) => {
+      const autoRepair = ShipIn(polled, 'g1').autoRepair;
+      return autoRepair?.state === 'repairing' && autoRepair.policy === 'damaged' && autoRepair.policySource === 'squad' ? null : Show(autoRepair);
+    });
+    const manual = await call<SwitchModulesResult>('switch_modules', { ships: ['g1'], modules: ['remote-armor-repairer'], state: 'online' });
+    Expect(
+      (manual.notes ?? []).some((note) => note.includes('"g1"')),
+      Show(manual)
+    );
+    const held = Date.now();
+    while (Date.now() - held < 10_000) {
+      const polled = await call<ViewerState>('get_state');
+      const autoRepair = ShipIn(polled, 'g1').autoRepair;
+      Expect(autoRepair?.state === 'manual' && RepRows(polled, 'g1').every((row) => row.state !== 'active' && row.state !== 'activating'), `manual: ${Show(autoRepair)}, reps ${Show(RepRows(polled, 'g1'))}`);
+      await Delay(1000);
+    }
+    await call('auto_repair', { fleet: 'b', squad: 'logi', on: true });
+    const back = await WaitFor('auto_repair hands g1 back', 15, (polled) => (ShipIn(polled, 'g1').autoRepair?.state === 'repairing' ? null : Show(ShipIn(polled, 'g1').autoRepair)));
+    const refusals: string[] = [];
+    for (const args of [{ ships: ['g1'], on: true }, { fleet: 'b', policy: 'bogus' }, { fleet: 'b' }, { fleet: 'nope', on: true }]) {
+      let refused = 'accepted';
+      try {
+        await call('auto_repair', args);
+      } catch (error) {
+        refused = ErrorMessage(error);
+      }
+      Expect(refused !== 'accepted', `auto_repair ${Show(args)} was accepted`);
+      refusals.push(
+        refused
+          .split('\n')
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .at(-1) ?? refused
+      );
+    }
+    return `off at ${stopped.simulation.tick}, back on ${ShipIn(back, 'g1').autoRepair?.target} (${ShipIn(back, 'g1').autoRepair?.policy}); refusals: ${refusals.join(' | ')}`;
   });
 
   // Tackle: a Rifter with a web, a scram and a point at the origin; 3 km off it a Guardian with two neuts and a cap

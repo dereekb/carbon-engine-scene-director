@@ -173,7 +173,14 @@ import {
   type DogmaIncomingModifier,
   type ModuleCategory,
   type ShipStatsInput,
-  REMOTE_REPAIRER_CATEGORIES
+  REMOTE_REPAIRER_CATEGORIES,
+  REPAIR_PRESSURE_SECONDS,
+  autoRepairOf,
+  normalizeAutoRepairCommand,
+  type SceneAutoRepair,
+  toAutoRepairGroup,
+  toAutoRepairOperations,
+  resolveAutoRepair
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -208,6 +215,7 @@ import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullS
 import { FleetCommanders } from './fleet-commanders';
 import { CaptureFleetHeirs, InheritFleetOrders } from './fleet-succession';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
+import { AutoRepair, type AutoRepairCondition, type AutoRepairFleetReport, type AutoRepairReport } from './auto-repair';
 import { type CalledPrimaryChange, type FleetGroupCalledReport, FleetTargets, type ShipCallReport, type ShipTargetSource } from './fleet-targets';
 import { FleetFollowing, type ShipFollowingReport } from './following';
 import { Arrivals, WARP_IN_HIDDEN_DISTANCE } from './arrivals';
@@ -422,6 +430,10 @@ export interface SwitchModulesResult {
    * Ships and modules left alone, with why (no fit, a selector matching none of its modules, a refusal).
    */
   readonly skipped: { readonly id: string; readonly module?: string; readonly reason: string }[];
+  /**
+   * What the switch changed beyond the modules: a logi it took off auto-repair.
+   */
+  readonly notes?: string[];
 }
 
 /**
@@ -750,6 +762,10 @@ export class Director {
    */
   readonly fleetTargets: FleetTargets;
   /**
+   * Logi auto-repair: fleet logi repair members under fire (auto-repair.ts).
+   */
+  readonly autoRepair: AutoRepair;
+  /**
    * The live call book order_fleet's targets order edits (fleet-commanders.ts); the live fleet view splices it over the
    * document.
    */
@@ -986,12 +1002,35 @@ export class Director {
         return world.master.tickInterval / 1000;
       }
     });
+    this.autoRepair = new AutoRepair({
+      port: {
+        get tickSeconds() {
+          return world.master.tickInterval / 1000;
+        },
+        Scene: () => this.LiveFleets()?.scene ?? this.scene,
+        Condition: (id) => this.AutoRepairCondition(id),
+        Health: (id) => this.damage.Health(id),
+        Taken: (id, boundary) => this.combat.TakenSince(id, boundary, REPAIR_PRESSURE_SECONDS),
+        HostileLocks: (id, friends, team) => {
+          const teams = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc.team]));
+          return this.locks.Lockers(id).filter((lock) => !friends.has(lock.ship) && (team == null || teams.get(lock.ship) !== team)).length;
+        },
+        SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
+        Targeting: (id) => this.LockTargeting(id),
+        Locks: (id) => this.locks.Of(id).map((lock) => lock.target),
+        RemoteRepairers: (id) => this.modules.RemoteRepairers(id),
+        IncomingReps: (id) => this.modules.Incoming(id).map((row) => ({ from: row.from, module: row.spec.key, hps: ((row.spec.activation.repair?.amount ?? 0) * row.effectiveness) / row.spec.activation.cycleTime })),
+        Switch: (id, key, request, options) => this.modules.Switch(id, key, request, { boundary: world.tick, ...(options?.target ? { target: options.target } : {}), ...(options?.retarget ? { retarget: true } : {}) })
+      }
+    });
     // Shields recharge, then fleets move to their next called targets, locks advance and engagements re-arm, then cycles
     // land: right after the prop mods apply and before orders, so a siege module's physics fly from that tick.
     world.OnBoundary((boundary) => {
       this.RemoveDead(boundary);
       this.SyncRecharged(this.combat.Recharge(world.master.tickInterval / 1000));
       this.SyncFleetTargets(boundary);
+      // Logi pick their targets before the lock sweep, so a new rep target's lock starts at this boundary.
+      this.SyncAutoRepair(boundary);
       this.LockEvents(this.locks.Boundary(boundary, this.WantedLocks()));
       this.Engagements(boundary);
       this.MissileArrivals(boundary);
@@ -1032,6 +1071,7 @@ export class Director {
       order_ship: ({ id, order }) => this.OrderShip(id, order),
       switch_prop_mods: (args) => this.SwitchPropMods(args),
       switch_modules: (args) => this.SwitchModules(args),
+      auto_repair: (args) => this.SetAutoRepair(args),
       set_target: (args) => this.SetTarget(args),
       engage: (args) => this.Engage(args),
       cease_fire: (args) => this.CeaseFire(args),
@@ -1104,6 +1144,48 @@ export class Director {
       const { ships: builds, ...rest } = patch ?? {};
       const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
       return { ...result, operations, ...(patch ? { ...rest, builds } : {}) };
+    });
+  }
+
+  /**
+   * Sets a fleet's, wing's or squad's logi auto-repair (auto_repair): compiled to one update_fleet / update_wing /
+   * update_squad op on the group's `autoRepair` through the edit queue, as patch_scene does. Calling it always hands
+   * the group's logi back from a manual switch_modules (AutoRepair.Rearm); the new settings decide at once and the reps
+   * switch at the next boundary.
+   *
+   * @param input - The auto_repair arguments: fleet, wing or squad, on, policy.
+   * @returns The group, its field after, each selected ship's resolved settings and state, the operations and the
+   *   patch result (its ship reports under `builds`).
+   * @throws {SceneError} When the command is invalid or names an unknown fleet, wing or squad.
+   */
+  SetAutoRepair(input: unknown): Promise<object> {
+    const command = normalizeAutoRepairCommand(input);
+    return this.Serialize(async () => {
+      const selected = selectFleetShips(this.Current(), { fleet: command.fleet, ...(command.wing ? { wing: command.wing } : {}), ...(command.squad ? { squad: command.squad } : {}) });
+      if (selected.problems.length) throw new SceneError(selected.problems);
+      const operations = toAutoRepairOperations(this.Current(), command);
+      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
+      this.autoRepair.Rearm(selected.ships);
+      this.SyncAutoRepair();
+      const tick = this.world.tick;
+      const settings = resolveAutoRepair(this.LiveFleets()?.scene ?? this.Current());
+      const ships = selected.ships.map((id) => {
+        const report = this.autoRepair.Report(id, tick);
+        const resolved = settings.get(id);
+        const on = report?.on ?? resolved?.on ?? false;
+        return {
+          id,
+          on,
+          policy: report?.policy ?? resolved?.policy,
+          source: report?.source ?? resolved?.source,
+          state: report?.state ?? (on ? 'no-repairers' : 'off'),
+          ...(report?.target ? { target: report.target } : {}),
+          ...(report?.reason ? { reason: report.reason } : {})
+        };
+      });
+      const autoRepair: Maybe<SceneAutoRepair> = autoRepairOf(this.Current(), toAutoRepairGroup(command));
+      const { ships: builds, ...rest } = patch ?? {};
+      return { fleet: command.fleet, ...(command.wing ? { wing: command.wing } : {}), ...(command.squad ? { squad: command.squad } : {}), autoRepair, ships, operations, ...(patch ? { ...rest, builds } : {}) };
     });
   }
 
@@ -1250,6 +1332,7 @@ export class Director {
     const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay ?? 0, ships: selected.ships, issuer: '' });
     const ships: SwitchModulesResult['ships'] = [];
     const skipped: SwitchModulesResult['skipped'] = [];
+    const notes: string[] = [];
     for (const id of selected.ships) {
       const resolved = this.fittings.get(id);
       if (this.IsDead(id)) {
@@ -1262,6 +1345,11 @@ export class Director {
       }
       const { modules, unmatched } = selectFittedModules({ modules: resolved.modules }, command.modules);
       for (const selector of unmatched) skipped.push({ id, module: selector, reason: 'it fits no module matching it' });
+      // A manual switch of a logi's remote repairers takes it off auto-repair until auto_repair hands it back.
+      if (modules.some((module) => REMOTE_REPAIRER_CATEGORIES.includes(module.category)) && this.autoRepair.IsAuto(id)) {
+        this.autoRepair.Manual(id);
+        notes.push(`"${id}": switch_modules took its remote repairers off auto-repair (auto_repair on: true on its squad hands them back)`);
+      }
       // Weapons (turrets and launchers) fire at the ship's target: a switch's target becomes it first, as set_target would.
       const aimsWeapons = command.state === 'active' && command.target != null && command.target !== id && modules.some((module) => module.weapon != null);
       if (aimsWeapons && command.target && this.targets.KindOf(command.target) && !this.world.InWarp(id) && !this.world.InWarp(command.target)) {
@@ -1282,7 +1370,7 @@ export class Director {
       if (switched.length) ships.push({ id, modules: switched });
     }
     this.onChange();
-    return { tick: this.world.tick, state: command.state, ships, skipped };
+    return { tick: this.world.tick, state: command.state, ships, skipped, ...(notes.length ? { notes } : {}) };
   }
 
   /**
@@ -1857,6 +1945,7 @@ export class Director {
             modules: FleetModuleCountsOf(report.ships.flatMap((id) => moduleRows.get(id) ?? [])) satisfies FleetModuleCounts,
             command: this.orders.GroupReport({ fleet: report.id, kind: 'fleet', id: report.id }),
             ...this.CalledState({ fleet: report.id, kind: 'fleet', id: report.id }),
+            ...this.AutoRepairFleetState(report.id),
             wings: report.wings.map((wing) => ({
               ...wing,
               command: this.orders.GroupReport({ fleet: report.id, kind: 'wing', id: wing.id }),
@@ -1960,6 +2049,7 @@ export class Director {
       for (const [flight, shot] of this.missileHitShots) if (shot.ship === doc.id) this.missileHitShots.delete(flight);
       this.engagements.delete(doc.id);
       this.fleetTargets.Forget(doc.id);
+      this.autoRepair.Forget(doc.id);
       this.rechargeSynced.delete(doc.id);
       this.damage.Remove(doc.id);
       this.capacitor.Remove(doc.id);
@@ -2012,6 +2102,7 @@ export class Director {
       this.missileDrawing?.Clear();
       this.engagements.clear();
       this.fleetTargets.Clear();
+      this.autoRepair.Clear();
       this.rechargeSynced.clear();
       this.shots.Clear();
       this.turretSounds.Clear();
@@ -2063,6 +2154,8 @@ export class Director {
     stopped.push(...this.following.Reconcile({ regrouped: diff.regrouped.map((doc) => doc.id), restart }));
     // Members take their groups' calls (a load's, a patch's edit or removal) before the result is read.
     this.SyncFleetTargets();
+    // Logi take the new auto-repair settings at once; their switches apply at the next boundary.
+    this.SyncAutoRepair();
     await this.store.Put(CURRENT_KEY, scene);
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
     this.onChange();
@@ -2592,6 +2685,14 @@ export class Director {
       const set = wanted.get(doc.id);
       if (maxLocks == null || !set) continue;
       for (const preLock of preLocks) if (set.size < maxLocks) set.add(preLock);
+    }
+    // Logi pre-lock members under fire after their rep targets (LockAims), under their lock limit.
+    for (const [id, preLocks] of this.autoRepair.PreLocks()) {
+      const maxLocks = preLocks.length ? this.LockTargeting(id)?.maxLocks : null;
+      if (maxLocks == null) continue;
+      const set = wanted.get(id) ?? new Set<string>();
+      for (const preLock of preLocks) if (set.size < maxLocks) set.add(preLock);
+      if (set.size) wanted.set(id, set);
     }
     return wanted;
   }
@@ -3164,6 +3265,27 @@ export class Director {
   }
 
   /**
+   * Runs logi auto-repair (AutoRepair.Sync): at a boundary right after the fleets' calls and before the lock sweep, and
+   * after an edit or auto_repair so the new settings decide at once.
+   *
+   * @param boundary - The tick boundary; omitted after an edit (the tick now).
+   */
+  private SyncAutoRepair(boundary = this.world.tick): void {
+    if (this.autoRepair.Sync(boundary)) this.onChange();
+  }
+
+  /**
+   * Whether a ship can repair or be repaired now (AutoRepairPort.Condition).
+   */
+  private AutoRepairCondition(id: string): AutoRepairCondition {
+    let condition: AutoRepairCondition = 'ready';
+    if (this.combat.IsDestroyed(id) || this.IsDead(id)) condition = 'destroyed';
+    else if (this.world.InWarp(id) || this.world.Arriving(id)) condition = 'in-warp';
+    else if (!this.world.Curves(id) || !this.fittings.get(id)?.dogma) condition = 'waiting';
+    return condition;
+  }
+
+  /**
    * Gives every fleet member its groups' call (FleetTargets.Sync over the live fleet view) through SetShipTarget, then
    * tells the OnPrimary listeners which primaries moved.
    *
@@ -3274,6 +3396,7 @@ export class Director {
     this.locks.Remove(id);
     this.engagements.delete(id);
     this.fleetTargets.Forget(id);
+    this.autoRepair.Forget(id);
     if (this.targets.Of(id) != null) {
       this.targets.Set(id, null);
       this.turrets?.Aim(id, null);
@@ -3757,6 +3880,7 @@ export class Director {
     fitNote?: string;
     target: Maybe<ShipTargetReport & { readonly source?: ShipTargetSource }>;
     call?: ShipCallReport;
+    autoRepair?: AutoRepairReport;
     shots?: number;
     defense: Maybe<ShipDefenseReport | DamageReport>;
     capacitor: Maybe<ShipCapacitorReport>;
@@ -3803,6 +3927,7 @@ export class Director {
       ...(fitNote ? { fitNote } : {}),
       target: this.TargetState(doc.id),
       ...this.CallState(doc.id),
+      ...this.AutoRepairShipState(doc.id),
       ...(shots ? { shots } : {}),
       defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
       capacitor: capacitor ? ShipCapacitorReportOf(capacitor, this.capacitor.Report(doc.id, this.world.tick)) : null,
@@ -3828,6 +3953,22 @@ export class Director {
   private CallState(id: string): { call?: ShipCallReport } {
     const call = this.IsDead(id) ? null : this.fleetTargets.Report(id, this.world.tick);
     return call ? { call } : {};
+  }
+
+  /**
+   * A fleet member's `autoRepair` for get_state: for a member with remote repairers or with auto-repair on.
+   */
+  private AutoRepairShipState(id: string): { autoRepair?: AutoRepairReport } {
+    const autoRepair = this.autoRepair.Report(id, this.world.tick);
+    return autoRepair ? { autoRepair } : {};
+  }
+
+  /**
+   * A fleet's `autoRepair` for get_state: its logi's counts and whom they repair; omitted without remote repairers.
+   */
+  private AutoRepairFleetState(fleet: string): { autoRepair?: AutoRepairFleetReport } {
+    const autoRepair = this.autoRepair.FleetReport(fleet, this.world.tick);
+    return autoRepair ? { autoRepair } : {};
   }
 
   /**

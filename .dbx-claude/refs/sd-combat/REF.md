@@ -365,8 +365,10 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
 - **Director wiring**: one `OnBoundary` listener, in order: `RemoveDead(boundary)`, `combat.Recharge(tick s)` (impact
   overlays re-armed when the shield moved > 0.1 %), `SyncFleetTargets(boundary)` (the fleet targeting lever: members
   take their groups' next live called targets, locks asked at `boundary − 1`; `sd-fleets` doc `targets`),
-  `locks.Boundary(boundary, WantedLocks())` (wanted: `LockAims` (weapons and remote repairers), targets, then called members' pre-locks under
-  `maxLocks`), `Engagements(boundary)` (an engaged ship's matching weapons back `online` switch active again, then
+  `SyncAutoRepair(boundary)` (logi auto-repair: each fleet's logi pick their targets and switch their remote repairers
+  with `retarget`; `sd-logi`), `locks.Boundary(boundary, WantedLocks())` (wanted: `LockAims` (weapons and remote
+  repairers, so a rep target picked this boundary starts its lock here), targets, then called members' pre-locks and
+  the logi's `autoRepair.PreLocks()` under `maxLocks`), `Engagements(boundary)` (an engaged ship's matching weapons back `online` switch active again, then
   `fleetTargets.Armed()` members with `DEFAULT_ENGAGE_MODULES`: `ArmWeapons`), `MissileArrivals(boundary)`,
   `ModuleEvents(modules.Boundary(boundary))`, then `Shots([])` when missile hits are left. `Shots` resolves the
   boundary's shots before the `OnShot` listeners (the hook's contract is unchanged) and `SyncImpactState` follows the
@@ -456,7 +458,9 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 
 Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies with the repair
 tallies, kills, destroyed, spools, the scene's repaired total), a remote repairer's pending `retarget`, the
-`ModuleCycle` activation counters, `Director.engagements`, `FleetTargets` (own marks, called targets, holds, responses,
+`ModuleCycle` activation counters, `Director.engagements`, `AutoRepair` (owned modules with the target asked, incumbent
+targets with their since tick, manual marks, pending adoptions, last resolved settings, pre-locks; `sd-logi`),
+`FleetTargets` (own marks, called targets, holds, responses,
 the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders` (group key → list), and
 `Director.deaths` (kill, explosion choice, start, hidden, `removeTick`, gone), `DestinyWorld`'s missile entries and
 balls, and `MissileFlights` (the drawn missiles replay from the flights). The RNG is the document's seed, so a
@@ -469,9 +473,11 @@ re-simulation rolls the same; explosions re-trigger from their kills' times. Mis
   `ShipLocks.Keep`: sticky, and at the limit it can block the primary's own lock); the move-on is the boundary sync
   before the lock sweep (not `OnKill`, which runs inside `Shots` and would re-enter ShipModules for no earlier first
   shot); `Director.OnPrimary(listener)` reports each group's primary change for the automatic camera.
-- Logi auto-repair (`sd-logi`; L2 accessors built): `DamageModel.Health(id)` (per layer `{ hp, max }`),
-  `CombatRules.TakenSince(id, boundary, 10)` (pressure), `ShipLocks.Lockers(target)` (yellow boxes),
-  `ShipModules.RemoteRepairers(id)` and `Incoming(id)`, the `retarget` switch option; the controller is L3.
+- Logi auto-repair (built, `sd-logi` The page half): the `AutoRepair` controller's port reads `DamageModel.Health(id)`,
+  `CombatRules.TakenSince(id, boundary, REPAIR_PRESSURE_SECONDS)` (pressure: every shot through `Resolve`, missiles
+  included), `ShipLocks.Lockers(target)` (yellow boxes: outside the fleet and team), `ShipModules.RemoteRepairers(id)`
+  and `Incoming(id)`, and switches through `ShipModules.Switch` with `retarget`. It runs in the boundary listener after
+  `SyncFleetTargets` and before the lock sweep; its landings are tallied by `RecordRepair` as manual reps are.
 - Missiles (M2a and M2b in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
   `applyLayeredDamage`, wired (M2b: Missiles in the page → The wiring); hits reach `OnShot` with `missile` set, kills
   `OnKill`; no launch hook yet.

@@ -187,6 +187,10 @@ rows by live state: offline, online, activating, active, stopping, reactivating;
 Called targets (sub-doc `targets`): a fleet, wing or squad that calls reports `targets` (its live list) and `called` (`primary`,
 `queue`, `skipped` with why, `following`); a member reports `target.source` (`own` | `called`) and `call` (`state`:
 following, holding, stood-down, own-target, responding, in-warp, no-primary or logi; `group`, `primary`, `respondsIn`).
+Logi auto-repair (`sd-logi`): a member with remote repairers or with auto-repair on reports `autoRepair` (`state`,
+`on`, `policy` and their `source`s, `target`, `reason`, `why`, `hps`, `preLocks`, `unreachable`); a fleet with remote
+repairers reports `autoRepair` (`logi`, `repairing`, `locking`, `idle`, `outOfRange`, `manual`, `off`, and `targets`:
+whom its logi hold up). Wings and squads show their written `autoRepair` in the tree.
 A fleet that lost ships (`sd-combat`) lists only its live members and adds `destroyed` (their ids) and `actingFor` (the
 dead FC its commander stands in for); a fleet with nobody alive is not listed.
 

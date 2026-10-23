@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `missile-flights.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts`, `destiny-warp-in.spec.ts` and `destiny-missile.spec.ts` cover `destiny.ts`' tackle, accuracy, arrivals and missiles on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`

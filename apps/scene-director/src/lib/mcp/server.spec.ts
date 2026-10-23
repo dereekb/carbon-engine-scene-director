@@ -28,6 +28,7 @@ describe('mcp server', () => {
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/move_to_squad/u);
       const orderFleet = tools.find((tool) => tool.name === 'order_fleet')?.description;
       expect(orderFleet).toMatch(/break-off/u);
+      expect(tools.find((tool) => tool.name === 'auto_repair')?.description).toMatch(/urgent/u);
       expect(orderFleet).toMatch(/regroup/u);
       expect(orderFleet).toMatch(/by is the ship giving the order/u);
       expect(orderFleet).toMatch(/"targets"/u);

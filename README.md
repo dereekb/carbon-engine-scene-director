@@ -33,6 +33,10 @@ What works today:
   armor and hull, and each missile hits through EVE's missile damage formula (or runs
   out of flight time); a ship at 0 hull plays the client's death explosion and leaves the
   scene, its fleet falling back as on a removal (a load revives it).
+- **Logi**: a fleet's logi squads repair members under fire on their own: each logi
+  locks the member in reach that needs it most, runs its remote repairers on EVE's cycle
+  timing with the client's beams, and the reps hold ships up in the damage model
+  (`auto_repair` sets it per fleet, wing or squad).
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.
@@ -160,6 +164,7 @@ connected tab.
 | `engage` | page | arms ships' turrets and launchers on a target: they lock it and keep firing until `cease_fire` |
 | `cease_fire` | page | ends ships' engagements (their turrets and launchers stop at their cycle end); `unlock` drops the targets |
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, and called targets (a primary and a queue the group focuses fire on) |
+| `auto_repair` | page | a fleet's, wing's or squad's logi auto-repair on or off, and how they pick: most urgent, most damaged or most shot-at |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 | `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |
