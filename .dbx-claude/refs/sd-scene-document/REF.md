@@ -52,7 +52,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 |---|---|---|
 | ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`; `stats` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list with a warning; `remove_object` prunes the same) | `scene.ts` |
 | scene | `set_camera`, `set_environment` (merged), `rename`, `set_location` (whole), `clear_location` | `scene.ts` |
-| fleets | `add_/update_/remove_fleet`, `..._wing`, `..._squad`, `move_to_squad`, `remove_from_fleet`, `set_anchor`; `update_fleet` / `_wing` / `_squad` `set { targets }` edits a group's called targets (`null` clears) | `fleets/operations.ts`, `fleets/targets.ts` (`sd-fleets`, doc `targets`) |
+| fleets | `add_/update_/remove_fleet`, `..._wing`, `..._squad`, `move_to_squad`, `remove_from_fleet`, `set_anchor`; `update_fleet` / `_wing` / `_squad` `set { targets }` edits a group's called targets and `set { autoRepair }` its logi auto-repair (`null` clears) | `fleets/operations.ts`, `fleets/targets.ts` (`sd-fleets`, doc `targets`), `logi/auto-repair.ts` (`sd-logi`) |
 | compositions | `add_fleet_composition` | `compositions/operation.ts` (`sd-fleets` → `compositions`) |
 | prop mods | `set_prop_mods` | `prop-mods/operation.ts` (`sd-ship-stats`) |
 | staging | `add_ships`, `stage_engagement` | `staging/operation.ts` (`sd-staging`) |
@@ -83,7 +83,7 @@ branch of `applyOperation` in `scene.ts`.
 | `relabelled` | name/team only |
 | `retuned` | `type`, `stats`, `pilot`, `propMod.module` or the resolved fit text (`fitTextOf`) changed: new flight numbers, no rebuild; a fitted ship re-resolves its fit and flies the table path until it lands (`sd-fittings`) |
 | `switched` | `propMod.active` changed: switch at once (no cycle wait). A ship can be in `retuned` too |
-| `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild (a `targets` edit flags `fleets` only: no re-follow) |
+| `fleets` / `regrouped` | fleet changed / ships whose membership or resolved anchor changed: re-plan following, no rebuild (a `targets` or `autoRepair` edit flags `fleets` only: no re-follow) |
 | `location` | re-fetch `/map/system`, re-dress, re-sync the celestial targets (`sd-locations`) |
 | `objects` (`SceneObjectsDiff`: `added` / `removed` / `rebuilt` / `moved` / `resized`) | `SceneObjects.Apply` builds, retires or re-places the models; `DestinyWorld` adds, re-adds (moved, resized, rebuilt) or `RemoveObject`s the static ball, which halts ships flying at it (`sd-destiny`) |
 | `environment` | **reloads the tab** (the environment is initialized with the device) |

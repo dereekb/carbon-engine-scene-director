@@ -15,3 +15,4 @@ export * from './lib/waypoints';
 export * from './lib/weapons';
 export * from './lib/combat';
 export * from './lib/arrivals';
+export * from './lib/logi';

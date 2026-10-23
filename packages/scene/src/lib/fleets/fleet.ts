@@ -1,3 +1,5 @@
+import type { SceneAutoRepair } from '../logi/auto-repair';
+
 /**
  * EVE fleet structure in the scene document: a fleet commander (FC), wings, and squads with a role and an
  * anchor. It is validated, edited, saved and reported here, and the page flies it (Follow the FC): every member
@@ -80,6 +82,10 @@ export interface SceneSquad {
    * its primary, the live entries after it its queue. Omitted when it calls none.
    */
   targets?: string[];
+  /**
+   * The group's logi auto-repair settings (logi/auto-repair.ts): each key inherits from the group above when omitted.
+   */
+  autoRepair?: SceneAutoRepair;
 }
 
 export interface SceneWing {
@@ -97,6 +103,10 @@ export interface SceneWing {
    * its primary, the live entries after it its queue. Omitted when it calls none.
    */
   targets?: string[];
+  /**
+   * The group's logi auto-repair settings (logi/auto-repair.ts): each key inherits from the group above when omitted.
+   */
+  autoRepair?: SceneAutoRepair;
   squads: SceneSquad[];
 }
 
@@ -116,5 +126,9 @@ export interface SceneFleet {
    * its primary, the live entries after it its queue. Omitted when it calls none.
    */
   targets?: string[];
+  /**
+   * The group's logi auto-repair settings (logi/auto-repair.ts): each key inherits from the group above when omitted.
+   */
+  autoRepair?: SceneAutoRepair;
   wings: SceneWing[];
 }

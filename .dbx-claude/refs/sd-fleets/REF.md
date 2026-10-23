@@ -32,7 +32,7 @@
 
 ## The model
 
-`fleets: [{ id, name?, commander, targets?, wings: [{ id, name?, commander?, targets?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? }, targets? }] }] }]`
+`fleets: [{ id, name?, commander, targets?, autoRepair?, wings: [{ id, name?, commander?, targets?, autoRepair?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? }, targets?, autoRepair? }] }] }]`
 
 - `role` is required: `dps`, `logi`, `tackle`, `ewar`, `boost`, `support` (case-insensitive). `wings` / `squads` /
   `members` default `[]`; empty is valid. `fleets: []` = no fleets.
@@ -44,6 +44,8 @@
 - `home` is written only by `order_fleet` break-off: the anchor `regroup` restores. **It is not an anchor**:
   `toFleetAnchors` ignores it; it is validated and repaired like one (sub-doc `orders`).
 - `targets` is the group's called targets (ship or object ids in kill order; sub-doc `targets`). Memberships ignore it.
+- `autoRepair` (`{ on?, policy? }`) is the group's logi auto-repair, resolved key by key from the nearest group (squad,
+  wing, fleet; default on for logi squads): `sd-logi`. Memberships ignore it.
 
 Example: three TFIs keep 1 km on the FC; the logi squad anchors on its own lead, guardian-1, which holds 30 km off the
 FC while guardian-2 anchors up on it at 1 km.

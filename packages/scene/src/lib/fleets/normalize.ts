@@ -2,11 +2,12 @@ import type { Maybe } from '@dereekb/util';
 import { isPlainObject, readId, readList, readOptionalString, readString, reportUnknownKeys } from '../json';
 import { type SceneFleet, type SceneSquad, type SceneSquadAnchor, type SceneWing, SQUAD_ROLES, type SquadRole } from './fleet';
 import { toFleetAnchors } from './membership';
+import { readSceneAutoRepair } from '../logi/auto-repair';
 import { readCalledTargets } from './targets';
 
-const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'wings']);
-const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'squads']);
-const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home', 'targets']);
+const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'autoRepair', 'wings']);
+const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'autoRepair', 'squads']);
+const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home', 'targets', 'autoRepair']);
 const ANCHOR_KEYS = new Set<string>(['ship', 'range']);
 
 export interface NormalizeFleetsInput {
@@ -108,7 +109,8 @@ function normalizeFleet(input: unknown, where: string, report: Report): Maybe<Sc
   const name = readOptionalString(input['name'], `${where}.name`, report.problems);
   const commander = readString(input['commander'], `${where}.commander`, report.problems);
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
-  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(targets ? { targets } : {}), wings: [] };
+  const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
+  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), wings: [] };
 
   const wingIds = new Set<string>();
   const squadIds = new Set<string>();
@@ -137,7 +139,8 @@ function normalizeWing(input: unknown, where: string, report: Report): Maybe<Sce
   const name = readOptionalString(input['name'], `${where}.name`, report.problems);
   const commander = readOptionalString(input['commander'], `${where}.commander`, report.problems);
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
-  const wing: SceneWing = { id, ...(name ? { name } : {}), ...(commander ? { commander } : {}), ...(targets ? { targets } : {}), squads: [] };
+  const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
+  const wing: SceneWing = { id, ...(name ? { name } : {}), ...(commander ? { commander } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), squads: [] };
   for (const [index, candidate] of readList(input['squads'], `${where}.squads`, report.problems).entries()) {
     const squad = normalizeSquad(candidate, `${where}.squads[${index}]`, report);
     if (squad) wing.squads.push(squad);
@@ -159,7 +162,8 @@ function normalizeSquad(input: unknown, where: string, report: Report): Maybe<Sc
   const anchor = normalizeAnchor(input['anchor'], `${where}.anchor`, report);
   const home = normalizeAnchor(input['home'], `${where}.home`, report, { keepEmpty: true });
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
-  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}), ...(targets ? { targets } : {}) };
+  const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
+  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}) };
 }
 
 interface NormalizeAnchorOptions {

@@ -676,6 +676,39 @@
             ]
           }
         ]
+      },
+      {
+        "name": "sd-logi",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "auto-repair",
+              "auto_repair",
+              "autoRepair",
+              "logi",
+              "logistics",
+              "remote rep",
+              "remote reps",
+              "remote repair",
+              "remote repairer",
+              "shield transporter",
+              "repair target"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/logi/",
+              "apps/viewer/src/lib/auto-repair"
+            ]
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__auto_repair"
+            ]
+          }
+        ]
       }
     ]
   }
