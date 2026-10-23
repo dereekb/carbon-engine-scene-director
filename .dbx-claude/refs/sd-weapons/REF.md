@@ -14,7 +14,8 @@ mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weap
 **M1 is in** (default missiles, launcher charges, the `/missile` route; the numbers: `sd-combat` → Missiles); **M2a is
 in** (Destiny missile balls, the flight book, missile hits and expiry rows: `sd-destiny` → Missile balls, `sd-combat` →
 Missiles in the page); **M2b is in** (2026-10-23: launchers run and the page fires them, headless: Launchers fire,
-below); M3 (drawn, real GPU) is to come: no missile draws yet. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
+below); **M3 is in** (2026-10-23: missiles draw, fly and detonate with the client's effects, checked on the real GPU:
+Launchers fire, drawn, below); the plan is delivered. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
 ## Files
@@ -38,6 +39,9 @@ below); M3 (drawn, real GPU) is to come: no missile draws yet. Research: the dbx
 | `weapons/shots.ts` | `WeaponShot` (the Combat rules hook's event), `ShotTargetKind` |
 | `apps/viewer/src/lib/targets.ts` | `ShipTargets`: each ship's target, cleared on removal, warp and load (node-tested) |
 | `apps/viewer/src/lib/shots.ts` | `WeaponShotsOf`, `ShotQueue`: shots from cycle events, the cycle-exact draw time, counts, settle (node-tested) |
+| `apps/viewer/src/lib/missile-lookup.ts` | `MissileLookup`, `MISSILE_LOOKUP_TIMEOUT_MS`, `MISSILE_LOOKUP_RETRY_DELAYS_MS`: the page's `/missile` lookups (node-tested) |
+| `apps/viewer/src/lib/missile-plan.ts` | `MissileFileFacts`, `MissileFiles`, `MissileDrawPlan`, `MISSILES_LIVE_MAX` (256), `MISSILE_IMPACTS_LIVE_MAX` (64), `MISSILE_FALLBACK_TICKS` (2), `MISSILE_IMPACT_DEFAULT_DURATION` (6 s): the drawn missiles' files and schedule (node-tested) |
+| `apps/viewer/src/lib/missile-effects.ts` | `ShipMissiles` (runtime): pooled `EveMissile` / impact roots, launch, arrive, vanish, detonate, `renderer.missiles` |
 | `apps/viewer/src/lib/turret-audio.ts` | `TurretAudioPosts`, `TurretSoundQueue`: which emitter posts which turret sound when (node-tested) |
 | `apps/viewer/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `SetTarget`, `OnShot`, `SyncImpactState`, `DriveTurrets` |
 
@@ -254,7 +258,7 @@ fleet, a Punisher ordered to orbit the TFI at 2 km with the TFI on it.
   guns", "turrets fire at an object" (an Astrahus; a celestial refused), "turrets are not refused by range" (150 km,
   effectiveness 0). The launcher checks: Launchers fire, below.
 
-## Launchers fire (missiles M2b, headless; drawing is M3)
+## Launchers fire (missiles M2b, headless; drawn: next section)
 
 - **Activation** (`moduleActivationOf`, `sd-fittings`): a launcher (`weapon: 'launcher'`) runs `targeted` (its
   `useMissiles` is category 1 in the SDE), `reach` Infinity (missiles past their range expire), cycle = its rate of
@@ -282,6 +286,55 @@ fleet, a Punisher ordered to orbit the TFI at 2 km with the TFI on it.
   warping target are lost", "a shooter that warps loses its missiles", "missiles kill like turrets, and engage arms
   launchers by default" (evidence: `sd-combat` → Missiles in the page). Every turret, combat and fleet targeting check
   re-ran unchanged (seed 1: 40 shots, the kill 15 ticks after engage by p2 high-0, dealt [824.6, 748]).
+
+## Launchers fire, drawn (missiles M3)
+
+- **`MissileLookup`** (`missile-lookup.ts`): one `/missile?charge=&launcher=` request per (charge, launcher) per page
+  session, answered synchronously once cached; `WeaponLookup`'s retry rule (no answer, 502, 503 or 504 retried after
+  1 s and 3 s; a failure cached with the hub's message until `ForgetFailures` on every load, logged once).
+- **`MissileFiles`** (`missile-plan.ts`) load the charge's EveMissile `.black` and its impact effect once each, with or
+  without a renderer (a headless page still posts the impact sound), read into `MissileFileFacts` (`warheads`,
+  `impactDuration` from the impact's `duration`, `impactEvents`). `SyncTurrets` preloads them for every launcher module
+  with a charge.
+- **`DrawLaunch`** (`director.ts`): the launcher set's burst (`ShipTurrets.Fire`; `ShotQueue.Drawn` records it and
+  `shots.Off` now runs for every weapon, so launchers settle like turrets) and the outburst sound
+  (`missile_outburst_heavy_play`) through `TurretAudioPosts` with `missed: true` (no gun impact). The drawn missile
+  (`ShipMissiles.Launch`) starts at the burst start: the draw + the set's `randomFiringDelay`. Nothing for a shooter
+  that left or warps, or a missile whose ball is gone.
+- **The impact sound** is the impact file's `Tr2ActionPlaySound` event (`missile_explosion_kinetic_medium_play` for
+  Scourge), posted on the target's emitter at the detonation (headless: at the hit's draw time). Both it and the
+  outburst are learned undecodable (PTADPCM) on the GPU, like the guns' (Sounds, below).
+- **The schedule** (`MissileDrawPlan`; the runtime half and its gotchas: `sd-runtime` → EveMissile; the draw times:
+  `sd-combat` → Missiles in the page): a flight draws from its burst start until every warhead is DEAD. It arrives
+  (curve frozen, target kept) once its ball reaches its target; the runtime detonates it on the drawn hull and the
+  impact plays there. An expiry or a loss vanishes at its drawn end (no impact); a hit not detonated
+  `MISSILE_FALLBACK_TICKS` after its draw time is forced; a missile whose ball left the parks is frozen. Over 256 live
+  missiles a flight flies undrawn (`skipped`); over 64 live impacts a detonation plays its sound and kill without the
+  effect (`impactsSkipped`). The simulation never changes.
+- **get_state** `renderer.missiles` `{ live, waiting, impacts, detonated, vanished, forced, frozen, skipped,
+  impactsSkipped, pools, loading, failed, errors? }` (`pools`: instances per projectile / impact path).
+- verify-page (headless, 2026-10-23, SDE 3646012): "launcher and missile impact sounds post"
+  (`missile_outburst_heavy_play` on the Caracal, `missile_explosion_kinetic_medium_play` on the Punisher, both then
+  recorded undecodable; `gameObjects − emitters` 1). With the boundary draw rule every missile check above and "turret
+  sounds post with the shots" re-ran green (launched at tick 57, first hit at 59).
+
+### Real-GPU evidence: missiles (2026-10-23, Windows Chrome, RTX 40 series, SDE 3646012)
+
+Own hub on 5524; drivers in `.scratch/missiles-gpu/` (`call.sh`, `burst.mjs`, `fleet.mjs`, `duel.json`, `miss.json`),
+artifacts `run1-launch`, `run2-impact`, `run4-miss`, `run6-fleet`, `run7-scale` there (dbxpc only).
+
+- **Duel**: a Caracal (`cc1_t1`) and a Punisher 20 km off. Five missiles leave the launchers with flame and smoke trails
+  and sprites (run1 021 / 022); the Scourge impact cloud (a cyan flash) plays on the Punisher (run2 018). Detonations
+  sit 10-25 m from the 28 m Punisher's centre, ~0.5 s after the drawn ball's arrival at ~276 m.
+- **Miss**: the Punisher at `maxVelocity` 9000 fleeing: 5 expired, vanished at once, no impact.
+- **10 Caracals vs 10 Rifters at 30 km** (run6): 50 launched / 50 hits / 50 detonated, `failed` 0, `skipped` 0,
+  `gpuErrors` 0, `page_log` info only (the impact event undecodable), audio `gameObjects − emitters` 1 → 1; red-fc
+  killed by a Heavy Missile Launcher II and its explosion played. fps mean 54.2, p10 50, min 21 for ~5 s right after
+  the 50-impact volley and kill.
+- **TFIs (44) vs 20 Caracals at 25 km** (run7): 95 missiles per volley, 1,050 launched; pools `heavy_missile` 100,
+  impact 64 (+2 before the pool-order fix); impacts at the 64 cap (`impactsSkipped` 159), `failed` 0, `gpuErrors` 0.
+  fps 13-17 with missiles (one 4 fps sample) against ~22 with turrets alone before the first launch (`sd-combat` K3
+  baseline 17-23 between kills).
 
 ## Sounds (W4)
 
@@ -418,7 +471,7 @@ cached per launcher, projectiles per id. Errors: 400 for values that are not ids
 launcher does not fire (a launcher's rows list every charge it takes: rapid lights fire light missiles) or one with no
 projectile graphic, 503 without an SDE. tools-core answers the ammunition route with a JSON array:
 `SdeClient.GetJsonArray` reads it (`GetJson` flattens a non-object body to `{}`). The page reads the answer through
-`readMissileGraphic` (ids and `res:/….black` paths only); the page's lookup and drawing are missiles M3.
+`readMissileGraphic` (ids and `res:/….black` paths only); the page's lookup and drawing: Launchers fire, drawn.
 
 ## Test data
 

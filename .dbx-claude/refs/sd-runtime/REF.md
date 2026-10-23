@@ -191,6 +191,36 @@ Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `Eve
   root's `scaling` to 1 (long 01a's root 5 threw its blasts up to 1.8 km off a Megathron) and multiplies the child's
   own `scaling` by the hull factor (overwriting it drew short 01a at 3.4× its authored size).
 
+## EveMissile (`missile-effects.ts`, missiles M3)
+
+- **Typed** in `carbonenginejs-runtime.d.ts`: `EveMissile` (`translationCurve`, `rotationCurve` (left null),
+  `target`, `targetRadius`, `explosionCallback`, `updateWarheads`, `warheads`, `Start`), `EveMissileWarhead` (`id`,
+  `explosionPosition`, `PrepareLaunch`, `Launch`, `GetState`, `State`), `EveTurretSet.GetFiringBoneWorldTransform`
+  (where the warheads leave the launcher), `EveEffectRoot2.duration` / `StartControllers` (the impact). `SceneObjectRoot`
+  includes `EveMissile`.
+- **Pools** per projectile path (missiles) and per impact path (impacts), for the page session, hydrated inside
+  `PageAudio.Detached`; impacts pass through `WithoutAudio` first (now exported from `explosions.ts`; the projectile
+  files hold no audio). A missile goes back to its pool once every warhead is DEAD (`RemoveObject`); `PrepareLaunch`
+  re-rolls it and `Start` resets its clock.
+- **NEVER `Destruct` or `RetireShips` a missile or an impact**: the quad renderer keys sprite records by effect content
+  and keeps the first registered sprite effect, so one destructed root breaks every later missile's sprites.
+  `MissileRoots()` (every pooled root, live or idle) joins every retire's retained set.
+- `warhead.id` must be ≥ 0 (the page numbers them). The `explosionCallback` only queues `(flight, warhead)`: it runs
+  inside the scene update, where removing an object skips the next one; the frame handles the queue before the next
+  `engine.Frame`.
+- **Gotchas found on the GPU** (2026-10-23):
+  - The replica draws missile balls at master time (no lag, unlike ships), so the drawn ball reaches the target a tick
+    before the master hit drains: missile moments draw at their boundary (`sd-combat` → Missiles in the page).
+  - After the master end the ball flies straight on and the warhead's time-to-target estimate grows with it, so it
+    never reaches its locator (frozen 9.5 km past the target, or detonated 28 km past it). A missile must **arrive**:
+    its curve frozen at its sample, its target kept; the estimate freezes and the warhead reaches its locator in
+    ~0.5 s.
+  - A nulled `target` alone leaves a `TRACKING_SPREAD` warhead flying for seconds, so ending a flight is
+    `target = null` **and** `Start(0, 0)`.
+  - The impact root's camera-distance controller runs (`StartControllers`): the impact draws large far off, ~6× at
+    1 km.
+  - The launcher's outburst drew on every volley seen.
+
 ## Audio (`audio.ts`)
 
 The runtime's `CjsAudioMan` with a media provider over the hub's `/audio/path` route (the runtime's own provider lives

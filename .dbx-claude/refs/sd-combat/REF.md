@@ -20,7 +20,9 @@ pinned `referenceRadius` (below, Real-GPU evidence). The plan is **delivered**.
 missile effects (`sd-fittings`), default missiles and the `/missile` route (`sd-weapons`), `ship_stats` launcher rows.
 **M2a is in** (2026-10-23): Destiny missile balls (`sd-destiny` → Missile balls), the flight book and missile hits /
 expiry rows in Combat rules (Missiles in the page, below). **M2b is in** (2026-10-23): launchers run and the director
-fires, resolves and reports missiles, headless (`sd-weapons` → Launchers fire). M3 (drawn, real GPU) is to come.
+fires, resolves and reports missiles, headless (`sd-weapons` → Launchers fire). **M3 is in** (2026-10-23): missiles
+draw, detonate on the drawn hull and kill there, checked on the real GPU (Missiles in the page → Drawn, below;
+`sd-weapons` → Launchers fire, drawn). The plan is delivered.
 
 ## Files (K1)
 
@@ -224,7 +226,7 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
 - get_state `destroyed.explosion`: `{ state: waiting | playing | done | failed, file, scale?, localBlasts?,
   wreckSwitchTime?, totalDuration?, removesAt, gone }`.
 
-## Missiles in the page (M2a built and spec'd, M2b wired)
+## Missiles in the page (M2a built and spec'd, M2b wired, M3 drawn)
 
 | File | Holds |
 |---|---|
@@ -250,9 +252,10 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
 - **The flight book** (`MissileFlights`): `Add(launch, now)` records `{ id: <ship>|<module>|<activation>|<cycle>, ship,
   module, typeID, name, charge, target, targetKind, cycle, activation, tick, at, numbers }` (the spec's missile numbers
   at launch: a refitted launcher or a shooter killed after a hit was found still lands it) with `drawAt` = T(boundary)
-  + (at + 1 − tick) ticks. `End(event, now, boundary)` applies a DestinyWorld event: `finishes` once per flight (a
-  hit → `Resolve`; a loss or expiry → `Expire`; a lost target's later expiry only ends its flight), the end's draw time
-  by the same rule, and a `hit` or `vanish` moment for `Due(now)` (with the `launch` moments, in draw order).
+  + max(0, at − tick) ticks (M3: at its boundary, Drawn below). `End(event, now, boundary)` applies a DestinyWorld
+  event: `finishes` once per flight (a hit → `Resolve`; a loss or expiry → `Expire`; a lost target's later expiry only
+  ends its flight), the end's draw time by the same rule, and a `hit` or `vanish` moment for `Due(now)` (with the
+  `launch` moments, in draw order; a loss queues its `vanish` at once).
   `Counts(ship)` `{ launched, inFlight }`, `InFlightOf(ship, module)`, `Report(boundary, world.Missile)`: `{ inFlight,
   launched, hits, expired, lost, refused, flights }` (at most 40 rows, flying first, soonest end first: `{ id, ship,
   module, charge, target, state: flying | lost | hit | expired, launchedAt, age, expiresIn, distance, speed, why }`).
@@ -271,9 +274,8 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
   a boundary with no turret event resolves them with `Shots([])`. Losses and expiries go to `combat.Expire(ShotOf(…),
   why ?? MISSILE_EXPIRED_NOTE, boundary)` at once. Then `Prune(boundary)`. `LoseMissileTargets`' events from a kill
   inside `Resolve` drain one boundary later.
-- **`DriveMissiles(now)`** (`main.ts`, after `DriveTurrets`, before `DriveExplosions`): takes `Due(now)`; a hit whose
-  resolved shot was `fatal` starts the victim's explosion at the hit's `drawAt` (`ExplosionStarts`, first caller wins).
-  M3 draws launches, detonations and vanishes here and posts their sounds.
+- **`DriveMissiles(now)`** (`main.ts`, after `DriveTurrets`, before `DriveExplosions`): takes `Due(now)` and draws it
+  (Drawn, below).
 - **Death**: `world.Destroy` loses the missiles at the victim; the dead shooter's own missiles vanish on the next evolve
   ("its ship was destroyed"). **Removal**: `world.RemoveMissilesOf(id)`, `MissileFlights.Forget(id)`. **Load**:
   `world.ClearMissiles()`, `MissileFlights.Clear()`.
@@ -286,6 +288,26 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
   warping: 5 vanished ("its ship entered warp"). A Caracal `engage` (no `modules`) armed its 5 launchers and killed a
   Rifter at 8 km 53 ticks later (`destroyed.by` caracal, `module` high-0, `weapon` Heavy Missile Launcher II); the
   explosion played and the ball left; audio game objects − emitters unchanged.
+
+### Drawn (M3)
+
+- **The draw rule changed**: the replica draws missile balls at master time (no lag, unlike ships; `sd-runtime` →
+  EveMissile), so a launch draws at its boundary and an end at its drain boundary: `now + max(0, at − tick)` ticks (the
+  turret rule's `at + 1 − tick` drew the hit a tick after the drawn ball arrived). A lost target's drawing vanishes at
+  the loss (a warhead left on the hull would detonate there); its later expiry queues nothing.
+- **`DriveMissiles`**: `launch` → `DrawLaunch` (the burst, the outburst sound and the drawn missile: `sd-weapons` →
+  Launchers fire, drawn); `hit` → `ShipMissiles.Hit`: `drawn` (the missile is still flying: its detonation will play the
+  impact), `played` (it already detonated: the kill starts now, `MissileKill`) or `undrawn` (no renderer, over the cap,
+  its files not loaded: the impact sound and kill at the hit's draw time, `MissileDetonated`); `vanish` →
+  `ShipMissiles.Vanish`. Then the drawing's frame: each detonation posts the impact sound on the target's emitter and
+  starts a fatal hit's explosion there.
+- **Missile kills start at the drawn detonation**: `missileHitShots` keeps each resolved hit until it detonates; a
+  `fatal` hit still drawing puts its victim in `drawnMissileKills`, and `DriveExplosions`' fallback (a killing shot that
+  never drew) waits `MISSILE_FALLBACK_TICKS + 1` (3) ticks for it instead of 2. Cleared on removal and load.
+- **Real-GPU kills** (2026-10-23, run6 in `.scratch/missiles-gpu/`; `sd-weapons` → Real-GPU evidence: missiles): 10
+  Caracals vs 10 Rifters at 30 km, 50 launched / 50 hits / 50 detonated, red-fc killed by a Heavy Missile Launcher II
+  and its explosion played at the detonation; audio `gameObjects − emitters` 1 → 1, `gpuErrors` 0. TFIs (44) vs 20
+  Caracals: fps 13-17 with 95-missile volleys against ~22 with turrets alone (the K3 baseline 17-23 between kills).
 
 ## Locks and the gate (`locks.ts`)
 

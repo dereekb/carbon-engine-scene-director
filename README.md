@@ -26,7 +26,8 @@ What works today:
   them at a ship or object, and they fire once per weapon cycle with the game's
   firing effects and impacts, and the turrets' deploy and pack sounds (firing and
   impact sounds wait on a PTADPCM decoder). Launchers fire a missile each cycle that
-  flies as a Destiny ball to its target (drawn missiles come next).
+  flies as a Destiny ball to its target, drawn as the client's missile with its trail,
+  and detonates on the hull with the charge's impact effect.
 - **Combat**: `set_target` and `engage` lock on EVE's lock time; each turret shot rolls
   EVE's hit chance through Destiny's `GetAccuracy` and does EVE damage through shield,
   armor and hull, and each missile hits through EVE's missile damage formula (or runs
