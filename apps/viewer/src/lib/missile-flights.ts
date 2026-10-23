@@ -7,10 +7,12 @@
  * - Ends (End) come from DestinyWorld's missile events: a hit becomes a WeaponShot with `missile` for Combat rules
  *   (MissileShotOf); an expiry or a loss is a finished launch with no damage (Combat rules' Expire). A missile that
  *   lost its target finishes then, though it flies on to its expiry.
- * - Draw times follow the turret rule: an event at the fractional master tick `at` drained at boundary `tick` draws at
- *   scene clock T(boundary) + (at + 1 − tick) ticks. Due(now) hands out the drawn launches and ends in draw order:
- *   with a renderer they draw the missile; without one they time the launcher and impact sounds and a kill's
- *   explosion start.
+ * - Draw times: the replica draws a missile's ball at master time, with none of the ships' lag (GPU, 2026-10-23: the
+ *   drawn ball reached its target a tick before the turret rule's T(boundary) + (at + 1 − tick) and had flown 8 km at
+ *   that rule's launch). So a launch draws at its boundary, as its ball leaves the shooter, and an end at the boundary
+ *   it is drained at (its ball got there during the tick before). Due(now) hands out the drawn launches and ends in
+ *   draw order: with a renderer they draw the missile; without one they time the launcher and impact sounds and a
+ *   kill's explosion start.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
@@ -107,7 +109,8 @@ export interface MissileEnd {
 }
 
 /**
- * A drawn moment: a launch, a hit (detonation) or a vanish (an expired or lost missile's end).
+ * A drawn moment: a launch, a hit (detonation) or a vanish (an expiry, a lost shooter's end, or a lost target's loss:
+ * that missile flies on undrawn to its expiry).
  */
 export interface MissileDue {
   readonly kind: 'launch' | 'hit' | 'vanish';
@@ -223,6 +226,7 @@ export class MissileFlights {
     const flight = this.flights.get(event.id);
     if (!flight) return null;
     const finishes = !flight.finished;
+    const wasLost = flight.state === 'lost';
     flight.finished = true;
     if (event.kind === 'lost') {
       flight.why = event.why ?? null;
@@ -235,9 +239,12 @@ export class MissileFlights {
       if (flight.state === 'flying') flight.state = 'expired';
       if (finishes) this.totals.expired += 1;
     }
+    // A lost target's missile flies on undamaging to its expiry; its drawing vanishes at the loss (a drawn warhead left
+    // on the hull would detonate there), so its later end queues nothing.
+    if (event.kind === 'lost' && !event.ended && !wasLost) this.Queue({ kind: 'vanish', flight, at: this.DrawAt(now, event.at, boundary) });
     if (event.ended && !flight.end) {
       flight.end = { at: event.at, tick: boundary, drawAt: this.DrawAt(now, event.at, boundary) };
-      this.Queue({ kind: event.kind === 'hit' ? 'hit' : 'vanish', flight, at: flight.end.drawAt });
+      if (!wasLost) this.Queue({ kind: event.kind === 'hit' ? 'hit' : 'vanish', flight, at: flight.end.drawAt });
     }
     return { flight, kind: event.kind, finishes, ...(flight.why ? { why: flight.why } : {}) };
   }
@@ -379,7 +386,7 @@ export class MissileFlights {
   }
 
   private DrawAt(now: number, at: number, tick: number): number {
-    return Math.round(now + (at + 1 - tick) * this.tickTicks);
+    return Math.round(now + Math.max(0, at - tick) * this.tickTicks);
   }
 
   private Queue(due: MissileDue): void {

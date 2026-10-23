@@ -32,6 +32,8 @@ export {
   EveEffectRoot2,
   EveLensflare,
   EveMeshOverlayEffect,
+  EveMissile,
+  EveMissileWarhead,
   EveRootTransform,
   EveSpaceScene,
   EveSpaceSceneRenderDriver,

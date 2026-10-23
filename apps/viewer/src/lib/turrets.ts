@@ -222,6 +222,20 @@ export class ShipTurrets {
   }
 
   /**
+   * A mounted weapon's muzzle in world space (the firing turret's, else the closest): where a launcher's missile ejects.
+   *
+   * @param id - The ship id.
+   * @param key - The weapon module's key.
+   * @param out - Receives the 4×4.
+   * @returns Whether its set is mounted (`out` untouched otherwise).
+   */
+  FiringBone(id: string, key: string, out: Float32Array): boolean {
+    const set = this.ships.get(id)?.mounts.get(key)?.set;
+    if (set) set.GetFiringBoneWorldTransform(0, out);
+    return set != null;
+  }
+
+  /**
    * A weapon stopped and its last burst ran: its set returns to TARGETING on the ship's target, or IDLE.
    *
    * @param id - The ship id.

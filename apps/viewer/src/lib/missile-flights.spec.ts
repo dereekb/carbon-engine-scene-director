@@ -46,15 +46,15 @@ function Event(kind: MissileEvent['kind'], overrides: Partial<MissileEvent> = {}
 }
 
 describe('MissileFlights', () => {
-  it('draws a launch at T(boundary) + (at + 1 − tick) ticks and counts it', () => {
+  it('draws a launch at its boundary (the replica draws missile balls at master time) and counts it', () => {
     const flights = new MissileFlights(1);
     const flight = flights.Add(Launch(), NOW);
     expect(flight.id).toBe('caracal|high-0|1|1');
-    expect(flight.drawAt).toBe(NOW + 0.4 * TICKS_PER_SECOND);
+    expect(flight.drawAt).toBe(NOW);
     expect(flights.Counts('caracal')).toEqual({ launched: 1, inFlight: 1 });
     expect(flights.InFlightOf('caracal', 'high-0')).toBe(1);
-    expect(flights.Due(NOW + 0.3 * TICKS_PER_SECOND)).toEqual([]);
-    expect(flights.Due(NOW + 0.4 * TICKS_PER_SECOND)).toMatchObject([{ kind: 'launch', flight: { id: flight.id } }]);
+    expect(flights.Due(NOW - 1)).toEqual([]);
+    expect(flights.Due(NOW)).toMatchObject([{ kind: 'launch', flight: { id: flight.id } }]);
   });
 
   it('turns a hit into a missile WeaponShot carrying its launch numbers, and draws the detonation', () => {
@@ -63,7 +63,8 @@ describe('MissileFlights', () => {
     flights.Due(Infinity);
     const end = flights.End(Event('hit'), NOW + 3 * TICKS_PER_SECOND, 103);
     expect(end).toMatchObject({ kind: 'hit', finishes: true, flight: { state: 'hit' } });
-    expect(end?.flight.end?.drawAt).toBe(NOW + 3.25 * TICKS_PER_SECOND);
+    // Drained at boundary 103: its ball reached the target during the tick before, so it draws at once.
+    expect(end?.flight.end?.drawAt).toBe(NOW + 3 * TICKS_PER_SECOND);
     const shot = end ? flights.ShotOf(end.flight, 102.25, 103) : null;
     expect(shot).toEqual({
       ship: 'caracal',
@@ -92,7 +93,11 @@ describe('MissileFlights', () => {
     expect(flights.Counts('caracal').inFlight).toBe(1);
     expect(flights.End(Event('expired', { at: 109.17 }), NOW + 9 * TICKS_PER_SECOND, 110)).toMatchObject({ finishes: false, kind: 'expired', flight: { state: 'lost' } });
     expect(flights.Counts('caracal').inFlight).toBe(0);
-    expect(flights.Due(Infinity).map((due) => due.kind)).toEqual(['launch', 'vanish']);
+    // The drawing vanishes at the loss (its boundary), not at the expiry.
+    expect(flights.Due(Infinity).map((due) => [due.kind, due.at])).toEqual([
+      ['launch', NOW],
+      ['vanish', NOW]
+    ]);
     expect(flights.Report(110, () => null)).toMatchObject({ launched: 1, hits: 0, lost: 1, expired: 0 });
   });
 

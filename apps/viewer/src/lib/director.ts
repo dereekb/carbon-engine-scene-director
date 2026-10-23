@@ -159,6 +159,7 @@ import {
   type ShipKill,
   toLiveFleetScene,
   type LiveFleetView,
+  type MissileGraphic,
   shipLockLimit,
   incomingModifiersOf,
   incomingSourceLabel,
@@ -214,7 +215,10 @@ import { ModuleAudioPost } from './module-audio';
 import { ModuleEffects, type ModuleEffectsReport } from './module-effects';
 import { ModuleFxCommands } from './module-fx';
 import { ShipModules, type CapacitorLanding, type ShipModuleEvent, type TargetingModule } from './modules';
-import { MissileFlightId, MissileFlights, type MissileFlightsReport } from './missile-flights';
+import { ShipMissiles, type ShipMissilesReport } from './missile-effects';
+import { MissileFlightId, MissileFlights, type MissileFlight, type MissileFlightsReport } from './missile-flights';
+import { MissileLookup } from './missile-lookup';
+import { MISSILE_FALLBACK_TICKS, MissileFiles } from './missile-plan';
 import { ShotQueue, WeaponShotsOf } from './shots';
 import { ShipTargets, type ShipTargetReport } from './targets';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
@@ -560,6 +564,10 @@ export interface DirectorOptions {
    */
   readonly weapons?: WeaponLookup;
   /**
+   * The hub's /missile lookups (the launchers' missile and impact graphics); a fresh one by default.
+   */
+  readonly missileGraphics?: MissileLookup;
+  /**
    * `?audio=off`: the page never turns audio on.
    */
   readonly audioDisabled?: boolean;
@@ -705,6 +713,16 @@ export class Director {
    */
   private readonly turretSounds = new TurretSoundQueue();
   /**
+   * The launchers' missile graphics (/missile) and their files as values, with or without a renderer: the drawn
+   * missiles hydrate from them and the impact files name the impact sounds (missile-plan.ts).
+   */
+  private readonly missileGraphics: MissileLookup;
+  private readonly missileFiles = new MissileFiles({ read: (path) => ResourceValues(path) });
+  /**
+   * The drawn missiles and their impacts (missile-effects.ts); null without a renderer.
+   */
+  private readonly missileDrawing: Maybe<ShipMissiles>;
+  /**
    * Every ship's target (set_target; targets.ts): what its turrets aim and fire at.
    */
   readonly targets: ShipTargets;
@@ -770,6 +788,11 @@ export class Director {
    */
   private readonly missileHitShots = new Map<string, WeaponShot>();
   /**
+   * Ships killed by a missile the drawing detonates: their explosion waits for the drawn detonation (DriveExplosions'
+   * fallback waits MISSILE_FALLBACK_TICKS + 1 for them).
+   */
+  private readonly drawnMissileKills = new Set<string>();
+  /**
    * Per fitted ship: the module specs last given to the activation layer; per ship: the module states and the incoming
    * target effects its flight was computed with (FlownKey).
    */
@@ -793,11 +816,12 @@ export class Director {
   private appliedCamera: Maybe<string> = null;
   private queue: Promise<unknown> = Promise.resolve();
 
-  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), weapons = new WeaponLookup(), audioDisabled = false }: DirectorOptions) {
+  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), weapons = new WeaponLookup(), missileGraphics = new MissileLookup(), audioDisabled = false }: DirectorOptions) {
     this.hullStats = hullStats;
     this.propMods = propMods;
     this.fitLookup = fits;
     this.weapons = weapons;
+    this.missileGraphics = missileGraphics;
     this.engine = engine;
     this.engineError = engineError;
     this.store = store;
@@ -818,11 +842,11 @@ export class Director {
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
-      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()],
+      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
       onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
-    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
+    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -836,7 +860,7 @@ export class Director {
       ? new ModuleEffects({
           engine,
           ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()],
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
@@ -844,7 +868,7 @@ export class Director {
       ? new ShipExplosions({
           engine,
           files: this.explosionFiles,
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.WarpEffectRoots()],
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build),
           onHide: (id) => this.Hide(id),
           onSound: (id, event) => this.PostExplosionSound(id, event)
@@ -864,12 +888,35 @@ export class Director {
     this.warpEffects = engine
       ? new WarpEffects({
           engine,
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()],
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build),
           DrawnPosition: (id, now) => world.Curves(id)?.translation.GetValueAt__Ticks(now, vec3.create()) ?? null
         })
       : null;
     this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
+    this.missileDrawing = engine
+      ? new ShipMissiles({
+          engine,
+          files: this.missileFiles,
+          detachAudio: (build) => this.audio.Detached(build),
+          tickSeconds: world.master.tickInterval / 1000,
+          port: {
+            MissileCurves: (id) => world.MissileCurves(id),
+            ShipVelocity: (id, now, out) => world.Curves(id)?.translation.GetValueDotAt__Ticks(now, out) != null,
+            DrawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null,
+            TargetRadius: (id) => this.flights.get(id)?.radius ?? world.ObjectBall(id)?.radius ?? UNBUILT_RADIUS,
+            TargetPosition: (id, now, out) => {
+              const curves = world.Curves(id);
+              const object = curves ? null : world.ObjectBall(id);
+              if (curves) curves.translation.GetValueAt__Ticks(now, out);
+              else if (object) vec3.set(out, object.position[0], object.position[1], object.position[2]);
+              return curves != null || object != null;
+            },
+            SurfaceDistance: (a, b) => world.SurfaceDistance(a, b),
+            FiringBone: (ship, module, out) => this.turrets?.FiringBone(ship, module, out) ?? false
+          }
+        })
+      : null;
     // A destroyed ship is no target: nothing locks, aims or runs a module on it.
     const live = (id: string): boolean => world.Curves(id) != null && !this.combat.IsDestroyed(id);
     this.targets = new ShipTargets({ HasShip: live, HasObject: (id) => this.IsAuthoredObject(id), SurfaceDistance: (a, b) => world.SurfaceDistance(a, b) });
@@ -1474,6 +1521,15 @@ export class Director {
     if (drawn.length) this.turretSounds.Add(TurretAudioPosts({ shots: drawn, transitions: [], facts: (ship, module) => this.TurretSoundFactsOf(ship, module) }));
     for (const weapon of this.shots.Settled(now)) this.turrets?.Settle(weapon.ship, weapon.module);
     this.turrets?.Frame();
+    this.PostTurretSounds(now);
+  }
+
+  /**
+   * Posts the turret and launcher sounds due by `now` on their ships' emitters.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  private PostTurretSounds(now: number): void {
     for (const post of this.turretSounds.Due(now)) {
       // A ship that left (or not built into the world yet) posts nothing: its emitter is released with it.
       if (this.world.Curves(post.ship)) this.audio.Post({ ship: post.ship, tick: post.tick, events: post.events, placement: this.AudioPlacement(post.ship, now) });
@@ -1481,32 +1537,107 @@ export class Director {
   }
 
   /**
-   * Plays the missiles' drawn moments due by `now` (MissileFlights.Due): without a renderer a fatal hit starts its
-   * victim's explosion at the hit's draw time. Runs after DriveTurrets and before DriveExplosions.
+   * Plays the missiles' drawn moments due by `now` (MissileFlights.Due), then the drawn missiles' frame
+   * (missile-effects.ts). A launch fires its launcher's burst (ShipTurrets.Fire; its outburst sound through the turret
+   * sound path, settled like a turret's) and, at the burst start, its drawn missile. A hit is the drawing's to detonate
+   * on the drawn hull: its impact sound posts on the target's emitter and a fatal one starts the victim's explosion
+   * there; a hit that is not drawn (no renderer, over the cap, its files not loaded) does both at its draw time. An
+   * expiry or a loss vanishes. Runs after DriveTurrets and before DriveExplosions.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
    */
   DriveMissiles(now: number): void {
+    const launches: TurretShotSound[] = [];
     for (const due of this.missiles.Due(now)) {
-      if (due.kind !== 'hit') continue;
-      const shot = this.missileHitShots.get(due.flight.id);
-      this.missileHitShots.delete(due.flight.id);
-      if (shot?.fatal) this.ExplosionStarts(shot.target, due.at);
+      if (due.kind === 'launch') {
+        const sound = this.DrawLaunch(due.flight, now);
+        if (sound) launches.push(sound);
+      } else if (due.kind === 'hit') {
+        const drawn = this.missileDrawing?.Hit(due.flight.id, due.at) ?? 'undrawn';
+        if (drawn === 'undrawn') this.MissileDetonated(due.flight, due.at, now);
+        else if (drawn === 'played') this.MissileKill(due.flight, now);
+        else if (this.missileHitShots.get(due.flight.id)?.fatal) this.drawnMissileKills.add(due.flight.target);
+      } else this.missileDrawing?.Vanish(due.flight.id, due.at);
     }
+    if (launches.length) this.turretSounds.Add(TurretAudioPosts({ shots: launches, transitions: [], facts: (ship, module) => this.TurretSoundFactsOf(ship, module) }));
+    for (const detonation of this.missileDrawing?.Frame(now) ?? []) this.MissileDetonated(detonation.flight, now, now);
+    this.PostTurretSounds(now);
+  }
+
+  /**
+   * Draws one launch: the launcher's burst, then its missile at the burst start. Nothing for a shooter that left or
+   * warps, or a missile whose ball is gone.
+   *
+   * @param flight - The flight.
+   * @param now - The scene clock, in integer 100 ns ticks.
+   * @returns Its outburst sound's source (at the burst start; at once without a renderer), or null.
+   */
+  private DrawLaunch(flight: MissileFlight, now: number): Maybe<TurretShotSound> {
+    if (!this.world.Curves(flight.ship) || !this.world.MissileCurves(flight.id) || this.world.InWarp(flight.ship)) return null;
+    // A launch posts no gun impact: the missile's impact posts at its detonation.
+    const sound: Omit<TurretShotSound, 'at'> = { ship: flight.ship, module: flight.module, target: flight.target, targetKind: flight.targetKind, missed: true, tick: flight.tick };
+    if (!this.turrets) return { ...sound, at: now };
+    const burst = this.turrets.Fire(flight.ship, flight.module, flight.target, false);
+    const startAt = now + Math.round((burst?.delay ?? 0) * TICKS_PER_SECOND);
+    if (burst) this.shots.Drawn(flight, now, burst.duration);
+    this.missileDrawing?.Launch(flight, this.MissileGraphicOf(flight), startAt);
+    return burst ? { ...sound, at: startAt } : null;
+  }
+
+  /**
+   * A missile hit's detonation, drawn or at its draw time: its impact sound on the target's emitter, and a fatal hit's
+   * explosion start.
+   *
+   * @param flight - The flight.
+   * @param at - When it detonated, scene clock.
+   * @param now - The scene clock.
+   */
+  private MissileDetonated(flight: MissileFlight, at: number, now: number): void {
+    const graphic = this.MissileGraphicOf(flight);
+    const events = graphic ? (this.missileFiles.Cached(graphic)?.facts.impactEvents ?? []) : [];
+    // An object has no emitter; a ship that left posts nothing.
+    if (events.length && flight.targetKind === 'ship' && this.world.Curves(flight.target)) {
+      this.audio.Post({ ship: flight.target, tick: flight.end?.tick ?? this.world.tick, events: events.slice(0, 1), placement: this.AudioPlacement(flight.target, now) });
+    }
+    // A drawn missile can detonate before its hit is drained: its kill then starts with the hit (MissileKill).
+    this.MissileKill(flight, at);
+  }
+
+  /**
+   * Starts a fatal missile hit's explosion at `at`, once its resolved shot is known.
+   *
+   * @param flight - The flight.
+   * @param at - Scene clock.
+   */
+  private MissileKill(flight: MissileFlight, at: number): void {
+    const shot = this.missileHitShots.get(flight.id);
+    if (!shot) return;
+    this.missileHitShots.delete(flight.id);
+    if (shot.fatal) this.ExplosionStarts(shot.target, at);
+  }
+
+  /**
+   * A flight's missile graphic (its charge in its launcher), once the /missile lookup landed.
+   *
+   * @param flight - The flight.
+   * @returns It, or null while unknown or without a charge.
+   */
+  private MissileGraphicOf(flight: Pick<MissileFlight, 'typeID' | 'charge'>): Maybe<MissileGraphic> {
+    return flight.charge ? (this.missileGraphics.Cached(flight.charge.typeID, flight.typeID)?.missile ?? null) : null;
   }
 
   /**
    * Plays the destroyed ships' explosions for the frame at `now`: with a renderer they draw (explosions.ts: the hull
    * hides at the wreck switch, each blast posts its sound); without one the schedule (ExplosionSchedule) posts the
-   * sounds and hides the hull. A killing shot that never drew starts its explosion two ticks after the kill. Runs after
-   * DriveTurrets.
+   * sounds and hides the hull. A killing shot that never drew starts its explosion two ticks after the kill (a kill by
+   * a drawn missile MISSILE_FALLBACK_TICKS + 1). Runs after DriveTurrets.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
    */
   DriveExplosions(now: number): void {
     const tickSeconds = this.world.master.tickInterval / 1000;
     for (const [id, death] of this.deaths) {
-      if (death.start == null && this.world.tick >= death.kill.tick + 2) death.start = now;
+      if (death.start == null && this.world.tick >= death.kill.tick + (this.drawnMissileKills.has(id) ? MISSILE_FALLBACK_TICKS + 1 : 2)) death.start = now;
       if (death.start == null || death.gone) continue;
       if (!death.begun) {
         const curves = this.world.Curves(id);
@@ -1658,8 +1789,8 @@ export class Director {
         });
       }
     }
-    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport>; turrets: Maybe<TurretsReport>; warpEffects: Maybe<WarpEffectsReport> } & EngineStats) | { available: false; reason: string } = this.engine
-      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null, turrets: this.turrets?.Report() ?? null, warpEffects: this.warpEffects?.Report() ?? null }
+    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport>; turrets: Maybe<TurretsReport>; missiles: Maybe<ShipMissilesReport>; warpEffects: Maybe<WarpEffectsReport> } & EngineStats) | { available: false; reason: string } = this.engine
+      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null, turrets: this.turrets?.Report() ?? null, missiles: this.missileDrawing?.Report() ?? null, warpEffects: this.warpEffects?.Report() ?? null }
       : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
@@ -1780,6 +1911,7 @@ export class Director {
       // Its missiles go with it; those at it are lost through Destiny.
       this.world.RemoveMissilesOf(doc.id);
       this.missiles.Forget(doc.id);
+      this.missileDrawing?.Release(doc.id);
       for (const [flight, shot] of this.missileHitShots) if (shot.ship === doc.id) this.missileHitShots.delete(flight);
       this.engagements.delete(doc.id);
       this.fleetTargets.Forget(doc.id);
@@ -1793,8 +1925,9 @@ export class Director {
       this.audio.Release(doc.id);
     }
     for (const doc of diff.objects.removed) {
-      // Turrets on it stop at once, as on a removed ship.
+      // Turrets on it stop at once, as on a removed ship; drawn missiles at it explode where they are.
       moduleEvents.push(...this.modules.Remove(doc.id, this.world.tick));
+      this.missileDrawing?.Release(doc.id);
       this.ForgetTarget(doc.id);
       this.locks.Remove(doc.id);
       stopped.push(...this.world.RemoveObject(doc.id));
@@ -1818,6 +1951,8 @@ export class Director {
       this.weapons.ForgetFailures();
       this.turretFiles.ForgetFailures();
       this.explosionFiles.ForgetFailures();
+      this.missileGraphics.ForgetFailures();
+      this.missileFiles.ForgetFailures();
       // A load restarts every module online (or offline as fitted) and every ship at full HP.
       moduleEvents.push(...this.modules.Clear(this.world.tick));
       // Targets, locks, shots and kills are live state: a load starts with none, every ship alive.
@@ -1828,6 +1963,8 @@ export class Director {
       this.missiles.Clear();
       this.missileHits = [];
       this.missileHitShots.clear();
+      this.drawnMissileKills.clear();
+      this.missileDrawing?.Clear();
       this.engagements.clear();
       this.fleetTargets.Clear();
       this.rechargeSynced.clear();
@@ -2314,7 +2451,9 @@ export class Director {
         }
       }
     }
-    for (const event of events) if (event.kind === 'off' && turret(event.ship, event.module)) this.shots.Off(event.ship, event.module);
+    // Launchers settle like turrets: their bursts are the launches' (DrawLaunch).
+    const weapon = (ship: string, key: string): boolean => this.fittings.get(ship)?.modules.some((module) => module.key === key && module.weapon != null && module.typeID != null) ?? false;
+    for (const event of events) if (event.kind === 'off' && weapon(event.ship, event.module)) this.shots.Off(event.ship, event.module);
   }
 
   /**
@@ -2821,6 +2960,13 @@ export class Director {
         this.onChange();
       });
     }
+    // A launcher's missile graphics and files load ahead of its first launch (with or without a renderer: the impact
+    // file names the impact sound).
+    for (const module of resolved?.modules ?? []) {
+      const charge = module.charge?.typeID;
+      if (module.weapon !== 'launcher' || module.typeID == null || charge == null) continue;
+      void this.missileGraphics.Lookup(charge, module.typeID).then((answer) => (answer.missile ? this.missileFiles.Load(answer.missile) : null)).catch(() => undefined);
+    }
     const mounts = TurretMountsOf(resolved, (typeID) => this.weapons.Cached(typeID)?.weapon ?? null);
     // Shared with the sets: each file loads once, and a failure is the mount's to report.
     for (const mount of mounts) this.turretFiles.Load(mount.resPath).catch(() => undefined);
@@ -2882,7 +3028,7 @@ export class Director {
     this.turrets?.Remove(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
-    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()]);
+    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
   }
 
   /**
@@ -2904,7 +3050,7 @@ export class Director {
       entry.status = 'destroyed';
       if (ship && this.engine) {
         this.engine.RemoveShip(ship);
-        RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()]);
+        RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
       }
     }
     this.onChange();
@@ -2923,6 +3069,14 @@ export class Director {
    */
   private ExplosionRoots(): object[] {
     return this.explosions?.Roots() ?? [];
+  }
+
+  /**
+   * The drawn missiles' and impacts' pooled roots, live or idle, for every retire's retained set: they are never
+   * retired (missile-effects.ts).
+   */
+  private MissileRoots(): object[] {
+    return this.missileDrawing?.Roots() ?? [];
   }
 
   /**
@@ -3083,6 +3237,7 @@ export class Director {
   private ExplosionStarts(id: string, at: number): void {
     const death = this.deaths.get(id);
     if (death && death.start == null) death.start = at;
+    this.drawnMissileKills.delete(id);
   }
 
   /**

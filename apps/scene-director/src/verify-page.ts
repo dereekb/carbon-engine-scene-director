@@ -1833,6 +1833,28 @@ try {
     return `engage armed 5 launchers by default; killed by ${kill?.by} ${kill?.module} (${kill?.weapon}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} gone at tick ${gone.simulation.tick}; gameObjects − emitters ${after}`;
   });
 
+  await Check('launcher and missile impact sounds post', async () => {
+    await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [15000, 0, 0])], { death: 'flag' });
+    const beyond = (state: ViewerState) => (state.audio?.gameObjects ?? 0) - (state.audio?.emitters ?? 0);
+    const before = await WaitFor('the audio settles', 90, (state) => (state.audio && state.audio.state !== 'loading' ? null : JSON.stringify(state.audio)));
+    const on = await call<EngageResult>('engage', { ships: ['caracal'], target: 'punisher', modules: ['launcher'] });
+    const Posts = (state: ViewerState, ship: string, pattern: RegExp) => (state.audio?.posted ?? []).filter((entry) => entry.tick >= on.tick && entry.ship === ship && pattern.test(entry.event));
+    // The launcher's outburst posts on the shooter as each launch draws (its firing effect's start curve, through the
+    // turret sound path); the charge's impact sound (the impact file's Tr2ActionPlaySound) on the target at each hit.
+    const heard = await WaitFor('the outburst and impact sounds post', 45, (polled) => (Posts(polled, 'caracal', /^missile_outburst_/u).length && Posts(polled, 'punisher', /^missile_explosion_/u).length ? null : Show({ posted: polled.audio?.posted, missiles: polled.missiles?.hits })));
+    const [outburst] = Posts(heard, 'caracal', /^missile_outburst_/u);
+    const [impact] = Posts(heard, 'punisher', /^missile_explosion_/u);
+    const audio = heard.audio;
+    const played = audio?.state === 'on';
+    // Their media may be Wwise PTADPCM: once learned undecodable they are recorded and not sent.
+    Expect([outburst, impact].every((entry) => entry.played === played || entry.undecodable === true), `outburst and impact with audio ${audio?.state}: ${Show([outburst, impact])}`);
+    Expect(beyond(heard) === beyond(before), `audio game objects beyond the page's emitters went ${beyond(before)} -> ${beyond(heard)} with the launchers firing: ${Show(audio)}`);
+    const undecodable = (audio?.undecodable ?? []).filter((event) => /^missile_/u.test(event));
+    const outcome = played ? 'played' : 'audio ' + String(audio?.state) + ', recorded unplayed';
+    const unsent = undecodable.length ? '; undecodable, not sent: ' + undecodable.join(', ') : '';
+    return `${outburst.event} on caracal, ${impact.event} on punisher (${outcome}${unsent}); ${audio?.gameObjects ?? 0} audio game objects for ${audio?.emitters ?? 0} page emitter(s)`;
+  });
+
   // An FC, a wing commander and a squad of two whose lead the squad anchors on; two Punishers kill the lead, then the FC.
   const fleetFightShips = [Punisher('fc', [0, 0, 0]), Punisher('wc', [0, 0, -1500]), Rifter('lead', [1500, 0, 0]), Rifter('member', [3000, 0, 0]), Punisher('k1', [0, 0, 2500]), Punisher('k2', [1500, 0, 2500])];
   const fleetFight = { fleets: [{ id: 'f', commander: 'fc', wings: [{ id: 'w', commander: 'wc', squads: [{ id: 's', role: 'dps', commander: 'lead', members: ['lead', 'member'], anchor: { ship: 'lead', range: 1500 } }] }] }] };

@@ -641,6 +641,11 @@ declare module '@carbonenginejs/runtime/trinity' {
     ForceStateTargeting(): void;
     SetShotMissed(missed: boolean): void;
     /**
+     * The firing turret's muzzle joint in world space (the closest turret when none fires; the parent transform when it
+     * mounts none): a launcher's missiles eject from it along its +Z.
+     */
+    GetFiringBoneWorldTransform(muzzle: number, out: Float32Array): Float32Array;
+    /**
      * Turns the set's LOD off and loads its high-detail geometry now.
      */
     FreezeHighDetailLOD(): void;
@@ -779,8 +784,78 @@ declare module '@carbonenginejs/runtime/trinity' {
      */
     observers: { observer: unknown }[];
     readonly curveSets: readonly TriCurveSet[];
+    /**
+     * Seconds it plays (data only: a missile impact's 6; -1 when unset). The page removes it then.
+     */
+    duration: number;
     Start(): void;
     Stop(): void;
+    /**
+     * Starts its controllers (a missile impact's `explosion_ctrl`: camera-distance scaling and its sound action).
+     */
+    StartControllers(): void;
+  }
+
+  /**
+   * A missile in flight (an EveSpaceObject2 in scene.objects): its warheads ride its translation curve and detonate on
+   * its target by themselves (CheckImpact). The scene drives it once added: no per-frame host call.
+   */
+  export class EveMissile {
+    /**
+     * The ball it flies on (a replica ClientBall), sampled at the update context's time.
+     */
+    translationCurve: TriVectorCurve | null;
+    /**
+     * Null keeps the inherited velocity and the warheads' launch transforms in world axes.
+     */
+    rotationCurve: ITriQuaternionFunction | null;
+    /**
+     * The drawn hull or object it detonates on (`GetDamageLocatorPosition`, `GetImpactPosition`, `CreateImpact`); null:
+     * each warhead explodes where it is (in TRACKING_FINAL), with no impact on any hull.
+     */
+    target: EveShip2 | EveSpaceObject2 | null;
+    /**
+     * Metres subtracted from the distance in its time-to-target estimate.
+     */
+    targetRadius: number;
+    /**
+     * Called with the warhead's id on each detonation, inside the scene update: queue work, never throw.
+     */
+    explosionCallback: ((warheadId: number) => void) | null;
+    updateWarheads: boolean;
+    readonly warheads: readonly EveMissileWarhead[];
+    readonly boundingSphereRadius: number;
+    display: boolean;
+    /**
+     * Arms a flight: latches the launching ship's velocity and the estimated flying time (seconds), resets its clock,
+     * silences its emitters. It does not prepare or launch the warheads.
+     */
+    Start(shipVelocity: ArrayLike<number>, estimatedFlyingTime: number): void;
+  }
+
+  /**
+   * One warhead of an EveMissile: DELAYED 0, LAUNCH 1, EJECTING 2, START_TRACKING 3, TRACKING_SPREAD 4, TRACKING_FINAL
+   * 5, EXPLODED 6, DEAD 7.
+   */
+  export class EveMissileWarhead {
+    /**
+     * -1 in every file (not persisted); a warhead detonates only with an id >= 0.
+     */
+    id: number;
+    /**
+     * Where it detonated (world space), until its next PrepareLaunch.
+     */
+    readonly explosionPosition: Vec3;
+    /**
+     * Back to DELAYED, re-rolling its speed, final-target time and explosion distance.
+     */
+    PrepareLaunch(): void;
+    /**
+     * Its start offset and orientation in the missile's space (a 4×4): its +Z is the eject direction.
+     */
+    Launch(startTransform: Float32Array): void;
+    GetState(): number;
+    static readonly State: { readonly STATE_DEAD: number; readonly STATE_EXPLODED: number; readonly STATE_TRACKING_FINAL: number };
   }
 
   /**

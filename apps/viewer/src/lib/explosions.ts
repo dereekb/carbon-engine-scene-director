@@ -308,13 +308,13 @@ export class ShipExplosions {
 }
 
 /**
- * A copy of an explosion file's values with every sound curve (AudEventCurve) and observer list taken out, so the
- * hydrated root holds no emitter.
+ * A copy of an effect file's values (an explosion, a missile impact) with every sound curve (AudEventCurve) and
+ * observer list taken out, so the hydrated root holds no emitter.
  *
  * @param values - The file's values.
  * @returns The copy.
  */
-function WithoutAudio(values: CjsModelValues): CjsModelValues {
+export function WithoutAudio(values: CjsModelValues): CjsModelValues {
   const copy = structuredClone(values);
   const seen = new Set<unknown>();
   const strip = (value: unknown): void => {

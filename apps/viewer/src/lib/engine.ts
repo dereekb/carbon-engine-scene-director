@@ -42,6 +42,7 @@ import {
   type EvePlanet,
   type EveShip2,
   type EveEffectRoot2,
+  type EveMissile,
   type EveRootTransform,
   type EveSpaceObject2,
   type EveStretch,
@@ -55,9 +56,9 @@ const DEGREES = Math.PI / 180;
 
 /**
  * What the page puts in scene.objects besides ships: static objects, module effects (module-effects.ts) and ship-death
- * explosions (explosions.ts).
+ * explosions (explosions.ts), drawn missiles and their impacts (missile-effects.ts).
  */
-export type SceneObjectRoot = EveSpaceObject2 | EveStretch | EveStretch3 | EveRootTransform | EveEffectRoot2;
+export type SceneObjectRoot = EveSpaceObject2 | EveStretch | EveStretch3 | EveRootTransform | EveEffectRoot2 | EveMissile;
 
 /**
  * EVE's maps are BC7/BC5; without the feature the reader decodes to RGBA8.
