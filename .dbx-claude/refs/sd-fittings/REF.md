@@ -325,6 +325,12 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   `cycle: { number, endsIn }`), `stopping` (runs to its cycle end, rounded up to a tick: `CycleEnd`), `reactivating`
   (after a stop, for `moduleReactivationDelay`, 669). Passive modules only go online / offline; rigs and subsystems
   refuse offline.
+- **Gate and activations** (Combat rules): `ModuleCycle.Boundary(boundary, { hold })` keeps an activating module
+  waiting with the hold as its note (a turret's lock: `ShipModulesPort.LockHold` = `ShipLocks.Hold`); without
+  `LockHold` nothing waits. `activations` counts `on` events and every event carries `activation` (it keys the shot
+  rolls). `ShipModules.Spec(ship, key)` returns a module's spec; a turret's carries `combat`
+  (`turretCombatNumbersOf`, from `ShipModuleSpecsOf`'s evaluation). `Remove(id, boundary, why)` names why the modules
+  on it stop.
 - **Rules** (the prop mod's, generalized; `ModuleCycle`): `active` on online → activating, on stopping → active again,
   on reactivating → queued until ready (`activatesIn`), on offline → onlined and activated at the same boundary. `online`
   cancels an activation, stops a running module at its cycle end, and onlines an offline one at the next boundary.
@@ -391,8 +397,11 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
 - Repairs land at cycle events (`RepairLandings`): shield boosters at `cycle` (including the first, at `on`), armor and
   hull repairers at `end`; remote ones on their target × effectiveness; ancillary armor reps × their charge multiplier
   while paste is loaded (`moduleNumbersOf`).
-- `Damage(id, layer, amount)` is internal: nothing deals damage yet (Combat rules will). get_state's `defense` is
-  `Report`: hp, max, resists, ehp of the current HP, `repairs`, `incoming`.
+- `ApplyHit(id, damage)` (Combat rules, `sd-combat`): raw damage shield first, then armor, then structure, each through
+  its resonances, the unabsorbed share spilling on (`applyLayeredDamage`); `Destroyed(id)` at 0 structure.
+  `Recharge(seconds)` runs the passive shield recharge (`passiveRecharge`, the capacitor's curve; `CapacitorFractionAfter`
+  calls it too) at each boundary. `Damage(id, layer, amount)` stays for specs. get_state's `defense` is `Report`: hp,
+  max, resists, ehp of the current HP, `repairs`, `incoming`.
 - verify-page (2026-10-23, SDE 3632936): "switch_modules runs a Guardian's armor hardener" (Domination Thermal Armor
   Hardener: thermal 44.75 % → 75.14 % from the next tick, back after `online` and its 24 s cycle end; DC II refused as
   passive, an unmatched `weapon` selector skipped); "switch_modules prop matches switch_prop_mods" (the 10MN AB II

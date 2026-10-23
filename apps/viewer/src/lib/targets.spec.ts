@@ -62,4 +62,16 @@ describe('ShipTargets', () => {
     ]);
     expect(targets.Of('ferox')).toBe('astrahus');
   });
+
+  it('forgets every target on a destroyed ship and keeps its own', () => {
+    const targets = new ShipTargets(new FakePort());
+    targets.Set('rifter', 'punisher');
+    targets.Set('ferox', 'punisher');
+    targets.Set('punisher', 'rifter');
+    expect(targets.Forget('punisher')).toEqual([
+      { ship: 'rifter', previous: 'punisher' },
+      { ship: 'ferox', previous: 'punisher' }
+    ]);
+    expect(targets.Of('punisher')).toBe('rifter');
+  });
 });

@@ -147,22 +147,22 @@ Apocalypse, Tornado, Revelation and Caracal (`add_ships` by hull name), then the
 **A ship's target** (`ShipTargets`, `Director.targets`) is live state, never in the document: a ship or an authored
 object (a document object with a Destiny ball). `celestial:<id>` is refused (`normalizeTargetCommand` and
 `switch_modules`; follow-up). Cleared: on load; when the target ship or object is removed ("its target is gone"); when
-either ship enters warp (EVE breaks the lock). No lock, no hostility check, no pilot delay (Combat rules / the Fleet
-targeting lever).
+either ship enters warp (EVE breaks the lock). `set_target` also starts the ship's lock (`ShipLocks`, `sd-combat`):
+turrets fire only at a locked target. No hostility check, no pilot delay (the Fleet targeting lever).
 
 - **`set_target { ships | fleet [, wing | squad], target | null }`** (page tool, `Director.SetTarget`): an unknown
   target is a SceneError; skipped with a reason: the target ship itself, a ship in warp, a target in warp. Returns
-  `{ tick, target, ships: [{ id, target, previous?, turrets, retargeted }], skipped }` (`retargeted`: its running turrets
-  that follow the change).
+  `{ tick, target, ships: [{ id, target, previous?, turrets, retargeted, lock? }], skipped }` (`retargeted`: its running
+  turrets that follow the change; `lock`: its lock on the target, or `{ refused }`).
 - **Activation**: `moduleActivationOf` lets turrets (`weapon: 'turret'`) run: targeted, `reach` Infinity (EVE refuses
-  no turret by range: shots past falloff miss, Combat rules), rate of fire = the dogma `speed` with skills. Launchers
+  no turret by range: it waits for its lock, and shots past falloff miss: `sd-combat`), rate of fire = the dogma `speed` with skills. Launchers
   keep `LAUNCHER_REFUSAL` ("missile launchers fire in the Missiles entry"). Selectors `turret` / `launcher`.
 - **`switch_modules` on turrets**: a given `target` becomes the ship's target first (as `set_target`, and it may be an
   object); without one, the ship's target; neither: "it needs a target: set_target or switch_modules target". Other
   targeted modules still need an explicit ship target. Every existing rule holds (no activation in warp, a stop at
   once when the target goes or warps, a stop on entering warp, reactivation delay, group limits, pilot delay).
-- **Retarget** (`ShipModules.Retarget`, from `SetShipTarget`): a running turret takes a new target at its next cycle
-  start (row `nextTarget` until then; the cycle `end` event keeps the old target, the `cycle` event carries the new);
+- **Retarget** (`ShipModules.Retarget`, from `SetShipTarget`): a running turret takes a new target at its first cycle
+  start once that target is locked (it keeps firing at the old, still-locked one until then; row `nextTarget`; the cycle `end` event keeps the old target, the `cycle` event carries the new);
   a starting one at once; null stops it at its cycle end ("its target was cleared").
 
 ### Shots: the Combat rules hook and the cadence
@@ -174,8 +174,8 @@ targeting lever).
   charge?, target, targetKind, cycle, tick, at, distance, effectiveness, missed? }`; `at` is the cycle's exact
   fractional master tick (`ModuleCycle` events carry it), `effectiveness` the falloff half of EVE's hit chance.
 - **`Director.OnShot(listener)`** returns an unsubscribe. Listeners run at the boundary, in registration order (a
-  throwing one is logged), before the shot draws: Combat rules sets `missed`, applies damage, calls `SyncImpactState`.
-  This entry registers none: every shot draws as a hit.
+  throwing one is logged), before the shot draws. Combat rules (`CombatRules.Resolve`, `sd-combat`) runs before them:
+  every shot arrives with `missed`, `outcome` and, on a kill, `fatal`, and `SyncImpactState` follows the damage.
 - **Drawing** (`ShotQueue`): a shot draws at scene clock T(boundary) + (at + 1 − tick) ticks, so a 1.8 s gun fires every
   1.8 s on screen and every draw follows its boundary event. Dropped at draw time when its shooter or target is gone,
   either is in warp, or its set is not mounted. Otherwise `ShipTurrets.Fire`: `SetTargetObject` on the shot's own

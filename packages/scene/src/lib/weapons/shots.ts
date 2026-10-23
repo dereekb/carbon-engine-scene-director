@@ -3,6 +3,8 @@
  * (Director.OnShot), before it draws; Combat rules decides the hit there and applies the damage.
  */
 
+import type { ShotOutcome } from '../combat/kill';
+
 export type ShotTargetKind = 'ship' | 'object';
 
 export interface WeaponShot {
@@ -46,7 +48,19 @@ export interface WeaponShot {
    */
   readonly effectiveness: number;
   /**
+   * The weapon's activation (since the load) the cycle belongs to: with `cycle`, it keys the shot's roll.
+   */
+  readonly activation: number;
+  /**
    * Set by a listener (Combat rules) when the shot misses: it draws past the target, without an impact.
    */
   missed?: boolean;
+  /**
+   * Set by Combat rules: the roll, the damage and the layers it took it from.
+   */
+  outcome?: ShotOutcome;
+  /**
+   * Set by Combat rules on the shot that destroyed its target.
+   */
+  fatal?: true;
 }

@@ -56,6 +56,7 @@ export function WeaponShotsOf(events: readonly ShipModuleEvent[], port: WeaponSh
       target: event.target,
       targetKind,
       cycle: event.cycle,
+      activation: event.activation,
       tick: event.tick,
       at: event.at ?? event.tick,
       distance: Math.round(distance),

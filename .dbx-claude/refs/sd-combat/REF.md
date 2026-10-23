@@ -8,11 +8,11 @@
 **Status (2026-10-23)**: the combat-rules plan
 (`~/.claude/plans/combat-rules-locks-turret-hits-through-getaccuracy-damage-into-the-fit-s-damage.md`) lands in three
 slices. **K1 is in**: the runtime-free rules in `packages/scene` (below), the document's `combat` and `set_combat`, and
-`ship_stats`' turret numbers. **K2** (next) runs them in the page: `ShipLocks`, the lock gate on turrets, `CombatRules`
-rolling each shot through Destiny's `GetAccuracy`, damage into `DamageModel`, passive shield recharge, `engage` /
-`cease_fire`, get_state's locks and combat reports, deaths as `flag`. **K3**: deaths that explode (the client's
-explosion) and leave both parks, the live fleet view, the real-GPU fight. Until K2 the page does not read `combat` and
-every shot still draws as a hit.
+`ship_stats`' turret numbers. **K2 is in: deaths flag until K3**: the page runs them: `ShipLocks`, the lock gate on
+turrets, `CombatRules` rolling each shot through Destiny's `GetAccuracy`, damage into `DamageModel`, passive shield
+recharge, `engage` / `cease_fire`, get_state's locks and combat reports. A ship at 0 structure is recorded and flagged
+(`"explode"` acts as `"flag"`). **K3** (next): deaths that explode (the client's explosion) and leave both parks, the
+live fleet view, the real-GPU fight.
 
 ## Files (K1)
 
@@ -96,6 +96,64 @@ the Entropic Disintegrator and Vorton Projector pages; Destiny's `GetAccuracy`
   3 HP/s at its peak). Armor and structure do not regenerate. The viewer's `CapacitorFractionAfter` is the same formula;
   K2 makes it call `passiveRecharge` so there is one.
 
+## Files (K2, the page; node-tested but the director)
+
+| File | Holds |
+|---|---|
+| `viewer/locks.ts` | `ShipLocks` over `ShipLocksPort` (`SurfaceDistance`, `InWarp`, `IsTargetable`, `Targeting`, `SignatureOf`, `tickSeconds`): `Request`, `Keep` / `Release`, `Boundary(tick, wanted)`, `IsLocked`, `Hold`, `Of` / `On`, `Remove`, `OnWarpEnter`, `Clear`, `Report` |
+| `viewer/combat.ts` | `CombatRules` over `CombatPort` (`Accuracy`, `Speed`, `Weapon`, `SignatureOf`, `KindOf`): `SetCombat`, `Recharge`, `Resolve`, `IsDestroyed`, `KillOf`, `Kills`, `Totals`, `Report`, `Attackers`, `Remove`, `Clear`; `DPS_WINDOW_SECONDS` (20), `COMBAT_ROWS` (3) |
+| `viewer/module-cycle.ts` | the gate `Boundary(boundary, { hold })` and `activations` (every event carries `activation`) |
+| `viewer/modules.ts` | port `LockHold?`, the lost-lock stop, the lock-gated retarget, `Remove(id, boundary, why)`, `Spec`, `TurretAims`, `TurretKeys`; specs carry `combat` (`ShipModuleSpecsOf`) |
+| `viewer/damage.ts` | `ApplyHit`, `Recharge`, `Destroyed` (`capacitor.ts`' `CapacitorFractionAfter` is `passiveRecharge` too: one formula) |
+| `viewer/destiny.ts` | `Accuracy(source, target, numbers)`: the master park's `GetAccuracy` (`destiny-accuracy.spec.ts`) |
+| `viewer/director.ts` | the wiring below, `Engage` / `CeaseFire`, `OnKill`, get_state |
+
+## Locks and the gate (`locks.ts`)
+
+- **Lifecycle** `waiting` → `locking` → `locked` on boundaries. A lock starts at the first boundary after its request,
+  only while the target is within `maxTargetRange` (surface to surface); its lock time is fixed then (shooter's live
+  scan resolution, target's live signature: `RunningFlight`'s, so an MWD bloom and painters count; an object's ball
+  radius). It completes at the first boundary at or after start + lock time. Out of range it waits (note `out of
+  targeting range: 40.2 km, it locks at 28.1 km`); a locking or locked lock whose target leaves range is `lost` back
+  to waiting and locks again once back. A removed or destroyed target, either ship entering warp, or a load clears it.
+- **The sweep** (`Boundary`'s `wanted`, built by `Director.WantedLocks`): a ship keeps its target's lock, its turrets'
+  targets (running, stopping, held, and a pending retarget) and its `Keep`s, locks any wanted target it has room for,
+  and releases the rest. So a `set_target` to a new ship keeps the old lock while the guns still fire at it.
+- **Limit**: `maxLocks = shipLockLimit(targeting, MAX_SKILLS_PILOT)` (Rifter 4, the pilot 12). `Request` at the limit
+  frees a lock outside the ship's wanted set, else refuses (`it holds 4 locks, its most`).
+- **No targeting numbers** (the table path, no EVE dogma for the hull): `Request` refuses (`it cannot lock: no EVE dogma
+  for its hull`) and `Hold` is null, so its turrets fire unlocked as before (and do no damage: no combat numbers).
+- **The gate** (`ModuleCycle.Boundary(boundary, { hold })`, through `ShipModulesPort.LockHold` = `ShipLocks.Hold`):
+  an activating turret with a hold stays `activating` with the hold as its note (`waiting for its lock on "x" (1.6
+  s)`): EVE's pre-activation. A running turret whose lock is lost stops at its cycle end (`it lost its lock on "x"`).
+  A pending retarget switches at the first cycle start once the new target is locked. Only turrets wait: remote reps,
+  webs, scrams and EWAR run without a lock.
+
+## Combat rules in the page (`combat.ts`)
+
+- `Resolve(shots, boundary)` sorts by (`at`, ship id, module key), then per shot: a target already destroyed
+  (earlier in the boundary too) is `overkill` (no roll, no damage, drawn as a hit); an object (or a shooter without
+  combat numbers) gets a range-only roll on `effectiveness` (0 past optimal without falloff) and no damage; a ship gets
+  `port.Accuracy` (tracking / disintegrator kinds; falloff null → 1 m) or, for a vorton, `vortonApplication` within
+  optimal (no roll), then `rollShot` on `combatRoll(seed, { ship, module, activation, cycle, target })`, a
+  disintegrator's spool (`(n − 1) × perCycle` capped, n the consecutive cycles on this target in this activation),
+  and `DamageModel.ApplyHit(target, shotDamage(damage, quality × (1 + spool)))`. A ship the model does not track
+  takes nothing (`takes no damage: no EVE dogma for its hull`).
+- Every shot gets `missed`, `outcome` (`ShotOutcome`); the killing one `fatal`. Structure at 0 → a `ShipKill` (`by`,
+  `module`, `weapon`, `tick`, `at`, `mode`, contributors most first) and `onKill`; the ship is then destroyed for the
+  rules: no more damage until a load, its kill not repeated. Repairs still land on it.
+- Tallies: dealt / taken, a 20 s trailing DPS window, shots / hits / misses, the 3 latest rows fired (`lastHits`) and
+  taken (`lastTaken`), contributors, `Attackers` (who shot it in the window). Scene totals: shots, hits.
+- **Director wiring**: one `OnBoundary` listener, in order: `combat.Recharge(tick s)` (impact overlays re-armed when
+  the shield moved > 0.1 %), `locks.Boundary(boundary, WantedLocks())`, `Engagements(boundary)` (an engaged ship's
+  matching turrets back `online` switch active again), `ModuleEvents(modules.Boundary(boundary))`. `Shots` resolves the
+  boundary's shots before the `OnShot` listeners (the hook's contract is unchanged) and `SyncImpactState` follows the
+  damage. A destroyed ship is no target: `ShipTargets` and `ShipModules` `HasShip` and the locks' `IsTargetable` are
+  `world.Curves(id) != null && !combat.IsDestroyed(id)`. On a kill (`Killed`) every target on it clears
+  (`ShipTargets.Forget`; their turrets stop at their cycle end), then `OnKill` listeners run. The flagged ship keeps
+  its own target and guns. `SetCombat(sceneCombatOf(scene))` on every apply; a load clears locks, kills, tallies and
+  engagements; a removal forgets the ship's.
+
 ## The keyed RNG and determinism
 
 - `combatRoll(seed, { ship, module, activation, cycle, target })` = cyrb53 of `` `${seed}|${ship}|${module}|${activation}|${cycle}|${target}` ``
@@ -150,7 +208,46 @@ shared part, a `globalExplosion` container, timing values). The client picks one
   carry `weapons: { turrets, volley, dps, damage }` (DPS by type; a siege module in `active` raises it). Spec:
   `ship-stats-tool.spec.ts` (a default-fit Rifter text gives the table's numbers; a TFI's empty guns load Barrage L).
 - **`patch_scene`**: `set_combat`.
-- `engage` / `cease_fire` and get_state's locks, combat and kills land with K2 (`commands.ts` already validates them).
+- **`set_target`** starts the lock (its answer's `lock`: `{ state, lockTime?, readyIn?, note? }` or `{ refused }`); a
+  null target ends the ship's engagement. **`switch_modules`** turrets wait for the lock on the ship's target.
+- **`engage`** `{ selection, target, modules? }`: the target becomes each ship's target and its lock starts, the
+  matching turrets switch active (they wait for the lock), and the engagement keeps them firing (`Engagements`). It
+  ends on `cease_fire`, `set_target` null, removal or a load, and survives the target's death. Skipped: itself, in
+  warp, target in warp, destroyed, fit unresolved, no targeting numbers, no matching turret. A `warning` when shooter
+  and target share a team (no hostility check).
+- **`cease_fire`** `{ selection, unlock? }`: ends the engagement, its turrets switch online (cycle end); `unlock` also
+  clears the target (the sweep drops the lock).
+- **get_state** per ship: `targeting` `{ scanResolution, maxTargetRange, maxLocks }`, `locks`, `engaged`, `combat`
+  `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, paperDps }` (once it fired or was
+  shot), `destroyed` `{ tick, by, module, weapon, mode }`; weapon rows `combat` `{ damage, volley, dps }` and the lock
+  note while held; scene `combat` `{ seed, death, shots, hits, kills }`.
+- **`Director.OnKill(listener)`**: for the fleet targeting lever and the automatic camera.
+
+## State to snapshot (time control)
+
+Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies, kills, destroyed,
+spools), the `ModuleCycle` activation counters, `Director.engagements`, and (K3) the linger removal ticks. The RNG is
+the document's seed, so a re-simulation rolls the same.
+
+## Seams
+
+- Fleet targeting lever: members armed through `engage`, `SetShipTarget` for called primaries, `ShipLocks.Keep` for
+  pre-locks, `OnKill` to move on, `CombatRules.Attackers`.
+- Logi auto-repair: `DamageModel.Fractions` / `Report`, `CombatRules.Report(id).dps.taken`, `Attackers(id)`.
+- Missiles: a `missile` kind through `Resolve` with the shared `applyLayeredDamage`.
+
+## Verify-page (K2)
+
+`set_target locks with EVE's lock time and the guns wait for the lock`, `hits at rest within optimal always hit and
+land EVE damage through resists`, `shots in falloff mostly miss, and misses post no impact sound`, `engage arms the
+guns; cease_fire stops them; a lost lock re-fires after the re-lock`, `the same seed replays the same fight; another
+seed differs`. The turret checks count from the lock; `turrets are not refused by range: they wait for the lock`.
+
+Evidence (2026-10-23, SDE 3632936, headless): lock time 2.617 s Rifter → Punisher (825 mm, sig 37), first shot on the
+lock's boundary; at 40 km `out of targeting range: 39.9 km, it locks at 28.1 km`. Two Punishers on a Rifter at 2 km:
+16 / 16 hits, shield rows equal the volley through resists, dealt 803.1 = taken 803.1 (HP lost 794.3: the shield
+recharged the rest). Rifter at 20,085 m (chance 0.063): 11 of 12 missed, 1 impact sound for 1 hit. Seed 1 twice: 40
+shots, the kill 15 ticks after `engage`, by p2 high-0, dealt [824.6, 748]; seed 2: 32 shots, 12 ticks, p2 high-2.
 
 ## Test data
 

@@ -4,7 +4,7 @@ import { ModuleFxCommands } from './module-fx';
 import type { ShipModuleEvent } from './modules';
 
 function Event(kind: ShipModuleEvent['kind'], cycle: number, extra: Partial<ShipModuleEvent> = {}): ShipModuleEvent {
-  return { kind, tick: 100 + cycle, cycle, ship: 'logi', module: 'low-0', cycleTime: 24, effectGuid: 'effects.ArmorHardening', ...extra };
+  return { kind, tick: 100 + cycle, cycle, activation: 1, ship: 'logi', module: 'low-0', cycleTime: 24, effectGuid: 'effects.ArmorHardening', ...extra };
 }
 
 describe('ModuleFxCommands', () => {

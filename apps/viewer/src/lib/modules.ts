@@ -18,12 +18,15 @@
  *   cycle start (kept while it stops, null once off). Targeting / TargetIndex list them per target, for the target's
  *   flight (webs, painters, points, scrams); CapacitorLandings turns cycle starts into neut, nos and transmitter
  *   transfers (capacitor.ts applies them).
+ * - Locks (locks.ts, through the port's LockHold): a turret activated before its lock completes waits in `activating`
+ *   with the lock note (EVE's pre-activation); a running turret whose lock is lost stops at its cycle end; a pending
+ *   retarget switches at the first cycle start once the new target is locked. Without LockHold nothing waits.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type ModuleActivation } from '@scene-director/scene';
+import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type ModuleActivation, type TurretCombatNumbers } from '@scene-director/scene';
 import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleReport, type ModuleCycleRequest, type ModuleCycleState } from './module-cycle';
 
 /**
@@ -47,6 +50,10 @@ export interface ShipModulesPort {
    * Seconds per Destiny tick.
    */
   readonly tickSeconds: number;
+  /**
+   * Why a turret must wait for its lock on a target (ShipLocks.Hold); null once locked. Absent: turrets never wait.
+   */
+  LockHold?(ship: string, target: string): Maybe<string>;
 }
 
 /**
@@ -61,6 +68,10 @@ export interface ShipModuleSpec {
    */
   readonly offline: boolean;
   readonly activation: ModuleActivation;
+  /**
+   * A turret's damage, tracking and ranges from the same live evaluation (turretCombatNumbersOf); null without dogma.
+   */
+  readonly combat?: Maybe<TurretCombatNumbers>;
 }
 
 /**
@@ -214,13 +225,14 @@ export class ShipModules {
    *
    * @param id - The ship id.
    * @param boundary - The master tick now.
+   * @param why - Why the modules on it stop (`its target was destroyed`).
    * @returns The `off` events.
    */
-  Remove(id: string, boundary: number): ShipModuleEvent[] {
+  Remove(id: string, boundary: number, why = 'its target is gone'): ShipModuleEvent[] {
     const events: ShipModuleEvent[] = [];
     for (const [key, entry] of this.ships.get(id) ?? []) events.push(...this.Events(id, key, entry, entry.cycle.StopNow(boundary, 'removed')));
     this.ships.delete(id);
-    events.push(...this.StopTargeting(id, boundary, 'its target is gone'));
+    events.push(...this.StopTargeting(id, boundary, why));
     return events;
   }
 
@@ -307,8 +319,10 @@ export class ShipModules {
           }
           entry.effectiveness = this.Effectiveness(id, entry);
         }
-        const cycled = entry.cycle.Boundary(boundary);
-        const next = entry.retarget === undefined ? -1 : cycled.findIndex((event) => event.kind === 'cycle');
+        const hold = entry.target && IsTurret(entry) ? this.LockHold(id, entry.target) : null;
+        if (hold && entry.cycle.state === 'active') entry.cycle.StopAtCycleEnd(boundary, `it lost its lock on "${entry.target}"`);
+        const cycled = entry.cycle.Boundary(boundary, hold ? { hold } : undefined);
+        const next = entry.retarget === undefined || this.LockHold(id, entry.retarget) ? -1 : cycled.findIndex((event) => event.kind === 'cycle');
         if (next < 0) {
           events.push(...this.Events(id, key, entry, cycled));
         } else {
@@ -363,6 +377,47 @@ export class ShipModules {
       ...(entry.cycle.running ? { cycleTime: Math.round(entry.spec.activation.cycleTime * 100) / 100 } : {}),
       ...(!report.note && entry.spec.activation.note && entry.cycle.running ? { note: entry.spec.activation.note } : {})
     };
+  }
+
+  /**
+   * A module's spec (a turret's combat numbers).
+   *
+   * @param id - The ship id.
+   * @param key - The module key.
+   * @returns It, or null for a module the layer does not run.
+   */
+  Spec(id: string, key: string): Maybe<ShipModuleSpec> {
+    return this.ships.get(id)?.get(key)?.spec ?? null;
+  }
+
+  /**
+   * What every ship's turrets aim at while running, stopping or waiting to start, a pending retarget included: the
+   * locks the lock sweep keeps.
+   *
+   * @returns The targets by ship id.
+   */
+  TurretAims(): Map<string, Set<string>> {
+    const aims = new Map<string, Set<string>>();
+    for (const [id, modules] of this.ships) {
+      for (const entry of modules.values()) {
+        if (!IsTurret(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
+        const set = aims.get(id) ?? new Set<string>();
+        if (entry.target) set.add(entry.target);
+        if (entry.retarget) set.add(entry.retarget);
+        aims.set(id, set);
+      }
+    }
+    return aims;
+  }
+
+  /**
+   * A ship's turrets, whatever their state.
+   *
+   * @param id - The ship id.
+   * @returns Their keys, in fit order.
+   */
+  TurretKeys(id: string): string[] {
+    return [...(this.ships.get(id) ?? [])].flatMap(([key, entry]) => (IsTurret(entry) ? [key] : []));
   }
 
   /**
@@ -530,6 +585,10 @@ export class ShipModules {
    */
   private Targetable(entry: ModuleEntry, target: string): boolean {
     return this.port.HasShip(target) || (IsTurret(entry) && this.port.HasObject(target));
+  }
+
+  private LockHold(id: string, target: string): Maybe<string> {
+    return this.port.LockHold?.(id, target) ?? null;
   }
 
   private Untarget(entry: ModuleEntry): void {

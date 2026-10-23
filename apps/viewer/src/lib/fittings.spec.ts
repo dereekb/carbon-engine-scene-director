@@ -170,6 +170,8 @@ describe('ResolveShipFitting', () => {
     expect(flight.defense?.armor.hp).toBeCloseTo(1312.5, 9);
     // The online MWD's capacitor penalty.
     expect(flight.capacitor?.capacity).toBeCloseTo(250, 9);
+    // Long Range Targeting V and Signature Analysis V on the Rifter's 22,500 m and 660 mm.
+    expect(flight.targeting).toEqual({ maxTargetRange: 28_125, scanResolution: 825, maxLockedTargets: 4 });
   });
 
   it("flies a fit of only a prop mod at the table path's numbers", async () => {
@@ -293,6 +295,23 @@ describe('ShipModuleSpecsOf', () => {
     const dogma = resolved.dogma ?? Fail('no dogma');
     expect(lookup.Evaluate({ bundle: dogma.bundle, hullTypeID: RIFTER, modules: dogma.modules })).toBe(lookup.Evaluate({ bundle: dogma.bundle, hullTypeID: RIFTER, modules: dogma.modules }));
     expect(ShipModuleSpecsOf({ ...resolved, dogma: null }, lookup)).toEqual([]);
+  });
+
+  it("gives each turret its combat numbers from the same evaluation (the default Rifter's §1.3 row)", async () => {
+    const lookup = new FitLookup({ fetch: FixtureHub(), retryDelaysMs: [] });
+    const resolved = await Resolved(
+      `[Rifter, Guns]
+
+
+200mm AutoCannon II, EMP S
+`,
+      { lookup }
+    );
+    const [gun] = ShipModuleSpecsOf(resolved, lookup);
+    expect(gun.activation.weapon).toBe('turret');
+    expect(gun.combat).toMatchObject({ key: 'high-0', kind: 'tracking', optimal: 750, falloff: 9675 });
+    expect(gun.combat?.volley).toBeCloseTo(65.75, 2);
+    expect(gun.combat?.tracking).toBeCloseTo(393.75, 6);
   });
 });
 

@@ -12,6 +12,10 @@
  * - Events at boundaries: `on`, `cycle` (cycle n starts), `end` (cycle n ends), `off`. A cycle boundary that falls
  *   between ticks fires at the first tick boundary at or after it.
  * - A switch with a pilot delay is queued and made at the boundary of master tick `at`, as DestinyWorld's prop mod does.
+ * - A gate (`Boundary(boundary, { hold })`) keeps an activating module waiting with the hold as its note: a turret
+ *   switched on before its lock completes (EVE's pre-activation). It starts at the first boundary without a hold.
+ * - `activations` counts its `on` events since it was made; every event carries the activation it belongs to, which
+ *   keys the combat rolls (combat.ts).
  *
  * DestinyWorld keeps its own prop mod code (destiny.spec.ts pins it); this class copies its rules for the other
  * modules and owns CycleEnd, which destiny.ts imports.
@@ -49,6 +53,20 @@ export interface ModuleCycleEvent {
    * Why a module stopped on its own (warp, its target gone, refitted).
    */
   readonly why?: string;
+  /**
+   * The activation it belongs to (1 for the first `on`); 0 before any.
+   */
+  readonly activation: number;
+}
+
+/**
+ * What may hold an activating module at a boundary.
+ */
+export interface ModuleCycleGate {
+  /**
+   * Why it must wait (`waiting for its lock on "x" (1.6 s)`); null lets it start.
+   */
+  readonly hold?: Maybe<string>;
 }
 
 export interface ModuleCycleTiming {
@@ -148,6 +166,10 @@ export class ModuleCycle {
   private offlineNext = false;
   private queued: Maybe<{ readonly request: ModuleCycleRequest; readonly at: number }> = null;
   note: Maybe<string> = null;
+  /**
+   * Its `on` events so far.
+   */
+  activations = 0;
 
   constructor(state: 'offline' | 'online', timing: ModuleCycleTiming) {
     this.state = state;
@@ -184,9 +206,10 @@ export class ModuleCycle {
    * Advances to a tick boundary: a delayed switch is made, activations apply, cycles start and end, stops land.
    *
    * @param boundary - The master tick.
+   * @param gate - What holds an activation (a turret's lock).
    * @returns The events, in order.
    */
-  Boundary(boundary: number): ModuleCycleEvent[] {
+  Boundary(boundary: number, gate?: ModuleCycleGate): ModuleCycleEvent[] {
     const events: ModuleCycleEvent[] = [];
     if (this.queued && this.queued.at <= boundary) {
       const { request } = this.queued;
@@ -203,12 +226,17 @@ export class ModuleCycle {
       }
       this.activateWhenReady = false;
     }
-    if (this.state === 'activating') {
+    const hold = gate?.hold;
+    if (this.state === 'activating' && hold) {
+      this.note = hold;
+    } else if (this.state === 'activating') {
       this.state = 'active';
       this.since = boundary;
       this.cycles = 1;
       this.note = null;
-      events.push({ kind: 'on', tick: boundary, cycle: 1 }, { kind: 'cycle', tick: boundary, cycle: 1, at: boundary });
+      this.activations += 1;
+      const activation = this.activations;
+      events.push({ kind: 'on', tick: boundary, cycle: 1, activation }, { kind: 'cycle', tick: boundary, cycle: 1, at: boundary, activation });
     } else if (this.running) {
       events.push(...this.Cycles(boundary));
     } else if (this.state === 'offline' && this.onlineNext) {
@@ -232,7 +260,7 @@ export class ModuleCycle {
     const events: ModuleCycleEvent[] = [];
     this.queued = null;
     if (this.running) {
-      events.push({ kind: 'off', tick: boundary, cycle: this.cycles, why });
+      events.push({ kind: 'off', tick: boundary, cycle: this.cycles, why, activation: this.activations });
       this.Stopped(boundary);
       this.note = `stopped: ${why}`;
     } else if (this.state === 'activating' || this.activateWhenReady) {
@@ -295,8 +323,10 @@ export class ModuleCycle {
     } else if (request === 'online') {
       this.offlineAfterStop = false;
       this.offlineNext = false;
-      if (state === 'activating') this.state = 'online';
-      else if (state === 'active') this.StopAtCycleEnd(boundary, 'switched off');
+      if (state === 'activating') {
+        this.state = 'online';
+        this.note = null;
+      } else if (state === 'active') this.StopAtCycleEnd(boundary, 'switched off');
       else if (state === 'reactivating') this.activateWhenReady = false;
       else if (state === 'offline') this.onlineNext = true;
       if (this.state === 'stopping') this.note = null;
@@ -323,13 +353,14 @@ export class ModuleCycle {
     const cycle = Math.max(this.timing.cycleTicks, CYCLE_EPSILON);
     let end = Math.ceil(since + this.cycles * cycle - CYCLE_EPSILON);
     while (end <= boundary && this.running) {
-      events.push({ kind: 'end', tick: boundary, cycle: this.cycles, at: since + this.cycles * cycle });
+      const activation = this.activations;
+      events.push({ kind: 'end', tick: boundary, cycle: this.cycles, at: since + this.cycles * cycle, activation });
       if (this.state === 'stopping' && (this.stopAt ?? end) <= end) {
-        events.push({ kind: 'off', tick: boundary, cycle: this.cycles });
+        events.push({ kind: 'off', tick: boundary, cycle: this.cycles, activation });
         this.Stopped(boundary);
       } else {
         this.cycles += 1;
-        events.push({ kind: 'cycle', tick: boundary, cycle: this.cycles, at: since + (this.cycles - 1) * cycle });
+        events.push({ kind: 'cycle', tick: boundary, cycle: this.cycles, at: since + (this.cycles - 1) * cycle, activation });
         end = Math.ceil(since + this.cycles * cycle - CYCLE_EPSILON);
       }
     }

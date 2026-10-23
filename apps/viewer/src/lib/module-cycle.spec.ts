@@ -111,4 +111,39 @@ describe('ModuleCycle', () => {
     expect(cycle.Report(3, 1)).toEqual({ state: 'stopping', cycle: { number: 1, endsIn: 7 }, stopsIn: 7, note: 'stopping: its target is out of range' });
     expect(Run(cycle, 3, 10)).toEqual(['end1@10', 'off1@10']);
   });
+
+  it('waits in activating while held (a lock), then starts at the first boundary without a hold', () => {
+    const cycle = new ModuleCycle('online', TIMING);
+    cycle.Request('active', { boundary: 0 });
+    const hold = 'waiting for its lock on "punisher" (1.6 s)';
+    expect(Kinds(cycle.Boundary(1, { hold }))).toEqual([]);
+    expect(cycle.Report(1, 1)).toEqual({ state: 'activating', at: 1, note: hold });
+    expect(cycle.engaged).toBe(true);
+    const events = cycle.Boundary(2, { hold: null });
+    expect(Kinds(events)).toEqual(['on1@2', 'cycle1@2']);
+    expect(events.map((event) => event.activation)).toEqual([1, 1]);
+    expect(cycle.note).toBeNull();
+  });
+
+  it('counts activations and tags every event with its activation', () => {
+    const cycle = new ModuleCycle('online', TIMING);
+    cycle.Request('active', { boundary: 0 });
+    cycle.Boundary(0);
+    cycle.Request('online', { boundary: 1 });
+    const first = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].flatMap((tick) => cycle.Boundary(tick));
+    expect(first.map((event) => `${event.kind}${event.cycle}:${event.activation}`)).toEqual(['end1:1', 'off1:1']);
+    cycle.Request('active', { boundary: 11 });
+    const second = cycle.Boundary(11);
+    expect(second.map((event) => `${event.kind}${event.cycle}:${event.activation}`)).toEqual(['on1:2', 'cycle1:2']);
+    expect(cycle.activations).toBe(2);
+    expect(cycle.StopNow(12, 'entered warp')[0].activation).toBe(2);
+  });
+
+  it('drops the hold note when an activating module is switched off', () => {
+    const cycle = new ModuleCycle('online', TIMING);
+    cycle.Request('active', { boundary: 0 });
+    cycle.Boundary(1, { hold: 'waiting for its lock on "x"' });
+    cycle.Request('online', { boundary: 2 });
+    expect(cycle.Report(2, 1)).toEqual({ state: 'online' });
+  });
 });

@@ -310,4 +310,67 @@ describe('DestinyWorld.OnBoundary', () => {
     expect(seen[0]).toMatchObject({ prop: 'active', pending: true, distance: 4940 });
     expect(world.InWarp('a')).toBe(false);
   });
+
+  describe('with locks', () => {
+    class LockPort extends FakePort {
+      readonly locked = new Set<string>();
+
+      LockHold(ship: string, target: string): Maybe<string> {
+        return this.locked.has(`${ship}>${target}`) ? null : `waiting for its lock on "${target}"`;
+      }
+    }
+
+    it('holds a turret in activating until its lock completes, then fires', () => {
+      const port = new LockPort();
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', TURRET)], 0);
+      expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
+      expect(Run(modules, 1, 3)).toEqual([]);
+      expect(modules.State('logi', 'high-0', 3)).toMatchObject({ state: 'activating', target: 'fc', note: 'waiting for its lock on "fc"' });
+      expect(modules.TurretAims().get('logi')).toEqual(new Set(['fc']));
+      port.locked.add('logi>fc');
+      const events = modules.Boundary(4);
+      expect(Kinds(events)).toEqual(['logi:high-0:on1@4', 'logi:high-0:cycle1@4']);
+      expect(events.map((event) => event.activation)).toEqual([1, 1]);
+    });
+
+    it('stops a running turret at its cycle end when its lock is lost', () => {
+      const port = new LockPort();
+      port.locked.add('logi>fc');
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', TURRET)], 0);
+      modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+      Run(modules, 0, 0);
+      port.locked.delete('logi>fc');
+      expect(Run(modules, 1, 1)).toEqual([]);
+      expect(modules.State('logi', 'high-0', 1)).toMatchObject({ state: 'stopping', note: 'stopping: it lost its lock on "fc"' });
+      expect(Run(modules, 2, 3)).toEqual(['logi:high-0:end1@3', 'logi:high-0:off1@3']);
+    });
+
+    it('retargets a running turret only once the new target is locked', () => {
+      const port = new LockPort();
+      port.locked.add('logi>fc');
+      port.x.set('punisher', 2000);
+      const modules = new ShipModules(port);
+      modules.SetFit('logi', [Spec('high-0', TURRET)], 0);
+      modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+      Run(modules, 0, 0);
+      modules.Retarget('logi', 'punisher', 1);
+      expect(modules.TurretAims().get('logi')).toEqual(new Set(['fc', 'punisher']));
+      const before = [1, 2, 3, 4, 5].flatMap((tick) => modules.Boundary(tick));
+      expect(before.filter((event) => event.kind === 'cycle').map((event) => event.target)).toEqual(['fc', 'fc']);
+      port.locked.add('logi>punisher');
+      const after = [6, 7, 8].flatMap((tick) => modules.Boundary(tick));
+      expect(after.filter((event) => event.kind === 'cycle').map((event) => event.target)).toEqual(['punisher']);
+      expect(modules.Spec('logi', 'high-0')?.key).toBe('high-0');
+    });
+
+    it('names why the modules on a removed ship stop', () => {
+      const modules = new ShipModules(new FakePort());
+      modules.SetFit('logi', [Spec('high-0', TURRET)], 0);
+      modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+      Run(modules, 0, 0);
+      expect(Kinds(modules.Remove('fc', 1, 'its target was destroyed'))).toEqual(['logi:high-0:off1@1 (its target was destroyed)']);
+    });
+  });
 });

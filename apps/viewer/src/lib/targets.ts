@@ -113,6 +113,16 @@ export class ShipTargets {
   }
 
   /**
+   * A target was destroyed: every ship targeting it loses its target (its own stays).
+   *
+   * @param target - The ship id.
+   * @returns The ships that targeted it.
+   */
+  Forget(target: string): ClearedTarget[] {
+    return this.ClearOn(target);
+  }
+
+  /**
    * The ships targeting an id.
    *
    * @param target - The ship or object id.

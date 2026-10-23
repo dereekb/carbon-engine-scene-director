@@ -6,13 +6,17 @@
  *   when max changes the layer keeps its fraction, clamped to max.
  * - Repairs land at module cycle events (modules.ts): shield boosters at cycle start, armor and hull repairers at cycle
  *   end, remote repairers on their target scaled by their falloff effectiveness.
- * - Damage is internal: no tool calls it yet. Combat rules will; specs use it to show repairs restoring HP.
+ * - ApplyHit takes a shot's raw damage shield first, then armor, then structure, each through its resonances, the
+ *   unabsorbed share spilling on (the package's applyLayeredDamage). Structure at 0 is Destroyed (combat.ts records
+ *   the kill).
+ * - Recharge runs the passive shield recharge on every ship at each tick boundary (passiveRecharge, the capacitor's
+ *   curve: peak at 25 %). Armor and structure do not regenerate.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { DAMAGE_TYPES, DEFENSE_LAYERS, type DamageType, type DefenseLayerName, type ShipDefense } from '@scene-director/scene';
+import { applyLayeredDamage, DAMAGE_TYPES, DEFENSE_LAYERS, type DamageLayers, type DamageType, type DamageVector, type DefenseLayerName, passiveRecharge, type ShipDefense } from '@scene-director/scene';
 
 /**
  * A repair running on a ship from another one's module.
@@ -79,6 +83,18 @@ export type DamageReport = Readonly<Record<DefenseLayerName, DamageLayerReport>>
 
 const NO_REPAIRS: Readonly<Record<DefenseLayerName, number>> = { shield: 0, armor: 0, structure: 0 };
 
+/**
+ * What a hit took off a ship.
+ */
+export interface AppliedHit {
+  readonly taken: Readonly<Record<DefenseLayerName, number>>;
+  readonly total: number;
+  /**
+   * Structure HP left; at 0 the ship is destroyed.
+   */
+  readonly structure: number;
+}
+
 export class DamageModel {
   private readonly ships = new Map<string, ShipDamage>();
 
@@ -143,6 +159,49 @@ export class DamageModel {
     const taken = Math.min(entry.hp, amount);
     entry.hp -= taken;
     return taken;
+  }
+
+  /**
+   * Applies a shot's raw damage through the layers (shield, armor, structure).
+   *
+   * @param id - The ship id.
+   * @param damage - Raw damage by type.
+   * @returns What each layer lost and the structure left; null when the model does not track the ship.
+   */
+  ApplyHit(id: string, damage: DamageVector): Maybe<AppliedHit> {
+    const ship = this.ships.get(id);
+    if (!ship) return null;
+    const result = applyLayeredDamage(ship.layers as DamageLayers, damage);
+    for (const name of DEFENSE_LAYERS) ship.layers[name].hp = result.layers[name].hp;
+    return { taken: result.taken, total: result.total, structure: result.structure };
+  }
+
+  /**
+   * Passive shield recharge over some seconds, on every tracked ship.
+   *
+   * @param seconds - Seconds since the last recharge (a tick).
+   * @returns The ships whose shield HP rose.
+   */
+  Recharge(seconds: number): string[] {
+    const raised: string[] = [];
+    for (const [id, ship] of this.ships) {
+      const { shield } = ship.layers;
+      if (!(shield.max > 0) || shield.hp >= shield.max || !(ship.shieldRecharge > 0) || ship.layers.structure.hp <= 0) continue;
+      const hp = shield.max * passiveRecharge({ fraction: shield.hp / shield.max, seconds, rechargeTime: ship.shieldRecharge });
+      if (hp > shield.hp) {
+        shield.hp = Math.min(shield.max, hp);
+        raised.push(id);
+      }
+    }
+    return raised;
+  }
+
+  /**
+   * Whether a tracked ship's structure is at 0.
+   */
+  Destroyed(id: string): boolean {
+    const ship = this.ships.get(id);
+    return ship != null && ship.layers.structure.max > 0 && ship.layers.structure.hp <= 0;
   }
 
   /**

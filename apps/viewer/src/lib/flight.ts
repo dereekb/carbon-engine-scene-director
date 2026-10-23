@@ -40,7 +40,8 @@ import {
   type ShipDogmaInput,
   type ShipStats,
   type ShipStatsInput,
-  type ShipStatsMath
+  type ShipStatsMath,
+  type ShipTargeting
 } from '@scene-director/scene';
 import type { ShipHull, ShipPhysics, ShipPropMod } from './destiny';
 import type { PropModSource, ResolvedShipPropMod } from './prop-mods';
@@ -126,6 +127,11 @@ export interface ShipFlight extends ShipPhysics {
    * The capacitor with the modules online (the dogma path); absent on the table path.
    */
   readonly capacitor?: ShipCapacitor;
+  /**
+   * Max targeting range, scan resolution and max locked targets (the dogma path; what its locks read); absent on the
+   * table path.
+   */
+  readonly targeting?: ShipTargeting;
   /**
    * warpScrambleStatus with the points and scrams on it and its own modules: above 0 it cannot warp.
    */
@@ -323,6 +329,7 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
     math: stats.math,
     ...(stats.defense ? { defense: stats.defense } : {}),
     ...(stats.capacitor ? { capacitor: stats.capacitor } : {}),
+    ...(stats.targeting ? { targeting: stats.targeting } : {}),
     warpScrambleStatus: stats.warpScrambleStatus,
     ...(warpScrambleSteps.length ? { warpScrambleSteps } : {})
   };

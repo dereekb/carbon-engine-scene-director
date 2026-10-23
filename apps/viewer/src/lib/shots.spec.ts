@@ -12,19 +12,19 @@ const PORT: WeaponShotsPort = {
 };
 
 function Event(kind: ShipModuleEvent['kind'], extra: Partial<ShipModuleEvent> = {}): ShipModuleEvent {
-  return { kind, tick: 10, cycle: 2, ship: 'rifter', module: 'high-0', cycleTime: 2.5, target: 'punisher', effectiveness: 0.75, at: 9.5, ...extra };
+  return { kind, tick: 10, cycle: 2, activation: 3, ship: 'rifter', module: 'high-0', cycleTime: 2.5, target: 'punisher', effectiveness: 0.75, at: 9.5, ...extra };
 }
 
 function Shot(extra: Partial<WeaponShot> = {}): WeaponShot {
-  return { ship: 'rifter', module: 'high-0', typeID: 2889, name: '200mm AutoCannon II', target: 'punisher', targetKind: 'ship', cycle: 1, tick: 10, at: 10, distance: 5000, effectiveness: 1, ...extra };
+  return { ship: 'rifter', module: 'high-0', typeID: 2889, name: '200mm AutoCannon II', target: 'punisher', targetKind: 'ship', cycle: 1, activation: 1, tick: 10, at: 10, distance: 5000, effectiveness: 1, ...extra };
 }
 
 describe('WeaponShotsOf', () => {
   it('fires a shot for every turret cycle start on a target', () => {
     const shots = WeaponShotsOf([Event('end'), Event('cycle'), Event('cycle', { module: 'high-1', target: 'astrahus', at: undefined, effectiveness: undefined }), Event('cycle', { module: 'mid-0' }), Event('cycle', { target: undefined }), Event('off')], PORT);
     expect(shots).toEqual([
-      { ship: 'rifter', module: 'high-0', typeID: 2889, name: '200mm AutoCannon II', charge: { typeID: 185, name: 'EMP S' }, target: 'punisher', targetKind: 'ship', cycle: 2, tick: 10, at: 9.5, distance: 5001, effectiveness: 0.75 },
-      { ship: 'rifter', module: 'high-1', typeID: 2889, name: '200mm AutoCannon II', charge: { typeID: 185, name: 'EMP S' }, target: 'astrahus', targetKind: 'object', cycle: 2, tick: 10, at: 10, distance: 30_000, effectiveness: 1 }
+      { ship: 'rifter', module: 'high-0', typeID: 2889, name: '200mm AutoCannon II', charge: { typeID: 185, name: 'EMP S' }, target: 'punisher', targetKind: 'ship', cycle: 2, activation: 3, tick: 10, at: 9.5, distance: 5001, effectiveness: 0.75 },
+      { ship: 'rifter', module: 'high-1', typeID: 2889, name: '200mm AutoCannon II', charge: { typeID: 185, name: 'EMP S' }, target: 'astrahus', targetKind: 'object', cycle: 2, activation: 3, tick: 10, at: 10, distance: 30_000, effectiveness: 1 }
     ]);
   });
 });

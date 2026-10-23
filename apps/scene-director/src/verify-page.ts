@@ -108,6 +108,64 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly defense?: Maybe<ShipDefenseState>;
   readonly capacitor?: Maybe<ShipCapacitorState>;
   readonly targeted?: Maybe<ShipTargetedState>;
+  readonly targeting?: { readonly scanResolution: number; readonly maxTargetRange: number; readonly maxLocks: number };
+  readonly locks?: ShipLockState[];
+  readonly engaged?: { readonly modules: string[] };
+  readonly combat?: ShipCombatState;
+  readonly destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string };
+}
+
+/**
+ * A lock in get_state and in set_target / engage answers (the viewer's locks.ts ShipLockReport).
+ */
+interface ShipLockState {
+  readonly target?: string;
+  readonly state?: 'waiting' | 'locking' | 'locked';
+  readonly lockTime?: number;
+  readonly readyIn?: number;
+  readonly note?: string;
+  readonly refused?: string;
+}
+
+/**
+ * A shot row in get_state's combat (the viewer's combat.ts CombatRow).
+ */
+interface CombatRowState {
+  readonly tick: number;
+  readonly target?: string;
+  readonly from?: string;
+  readonly module: string;
+  readonly result: string;
+  readonly chance: number;
+  readonly quality: number;
+  readonly damage: number;
+  readonly layer?: 'shield' | 'armor' | 'structure';
+}
+
+/**
+ * get_state's per-ship `combat` (the viewer's combat.ts ShipCombatReport).
+ */
+interface ShipCombatState {
+  readonly dealt: number;
+  readonly taken: number;
+  readonly dps: { readonly dealt: number; readonly taken: number };
+  readonly shots: number;
+  readonly hits: number;
+  readonly misses: number;
+  readonly lastHits: CombatRowState[];
+  readonly lastTaken: CombatRowState[];
+  readonly paperDps: number;
+}
+
+/**
+ * engage's answer (the viewer's director.ts EngageResult).
+ */
+interface EngageResult {
+  readonly tick: number;
+  readonly target: string;
+  readonly ships: { readonly id: string; readonly target: string; readonly lock: Maybe<ShipLockState>; readonly modules: { readonly module: string; readonly state: string }[] }[];
+  readonly skipped: { readonly id: string; readonly module?: string; readonly reason: string }[];
+  readonly warnings?: string[];
 }
 
 /**
@@ -153,6 +211,7 @@ interface ShipModuleRowState {
   readonly charge?: string;
   readonly mount?: { readonly locator?: string; readonly state: string; readonly models?: number; readonly error?: string };
   readonly prop?: true;
+  readonly combat?: { readonly damage: Record<string, number>; readonly volley: number; readonly dps: number };
   readonly note?: string;
 }
 
@@ -172,7 +231,7 @@ interface SwitchModulesResult {
 interface SetTargetResult {
   readonly tick: number;
   readonly target: Maybe<string>;
-  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly turrets: number; readonly retargeted: number }[];
+  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly turrets: number; readonly retargeted: number; readonly lock?: Maybe<ShipLockState> }[];
   readonly skipped: { readonly id: string; readonly reason: string }[];
 }
 
@@ -282,6 +341,7 @@ interface ViewerState {
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
   readonly cinema?: CinemaStateReport;
+  readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly kills: { readonly ship: string; readonly by: string; readonly module: string; readonly weapon: string; readonly tick: number }[] };
 }
 
 /**
@@ -1200,7 +1260,8 @@ try {
   await Check('set_target aims and switch_modules fires turrets on their cycle', async () => {
     await LoadTurretScene();
     const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
-    Expect(JSON.stringify(set.ships) === JSON.stringify([{ id: 'rifter', target: 'punisher', turrets: 3, retargeted: 0 }]) && !set.skipped.length, JSON.stringify(set));
+    const [setShip] = set.ships;
+    Expect(set.ships.length === 1 && setShip.target === 'punisher' && setShip.turrets === 3 && setShip.retargeted === 0 && setShip.lock?.state === 'waiting' && !set.skipped.length, JSON.stringify(set));
     const target = ShipIn(await call<ViewerState>('get_state'), 'rifter').target;
     Expect(target?.id === 'punisher' && target.kind === 'ship' && (target.distance ?? 0) > 4000 && (target.distance ?? 0) < 5000, JSON.stringify(target));
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
@@ -1232,12 +1293,13 @@ try {
     await GunsRun('punisher');
     const moved = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher-2' });
     Expect(moved.ships[0]?.previous === 'punisher' && moved.ships[0].retargeted === 3, JSON.stringify(moved));
-    const retargeted = await GunsRun('punisher-2', 6);
+    // The retarget lands at the first cycle start once punisher-2 is locked.
+    const retargeted = await GunsRun('punisher-2', 10);
     const cleared = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: null });
     Expect(cleared.ships[0]?.target === null && cleared.ships[0].previous === 'punisher-2', JSON.stringify(cleared));
     const stopped = await GunsStopped(/its target was cleared/u);
     Expect(ShipIn(stopped, 'rifter').target === null, JSON.stringify(ShipIn(stopped, 'rifter').target));
-    return `retargeted onto punisher-2 at the next cycle (${Shots(retargeted)} shots by then), stopped at the cycle end once cleared`;
+    return `retargeted onto punisher-2 at the first cycle once locked (${Shots(retargeted)} shots by then), stopped at the cycle end once cleared`;
   });
 
   await Check('a removed or warping target clears and stops the guns', async () => {
@@ -1281,18 +1343,22 @@ try {
     return "the Caracal's 5 default launchers refused with the Missiles note; turrets without a target refused";
   });
 
-  await Check('turrets are not refused by range', async () => {
+  await Check('turrets are not refused by range: they wait for the lock', async () => {
     await LoadTurretScene();
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'far' });
     Expect(on.ships[0]?.modules.length === 3 && !on.skipped.length, JSON.stringify(on));
-    const running = await GunsRun('far');
-    const target = ShipIn(running, 'rifter').target;
+    const waiting = await WaitFor('the guns wait out of targeting range', 10, (polled) => {
+      const guns = Guns(polled);
+      return guns.length === 3 && guns.every((gun) => gun.state === 'activating' && /out of targeting range/u.test(gun.note ?? '')) ? null : JSON.stringify(guns);
+    });
+    const target = ShipIn(waiting, 'rifter').target;
     Expect(target?.id === 'far' && (target.distance ?? 0) > 149000, JSON.stringify(target));
     Expect(
-      Guns(running).every((gun) => (gun.effectiveness ?? 1) < 0.001),
-      JSON.stringify(Guns(running))
+      Guns(waiting).every((gun) => (gun.effectiveness ?? 1) < 0.001),
+      JSON.stringify(Guns(waiting))
     );
-    return `fires at ${target?.distance} m with effectiveness ${Guns(running)[0]?.effectiveness}`;
+    Expect(Shots(waiting) === 0, `${Shots(waiting)} shots before a lock`);
+    return `not refused at ${target?.distance} m: the guns wait with "${Guns(waiting)[0]?.note}" (effectiveness ${Guns(waiting)[0]?.effectiveness})`;
   });
 
   await Check('turret sounds post with the shots', async () => {
@@ -1328,6 +1394,132 @@ try {
     const outcome = played ? 'played' : 'audio ' + String(audio?.state) + ', recorded unplayed';
     const unsent = undecodable.length ? '; undecodable, not sent: ' + undecodable.join(', ') : '';
     return `${posts} (${outcome}${unsent}); ${audio?.gameObjects ?? 0} audio game objects for ${audio?.emitters ?? 0} page emitter(s)`;
+  });
+
+  // Combat rules (K2): locks, hits and EVE damage on default-gunned Rifters and Punishers. Each check loads its own scene.
+  const Rifter = (id: string, position: SceneVector) => ({ id, dna: 'mf4_t1:minmatarbase:minmatar', type: 'Rifter', position });
+  const Punisher = (id: string, position: SceneVector) => ({ id, dna: 'af1_t1:amarrbase:amarr', type: 'Punisher', position });
+  const LoadCombatScene = async (ships: { readonly id: string }[], combat?: object): Promise<ViewerState> => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter' }).catch(SkipWithoutSde);
+    await call('load_scene', { scene: { name: 'verify-combat', ships, ...(combat ? { combat } : {}) } });
+    return WaitFor('the combat scene resolves its default fits', 60, (polled) => {
+      const pending = ships.map((ship) => ShipIn(polled, ship.id)).find((ship) => ship.fit?.math !== 'dogma' || !ship.targeting);
+      return pending ? `${pending.id}: ${Show(pending.fit?.note ?? pending.fitNote ?? pending.fit?.math)}` : null;
+    });
+  };
+  const Move = (id: string, position: SceneVector) => call('patch_scene', { operations: [{ op: 'update_ship', id, set: { position } }] });
+  const LockOf = (state: ViewerState, id: string, target: string): Maybe<ShipLockState> => ShipIn(state, id).locks?.find((lock) => lock.target === target) ?? null;
+  // A WaitFor test's problem must never be undefined (JSON.stringify(undefined) is).
+  const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
+  const ShipGuns = (state: ViewerState, id: string): ShipModuleRowState[] => ShipIn(state, id).fit?.modules.filter((module) => module.combat) ?? [];
+
+  await Check("set_target locks with EVE's lock time and the guns wait for the lock", async () => {
+    await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [5000, 0, 0])], { death: 'flag' });
+    const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
+    Expect(on.ships[0]?.modules.length === 3, Show(on));
+    const held = await WaitFor('the guns wait for the lock', 10, (polled) => {
+      const guns = ShipGuns(polled, 'rifter');
+      return guns.length === 3 && guns.every((gun) => gun.state === 'activating' && /waiting for its lock on "punisher"/u.test(gun.note ?? '')) && LockOf(polled, 'rifter', 'punisher')?.state === 'locking' ? null : Show({ guns, locks: ShipIn(polled, 'rifter').locks });
+    });
+    const rifter = ShipIn(held, 'rifter');
+    const signature = ShipIn(held, 'punisher').physics?.signatureRadius ?? 0;
+    const expected = 40000 / ((rifter.targeting?.scanResolution ?? 0) * Math.asinh(signature) ** 2);
+    const lock = LockOf(held, 'rifter', 'punisher');
+    Expect(Math.abs((lock?.lockTime ?? 0) - expected) <= 0.01, `lockTime ${lock?.lockTime}, expected ${expected.toFixed(3)} (scan ${rifter.targeting?.scanResolution}, sig ${signature})`);
+    Expect((ShipIn(held, 'rifter').shots ?? 0) === 0, `shots before the lock: ${ShipIn(held, 'rifter').shots}`);
+    const fired = await WaitFor('the first shots', 15, (polled) => ((ShipIn(polled, 'rifter').combat?.shots ?? 0) > 0 ? null : Show(ShipIn(polled, 'rifter').locks)));
+    const first = Math.min(...(ShipIn(fired, 'rifter').combat?.lastHits ?? []).map((row) => row.tick));
+    const due = set.tick + 1 + Math.ceil(expected);
+    Expect(first >= due - 1 && first <= due + 1, `first shot at tick ${first}, the lock completes about tick ${due} (set_target at ${set.tick})`);
+    await Move('punisher', [40000, 0, 0]);
+    const lost = await WaitFor('the lock waits out of targeting range and the guns stop', 15, (polled) => {
+      const waiting = LockOf(polled, 'rifter', 'punisher');
+      const guns = ShipGuns(polled, 'rifter');
+      return waiting?.state === 'waiting' && /out of targeting range/u.test(waiting.note ?? '') && guns.every((gun) => gun.state === 'online' || gun.state === 'reactivating' || gun.state === 'activating') ? null : Show({ waiting, guns });
+    });
+    return `lockTime ${lock?.lockTime} s (EVE's ${expected.toFixed(3)} from scan ${rifter.targeting?.scanResolution} mm and sig ${signature} m); first shot at tick ${first} (lock due ${due}); at 40 km: "${LockOf(lost, 'rifter', 'punisher')?.note}"`;
+  });
+
+  await Check('hits at rest within optimal always hit and land EVE damage through resists', async () => {
+    const loaded = await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0])], { death: 'flag' });
+    const [gun] = ShipGuns(loaded, 'p1');
+    const damage: Record<string, number> = gun?.combat?.damage ?? {};
+    const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
+    Expect(engaged.ships.length === 2 && engaged.ships.every((ship) => ship.modules.length === 4), Show(engaged));
+    const Expected = (state: ViewerState, row: CombatRowState): number => {
+      const resists = ShipIn(state, 'rifter').defense?.[row.layer ?? 'shield'].resists;
+      return Object.entries(damage).reduce((sum, [type, amount]) => sum + amount * (1 - (resists?.[type as keyof DamageResists] ?? 0) / 100), 0) * row.quality;
+    };
+    const hit = await WaitFor('the first hits on the shield', 15, (polled) => ((ShipIn(polled, 'rifter').combat?.lastTaken ?? []).some((row) => row.layer === 'shield') ? null : Show(ShipIn(polled, 'rifter').combat)));
+    // A row's layer is the deepest it reached: a shield row's damage stayed in the shield.
+    const shieldRows = (ShipIn(hit, 'rifter').combat?.lastTaken ?? []).filter((row) => row.layer === 'shield');
+    Expect(shieldRows.length > 0, Show(ShipIn(hit, 'rifter').combat));
+    for (const row of shieldRows) Expect(Math.abs(row.damage - Expected(hit, row)) <= 0.1, `row ${Show(row)}: expected ${Expected(hit, row).toFixed(2)} from ${Show(damage)}`);
+    const t0 = hit.simulation.seconds;
+    const armor = await WaitFor('the hits reach armor', 30, (polled) => ((ShipIn(polled, 'rifter').combat?.lastTaken ?? []).some((row) => row.layer === 'armor' || row.layer === 'structure') ? null : Show(ShipIn(polled, 'rifter').defense)));
+    const rifter = ShipIn(armor, 'rifter');
+    const shooters = ['p1', 'p2'].map((id) => ShipIn(armor, id).combat);
+    Expect(
+      shooters.every((combat) => combat && combat.misses === 0 && combat.hits === combat.shots),
+      `misses at rest within optimal: ${Show(shooters)}`
+    );
+    const dealt = shooters.reduce((sum, combat) => sum + (combat?.dealt ?? 0), 0);
+    const taken = rifter.combat?.taken ?? 0;
+    const defense = rifter.defense;
+    const lost = defense ? (['shield', 'armor', 'structure'] as const).reduce((sum, layer) => sum + defense[layer].max - defense[layer].hp, 0) : 0;
+    const recharge = (armor.simulation.seconds - t0 + 2) * ((2.5 * (defense?.shield.max ?? 0)) / (defense?.shieldRecharge || 1));
+    Expect(Math.abs(dealt - taken) <= 0.5, `dealt ${dealt}, taken ${taken}`);
+    Expect(taken - lost >= -0.5 && taken - lost <= recharge + 0.5, `taken ${taken}, HP lost ${lost} (shield recharge up to ${recharge.toFixed(1)})`);
+    return `${shooters.reduce((sum, combat) => sum + (combat?.shots ?? 0), 0)} shots, all hits; ${shieldRows.length} shield rows match the volley through resists; dealt ${dealt.toFixed(1)} = taken ${taken} (HP lost ${lost.toFixed(1)}); shield ${defense?.shield.hp}, armor ${defense?.armor.hp}`;
+  });
+
+  await Check('shots in falloff mostly miss, and misses post no impact sound', async () => {
+    await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [20150, 0, 0])], { death: 'flag' });
+    const engaged = await call<EngageResult>('engage', { ships: ['rifter'], target: 'punisher', modules: ['high-0'] });
+    Expect(engaged.ships[0]?.modules.length === 1, Show(engaged));
+    const done = await WaitFor('12 shots in falloff', 45, (polled) => ((ShipIn(polled, 'rifter').combat?.shots ?? 0) >= 12 ? null : Show(ShipIn(polled, 'rifter').combat?.shots)));
+    const combat = ShipIn(done, 'rifter').combat;
+    const posted = (done.audio?.posted ?? []).filter((entry) => entry.tick >= engaged.tick);
+    Expect((done.audio?.posted ?? []).some((entry) => entry.tick < engaged.tick) || (done.audio?.posted.length ?? 0) < 20, 'audio.posted no longer reaches back to the engage');
+    const impacts = posted.filter((entry) => entry.ship === 'punisher' && /^ship_impact_/u.test(entry.event)).length;
+    Expect(combat && combat.misses >= 0.75 * combat.shots, `misses ${combat?.misses} of ${combat?.shots}`);
+    Expect(impacts === combat?.hits, `impact sounds ${impacts}, hits ${combat?.hits}`);
+    return `${combat?.misses} of ${combat?.shots} missed at ${ShipIn(done, 'rifter').target?.distance} m (chance ${combat?.lastHits[0]?.chance}); ${impacts} impact sounds for ${combat?.hits} hits`;
+  });
+
+  await Check('engage arms the guns; cease_fire stops them; a lost lock re-fires after the re-lock', async () => {
+    await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [5000, 0, 0])], { death: 'flag' });
+    await call<EngageResult>('engage', { ships: ['rifter'], target: 'punisher' });
+    const firing = await WaitFor('the engaged guns fire', 15, (polled) => ((ShipIn(polled, 'rifter').combat?.shots ?? 0) >= 3 && ShipIn(polled, 'rifter').engaged ? null : Show(ShipIn(polled, 'rifter').locks)));
+    await Move('punisher', [40000, 0, 0]);
+    const stopped = await WaitFor('the lost lock stops the guns', 15, (polled) => (ShipGuns(polled, 'rifter').every((gun) => gun.state !== 'active' && gun.state !== 'stopping') && LockOf(polled, 'rifter', 'punisher')?.state === 'waiting' ? null : Show(ShipGuns(polled, 'rifter'))));
+    const before = ShipIn(stopped, 'rifter').combat?.shots ?? 0;
+    await Move('punisher', [5000, 0, 0]);
+    const again = await WaitFor('the guns fire again after the re-lock', 20, (polled) => ((ShipIn(polled, 'rifter').combat?.shots ?? 0) > before ? null : Show({ locks: ShipIn(polled, 'rifter').locks, guns: ShipGuns(polled, 'rifter') })));
+    const cease = await call<{ ships: { id: string; modules: string[] }[] }>('cease_fire', { ships: ['rifter'] });
+    Expect(cease.ships[0]?.modules.length === 3, Show(cease));
+    const quiet = await WaitFor('cease_fire stops the guns at their cycle end', 10, (polled) => (ShipGuns(polled, 'rifter').every((gun) => gun.state === 'online' || gun.state === 'reactivating') && !ShipIn(polled, 'rifter').engaged ? null : Show(ShipGuns(polled, 'rifter'))));
+    await call('cease_fire', { ships: ['rifter'], unlock: true });
+    const unlocked = await WaitFor('unlock clears the target and the lock', 5, (polled) => (ShipIn(polled, 'rifter').target === null && !ShipIn(polled, 'rifter').locks?.length ? null : Show(ShipIn(polled, 'rifter').locks)));
+    return `${ShipIn(firing, 'rifter').combat?.shots} shots engaged; out of range at ${before} shots, firing again at ${ShipIn(again, 'rifter').combat?.shots} after the re-lock with no new command; stopped at ${ShipIn(quiet, 'rifter').combat?.shots}; unlocked at tick ${unlocked.simulation.tick}`;
+  });
+
+  await Check('the same seed replays the same fight; another seed differs', async () => {
+    const Fight = async (seed?: number): Promise<string> => {
+      await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0])], { death: 'flag', ...(seed == null ? {} : { seed }) });
+      const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
+      const dead = await WaitFor('the kill', 60, (polled) => (ShipIn(polled, 'rifter').destroyed ? null : Show(ShipIn(polled, 'rifter').defense)));
+      const settled = await WaitFor('the guns settle', 10, (polled) => (['p1', 'p2'].every((id) => ShipGuns(polled, id).every((gun) => gun.state !== 'active' && gun.state !== 'stopping')) ? null : 'firing'));
+      const kill = ShipIn(dead, 'rifter').destroyed;
+      return Show({ shots: settled.combat?.shots, after: (kill?.tick ?? 0) - engaged.tick, by: kill?.by, module: kill?.module, dealt: ['p1', 'p2'].map((id) => Math.round((ShipIn(settled, id).combat?.dealt ?? 0) * 10) / 10) });
+    };
+    const first = await Fight();
+    const again = await Fight();
+    Expect(first === again, `seed 1 twice: ${first} vs ${again}`);
+    const other = await Fight(2);
+    Expect(other !== first, `seed 2 replayed seed 1: ${other}`);
+    return `seed 1: ${first} (twice); seed 2: ${other}`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

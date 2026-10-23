@@ -20,8 +20,8 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts` (`destiny-tackle.spec.ts`
-  covers `destiny.ts`' tackle on `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts` (`destiny-tackle.spec.ts` and `destiny-accuracy.spec.ts`
+  cover `destiny.ts`' tackle and accuracy on `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)

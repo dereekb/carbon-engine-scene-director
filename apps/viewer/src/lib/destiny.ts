@@ -68,7 +68,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
+import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, NO_FALLOFF_METRES, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import { CycleEnd } from './module-cycle';
 import type { EveShip2 } from './runtime';
@@ -1170,6 +1170,26 @@ export class DestinyWorld {
     const ballA = first ? this.master.GetBall(first.ballId) : null;
     const ballB = second ? this.master.GetBall(second.ballId) : null;
     return ballA && ballB ? Math.hypot(ballA.x - ballB.x, ballA.y - ballB.y, ballA.z - ballB.z) - ballA.radius - ballB.radius : null;
+  }
+
+  /**
+   * EVE's turret hit chance on the master park's balls now (Destiny's own GetAccuracy): a query, so it reads the master
+   * only. At a boundary (OnBoundary, before orders and the evolve) the balls' new positions and velocities are the
+   * tick's state.
+   *
+   * @param source - The shooting ship.
+   * @param target - Its target: a ship or an authored object.
+   * @param numbers - The turret's optimal, falloff (null: none, NO_FALLOFF_METRES), tracking and signature resolution,
+   *   and the target's live signature radius.
+   * @returns The chance, the surface distance (m) and the angular velocity (rad/s); null for a missing ball or the
+   *   same id.
+   */
+  Accuracy(source: string, target: string, numbers: { readonly optimal: number; readonly falloff: Maybe<number>; readonly tracking: number; readonly signatureRadius: number; readonly signatureResolution: number }): Maybe<{ readonly chance: number; readonly distance: number; readonly angularVelocity: number }> {
+    const first = this.TargetEntry(source);
+    const second = this.TargetEntry(target);
+    if (!first || !second || source === target || !this.master.GetBall(first.ballId) || !this.master.GetBall(second.ballId)) return null;
+    const [chance, distance, angularVelocity] = this.master.GetAccuracy(first.ballId, second.ballId, numbers.optimal, numbers.falloff ?? NO_FALLOFF_METRES, numbers.tracking, numbers.signatureRadius, numbers.signatureResolution);
+    return { chance, distance, angularVelocity };
   }
 
   /**

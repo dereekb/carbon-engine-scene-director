@@ -50,4 +50,32 @@ describe('DamageModel', () => {
     model.SetDefense('fc', Defense(1000));
     expect(model.Report('fc')?.armor.hp).toBe(1000);
   });
+
+  it('applies hits shield first, spilling the unabsorbed share into armor and structure, to destruction', () => {
+    const model = new DamageModel();
+    model.SetDefense('rifter', Defense(600));
+    const em = (amount: number) => ({ em: amount, thermal: 0, kinetic: 0, explosive: 0 });
+    expect(model.ApplyHit('rifter', em(1000))).toEqual({ taken: { shield: 400, armor: 0, structure: 0 }, total: 400, structure: 400 });
+    expect(model.ApplyHit('rifter', em(1000))).toEqual({ taken: { shield: 100, armor: 300, structure: 0 }, total: 400, structure: 400 });
+    expect(model.Destroyed('rifter')).toBe(false);
+    const last = model.ApplyHit('rifter', em(2000));
+    expect(last?.taken.armor).toBeCloseTo(300, 9);
+    expect(last?.structure).toBe(0);
+    expect(model.Destroyed('rifter')).toBe(true);
+    expect(model.ApplyHit('nobody', em(10))).toBeNull();
+    expect(model.Destroyed('nobody')).toBe(false);
+  });
+
+  it("recharges shields passively on EVE's curve, peaking at 25 %", () => {
+    const model = new DamageModel();
+    model.SetDefense('rifter', Defense(600));
+    model.SetDefense('full', Defense(600));
+    model.Damage('rifter', 'shield', 375);
+    expect(model.Recharge(1)).toEqual(['rifter']);
+    expect(model.Report('rifter')?.shield.hp).toBeCloseTo(125 + (2.5 * 500) / 468.75, 1);
+    model.Damage('rifter', 'structure', 400);
+    const before = model.Report('rifter')?.shield.hp;
+    expect(model.Recharge(10)).toEqual([]);
+    expect(model.Report('rifter')?.shield.hp).toBe(before);
+  });
 });

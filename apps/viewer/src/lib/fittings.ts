@@ -57,6 +57,7 @@ import {
   type ShipStatsInput,
   type HullStatOverrides,
   toDogmaModules,
+  turretCombatNumbersOf,
   typeEftFit
 } from '@scene-director/scene';
 
@@ -669,7 +670,8 @@ export function ShipModuleSpecsOf(resolved: ResolvedShipFitting, lookup: FitLook
   const ship = lookup.Evaluate({ bundle: dogma.bundle, hullTypeID: dogma.hullTypeID, modules: dogma.modules, overrides });
   return resolved.modules.flatMap((module): ShipModuleSpec[] => {
     const activation = module.prop || module.typeID == null ? null : moduleActivationOf(ship, dogma.bundle, module.key);
-    return activation && module.typeID != null ? [{ key: module.key, name: module.name, typeID: module.typeID, offline: module.offline === true, activation }] : [];
+    const combat = activation?.weapon === 'turret' ? turretCombatNumbersOf(ship, dogma.bundle, module.key) : null;
+    return activation && module.typeID != null ? [{ key: module.key, name: module.name, typeID: module.typeID, offline: module.offline === true, activation, ...(combat ? { combat } : {}) }] : [];
   });
 }
 
@@ -716,6 +718,10 @@ export interface ShipModuleRowState {
    * A weapon's turret set on the drawn hull (with a renderer).
    */
   readonly mount?: TurretMountReport;
+  /**
+   * A turret's damage per shot by type, volley and paper DPS (turretCombatNumbersOf, rounded).
+   */
+  readonly combat?: { readonly damage: Readonly<Record<string, number>>; readonly volley: number; readonly dps: number };
   readonly note?: string;
 }
 

@@ -16,6 +16,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { passiveRecharge } from '@scene-director/scene';
 
 /**
  * The evaluated numbers the live level runs on (ShipCapacitor's).
@@ -215,13 +216,11 @@ export class CapacitorModel {
 }
 
 /**
- * EVE's recharge curve in closed form.
+ * EVE's recharge curve in closed form: the package's passiveRecharge, the one formula shields share.
  *
  * @param input - The fraction full now, the seconds that pass and the recharge time (s).
  * @returns The fraction full after them: `(1 + (√c0 − 1)·e^(−5t/τ))²`.
  */
 export function CapacitorFractionAfter(input: { readonly fraction: number; readonly seconds: number; readonly rechargeTime: number }): number {
-  const { fraction, seconds, rechargeTime } = input;
-  const root = 1 + (Math.sqrt(Math.min(1, Math.max(0, fraction))) - 1) * Math.exp((-5 * seconds) / rechargeTime);
-  return root * root;
+  return passiveRecharge(input);
 }

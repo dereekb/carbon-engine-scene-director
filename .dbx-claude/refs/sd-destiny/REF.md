@@ -184,7 +184,10 @@ right after `SetPhysics`, so every re-fly and retune refreshes it. DestinyWorld 
   The booster drive reads the webbed prop-mod-off `maxVelocity`, as the client reads its ball's.
 - **Module-layer helpers**: `OnBoundary(listener)` (called with the boundary's master tick; a throwing listener is
   logged and the rest run), `SurfaceDistance(a, b)` (ball to ball on the EVE radii, negative when overlapping; null
-  when either is gone; either id may be an object, through `TargetEntry`, for a turret's target) and `InWarp(id)` (proper warp). `CycleEnd` lives in `module-cycle.ts`; destiny.ts re-exports it.
+  when either is gone; either id may be an object, through `TargetEntry`, for a turret's target), `InWarp(id)` (proper
+  warp) and `Accuracy(source, target, numbers)` (Destiny's own `GetAccuracy` on the master's balls: `{ chance,
+  distance, angularVelocity }`, falloff null → `NO_FALLOFF_METRES`; null for a missing ball or the same id;
+  `destiny-accuracy.spec.ts` pins it to `turretHitChance`). Queries read the master; every change goes to both parks. `CycleEnd` lives in `module-cycle.ts`; destiny.ts re-exports it.
 - The world accepts a max velocity of 0. `RequireValidPhysics` refuses a warp speed it cannot convert.
 
 ## Real-GPU evidence (2026-10-22, Windows Chrome, NVIDIA)

@@ -157,6 +157,12 @@ declare module '@carbonenginejs/server/destiny' {
     GetBall(id: DestinyInt64): CjsDestinyBall | null;
     RemoveBall(id: DestinyInt64, delay?: number): void;
     /**
+     * EVE's turret hit chance from the balls' new positions and velocities: `[accuracy, surfaceDistance,
+     * angularVelocity]` with numeric arguments. 0 for the same ball, a missing one, a zero falloff, tracking or
+     * signature.
+     */
+    GetAccuracy(srcId: DestinyInt64, dstId: DestinyInt64, optimalRange: number, falloff: number, trackingSpeed: number, signatureRadius: number, optimalSignatureRadius: number): [number, number, number];
+    /**
      * Evolves every whole tick up to `simTime` (100 ns ticks).
      */
     OnTick(realTime: DestinyInt64, simTime: DestinyInt64, cookie: unknown): void;
