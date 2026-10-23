@@ -56,9 +56,13 @@
 - **What clears the record**: a new play, a load (`Stop({ cut, forget })`), removing the shot's subject, a hardpoint
   with no pose, a shot or sequence finishing. A camera change, `frame_camera`, the pointer and `stop_shot` keep it.
 - **Drivers** (`CINEMA_DRIVERS`): `claude`, `director` (reserved for the automatic camera; nothing passes it yet),
-  `user` whenever the orbit camera has (or is getting) the view. Never null.
-- **Timeline cues** embed the play_shot / play_sequence object unchanged (library references included) and play
-  through `Director.PlayShot`: a library reference expands at play time against the live scene.
+  `timeline` (the scene's camera cues), `user` whenever the orbit camera has (or is getting) the view. Never null.
+- **Timeline cues** (`sd-timeline`) embed the play_shot / play_sequence object unchanged (library references included)
+  and play through `Director.PlayShot(args, 'timeline', time)` from the cue's boundary scene time (so `elapsed` is
+  frame-independent): a library reference expands at play time against the live scene. They take the camera whoever
+  drove before; a pointer takeover releases as usual and the next camera cue takes it again. A `stop_shot` cue stops
+  only a timeline-driven shot (else `skipped`). `timeline { camera: false }` releases a timeline shot (adopt) and skips
+  later camera cues ("the timeline's camera is off"); the switch lasts until the tab reloads.
 - `list_hardpoints` on a `celestial` while the location is not `ready` warns that its celestials may be missing.
 - The console path still works for debugging: `sceneDirector.director.PlayShot(shot)`, `.StopShot()`,
   `.cinema.Report()` (chrome-devtools `evaluate_script`).
@@ -232,7 +236,7 @@ The canvas listeners are capture-phase, so they run before `OrbitCamera`'s own h
 
 ## get_state
 
-- `cinema`: `state` (`idle` | `playing` | `paused` | `releasing`), `driver` (`claude` | `director` | `user`), `shot`
+- `cinema`: `state` (`idle` | `playing` | `paused` | `releasing`), `driver` (`claude` | `director` | `timeline` | `user`), `shot`
   (`name`, `library`, `hardpoint` or `pose`, `moves`, `transition`, `end`, `elapsed`, `duration`, `progress`,
   `holding`), `sequence { index, count, elapsed, duration, progress }` (over the whole sequence; null duration when the
   last shot holds), `resumable { name?, library?, index, count, elapsed }`, `pose`, `near`, `far`, `letterbox`, `hud`,

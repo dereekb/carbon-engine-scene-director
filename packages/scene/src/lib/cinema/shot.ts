@@ -54,9 +54,10 @@ export const CAMERA_SHOT_ENDS = ['release', 'hold'] as const;
 export type CameraShotEnd = (typeof CAMERA_SHOT_ENDS)[number];
 
 /**
- * Who drives the camera: Claude over MCP, the automatic director (reserved), or the user (the orbit camera).
+ * Who drives the camera: Claude over MCP, the automatic director (reserved), the scene's timeline (its camera cues), or
+ * the user (the orbit camera).
  */
-export const CINEMA_DRIVERS = ['claude', 'director', 'user'] as const;
+export const CINEMA_DRIVERS = ['claude', 'director', 'timeline', 'user'] as const;
 export type CinemaDriver = (typeof CINEMA_DRIVERS)[number];
 
 /**

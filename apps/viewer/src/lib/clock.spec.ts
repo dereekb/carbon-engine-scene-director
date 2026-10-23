@@ -39,4 +39,20 @@ describe('SceneClock', () => {
     clock.Advance(116);
     expect(clock.now).toBe(before + 16 * TICKS_PER_MS);
   });
+
+  it('adds no ticks while held, and the frame after release advances by its own delta only', () => {
+    const clock = new SceneClock();
+    clock.Advance(0);
+    clock.Advance(100);
+    const before = clock.now;
+    clock.Hold();
+    expect(clock.held).toBe(true);
+    clock.Advance(600);
+    clock.Advance(1400);
+    expect(clock.now).toBe(before);
+    clock.Release();
+    expect(clock.held).toBe(false);
+    clock.Advance(1416);
+    expect(clock.now).toBe(before + 16 * TICKS_PER_MS);
+  });
 });

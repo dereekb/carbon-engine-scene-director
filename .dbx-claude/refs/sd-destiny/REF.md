@@ -36,20 +36,27 @@
 
 `main.ts` owns the single rAF loop, in this order:
 
-`clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` → `director.TrackCamera(now)` →
-`director.DriveAudio(now)` → `engine.Frame(timestamp, now)`
+`director.DriveTimeline()` → `clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` →
+`director.TrackCamera(now)` → `director.DriveAudio(now)` → `engine.Frame(timestamp, now)`
 
 - `OnTick` and `driver.Execute` get the **same integer `now`**.
 - The clock caps a frame at **1 s**, so the master's 6-tick backlog drop never fires and a hidden tab pauses rather
   than fast-forwards. Follow the FC relies on this: one evolve per `Tick` call.
 - The loop runs without WebGPU too, so headless checks see ships move.
+- **The clock hold** (`SceneClock.Hold()` / `Release()` / `held`): held, `Advance` records frame times but adds no
+  ticks, so no boundary runs and nothing moves; the frame after `Release` advances by its own delta only. A scripted
+  load holds it while the scene prepares (`sd-timeline`); get_state reports `simulation.held`. Internal to the
+  timeline's prepare: Time control's scene pause is a separate, later thing.
 
 ## When things apply
 
 - **Add, remove, place and physics apply at once** (they teleport).
 - **Movement orders wait for the next 1 s tick boundary**, as EVE applies commands before a tick, so the interval a
   ClientBall is interpolating is never disturbed. The drawn ship trails the reported state by up to a tick.
-- At a due boundary the order is: prop mods (`ApplyPropMods`: delayed switches due now, then the numbers) →
+- At a due boundary the order is: `OnBeforeBoundary` listeners (the timeline's ship scripts and cues, `sd-timeline`:
+  called with the boundary and its scene-clock time `Number(master.time) + tickInterval × TICKS_PER_MS`, before
+  anything else, so a cue is exactly the same call made just before that tick) → prop mods (`ApplyPropMods`: delayed
+  switches due now, then the numbers) →
   `OnBoundary` listeners (the fitted modules' cycles, `sd-fittings`; a siege or triage module's, a web's or a painter's
   `SetPhysics` and a point's or scram's `SetTackle` land here with the re-fly, so a point landing on the boundary a
   warp would begin wins) → pending orders (`ApplyOrder`; a delayed one waits for its boundary) → formation warps (`ApplyFormationWarps`, sd-fleets

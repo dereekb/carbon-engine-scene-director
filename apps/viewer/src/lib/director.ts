@@ -180,7 +180,12 @@ import {
   type SceneAutoRepair,
   toAutoRepairGroup,
   toAutoRepairOperations,
-  resolveAutoRepair
+  resolveAutoRepair,
+  TIMELINE_OPERATION_NAMES,
+  cueActionOf,
+  sceneAtTimelineTime,
+  type SceneCue,
+  type SceneCueAdds
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -242,6 +247,8 @@ import { ErrorText, ResourceValues } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
+import { ShipScripts } from './ship-scripts';
+import { TimelinePlayer, type CueFireResult, type TimelineSettled } from './timeline';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
 import { ShipTurrets, type TurretsReport } from './turrets';
@@ -597,7 +604,51 @@ interface ApplyOptions {
    * Put every kept ship back at rest at its placement (load_scene).
    */
   readonly restart?: boolean;
+  /**
+   * A load: prepare the timeline and hold at t = 0 until `timeline play`.
+   */
+  readonly paused?: boolean;
+  /**
+   * The live scene to apply instead of the authored document without its timeline, or `keep` to leave it as it is.
+   */
+  readonly live?: NormalizedScene | 'keep';
+  /**
+   * Warnings to add to the result.
+   */
+  readonly warnings?: readonly string[];
 }
+
+/**
+ * ApplyNow's result: what FinishApply builds and reports.
+ */
+interface AppliedScene {
+  readonly scene: SceneDocument;
+  readonly restart: boolean;
+  readonly diff: ReturnType<typeof diffScenes>;
+  readonly builds: SceneShip[];
+  readonly objectBuilds: ReturnType<SceneObjects['Apply']>;
+  readonly retried: number;
+  readonly stopped: number;
+  readonly arrivalKeys: ReturnType<Arrivals['Add']>[];
+  readonly callWarnings: string[];
+}
+
+/**
+ * A change to the live scene the authored document does not hold: a document cue's, or a user edit only the live scene
+ * took. Dropped on every restart.
+ */
+export interface LiveEdit {
+  readonly source: 'cue' | 'edit';
+  readonly cue?: string;
+  readonly tick: number;
+  readonly operations: unknown;
+  readonly adds?: SceneCueAdds;
+}
+
+/**
+ * What the timeline tool does: report, play, pause, or restart (reload the authored document).
+ */
+export const TIMELINE_TOOL_ACTIONS = ['status', 'play', 'pause', 'restart'] as const;
 
 export interface OrderShipResult {
   readonly id: string;
@@ -672,7 +723,22 @@ export class Director {
    * The engine sounds (audio.ts).
    */
   readonly audio: PageAudio;
+  /**
+   * The live scene, what every subsystem reads: the authored document without its timeline, plus the live edits.
+   */
   scene: Maybe<SceneDocument> = null;
+  /**
+   * The document as authored, timeline included: what get_scene, save_scene and the working copy hold.
+   */
+  authored: Maybe<SceneDocument> = null;
+  /**
+   * The live scene's changes the authored document does not hold, in order.
+   */
+  private liveEdits: LiveEdit[] = [];
+  /**
+   * Plays the authored timeline and the ships' orders (timeline.ts).
+   */
+  readonly timeline: TimelinePlayer;
   private readonly onChange: () => void;
   private readonly hullStats: HullStatsLookup;
   private readonly propMods: PropModLookup;
@@ -1050,6 +1116,23 @@ export class Director {
       }
       this.PlayWarpFlashes(this.warpFx.OnWarp(event));
     });
+    this.timeline = new TimelinePlayer({
+      port: {
+        Fire: (cue, at) => this.FireCue(cue, at),
+        Settled: () => this.SceneSettled(),
+        HoldClock: (held) => (held ? clock.Hold() : clock.Release()),
+        Now: () => performance.now()
+      },
+      scripts: new ShipScripts({
+        Order: (id, order) => this.OrderShip(id, order).order,
+        Motion: (id) => world.Motion(id),
+        Alive: (id) => !this.IsDead(id),
+        Arriving: (id) => world.Arriving(id),
+        InWarp: (id) => world.InWarp(id)
+      })
+    });
+    // Cues fire before the boundary's prop mods: a cue is the same call made just before that tick.
+    world.OnBeforeBoundary((boundary, time) => this.timeline.Boundary(boundary, time, this.scene?.ships ?? []));
     if (engine) this.AttachCameraControls(engine.canvas);
   }
 
@@ -1058,14 +1141,15 @@ export class Director {
    */
   Handlers(): Record<string, ToolHandler> {
     return {
-      load_scene: ({ scene }) => this.Load(scene),
-      get_scene: () => this.scene,
-      patch_scene: ({ operations }) => this.Serialize(() => this.Apply(applySceneOperations(this.Current(), operations))),
+      load_scene: ({ scene, timeline }) => this.Load(scene, { paused: TimelineStartPaused(timeline) }),
+      get_scene: (args) => this.GetScene(args),
+      patch_scene: ({ operations }) => this.Edit(operations),
       save_scene: ({ name }) => this.Save(name),
       list_scenes: () => this.store.List(),
-      open_scene: ({ name }) => this.Open(name),
+      open_scene: ({ name, timeline }) => this.Open(name, { paused: TimelineStartPaused(timeline) }),
       delete_scene: async ({ name }) => ({ deleted: await this.store.Delete(RequireName(name)), name }),
       get_state: () => this.State(),
+      timeline: (args) => this.Timeline(args),
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
       frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
       order_ship: ({ id, order }) => this.OrderShip(id, order),
@@ -1085,10 +1169,25 @@ export class Director {
   }
 
   /**
-   * Replaces the scene with a document.
+   * Replaces the scene with a document. A scripted one prepares with the scene clock held, then plays its timeline from
+   * t = 0 (or holds there when `paused`).
    */
-  Load(input: unknown): Promise<unknown> {
-    return this.Serialize(() => this.Apply(normalizeScene(input), { restart: true }));
+  Load(input: unknown, { paused = false }: { readonly paused?: boolean } = {}): Promise<unknown> {
+    return this.Serialize(() => this.Apply(normalizeScene(input), { restart: true, paused }));
+  }
+
+  /**
+   * get_scene: the authored document (timeline included); `live: true` the live scene (the timeline's adds included);
+   * `at` the authored document projected to that timeline time (its patch cues due by then applied).
+   *
+   * @throws {Error} When `at` is not seconds ≥ 0.
+   */
+  GetScene({ live, at }: Record<string, unknown> = {}): Maybe<SceneDocument> {
+    if (at != null) {
+      if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) throw new Error('at must be seconds of timeline time, at least 0');
+      return this.authored ? sceneAtTimelineTime(this.authored, at, applySceneOperations) : null;
+    }
+    return live === true ? this.scene : this.authored;
   }
 
   /**
@@ -1127,11 +1226,7 @@ export class Director {
    * @throws {Error} When the leader refuses the order, or the fleet is not planned yet for a wing or squad move or a warp.
    */
   OrderFleet(input: unknown): Promise<object> {
-    const record = input !== null && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
-    const fc = this.scene?.fleets?.find((fleet) => fleet.id === record?.['fleet'])?.commander;
-    const named = record ? this.NamedTarget({ order: record['order'], from: fc, where: 'order_fleet.order' }) : { order: undefined };
-    const request = normalizeFleetOrderRequest(named.resolved ? { ...record, order: named.order } : input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
-    const resolved = named.resolved ? { resolved: named.resolved } : {};
+    const { request, resolved } = this.FleetRequest(input);
     if (isFleetTargetsOrder(request.order)) return Promise.resolve({ ...this.CallTargets(request), ...resolved });
     if (!isFleetDocumentOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
@@ -1140,11 +1235,51 @@ export class Director {
       const resolved = this.orders.Resolve(request);
       const tick = this.world.tick;
       const operations = toFleetOrderOperations(this.Current(), resolved);
-      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
+      const patch = operations.length ? ((await this.EditNow(operations)) as { readonly ships?: unknown }) : null;
       const { ships: builds, ...rest } = patch ?? {};
       const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
       return { ...result, operations, ...(patch ? { ...rest, builds } : {}) };
     });
+  }
+
+  /**
+   * order_fleet's request: a name target resolved from the fleet's FC, then normalized against the live scene.
+   */
+  private FleetRequest(input: unknown): { readonly request: FleetOrderRequest; readonly resolved: { readonly resolved?: ResolvedNamedOrderTarget } } {
+    const record = input !== null && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null;
+    const fc = this.scene?.fleets?.find((fleet) => fleet.id === record?.['fleet'])?.commander;
+    const named = record ? this.NamedTarget({ order: record['order'], from: fc, where: 'order_fleet.order' }) : { order: undefined };
+    const request = normalizeFleetOrderRequest(named.resolved ? { ...record, order: named.order } : input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
+    return { request, resolved: named.resolved ? { resolved: named.resolved } : {} };
+  }
+
+  /**
+   * A timeline cue's order_fleet, synchronous from the pre-boundary hook: moves, warps and targets as the tool runs
+   * them; a document order (anchor, break-off, regroup) edits the live scene only (CueEdit), then flies its live half.
+   */
+  private FleetOrderNow(input: unknown, cue: SceneCue): object {
+    const { request, resolved: named } = this.FleetRequest(input);
+    if (isFleetTargetsOrder(request.order)) return { ...this.CallTargets(request), ...named };
+    const resolved = this.orders.Resolve(request);
+    if (!isFleetDocumentOrder(request.order)) return { ...this.orders.Fly(resolved), ...named };
+    const tick = this.world.tick;
+    const operations = toFleetOrderOperations(this.Current(), resolved);
+    const patch = operations.length ? this.CueEdit(operations, cue) : null;
+    return { ...this.orders.Fly(resolved, { tick }), operations, ...(patch ? { patch } : {}) };
+  }
+
+  /**
+   * A timeline cue's auto_repair: the group's autoRepair set on the live scene only (CueEdit), its logi rearmed.
+   */
+  private AutoRepairNow(input: unknown, cue: SceneCue): object {
+    const command = normalizeAutoRepairCommand(input);
+    const selected = selectFleetShips(this.Current(), { fleet: command.fleet, ...(command.wing ? { wing: command.wing } : {}), ...(command.squad ? { squad: command.squad } : {}) });
+    if (selected.problems.length) throw new SceneError(selected.problems);
+    const operations = toAutoRepairOperations(this.Current(), command);
+    const patch = operations.length ? this.CueEdit(operations, cue) : null;
+    this.autoRepair.Rearm(selected.ships);
+    this.SyncAutoRepair();
+    return { fleet: command.fleet, ships: selected.ships.length, operations: operations.length, ...(patch ? { patch } : {}) };
   }
 
   /**
@@ -1164,7 +1299,7 @@ export class Director {
       const selected = selectFleetShips(this.Current(), { fleet: command.fleet, ...(command.wing ? { wing: command.wing } : {}), ...(command.squad ? { squad: command.squad } : {}) });
       if (selected.problems.length) throw new SceneError(selected.problems);
       const operations = toAutoRepairOperations(this.Current(), command);
-      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
+      const patch = operations.length ? ((await this.EditNow(operations)) as { readonly ships?: unknown }) : null;
       this.autoRepair.Rearm(selected.ships);
       this.SyncAutoRepair();
       const tick = this.world.tick;
@@ -1832,8 +1967,8 @@ export class Director {
    * @returns The rig's state, the driver, the shots as played and any warnings.
    * @throws {Error} When the shot is invalid.
    */
-  PlayShot(input: unknown, driver: CinemaPlayer = 'claude'): CinemaPlayResult & { readonly driver: CinemaPlayer } {
-    const result = this.cinema.Play(input, this.clock.now, driver);
+  PlayShot(input: unknown, driver: CinemaPlayer = 'claude', now = this.clock.now): CinemaPlayResult & { readonly driver: CinemaPlayer } {
+    const result = this.cinema.Play(input, now, driver);
     this.onChange();
     return { ...result, driver };
   }
@@ -1889,19 +2024,144 @@ export class Director {
     this.ChangeCamera({ target: id });
   }
 
+  /**
+   * Called first in every frame: a preparing timeline checks whether the scene settled, then releases the clock.
+   */
+  DriveTimeline(): void {
+    const before = this.timeline.state;
+    this.timeline.Frame();
+    if (this.timeline.state !== before) this.onChange();
+  }
+
+  /**
+   * The timeline tool: reports the timeline, plays, pauses or restarts it (a reload of the authored document, paused
+   * at t = 0 with `paused`), and switches its camera cues on or off (off hands a timeline shot back to the user).
+   *
+   * @throws {Error} When the arguments are invalid, or play is asked of a scene without a script.
+   */
+  async Timeline({ action = 'status', paused, camera }: Record<string, unknown> = {}): Promise<object> {
+    if (typeof action !== 'string' || !(TIMELINE_TOOL_ACTIONS as readonly string[]).includes(action)) throw new Error(`action must be one of ${TIMELINE_TOOL_ACTIONS.join(', ')}`);
+    if (camera != null && typeof camera !== 'boolean') throw new Error('camera must be true or false');
+    if (paused != null && typeof paused !== 'boolean') throw new Error('paused must be true or false');
+    if (paused != null && action !== 'restart') throw new Error('paused goes with action "restart"');
+    if (typeof camera === 'boolean') {
+      this.timeline.SetCamera(camera);
+      if (!camera && this.cinema.Report(this.clock.now).driver === 'timeline') this.ReleaseCinema({ adopt: true, note: "the timeline's camera was switched off" });
+    }
+    let load: Maybe<Record<string, unknown>> = null;
+    if (action === 'play') this.timeline.Play();
+    else if (action === 'pause') this.timeline.Pause();
+    else if (action === 'restart') {
+      if (!this.authored) throw new Error('no scene is loaded');
+      load = (await this.Load(this.authored, { paused: paused === true })) as Record<string, unknown>;
+    }
+    this.onChange();
+    const report = this.TimelineReport();
+    const loaded = load ? { load: { warnings: load['warnings'], changes: load['changes'] } } : {};
+    return report ? { ...report, ...loaded } : { state: 'idle', note: 'the scene has no timeline or ship orders', ...loaded };
+  }
+
+  /**
+   * get_state's `timeline`: null for a scene without a script.
+   */
+  private TimelineSummary(): Maybe<object> {
+    const summary = this.timeline.Summary();
+    if (!summary) return null;
+    const last = this.liveEdits.slice(-5).map(({ source, cue, tick, adds }) => ({ source, ...(cue ? { cue } : {}), tick, ...(adds ? { adds } : {}) }));
+    return { ...summary, ...(this.liveEdits.length ? { liveEdits: { count: this.liveEdits.length, last } } : {}) };
+  }
+
+  /**
+   * The timeline tool's report: the summary, every cue, every script and every live edit.
+   */
+  private TimelineReport(): Maybe<object> {
+    const report = this.timeline.Report();
+    if (!report) return null;
+    const liveEdits = this.liveEdits.map(({ source, cue, tick, adds, operations }) => ({ source, ...(cue ? { cue } : {}), tick, operations: Array.isArray(operations) ? operations.length : 0, ...(adds ? { adds } : {}) }));
+    return { ...report, held: this.clock.held, liveEdits };
+  }
+
+  /**
+   * Runs a timeline cue's lever now, from the pre-boundary hook: each action as its tool runs it, document actions on
+   * the live scene only (CueEdit), camera shots as the `timeline` driver from the boundary's scene time.
+   *
+   * @returns Fired with the lever's compact result, or skipped (a stop_shot while the camera is not the timeline's).
+   * @throws {Error} The lever's refusal.
+   */
+  private FireCue(cue: SceneCue, { time }: { readonly boundary: number; readonly time: number }): CueFireResult {
+    const { name, args } = cueActionOf(cue);
+    const input = args as unknown as Record<string, unknown>;
+    switch (name) {
+      case 'order_ship':
+        return Fired(this.OrderShip(input['id'], input['order']));
+      case 'order_fleet':
+        return Fired(this.FleetOrderNow(args, cue));
+      case 'switch_prop_mods':
+        return Fired(this.SwitchPropMods(args));
+      case 'switch_modules':
+        return Fired(this.SwitchModules(args));
+      case 'set_target':
+        return Fired(this.SetTarget(args));
+      case 'engage':
+        return Fired(this.Engage(args));
+      case 'cease_fire':
+        return Fired(this.CeaseFire(args));
+      case 'auto_repair':
+        return Fired(this.AutoRepairNow(args, cue));
+      case 'play_shot':
+        return Fired(this.PlayShot(args, 'timeline', time));
+      case 'play_sequence':
+        return Fired(this.PlayShot({ shots: input['shots'] }, 'timeline', time));
+      case 'stop_shot': {
+        const driver = this.cinema.Report(this.clock.now).driver;
+        if (driver !== 'timeline') return { state: 'skipped', note: driver === 'user' ? "no timeline shot is playing: the camera is the user's" : `the camera is ${driver}'s` };
+        return Fired(this.StopShot(input));
+      }
+      case 'patch_scene':
+        return Fired(this.CueEdit(input['operations'], cue));
+    }
+  }
+
+  /**
+   * Whether the live scene is ready for t = 0 (a scripted load's prepare): every live ship's /ship-stats lookup answered
+   * (a failure counts), its prop mod looked up, its fit (or its default weapons' hull type) resolved and its build
+   * settled; every fleet planned; every object built; the location loaded.
+   */
+  private SceneSettled(): TimelineSettled {
+    const waiting = { lookups: 0, fits: 0, builds: 0, fleets: 0, objects: 0, location: 0 };
+    const scene = this.scene;
+    for (const doc of scene?.ships ?? []) {
+      if (this.IsDead(doc.id)) continue;
+      const answer = this.hullStats.Cached(doc);
+      const propMod = answer ? this.PropModTarget(doc, answer) : null;
+      if (!answer || (propMod != null && !this.propMods.Cached(propMod))) waiting.lookups += 1;
+      const hullTypeID = answer?.hull?.typeID;
+      if (this.fittings.get(doc.id)?.pending || (!doc.fit && hullTypeID != null && this.fitLookup.TypePending(hullTypeID))) waiting.fits += 1;
+      const status = this.live.get(doc.id)?.status;
+      if (status === 'queued' || status === 'building') waiting.builds += 1;
+    }
+    for (const fleet of scene?.fleets ?? []) if (!this.following.Ready(fleet.id)) waiting.fleets += 1;
+    for (const doc of scene?.objects ?? []) {
+      const status = this.objects.Entry(doc.id)?.status;
+      if (status == null || status === 'queued' || status === 'building') waiting.objects += 1;
+    }
+    if (this.location.Report()?.status === 'loading') waiting.location = 1;
+    return { settled: Object.values(waiting).every((count) => count === 0), waiting };
+  }
+
   async Save(name: unknown): Promise<{ saved: string; ships: number }> {
-    const scene = this.Current();
+    const scene = this.Authored();
     const key = RequireName(name ?? scene.name);
     if (key === CURRENT_KEY) throw new Error(`"${CURRENT_KEY}" is reserved`);
     await this.store.Put(key, { ...scene, name: key });
     return { saved: key, ships: scene.ships.length };
   }
 
-  async Open(name: unknown): Promise<unknown> {
+  async Open(name: unknown, options: { readonly paused?: boolean } = {}): Promise<unknown> {
     const key = RequireName(name);
     const scene = await this.store.Get(key);
     if (!scene) throw new Error(`no saved scene "${key}"; list_scenes shows what is saved`);
-    return this.Load(scene);
+    return this.Load(scene, options);
   }
 
   State(): object {
@@ -1929,8 +2189,12 @@ export class Director {
       camera: this.engine ? { ...this.engine.camera.Get(), view: this.cinema.active ? 'cinema' : 'orbit', drawn: DrawnCameraReport(this.engine.DrawnCamera()) } : null,
       cinema: this.cinema.Report(this.clock.now),
       environment: this.engine?.Environment() ?? null,
-      simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
-      ships,
+      simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, ...(this.clock.held ? { held: true } : {}), warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
+      timeline: this.TimelineSummary(),
+      ships: ships.map((ship) => {
+        const script = this.timeline.Script(ship.id);
+        return script ? { ...ship, script } : ship;
+      }),
       ...(this.arrivals.Report().length ? { arrivals: this.arrivals.Report() } : {}),
       distances,
       objects: this.ObjectRows(),
@@ -1977,15 +2241,82 @@ export class Director {
     camera.distance = IsFiniteNumber(distance) ? distance : null;
     if (mode != null && !SCENE_CAMERA_MODES.includes(mode)) throw new Error(`mode must be one of ${SCENE_CAMERA_MODES.join(', ')}`);
     if (mode) camera.mode = mode;
-    if (persist) return this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera }])));
+    if (persist) return this.Edit([{ op: 'set_camera', camera }]);
     if (camera.target && !this.live.has(camera.target) && !this.objects.Has(camera.target)) throw new Error(`no ship or object "${camera.target}"`);
     if (camera.target && this.world.Arriving(camera.target)) throw new Error(`ship "${camera.target}" is arriving by warp; frame it once it lands (get_state arrivals), or play the warp-in shot`);
     this.ApplyCamera(camera);
     return { camera: this.engine?.camera.Get() ?? null };
   }
 
+  /**
+   * The live scene (or an empty one).
+   */
   private Current(): SceneDocument {
     return this.scene ?? createEmptyScene();
+  }
+
+  /**
+   * The authored document (or an empty one).
+   */
+  private Authored(): SceneDocument {
+    return this.authored ?? createEmptyScene();
+  }
+
+  /**
+   * A user's document edit (patch_scene, order_fleet's document orders, auto_repair, a persisted camera, every hub
+   * tool's forwarded op), through the edit queue.
+   */
+  private Edit(operations: unknown): Promise<object> {
+    return this.Serialize(() => this.EditNow(operations));
+  }
+
+  /**
+   * A document edit at its turn in the queue. Without live edits (the usual case) the authored document takes the
+   * operations and the live scene follows it. Once a cue changed the live scene, they apply to both (the timeline ops to
+   * the authored document only): live-only when only the live scene takes them and they name something the timeline
+   * added, authored-only when only the authored document takes them, each with a warning; otherwise the refusal is thrown
+   * (the live scene's when both refuse).
+   */
+  private async EditNow(operations: unknown): Promise<object> {
+    if (!this.liveEdits.length) return this.Apply(applySceneOperations(this.Authored(), operations));
+    const liveOperations = (Array.isArray(operations) ? operations : []).filter((operation) => !IsTimelineOperation(operation));
+    const authored = Attempt(() => applySceneOperations(this.Authored(), operations));
+    const live = liveOperations.length ? Attempt(() => applySceneOperations(this.Current(), liveOperations)) : null;
+    if (!live || live.error) {
+      if (!authored.value) throw live?.error ?? authored.error;
+      return this.Apply(authored.value, { live: 'keep', ...(live ? { warnings: [`the live scene refused it (${ErrorText(live.error)}): it applies from the next restart`] } : {}) });
+    }
+    if (!authored.value) {
+      // Live-only only for an edit of what the timeline added; any other refusal of the script stands.
+      if (!NamesAny(liveOperations, LiveOnlyIds(this.Current(), this.Authored()))) throw authored.error;
+      this.liveEdits.push({ source: 'edit', tick: this.world.tick, operations: liveOperations });
+      return this.Apply(null, { live: live.value ?? undefined, warnings: [`applies live only (the authored document refused it: ${ErrorText(authored.error)}): it lasts until the timeline restarts`] });
+    }
+    return this.Apply(authored.value, { live: live.value ?? undefined });
+  }
+
+  /**
+   * A document cue's edit (a patch_scene cue, an anchor order, auto-repair), synchronous from the pre-boundary hook:
+   * applied to the live scene only, so saving mid-play saves the script, not its effects. Its builds start at once,
+   * outside the edit queue.
+   *
+   * @returns A compact report: what changed, any arrivals and warnings.
+   * @throws {SceneError} When the operations no longer apply to the live scene.
+   */
+  private CueEdit(operations: unknown, cue: SceneCue): object {
+    const normalized = applySceneOperations(this.Current(), operations);
+    const applied = this.ApplyNow(normalized);
+    this.liveEdits.push({ source: 'cue', cue: cue.id, tick: this.world.tick, operations, ...(cue.adds ? { adds: cue.adds } : {}) });
+    this.FinishApply(applied).catch((error: unknown) => console.warn(`timeline cue "${cue.id}": its builds failed: ${ErrorText(error)}`));
+    const { diff } = applied;
+    return {
+      added: diff.added.length,
+      removed: diff.removed.length,
+      rebuilt: diff.rebuilt.length,
+      moved: diff.moved.length,
+      ...(applied.arrivalKeys.length ? { arrivals: applied.arrivalKeys.length } : {}),
+      ...(normalized.warnings.length ? { warnings: normalized.warnings.slice(0, 10) } : {})
+    };
   }
 
   /**
@@ -2000,17 +2331,52 @@ export class Director {
     return run;
   }
 
-  private async Apply({ scene, warnings, arrivals }: NormalizedScene, { restart = false }: ApplyOptions = {}): Promise<object> {
+  /**
+   * Applies an edit: the authored document (null to keep it: a live-only edit) and the live scene (by default the
+   * authored document without its timeline; `keep` leaves it). ApplyNow does the synchronous part on the live scene,
+   * the timeline player takes the authored document (a load restarts it), the working copy is written, then
+   * FinishApply builds and reports.
+   *
+   * @returns The patch result: `scene` the authored document, `live` the live scene while live edits exist, the
+   *   authored document's warnings, and the builds' reports.
+   */
+  private async Apply(authored: Maybe<NormalizedScene>, { restart = false, paused = false, live, warnings: extra = [] }: ApplyOptions = {}): Promise<object> {
+    const target = live === 'keep' ? null : (live ?? (authored ? { ...authored, scene: WithoutTimeline(authored.scene) } : null));
+    const warnings = [...((authored ?? target)?.warnings ?? []), ...extra];
     // Changing the universe re-creates the scene's environment, which is
     // initialized with the device; a reload is the reliable way to do it (and
     // the reload trick CLAUDE.md names). A location's region nebula swaps in
     // live instead (Engine.SetNebula, location-dressing.ts).
-    if (this.engine && this.engine.universe !== scene.environment.universe) {
-      await this.store.Put(CURRENT_KEY, scene);
+    if (this.engine && target && this.engine.universe !== target.scene.environment.universe) {
+      await this.store.Put(CURRENT_KEY, authored?.scene ?? this.Authored());
       setTimeout(() => location.reload(), 200);
       return { reloading: true, note: 'The environment changed, so the viewer is reloading with the new scene. Call get_state in a few seconds.', warnings };
     }
+    const applied = target ? this.ApplyNow(target, { restart }) : null;
+    if (authored) {
+      this.authored = authored.scene;
+      const cues = authored.scene.timeline?.cues ?? [];
+      const scripted = cues.length > 0 || authored.scene.ships.some((doc) => (doc.orders?.length ?? 0) > 0);
+      if (restart) this.timeline.Load(cues, scripted, { paused });
+      else this.timeline.Edit(cues, scripted);
+    }
+    if (restart) this.liveEdits = [];
+    if (authored) await this.store.Put(CURRENT_KEY, authored.scene);
+    const report = applied ? await this.FinishApply(applied) : { changes: null };
+    return {
+      scene: this.authored,
+      ...(this.liveEdits.length ? { live: this.scene } : {}),
+      warnings: [...new Set([...warnings, ...(applied?.callWarnings ?? [])])],
+      ...report
+    };
+  }
 
+  /**
+   * The synchronous part of an apply, on the live scene: the diff, revivals and retirements, removals, the live scene
+   * itself, cinema releases, location, combat, a load's clears, balls, arrivals, object balls, retunes, prop mods and
+   * formations. The builds' live entries are queued here, so readiness checks never see a missing one.
+   */
+  private ApplyNow({ scene, arrivals }: NormalizedScene, { restart = false }: { readonly restart?: boolean } = {}): AppliedScene {
     const previous = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
     const diff = diffScenes(this.scene, scene);
     // A load opens with the document's calls; a patch keeps the live calls it leaves standing, pruned.
@@ -2156,8 +2522,17 @@ export class Director {
     this.SyncFleetTargets();
     // Logi take the new auto-repair settings at once; their switches apply at the next boundary.
     this.SyncAutoRepair();
-    await this.store.Put(CURRENT_KEY, scene);
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
+    return { scene, restart, diff, builds, objectBuilds, retried: retried.length, stopped: stopped.length, arrivalKeys, callWarnings };
+  }
+
+  /**
+   * The asynchronous tail of an apply: the builds in document order, then the objects', the draw reach, the arrivals'
+   * plan after the builds, and the reframe.
+   *
+   * @returns The ship, object and arrival reports and the change counts.
+   */
+  private async FinishApply({ scene, restart, diff, builds, objectBuilds, retried, stopped, arrivalKeys }: AppliedScene): Promise<object> {
     this.onChange();
 
     // Builds are serialized by SOF anyway; awaiting them in order keeps the report in document order. Objects build
@@ -2173,20 +2548,18 @@ export class Director {
     this.appliedCamera = null;
     this.onChange();
     return {
-      scene,
-      warnings: [...new Set([...warnings, ...callWarnings])],
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
       ...(scene.objects?.length || diff.objects.removed.length ? { objects: (scene.objects ?? []).map((doc) => this.ObjectReport(doc.id)) } : {}),
       ...(arrivalKeys.length ? { arrivals: this.arrivals.Report(arrivalKeys) } : {}),
       changes: {
         added: diff.added.length,
         rebuilt: diff.rebuilt.length,
-        retried: retried.length,
+        retried,
         moved: diff.moved.length,
         removed: diff.removed.length,
         regrouped: diff.regrouped.length,
         switched: diff.switched.length,
-        stopped: stopped.length,
+        stopped,
         ...(scene.objects?.length || diff.objects.removed.length ? { objects: { added: diff.objects.added.length, rebuilt: diff.objects.rebuilt.length, moved: diff.objects.moved.length, removed: diff.objects.removed.length } } : {})
       }
     };
@@ -3827,7 +4200,7 @@ export class Director {
     this.ApplyCamera(camera);
     this.appliedCamera = JSON.stringify(camera);
     this.onChange();
-    this.Serialize(() => this.Apply(applySceneOperations(this.Current(), [{ op: 'set_camera', camera: { ...live, ...change } }]))).catch((error: unknown) => console.warn(`camera change failed: ${ErrorText(error)}`));
+    this.Edit([{ op: 'set_camera', camera: { ...live, ...change } }]).catch((error: unknown) => console.warn(`camera change failed: ${ErrorText(error)}`));
   }
 
   /**
@@ -4298,4 +4671,72 @@ function ToBase64(bytes: Uint8Array): string {
 function Round(value: number, digits: number): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
+}
+
+/**
+ * load_scene / open_scene's `timeline`: "play" (the default) or "pause".
+ *
+ * @param value - The argument.
+ * @returns Whether to load paused.
+ * @throws {Error} For any other value.
+ */
+function TimelineStartPaused(value: unknown): boolean {
+  if (value == null || value === 'play') return false;
+  if (value === 'pause') return true;
+  throw new Error('timeline must be "play" or "pause"');
+}
+
+/**
+ * Whether a patch operation edits the timeline (applied to the authored document only).
+ */
+function IsTimelineOperation(operation: unknown): boolean {
+  const op = operation !== null && typeof operation === 'object' ? (operation as Record<string, unknown>)['op'] : null;
+  return typeof op === 'string' && (TIMELINE_OPERATION_NAMES as readonly string[]).includes(op);
+}
+
+function Attempt<T>(action: () => T): { readonly value: Maybe<T>; readonly error: unknown } {
+  try {
+    return { value: action(), error: null };
+  } catch (error) {
+    return { value: null, error };
+  }
+}
+
+/**
+ * A document without its timeline: the live scene's base.
+ */
+function WithoutTimeline(scene: SceneDocument): SceneDocument {
+  const { timeline: _timeline, ...rest } = scene;
+  return rest;
+}
+
+/**
+ * A fired cue with its lever's result, compacted for the report: scalars kept, lists counted (the first 10 skips and
+ * warnings kept).
+ */
+function Fired(result: unknown): CueFireResult {
+  if (result === null || typeof result !== 'object') return { state: 'fired', result };
+  const compact: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(result)) {
+    if (Array.isArray(value)) compact[key] = key === 'skipped' || key === 'warnings' ? value.slice(0, 10) : value.length;
+    else if (value === null || typeof value !== 'object') compact[key] = value;
+  }
+  return { state: 'fired', result: compact };
+}
+
+/**
+ * The ship, object and fleet ids the live scene holds and the authored document does not: what the timeline added.
+ */
+function LiveOnlyIds(live: SceneDocument, authored: SceneDocument): Set<string> {
+  const ids = (scene: SceneDocument) => [...scene.ships.map((doc) => doc.id), ...(scene.objects ?? []).map((doc) => doc.id), ...(scene.fleets ?? []).map((fleet) => fleet.id)];
+  const known = new Set(ids(authored));
+  return new Set(ids(live).filter((id) => !known.has(id)));
+}
+
+/**
+ * Whether operations name any of the ids (as a JSON string anywhere in them).
+ */
+function NamesAny(operations: unknown, ids: ReadonlySet<string>): boolean {
+  const text = JSON.stringify(operations);
+  return [...ids].some((id) => text.includes(JSON.stringify(id)));
 }

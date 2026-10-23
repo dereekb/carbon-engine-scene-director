@@ -67,7 +67,8 @@ export const CINEMA_DEFAULT_FOV = 45;
 export type CinemaState = 'idle' | 'playing' | 'paused' | 'releasing';
 
 /**
- * Who can play a shot: Claude over MCP, or the automatic director (reserved). The user drives the orbit camera.
+ * Who can play a shot: Claude over MCP, the automatic director (reserved), or the timeline's camera cues. The user
+ * drives the orbit camera.
  */
 export type CinemaPlayer = Exclude<CinemaDriver, 'user'>;
 

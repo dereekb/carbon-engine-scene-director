@@ -24,6 +24,14 @@ export const MAX_FRAME_STEP_MS = 1000;
 export class SceneClock {
   private ticks = CLOCK_EPOCH_TICKS;
   private lastFrameMs: Maybe<number> = null;
+  private holding = false;
+
+  /**
+   * Whether the clock is held (Hold): frames are recorded but add no ticks.
+   */
+  get held(): boolean {
+    return this.holding;
+  }
 
   /**
    * The current time, in integer 100 ns ticks.
@@ -41,17 +49,33 @@ export class SceneClock {
 
   /**
    * Advances by the time since the previous frame, capped at MAX_FRAME_STEP_MS. The first call only records the
-   * frame time.
+   * frame time, and so does every call while the clock is held.
    *
    * @param frameMs - The animation frame's timestamp, in milliseconds.
    * @returns The new time, in 100 ns ticks.
    */
   Advance(frameMs: number): number {
-    if (typeof this.lastFrameMs === 'number' && Number.isFinite(frameMs)) {
+    if (!this.holding && typeof this.lastFrameMs === 'number' && Number.isFinite(frameMs)) {
       const step = Math.min(Math.max(frameMs - this.lastFrameMs, 0), MAX_FRAME_STEP_MS);
       this.ticks += Math.round(step * TICKS_PER_MS);
     }
     if (Number.isFinite(frameMs)) this.lastFrameMs = frameMs;
     return this.ticks;
+  }
+
+  /**
+   * Holds the clock: Advance keeps recording frame times but adds no ticks, so no Destiny boundary is processed and
+   * nothing moves. A scripted load holds it while the scene prepares (timeline.ts); the frame after Release advances by
+   * its own delta only.
+   */
+  Hold(): void {
+    this.holding = true;
+  }
+
+  /**
+   * Releases a Hold.
+   */
+  Release(): void {
+    this.holding = false;
   }
 }

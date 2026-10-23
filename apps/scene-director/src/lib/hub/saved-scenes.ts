@@ -136,6 +136,8 @@ export class SavedScenes {
   async Open(args: ToolArgs): Promise<object> {
     const name = RequireSceneName(args['name']);
     const store = ReadStore(args['store']);
+    // A scripted scene plays from t = 0 once prepared, or holds there with "pause": the page reads it on both paths.
+    const timeline = args['timeline'] != null ? { timeline: args['timeline'] } : {};
     if (store !== 'browser') {
       const saved = await this.files.Get(name);
       if (saved) {
@@ -143,14 +145,14 @@ export class SavedScenes {
         if (!this.page.Connected()) {
           return { ...opened, loaded: false, scene: saved.document, note: 'No viewer tab is connected, so the scene was read but not shown; open the viewer and call open_scene again to show it.' };
         }
-        return { ...opened, ...((await this.page.Call('load_scene', { scene: saved.document })) as object) };
+        return { ...opened, ...((await this.page.Call('load_scene', { scene: saved.document, ...timeline })) as object) };
       }
       if (store === 'disk' || !this.page.Connected()) {
         const browser = store === 'disk' ? '' : ", and no viewer tab is connected to look in the browser's storage";
         throw new ToolError(`no scene "${name}" is saved on disk (${this.files.directory})${browser}; list_scenes shows what is saved`);
       }
     }
-    const loaded = await this.PageCall('open_scene', { name });
+    const loaded = await this.PageCall('open_scene', { name, ...timeline });
     return { opened: name, store: 'browser', ...(loaded as object) };
   }
 

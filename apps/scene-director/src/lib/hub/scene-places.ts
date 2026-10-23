@@ -101,7 +101,7 @@ export class ScenePlaces {
   async Before(args: ToolArgs, options: { readonly read?: boolean } = {}): Promise<SceneBefore> {
     let before: SceneBefore;
     if (args['scene'] != null) before = { scene: normalizeScene(args['scene']).scene, live: false };
-    else if (this.page.Connected()) before = { scene: options.read === false ? createEmptyScene() : normalizeScene((await this.page.Call('get_scene')) ?? createEmptyScene()).scene, live: true };
+    else if (this.page.Connected()) before = { scene: options.read === false ? createEmptyScene() : normalizeScene((await this.page.Call('get_scene', { live: true })) ?? createEmptyScene()).scene, live: true };
     else throw new ToolError(`${this.page.NotConnected().message} Or pass "scene" to build a document without a tab.`);
     return before;
   }
@@ -120,8 +120,9 @@ export class ScenePlaces {
       const { scene, warnings, arrivals } = applySceneOperations(before.scene, [...operations]);
       applied = { scene, warnings: arrivals?.length ? [...warnings, WARP_IN_DOCUMENT_WARNING] : warnings, rest: { scene, loaded: false } };
     } else {
-      const patched = (await this.page.Call('patch_scene', { operations })) as Record<string, unknown> & { readonly scene?: SceneDocument; readonly warnings?: string[] };
-      applied = { scene: patched.scene ?? null, warnings: patched.warnings ?? [], rest: Without(patched, ['warnings']) };
+      // The live scene (the timeline's adds included) while a timeline cue changed it; the authored document otherwise.
+      const patched = (await this.page.Call('patch_scene', { operations })) as Record<string, unknown> & { readonly scene?: SceneDocument; readonly live?: SceneDocument; readonly warnings?: string[] };
+      applied = { scene: patched.live ?? patched.scene ?? null, warnings: patched.warnings ?? [], rest: Without(patched, ['warnings']) };
     }
     return applied;
   }

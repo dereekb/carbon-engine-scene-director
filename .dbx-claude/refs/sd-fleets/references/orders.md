@@ -11,8 +11,10 @@ and `Director.OrderFleet`.
 { "fleet": "tfis", "squad": "logi", "by": "tfis-logi-01", "delay": 0.3, "order": { "type": "warp", "point": [0, 0, 600000] } }
 ```
 
-One plain object (`FleetOrderRequest`, validated by `normalizeFleetOrderRequest`). A future timeline beat embeds it
-unchanged and runs it through `Director.OrderFleet`.
+One plain object (`FleetOrderRequest`, validated by `normalizeFleetOrderRequest`). A timeline cue (`sd-timeline`)
+embeds it unchanged as `{ "order_fleet": <request> }` and the page runs it from the pre-boundary hook through
+`Director.FleetOrderNow`, the synchronous twin of `OrderFleet` (they share `FleetRequest`): moves, warps and targets as
+the tool runs them; anchor / break-off / regroup edit the **live scene only** (`CueEdit`), then fly their live half.
 
 - **Selection**: `fleet`, narrowed by `wing` xor `squad` (`switch_prop_mods`' `fleets/selection.ts`). `ships` is
   refused with a pointer to `order_ship`. **The FC is never part of a wing or squad order** (it heads the whole fleet);
@@ -115,7 +117,9 @@ follow-the-FC). An FC giving a wing or squad warp does not warp itself.
 
 `delay` (0–1) on `order_fleet` and `switch_prop_mods`: every ship but the giver responds after its own time,
 `toPilotDelays`: uniform in [0, delay × `MAX_FLEET_ORDER_DELAY` (10 s)] in whole ticks, from an FNV-1a hash of the
-group key, the tick and the ship id, so the same order at the same tick (a timeline replay) responds the same way.
+group key, the tick and the ship id, so the same order at the same tick responds the same way. The tick is the world's
+absolute tick, which keeps counting across loads: keying it on scene ticks (so a timeline replay draws the same delays)
+is the timeline's T3.
 
 - `DestinyWorld.Order(id, order, { delay })` keeps the pending order until its boundary (`pendingAt`);
   `WarpInFormation` and `SwitchPropMod` take the same delay (a queued switch is re-checked when made; the document's

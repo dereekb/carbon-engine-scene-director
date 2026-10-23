@@ -27,7 +27,10 @@ import {
   type SceneLocation,
   type SceneObjectStateReport,
   type SceneVector,
-  type ShipFleetMembership
+  type ShipFleetMembership,
+  type ShipScriptReport,
+  type TimelineSummary,
+  type CueReport
 } from '@scene-director/scene';
 import { AudioBankCache } from './lib/hub/audio-cache';
 import { Hub } from './lib/hub/hub';
@@ -741,6 +744,15 @@ function YawGap(a: number, b: number): number {
  */
 function Delay(ms: number): Promise<void> {
   return new Promise((done) => setTimeout(done, ms));
+}
+
+/**
+ * The timeline tool's report.
+ */
+interface TimelineToolReport extends TimelineSummary {
+  readonly list: CueReport[];
+  readonly ships: ({ readonly ship: string } & ShipScriptReport)[];
+  readonly held: boolean;
 }
 
 const toolsCore = new ToolsCore({ url: Option('--tools-core', DEFAULT_TOOLS_CORE) });
@@ -3826,6 +3838,219 @@ try {
     const note = refused ?? cinemaOf(await call<ViewerState>('get_state')).note ?? '';
     Expect(/still arriving by warp/u.test(note), `flank-port: ${note}`);
     return `anchored ${Math.round(between(eye, landing))} m from the landing with ${arriving.length} still arriving; flank-port: ${note}`;
+  });
+
+  // The timeline (T2): each check loads its own scripted scene. The ships carry all four stats, so only the called-targets
+  // check needs the SDE; --only timeline: runs them alone.
+  const TIMELINE_STATS = { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35 };
+  const Scripted = (id: string, position: SceneVector, extra: object = {}) => ({ id, dna: 'mf4_t1:minmatarbase:minmatar', type: 'Rifter', position, stats: TIMELINE_STATS, ...extra });
+  const TimelineOf = (state: ViewerState): Maybe<TimelineSummary> => (state as unknown as { readonly timeline?: Maybe<TimelineSummary> }).timeline ?? null;
+  const HeldOf = (state: ViewerState): boolean => (state.simulation as { readonly held?: boolean }).held === true;
+  const ScriptOf = (state: ViewerState, id: string): Maybe<ShipScriptReport> => (ShipIn(state, id) as { readonly script?: ShipScriptReport }).script ?? null;
+  const TimelineTool = (args: Record<string, unknown> = {}) => call<TimelineToolReport>('timeline', args);
+  const LoadTimeline = (scene: object, args: Record<string, unknown> = {}) => call<{ readonly warnings: string[] }>('load_scene', { scene: { name: 'verify-timeline', ...scene }, ...args });
+  const WaitTimeline = (what: string, seconds: number, test: (timeline: Maybe<TimelineSummary>, state: ViewerState) => Maybe<string>) => WaitFor(what, seconds, (polled) => test(TimelineOf(polled), polled));
+  const Played = (what: string, seconds: number, time: number) => WaitTimeline(what, seconds, (timeline) => ((timeline?.time ?? -1) >= time ? null : Show(timeline)));
+  const Done = (seconds: number) => WaitTimeline('the timeline is done', seconds, (timeline) => (timeline?.state === 'done' ? null : Show(timeline)));
+  const FiredAt = (report: TimelineToolReport): Record<string, number> => Object.fromEntries(report.list.filter((cue) => cue.tick != null).map((cue) => [cue.id, (cue.tick ?? 0) - (report.startedAt ?? 0)]));
+  const Direction = (ship: string, direction: SceneVector) => ({ order_ship: { id: ship, order: { type: 'direction', direction } } });
+
+  await Check('timeline: a scripted scene prepares with the clock held, then fires each cue on its tick', async () => {
+    const before = (await call<ViewerState>('get_state')).simulation.tick;
+    await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0]), Scripted('b', [0, 0, 5000])],
+      timeline: [
+        { id: 'go', at: 0, ...Direction('a', [0, 0, 1]) },
+        { id: 'mwd', at: 2.5, switch_prop_mods: { ships: ['a'], active: true } },
+        { id: 'lock', at: 3, set_target: { ships: ['a'], target: 'b' } },
+        { id: 'halt', at: 5, order_ship: { id: 'a', order: { type: 'stop' } } }
+      ]
+    });
+    const first = await call<ViewerState>('get_state');
+    const opening = `${TimelineOf(first)?.state}${HeldOf(first) ? ' (held)' : ''}`;
+    Expect(['preparing', 'playing', 'ready'].includes(TimelineOf(first)?.state ?? '') && (TimelineOf(first)?.state !== 'preparing' || HeldOf(first)), `after the load: ${opening}`);
+    const done = await Done(30);
+    const report = await TimelineTool();
+    const fired = FiredAt(report);
+    Expect((report.startedAt ?? 0) >= before, `t = 0 at ${report.startedAt}, before the load ${before}`);
+    Expect(fired['go'] === 0 && fired['mwd'] === 3 && fired['lock'] === 3 && fired['halt'] === 5, Show(fired));
+    const since = (ShipIn(done, 'a').propMod as Maybe<{ readonly since?: number }>)?.since;
+    Expect(since === (report.startedAt ?? 0) + 3, `prop mod since ${since}, t = 0 at ${report.startedAt}`);
+    Expect(report.cues.fired === 4 && report.cues.total === 4 && !HeldOf(done), Show(report.cues));
+    return `${opening} after the load; t = 0 at tick ${report.startedAt}; fired at +${Object.values(fired).join(', +')}`;
+  });
+
+  await Check('timeline: ship orders chain on completion, after and duration', async () => {
+    await LoadTimeline({ ships: [Scripted('a', [0, 0, 0], { orders: [{ type: 'goto', point: [0, 0, 3000] }, { type: 'stop' }, { after: 2, type: 'direction', direction: [1, 0, 0], duration: 5 }, { type: 'stop' }] })] });
+    const states: string[] = [];
+    const steps = new Map<number, number>();
+    let applied: Maybe<number> = null;
+    await WaitFor('the script is done', 60, (polled) => {
+      const script = ScriptOf(polled, 'a');
+      const label = `${script?.step}:${script?.state}`;
+      if (script && states[states.length - 1] !== label) states.push(label);
+      if (script && !steps.has(script.step)) steps.set(script.step, polled.simulation.tick);
+      if (applied == null && ShipIn(polled, 'a').order?.type === 'direction') applied = polled.simulation.tick;
+      return script?.state === 'done' ? null : Show(script);
+    });
+    const waitStart = steps.get(2) ?? 0;
+    Expect(applied != null && Math.abs(applied - waitStart - 2) <= 1, `step 2 waited from ${waitStart}, its order applied at ${applied}`);
+    Expect(steps.get(3) != null && Math.abs((steps.get(3) ?? 0) - (applied ?? 0) - 5) <= 1, `step 2 applied at ${applied}, step 3 from ${steps.get(3)}`);
+    return states.join(' -> ');
+  });
+
+  await Check('timeline: a patch cue adds a ship to the live scene; get_scene and save_scene keep the authored document', async () => {
+    await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0])],
+      timeline: [
+        { id: 'add', at: 2, patch_scene: { operations: [{ op: 'add_ship', ship: Scripted('late', [2000, 0, 0]) }] } },
+        { id: 'fly', at: 4, order_ship: { id: 'late', order: { type: 'goto', point: [2000, 0, 3000] } } }
+      ]
+    });
+    const done = await Done(30);
+    const authored = await call<SceneDocument>('get_scene');
+    const live = await call<SceneDocument>('get_scene', { live: true });
+    const cue = authored.timeline?.cues.find((candidate) => candidate.id === 'add');
+    Expect(done.ships.some((ship) => ship.id === 'late') && live.ships.some((ship) => ship.id === 'late'), 'late is live');
+    Expect(!authored.ships.some((ship) => ship.id === 'late') && Show(cue?.adds?.ships) === '["late"]', `authored: ${authored.ships.map((ship) => ship.id).join(', ')}; adds ${Show(cue?.adds)}`);
+    Expect(TimelineOf(done)?.liveEdits?.count === 1, Show(TimelineOf(done)?.liveEdits));
+    await call('save_scene', { name: 'verify-timeline-saved' });
+    const saved = await scenes.Get('verify-timeline-saved');
+    Expect(saved != null && !saved.document.ships.some((ship) => ship.id === 'late') && saved.document.timeline?.cues.length === 2, `saved: ${Show(saved?.document.ships.map((ship) => ship.id))}`);
+    await TimelineTool({ action: 'restart' });
+    const restarted = await call<ViewerState>('get_state');
+    Expect(!restarted.ships.some((ship) => ship.id === 'late'), 'late is still there after the restart');
+    const back = await WaitFor('late comes back at 2 s', 20, (polled) => (polled.ships.some((ship) => ship.id === 'late') ? null : Show(TimelineOf(polled))));
+    return `late live, not authored; saved ${saved?.document.ships.length} ship(s) with ${saved?.document.timeline?.cues.length} cues; back at ${TimelineOf(back)?.time} s after the restart`;
+  });
+
+  await Check('timeline: a targets cue calls a primary for the fleet', async () => {
+    await LoadCombatScene(
+      [Punisher('b1', [0, 0, 0]), Punisher('b2', [0, 0, 800]), Rifter('r1', [0, 0, 20000])],
+      { death: 'flag' },
+      {
+        fleets: [{ id: 'b', commander: 'b1', wings: [{ id: 'b-w', squads: [{ id: 'b-s', role: 'dps', members: ['b2'] }] }] }],
+        timeline: [{ id: 'call', at: 1, order_fleet: { fleet: 'b', order: { type: 'targets', primary: 'r1' } } }]
+      }
+    );
+    const called = await WaitFor('the members take the call', 30, (polled) => (['b1', 'b2'].every((id) => ShipIn(polled, id).target?.id === 'r1') ? null : Show(['b1', 'b2'].map((id) => ShipIn(polled, id).target))));
+    const report = await TimelineTool();
+    Expect(FiredAt(report)['call'] === 1, Show(FiredAt(report)));
+    Expect(ShipIn(called, 'b2').target?.source === 'called', Show(ShipIn(called, 'b2').target));
+    return `fired at +1; b1 ${Show(ShipIn(called, 'b1').target?.source)}, b2 ${Show(ShipIn(called, 'b2').target?.source)}`;
+  });
+
+  await Check('timeline: edits while playing: missed, retimed, pruned, refused, live only', async () => {
+    await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0]), Scripted('b', [0, 0, 4000])],
+      timeline: [
+        { id: 'go', at: 1, ...Direction('a', [0, 0, 1]) },
+        { id: 'add', at: 2, patch_scene: { operations: [{ op: 'add_ship', ship: Scripted('late', [3000, 0, 0]) }] } },
+        { id: 'later', at: 60, order_ship: { id: 'a', order: { type: 'stop' } } },
+        { id: 'b-go', at: 70, ...Direction('b', [1, 0, 0]) },
+        { id: 'move-a', at: 80, patch_scene: { operations: [{ op: 'update_ship', id: 'a', set: { position: [0, 0, 100] } }] } }
+      ]
+    });
+    const at = (await Played('the timeline reaches 4 s', 30, 4).then(TimelineOf))?.time ?? 4;
+    await call('patch_scene', { operations: [{ op: 'add_cue', cue: { id: 'past', at: 1, ...Direction('a', [1, 0, 0]) } }] });
+    await call('patch_scene', { operations: [{ op: 'update_cue', id: 'later', set: { at: at + 3, ...Direction('a', [0, 1, 0]) } }] });
+    const pruned = await call<{ readonly warnings: string[] }>('patch_scene', { operations: [{ op: 'remove_ship', id: 'b' }] });
+    const refused = await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'a' }] }).then(() => null, ErrorMessage);
+    const liveOnly = await call<{ readonly warnings: string[] }>('patch_scene', { operations: [{ op: 'update_ship', id: 'late', set: { name: 'Late Rifter' } }] });
+    await WaitTimeline('the retimed cue fires', 20, (timeline) => (timeline?.last?.some((cue) => cue.id === 'later' && cue.state === 'fired') ? null : Show({ last: timeline?.last, failed: timeline?.failed })));
+    const report = await TimelineTool();
+    const state = (id: string) => report.list.find((cue) => cue.id === id)?.state;
+    Expect(state('past') === 'missed', `past: ${state('past')}`);
+    Expect(state('later') === 'fired' && !report.list.some((cue) => cue.id === 'b-go'), `later ${state('later')}; ${report.list.map((cue) => cue.id).join(', ')}`);
+    Expect(
+      pruned.warnings.some((warning) => warning.includes('b-go')),
+      Show(pruned.warnings)
+    );
+    Expect(refused != null && refused.includes('move-a'), `remove a: ${refused}`);
+    Expect(
+      liveOnly.warnings.some((warning) => warning.startsWith('applies live only')),
+      Show(liveOnly.warnings)
+    );
+    return `missed, retimed to ${at + 3} s and fired; pruned "${pruned.warnings[0]}"; refused "${refused?.slice(0, 80)}"`;
+  });
+
+  await Check('timeline: pause holds the cues and scripts; play resumes them later', async () => {
+    await LoadTimeline({ ships: [Scripted('a', [0, 0, 0])], timeline: [{ id: 'late', at: 4, ...Direction('a', [0, 0, 1]) }] });
+    const started = await Played('the timeline plays', 30, 1);
+    const paused = await TimelineTool({ action: 'pause' });
+    const pausedTick = (await call<ViewerState>('get_state')).simulation.tick;
+    await Delay(5000);
+    const still = await TimelineTool();
+    Expect(still.state === 'paused' && still.cues.fired === 0 && still.time === paused.time, Show({ state: still.state, time: still.time, cues: still.cues }));
+    const playTick = (await call<ViewerState>('get_state')).simulation.tick;
+    await TimelineTool({ action: 'play' });
+    await Done(20);
+    const report = await TimelineTool();
+    const firedAt = FiredAt(report)['late'];
+    const shift = playTick - pausedTick;
+    Expect(Math.abs(firedAt - (4 + shift)) <= 1, `fired at +${firedAt}, paused ${shift} ticks`);
+    return `paused at ${paused.time} s (t ${TimelineOf(started)?.time}) for ${shift} ticks; fired at +${firedAt}`;
+  });
+
+  await Check('timeline: camera cues drive the cinema as the timeline; camera off skips them', async () => {
+    const pose = (eye: SceneVector) => ({ play_shot: { pose: { eye, look: { ship: 'a' } } } });
+    await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0])],
+      timeline: [
+        { id: 'shot', at: 1, ...pose([0, 2000, -8000]) },
+        { id: 'stop', at: 3, stop_shot: {} },
+        { id: 'again', at: 6, ...pose([0, 4000, -8000]) }
+      ]
+    });
+    const driven = await WaitFor('the timeline drives the camera', 20, (polled) => ((polled.cinema as { readonly driver?: string }).driver === 'timeline' ? null : Show(polled.cinema)));
+    const stopped = await WaitFor('the stop cue hands it back', 20, (polled) => ((polled.cinema as { readonly state?: string }).state === 'idle' ? null : Show(polled.cinema)));
+    await TimelineTool({ camera: false });
+    await Done(20);
+    const report = await TimelineTool({ camera: true });
+    const again = report.list.find((cue) => cue.id === 'again');
+    Expect(again?.state === 'skipped' && again.note === "the timeline's camera is off", Show(again));
+    return `driver ${(driven.cinema as { readonly driver?: string }).driver}, then ${(stopped.cinema as { readonly state?: string }).state}; again ${again?.state}`;
+  });
+
+  await Check('timeline: bad timelines are refused with every problem; a name target only warns', async () => {
+    // A cue that fails to read skips the projection, so unknown ids are refused in a second load.
+    const error = await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0], { orders: [{ type: 'orbit', target: 'a2', range: 500 }, { type: 'stop' }] }), Scripted('a2', [0, 0, 3000])],
+      timeline: [
+        { at: -1, ...Direction('a', [0, 0, 1]) },
+        { at: 2, when: 'later', ...Direction('a', [0, 0, 1]) },
+        { at: 2, ...Direction('a', [0, 0, 1]), cease_fire: { ships: ['a'] } },
+        { at: 2, patch_scene: { operations: [{ op: 'set_environment', environment: { universe: 'res:/x' } }] } }
+      ]
+    }).then(() => null, ErrorMessage);
+    const unknown = await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0])],
+      timeline: [
+        { at: 1, order_ship: { id: 'ghost', order: { type: 'stop' } } },
+        { at: 1, order_fleet: { fleet: 'nofleet', order: { type: 'stop' } } }
+      ]
+    }).then(() => null, ErrorMessage);
+    const missing = ['at must be', 'when is reserved', 'exactly one action', 'set_environment', 'never ends'].filter((text) => !(error ?? '').includes(text));
+    Expect(error != null && !missing.length, `missing ${missing.join(', ')} in: ${error}`);
+    Expect(unknown != null && ['ghost', 'nofleet'].every((text) => unknown.includes(text)), `unknown ids: ${unknown}`);
+    const named = await LoadTimeline({ ships: [Scripted('a', [0, 0, 0])], timeline: [{ at: 1, order_ship: { id: 'a', order: { type: 'approach', target: 'Some Station' } } }] });
+    Expect(
+      named.warnings.some((warning) => warning.includes('Some Station')),
+      Show(named.warnings)
+    );
+    return `${(error ?? '').split(';').length} problems in one error; name: "${named.warnings.find((warning) => warning.includes('Some Station'))}"`;
+  });
+
+  await Check('timeline: a paused load holds at t = 0 until play', async () => {
+    await LoadTimeline({ ships: [Scripted('a', [0, 0, 0])], timeline: [{ id: 'go', at: 0, ...Direction('a', [0, 0, 1]) }] }, { timeline: 'pause' });
+    const ready = await WaitTimeline('the timeline is ready', 30, (timeline) => (timeline?.state === 'ready' ? null : Show(timeline)));
+    Expect(HeldOf(ready), 'the clock is not held');
+    await Delay(3000);
+    const still = await call<ViewerState>('get_state');
+    Expect(TimelineOf(still)?.cues.fired === 0 && still.simulation.tick === ready.simulation.tick, `fired ${TimelineOf(still)?.cues.fired}, tick ${ready.simulation.tick} -> ${still.simulation.tick}`);
+    await TimelineTool({ action: 'play' });
+    const done = await Done(20);
+    return `ready and held at tick ${ready.simulation.tick} for 3 s; played: ${TimelineOf(done)?.cues.fired} fired from tick ${TimelineOf(done)?.startedAt}`;
   });
 
   if (rendering) {

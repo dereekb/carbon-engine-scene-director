@@ -6,9 +6,9 @@
 > `ShipScripts`. The plan this follows: `~/.claude/plans/scene-timeline-and-per-ship-orders-validated-played-on-the-scene-clock-reported.md`
 > (slices T1 document → T2 page player → T3 determinism → T4 `at` on the tools → T5 real-GPU look).
 
-**Status: T1 (the document) has landed.** The schema, validation, patch ops, diff and pruning are real; the page does
-not play the script yet. Every document with a script warns `TIMELINE_NOT_PLAYED_WARNING` ("validated and stored; the
-page plays them from the next release"); T2 deletes it.
+**Status: T1 (the document) and T2 (the page player) have landed.** The page plays the script on Destiny ticks and
+reports it. T3 (pilot delays and warp-in staggers keyed on scene ticks, prefetched lookups for cue-added ships), T4 (`at`
+on the lever tools) and T5 (the real-GPU scripted fight) follow.
 
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
@@ -21,7 +21,12 @@ page plays them from the next release"); T2 deletes it.
 | `normalize.ts` | `normalizeSceneTimeline`: read, ids, sort, the projection walk, `adds` pinning |
 | `operations.ts` | `TIMELINE_OPERATIONS` + `applyTimelineOperation` (wired into `applyOperation`'s `default:`) |
 | `prune.ts` | `removeTimelineReferences`, called by `remove_ship`, `remove_object`, `remove_fleet`, `remove_wing`, `remove_squad` |
-| `report.ts` | `TIMELINE_STATES`, `CUE_STATES`, `SHIP_SCRIPT_STATES` and the report shapes (get_state, the `timeline` tool) for T2 |
+| `report.ts` | `TIMELINE_STATES`, `CUE_STATES`, `SHIP_SCRIPT_STATES` and the report shapes (get_state, the `timeline` tool) |
+
+The page (`apps/viewer/src/lib/`, node-tested, no runtime): `timeline.ts` (`TimelinePlayer` over a `TimelinePort`,
+`TimelineText` for the HUD; `timeline.spec.ts`), `ship-scripts.ts` (`ShipScripts` over a `ShipScriptsPort`;
+`ship-scripts.spec.ts`), `clock.ts` (`Hold` / `Release`), `destiny.ts` (`OnBeforeBoundary`; `destiny-timeline.spec.ts`).
+The director is both ports.
 
 ## The document
 
@@ -124,11 +129,93 @@ page plays them from the next release"); T2 deletes it.
 - **`patch_scene` cues are never pruned**: a patch that no longer applies refuses the removal (above), the same rule as
   "a fleet commander is never removed implicitly".
 
-## Decisions for the later slices (plan §2.8–§2.18)
+## Playing it (the page)
 
-- Cues fire in `DestinyWorld.OnBeforeBoundary`, before `ApplyPropMods`, so a cue is exactly "that MCP call made just
-  before that tick"; scripts step first, then cues in (due, document order). A scripted load holds the scene clock while
-  the scene prepares; t = 0 is the next tick. The page keeps the authored document (what `get_scene` / `save_scene` /
-  the working copy hold) apart from the live scene (authored minus `timeline`, plus live edits).
-- Time control snapshots `TimelinePlayer.Snapshot()` beside Destiny's state; fast-forward loops `Tick`, so it fires
-  cues for free. Movie mode replaces `missed` (a cue added into the past) with re-simulation.
+- **When cues fire.** `DestinyWorld.OnBeforeBoundary` runs at the top of a due boundary, **before `ApplyPropMods`**
+  (`sd-destiny`), so a cue is exactly the MCP call made just before that tick: an order applies at this boundary, a prop
+  mod switch-on is active since this boundary, a module activation lands in this boundary's cycle, a lock starts at the
+  next. Within one tick the ship scripts step first (`ships[]` order), then the due cues fire in document order (sorted
+  by `at`). Fast-forward (Time control) loops `Tick`, so it fires cues for free.
+- **Timeline time** is whole seconds played (`played` boundaries since t = 0; get_state `time` = played − 1). A cue fires
+  at played tick `cueDueSecond(at)`. Pause stops `played`: later cues and step waits shift by the pause while the ships
+  fly on.
+- **States** (`TimelinePlayer`): `idle` (unscripted: no cues, no ship `orders`; never holds the clock, get_state
+  `timeline: null`), `stopped`, `preparing`, `ready`, `playing`, `paused`; get_state reads `done` while playing with no
+  pending cue and every script settled (a `holding` script counts as settled). A cue added later in the future plays on.
+- **Prepare.** A load of a scripted document (`load_scene`, `open_scene`, the startup restore of the working copy,
+  `timeline restart`) holds the scene clock (`SceneClock.Hold`) and checks `Director.SceneSettled()` every frame
+  (`DriveTimeline`, first in `main.ts`'s loop): every live ship's `/ship-stats` answered (a failure counts), its prop
+  mod looked up, its fit not pending (or without a fit its hull type not `TypePending`), its build not queued /
+  building; every fleet planned (`FleetFollowing.Ready`); every object built; the location not loading. Then the clock
+  releases and the next boundary is t = 0, so every run starts from the same state. Cap
+  `TIMELINE_PREPARE_LIMIT_SECONDS` 60 s of wall time, then it starts anyway with `note: "started after 60 s with 3
+  builds and 1 lookup pending: this run may differ"`. `load_scene` / `open_scene { timeline: "pause" }` and `timeline
+  restart { paused: true }` end the prepare in `ready`, held at t = 0 until `timeline play`.
+- **A live scene that gains its first cue or steps** is `stopped` (never auto-starts while Claude authors); `timeline
+  play` starts it live with t = 0 at the next tick, `restart` replays it from the placements.
+- **Errors.** A cue is marked processed before its lever runs and caught per cue: a throw is `failed` with the
+  message, never re-fired. `FireCue` maps each action to its lever (`OrderShip`, `FleetOrderNow`, `SwitchPropMods`,
+  `SwitchModules`, `SetTarget`, `Engage`, `CeaseFire`, `AutoRepairNow`, `PlayShot(…, 'timeline', time)`, `StopShot`,
+  `CueEdit`) and keeps a compact result (scalars kept, lists counted, the first 10 skips and warnings).
+- **Ship scripts** (`ShipScripts`): a live ship with `orders` starts its script at the next played tick; an `orders`
+  change (JSON) restarts it from step 0 ("its orders changed"); a removed ship's script goes. A step's order is given
+  in the hook (through `OrderShip`, so names resolve and a fleet member detaches) once `after` ticks passed, waiting
+  while the ship is `arriving` (a warp-in) or in warp. It ends `ceil(duration)` ticks after it was given, or on
+  completion (`shipStepCompletion`; a warp completes on a landing of its own warp, not one it began with). States
+  `waiting`, `arriving`, `flying`, `holding` (the last, never-ending order), `done`, `failed` (a refusal, or the world
+  dropped the order: `orderNote`), `interrupted` (the ship flies another order), `destroyed`.
+- **Camera cues** play with the `timeline` cinema driver from the boundary's scene time (`sd-cinema`); `stop_shot`
+  cues stop only a timeline shot (else `skipped`); `timeline { camera: false }` releases a timeline shot and skips
+  later camera cues (until the tab reloads).
+
+## The authored document and the live scene
+
+Document cues (`patch_scene`, `auto_repair`, `order_fleet` anchor / break-off / regroup) change **the live scene only**
+(`CueEdit`: `applySceneOperations(live)` → `ApplyNow` → a live edit → `FinishApply` outside the edit queue, no store
+write). `get_scene`, `save_scene` and the working copy keep the authored document, so saving mid-play saves the script,
+not its effects, and a restart replays it. Details, user edits while live edits exist (live-only, authored-only) and the
+Apply split: `sd-scene-document` "The authored document and the live scene". The live scene normalizes ship steps that
+target cue-added ships as names; the user sees the authored document's warnings, never the live normalize's.
+
+- **Timeline edits while it plays** (`TimelinePlayer.Edit`): a new or retimed cue whose due second is still ahead is
+  pending; one in the past is `missed` ("added after its time: it plays from the next restart"); a fired cue keeps its
+  record (an edit notes "edited after it fired: the edit plays on a restart"; a removal keeps it in the log, "removed
+  after it fired"). A scene that loses every cue and step goes `idle`.
+
+## Reporting
+
+- **get_state** `timeline` (null when idle): `state`, `time`, `startedAt` (world tick of t = 0), `camera`, `cues` (total
+  and per state), `next` (≤ 5 pending, with `in`), `last` (≤ 5 processed), `failed` (≤ 10 with `error`), `scripts`
+  (counts per state), `liveEdits { count, last }`, `preparing { seconds, waiting: lookups, fits, builds, fleets,
+  objects, location }`, `note`. Each scripted ship: `script { state, step, steps, order, startsIn, endsIn, note }`.
+  `simulation.held: true` while the clock is held. The HUD row: `playing · 42 s · 7/12 cues (1 failed)` or
+  `preparing · 3 builds and 1 lookup`.
+- **The `timeline` tool** (page, in the hub's `SLOW_TOOLS`): `{ action?: status | play | pause | restart, paused?
+  (restart only), camera? }` → the summary plus `list` (every cue: id, at, name, action, kind, state, tick, note, error,
+  result), `ships` (every script), `liveEdits` (source, cue, tick, operation count, adds) and `held`; `restart` adds the
+  load's `warnings` and `changes`. `play` on an idle scene throws "the scene has no timeline or ship orders".
+
+## Seams for Time control and Movie mode
+
+`TimelinePlayer.Snapshot()` / `Restore()` (cursor, played, cue records, camera, the scripts' plain state) round-trip
+through `structuredClone` (spec'd); `liveEdits` lets a jump back re-derive the live scene. `SceneClock.Hold` is the
+primitive Time control's pause generalizes. Due ticks per cue are where event cues (`when`, reserved) plug in; Movie
+mode replaces `missed` with re-simulation.
+
+## verify-page (`--only timeline:`, headless, real tools-core)
+
+Checks (a)–(i) of the plan, each loading its own scene of stats-carrying Rifters (only the targets check needs the
+SDE). Run 2026-10-23 on dbxpc: a load showed `preparing (held)`, t = 0 after the load, cues fired at +0, +3, +3, +5 with
+the MWD active since t + 3; a script ran `0:flying → 1:flying → 2:waiting → 2:flying → 3:flying → 4:done` with its after
+and duration on the tick; a patch cue's `late` was live but not authored, saved files had 1 ship and 2 cues, and a
+restart removed it until 2 s; a targets cue fired at +1 and both members took `called` targets; edits while playing gave
+`missed`, a retimed cue fired, `remove_ship b` pruned its cue, `remove_ship a` was refused naming the patch cue that
+moves it, and an edit of the cue-added ship applied live only; a 5-tick pause shifted a 4 s cue to +9; camera cues
+drove the cinema as `timeline`, the stop cue made it idle and camera off skipped the next; bad timelines were refused
+with every problem (reading problems in one load, unknown ids in another: a cue that fails to read skips the
+projection); a paused load held at t = 0 for 3 s, then played.
+
+The full verify-page after the Apply split (T2): 129 ok, 1 skip (headless audio), 2 FAIL that both reproduce on the
+pre-T2 commit (d272abf), built in a temp worktree: "a moving FC dies …" (a race: when the FC dies while the wing
+commander still catches up, it slows by design; 1 run in 5 on HEAD, the same numbers) and "the warp-in shot anchors …"
+(flank-port is not refused for an arriving fleet). Both filed as follow-ups.

@@ -79,9 +79,35 @@ SDE radii, celestials, saved compositions) is resolved by the **hub tool of the 
 A new op family: export an `*_OPERATIONS` set + `apply*Operation(operation, context)` and add it to the `default:`
 branch of `applyOperation` in `scene.ts`.
 
+## The authored document and the live scene (`sd-timeline`)
+
+The page keeps two documents. **`Director.authored`** is the document as authored, timeline included: what
+`get_scene`, `save_scene` (both stores) and the IndexedDB working copy hold, so a tab reload restores the script and
+restarts it. **`Director.scene`** is the **live scene** every subsystem reads: the authored document **without its
+`timeline`**, plus the **live edits** (`liveEdits`: what document cues changed, and user edits only the live scene took).
+Without a timeline in it, normalizing it never projects, and cue-added ids never collide with their own cues. The
+"live state is never written" rule extends to document cues: a warp-in add by a cue is never saved.
+
+- `get_scene` returns the authored document; `{ live: true }` the live scene; `{ at }` the authored document projected
+  to that timeline time (`sceneAtTimelineTime`). Hub tools read `{ live: true }` (`ScenePlaces.Before`) and take the
+  patch result's `live ?? scene` (`ScenePlaces.Apply`).
+- **User edits** (`Director.Edit`: patch_scene, order_fleet's document half, auto_repair, a persisted camera, the
+  pointer's camera, every hub tool's forwarded op) run through the edit queue. With no live edits: the authored document
+  takes the ops and the live scene follows it (today's path). With live edits: both take the ops (the timeline ops the
+  authored document only); **live-only** when only the live scene takes them and they name a timeline-added id
+  (warning "applies live only …: it lasts until the timeline restarts"); **authored-only** when only the authored
+  document does (warning "the live scene refused it (…): it applies from the next restart"); any other refusal is
+  thrown. The patch result's `scene` is the authored document, plus `live` while live edits exist.
+- **The Apply split**: `Apply(authored, { restart, paused, live })` → `ApplyNow(live)` (the synchronous part: diff,
+  revivals, removals, `this.scene =`, cinema releases, location, combat, a load's clears, balls, arrivals, object balls,
+  retunes, prop mods, formations, and the builds' `queued` live entries) → the timeline player takes the authored
+  document (`Load` on a restart, else `Edit`) → `store.Put(CURRENT_KEY, authored)` → `FinishApply` (builds, object
+  builds, draw reach, the arrivals' plan, reframe, report). `CueEdit` (a document cue, from the pre-boundary hook) runs
+  `ApplyNow` on the live scene and starts `FinishApply` outside the queue, with no store write.
+
 ## Diff (`diffScenes`) and what the page does with it
 
-`Director.Apply` diffs the new normalized document against the current one and does only the work the diff names:
+`Director.ApplyNow` diffs the new normalized live scene against the current one and does only the work the diff names:
 
 | `SceneDiff` field | Page action |
 |---|---|

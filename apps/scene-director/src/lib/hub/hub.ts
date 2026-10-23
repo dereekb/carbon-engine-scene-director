@@ -68,7 +68,7 @@ const LOG_LIMIT = 2000;
  * Building ships fetches many files on first use, so scene edits get a long deadline, and so do document fleet orders
  * (order_fleet anchor, break-off and regroup edit the document as patch_scene does).
  */
-const SLOW_TOOLS = new Set(['load_scene', 'open_scene', 'patch_scene', 'order_fleet', 'auto_repair']);
+const SLOW_TOOLS = new Set(['load_scene', 'open_scene', 'patch_scene', 'order_fleet', 'auto_repair', 'timeline']);
 const LOG_LEVEL_RANK: Record<string, number> = { all: 0, info: 0, warn: 1, error: 2 };
 
 export type PageLogLevel = 'info' | 'warn' | 'error';

@@ -340,6 +340,12 @@ export type WarpListener = (event: WarpEvent) => void;
 export type BoundaryListener = (boundary: number) => void;
 
 /**
+ * Called right before a due tick boundary is processed (OnBeforeBoundary) with its master tick and the boundary's
+ * scene-clock time, in 100 ns ticks.
+ */
+export type BeforeBoundaryListener = (boundary: number, time: number) => void;
+
+/**
  * A hull's class and size, from SOF.
  */
 export interface ShipHull {
@@ -861,6 +867,7 @@ export class DestinyWorld {
   private readonly pendingAt = new Map<string, number>();
   private readonly warpListeners = new Set<WarpListener>();
   private readonly boundaryListeners = new Set<BoundaryListener>();
+  private readonly beforeBoundaryListeners = new Set<BeforeBoundaryListener>();
   private readonly propModListeners = new Set<PropModListener>();
   /**
    * Prop mod events waiting for the end of the tick (or the call) that made them.
@@ -1473,6 +1480,23 @@ export class DestinyWorld {
   }
 
   /**
+   * Calls a listener at the top of every due tick boundary, before the prop mods apply: the timeline's cues fire there
+   * (timeline.ts), so a cue is exactly the same MCP call made just before that tick (its order applies at this
+   * boundary, a prop mod switch-on lands in this boundary's ApplyPropMods, a module activation in this boundary's
+   * cycle). It touches no park itself; the listener's calls are the world's ordinary methods. A throwing listener is
+   * logged and the rest still run.
+   *
+   * @param listener - Called with the boundary's master tick and its scene-clock time (100 ns ticks).
+   * @returns The unsubscribe.
+   */
+  OnBeforeBoundary(listener: BeforeBoundaryListener): () => void {
+    this.beforeBoundaryListeners.add(listener);
+    return () => {
+      this.beforeBoundaryListeners.delete(listener);
+    };
+  }
+
+  /**
    * The surface-to-surface distance between two balls, on their EVE radii (negative when they overlap): ships, or an
    * authored object for either (a turret's target).
    *
@@ -2006,7 +2030,8 @@ export class DestinyWorld {
   }
 
   /**
-   * Evolves both parks to `now`. When this call will run a tick, pending orders apply first, then formation warps,
+   * Evolves both parks to `now`. When this call will run a tick, the OnBeforeBoundary listeners run first (the
+   * timeline's cues), then the prop mods and the OnBoundary listeners, then pending orders, then formation warps,
    * then the arrivals due, then every following ship is steered. The clock caps a frame at 1 s and a tick is 1 s, so a call evolves at most one tick: the steering
    * always precedes the tick it is for, which is why there is one OnTick per call rather than a loop. After an evolved
    * tick the warps are tracked and OnWarp's listeners called.
@@ -2018,6 +2043,7 @@ export class DestinyWorld {
     const time = BigInt(Math.round(now));
     const due = time - this.master.time >= BigInt(this.master.tickInterval * TICKS_PER_MS);
     if (due) {
+      this.DeliverBeforeBoundary();
       this.ApplyPropMods();
       this.DeliverBoundary();
       const boundary = this.master.currentTime;
@@ -2173,6 +2199,18 @@ export class DestinyWorld {
 
   private PropModEventOf(kind: PropModEvent['kind'], entry: ShipEntry, cause: PropModCause): void {
     this.propModEvents.push({ kind, id: entry.id, tick: this.master.currentTime, cause });
+  }
+
+  private DeliverBeforeBoundary(): void {
+    const boundary = this.master.currentTime;
+    const time = Number(this.master.time) + this.master.tickInterval * TICKS_PER_MS;
+    for (const listener of this.beforeBoundaryListeners) {
+      try {
+        listener(boundary, time);
+      } catch (error) {
+        console.error(`an OnBeforeBoundary listener failed at tick ${boundary}`, error);
+      }
+    }
   }
 
   private DeliverBoundary(): void {

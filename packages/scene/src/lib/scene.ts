@@ -227,10 +227,6 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', 'personalities', 'combat', 'timeline']);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders']);
 
-/**
- * Until the page plays them (the timeline's player lands in the next slice), a document with a script says so.
- */
-export const TIMELINE_NOT_PLAYED_WARNING = 'timeline and ship orders are validated and stored; the page plays them from the next release';
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
@@ -575,7 +571,6 @@ function normalizeScript(input: NormalizeScriptInput): void {
   warnings.push(...timeline.warnings);
   for (const name of names) if (!timeline.addedTargets.has(name.target)) warnings.push(shipStepNameWarning(name));
   if (timeline.timeline) scene.timeline = timeline.timeline;
-  if (scene.timeline || scene.ships.some((ship) => ship.orders)) warnings.push(TIMELINE_NOT_PLAYED_WARNING);
 }
 
 function normalizeEnvironment(input: unknown, problems: string[], warnings: string[]): SceneEnvironment {

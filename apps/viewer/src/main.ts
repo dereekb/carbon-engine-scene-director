@@ -25,6 +25,7 @@ import { Engine } from './lib/engine';
 import { HubLink } from './lib/link';
 import { LocationText } from './lib/location';
 import { ObjectsText } from './lib/objects';
+import { TimelineText } from './lib/timeline';
 import { LetterboxRect } from './lib/cinema';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
@@ -93,6 +94,8 @@ class Overlay {
     if (dressed) rows.push(['dressing', dressed]);
     const objectsText = ObjectsText((scene?.objects ?? []).map((doc) => ({ status: director?.objects.Entry(doc.id)?.status ?? 'queued' })));
     if (objectsText) rows.push(['objects', objectsText]);
+    const timeline = TimelineText(director?.timeline.Summary());
+    if (timeline) rows.push(['timeline', timeline]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
@@ -233,6 +236,8 @@ async function Start(): Promise<void> {
   let tickError: Maybe<string> = null;
   let liveDirector: Maybe<Director> = null;
   const frame = (timestamp: number): void => {
+    // A preparing timeline releases the clock here, so t = 0 is this frame's boundary at the earliest.
+    liveDirector?.DriveTimeline();
     const now = clock.Advance(timestamp);
     try {
       world.Tick(now);
