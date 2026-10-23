@@ -16,7 +16,9 @@
 - **L3 in** (2026-10-23): the page's `AutoRepair` controller (`apps/viewer/src/lib/auto-repair.ts`, node-tested) runs
   every boundary, the `auto_repair` tool, get_state `autoRepair` per member and per fleet, `switch_modules` taking a
   logi over, and the four verify-page `logi:` checks (evidence below).
-- **Not yet**: L4 (the real-GPU look: TFIs against 10 Ferox, beams, fps, GPU errors).
+- **L4 in, delivered** (2026-10-23): the real-GPU look (TFIs against 10 Ferox; evidence below). Known gaps, filed as
+  follow-ups: the Zarmazd's Perun reps draw no beam, mutadaptive spool, the FAX's triage, lock-free tackle and EWAR,
+  split-fire flip-flops, frame dips on beam restart waves.
 
 ## Files
 
@@ -124,7 +126,42 @@ II) 30 km behind its FC Punisher, default-fit red Rifters 3 km off the Punishers
   nothing to set and an unknown fleet are refused.
 
 The 502s from tools-core's resource proxy (hull materials) during these runs only stop hulls drawing; balls, fits and
-combat run.
+combat run (healthy again for L4).
+
+## Real-GPU evidence (L4, 2026-10-23, Windows Chrome, nvidia lovelace, SDE 3632936)
+
+A private hub on 5522 (temp scenes and fleets dirs; 5521 was held by another session's stale hub), 1600 × 900, at
+Jita IV - Moon 4 - Caldari Navy Assembly Plant; `stage_engagement` TFIs (blue, 44) against 10 default-fit Ferox (red)
+at 20 km.
+Every fit `dogma`, 197 turret sets mounted, 43 in formation, 9 logi (5 Guardians, 3 Zarmazds, the Apostle) idle 30 km
+behind `tfis-fc`. Driver `.scratch/logi-gpu/hold.mjs` (get_state at 2 Hz; artifacts there, never committed).
+
+- **Hold (A, 180 s on `tfis-dps-a-01`)**: shield gone 14 s in; the 8 subcap logi pile on it (4 `under-fire`, 4
+  `covering`; 5 × 256 + 3 × 170.7 = 1,792 HP/s nominal). It takes 503–702 HP/s on armor and gets 616 HP/s (20 s
+  window; overflow at full armor lands `amount: 0`); armor minimum 46,947 / 52,527, 102,116 HP repaired.
+- **Off (B)**: `auto_repair { fleet: "tfis", on: false }` → 9 `off`, reps stop at their cycle end; `tfis-dps-a-02` dies
+  110 s after the engage (shield 12 s, armor 84 s at ~625 HP/s); explosion `generic_explosive_long_01a` drawn (8
+  local blasts, wreck at 5.1 s).
+- **Back on**: `on: null` restores the defaults; the logi re-adopt their old target (`a-01`, Rearm's incumbent) and all
+  move to the new primary `a-03` 6.6 s later; it holds (armor minimum 47,137).
+- **Primary switch** (red `a-03` → `a-04`): the logi follow 10–15 s after the engage (red's lock plus the 10 s window);
+  the new primary's 14k shield covers the lag (armor minimum 47,029). The §6 risk (logi stuck on the old primary while
+  the new one dies) did not show.
+- **Split (C, 5 Ferox each on `a-04` and `a-05`)**: 6/2 at first, then 18 target flips in 25 s (one Guardian six times)
+  before settling 5/3 (`targets`: `a-04` 1,109 HP/s, `a-05` 683 HP/s); both hold (armor minimum ~50,000 and 49,807,
+  each ~270–340 HP/s in and out at the end). The flips are tier churn: each logi that leaves uncovers the other target.
+- **Reach**: the Zarmazds repair at 29.7 km (not idle). The Apostle is `out-of-range` throughout ("under fire 33.7 km
+  off; its reps reach 19.0 km", pre-locking the primary): untriaged capital reps do not reach the line.
+- **Beams**: the Guardians' green remote-armor beams draw across the ~30 km (a bundle in the wide shot) and restart on
+  the new target. The Perun (group 2018) has `effectGuid` `effects.TriglavianBeam,effects.AttackMode`, absent from
+  `MODULE_EFFECTS` (`fitting/effects.ts`, exact match): Zarmazd reps land HP but draw and sound nothing
+  (`moduleEffects.live` peaks at 20, the Guardians' reps alone).
+- **Health**: `gpuErrors` 0, `moduleEffects.failed` 0, `lastFrameError` null, `page_log` no errors (one warn: a
+  tools-core lookup flake during staging); `audio.gameObjects − emitters` 3 (listener + 2 foreign `sun_sfx_atmo`)
+  before and after every phase (emitters 0 → 16).
+- **fps**: 19 at rest; mean 16.1–16.6 per phase (the K3 baseline is 17–23 between kills). Dips to 1–4 fps for about a
+  second line up with module-effect waves: reps starting (9), stopping (2), retarget waves (3–4), and two lone beam
+  restarts in the split (1).
 
 ## The selection (`chooseRepairTargets`, one pass per fleet)
 
