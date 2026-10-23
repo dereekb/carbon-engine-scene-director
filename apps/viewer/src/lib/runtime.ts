@@ -65,7 +65,7 @@ export { CjsWebgpuDevice } from '@carbonenginejs/runtime/trinityal/webgpu';
 export { CjsWebgpuRenderContextAL, CjsWebgpuRenderTarget } from 'runtime-dist/trinityal/webgpu/internal.js';
 export { EveSOF } from '@carbonenginejs/runtime/sof';
 export { RegisterGeometryResources, RegisterSolidColorTexture, RegisterTextureArray, RegisterTexturePack, RegisterTextureResources } from '@carbonenginejs/runtime/resource';
-export { RegisterObjectResources } from '@carbonenginejs/runtime/resource/object';
+export { ObjectResourceExtensions, RegisterObjectResources } from '@carbonenginejs/runtime/resource/object';
 export { RegisterShaderResources } from '@carbonenginejs/runtime/resource/shader';
 export { default as CjsWebgpuFormat } from '@carbonenginejs/runtime/resource/formats/webgpu';
 export { CjsBlackFormat } from '@carbonenginejs/runtime/resource/formats/black';

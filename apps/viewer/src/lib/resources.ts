@@ -5,6 +5,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { DetachObjectRoutes, InAudioDetachScope } from './audio-guard';
 import {
   blue,
   BlueResFileSystemRemote,
@@ -13,6 +14,7 @@ import {
   CjsPngFormat,
   CjsWebgpuFormat,
   ImageIO,
+  ObjectResourceExtensions,
   RegisterGeometryResources,
   RegisterObjectResources,
   RegisterShaderResources,
@@ -114,6 +116,11 @@ export function ConfigureResources(): void {
   RegisterShaderResources(blue.resMan, { translator: CjsWebgpuFormat });
   RegisterGeometryResources(blue.resMan);
   RegisterObjectResources(blue.resMan);
+  // Every object the runtime loads (a controller's child effect, an overlay, an EveChildRef) builds with the audio seams
+  // detached, like the page's own SOF builds, so its emitters stay inert (sd-runtime → Audio).
+  const detached = DetachObjectRoutes(blue.resMan, ObjectResourceExtensions, InAudioDetachScope);
+  const attached = ObjectResourceExtensions.filter((extension) => !detached.includes(extension));
+  if (attached.length) console.warn(`object builds attach audio for .${attached.join(', .')}: the runtime's object route changed (re-check on a pin bump)`);
   SetEffectPathDefaults({ platformName: 'webgpu', shaderModel: SHADER_TIER });
   Tr2Renderer.SetShaderModel(SHADER_MODELS[SHADER_TIER] ?? TR2SHADERMODEL.TR2SM_3_0_DEPTH);
   void FilesReady();

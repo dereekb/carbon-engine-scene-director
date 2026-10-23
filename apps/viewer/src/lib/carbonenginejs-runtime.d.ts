@@ -49,10 +49,32 @@ declare module '@carbonenginejs/runtime/blue' {
     Read(path: string): Promise<Uint8Array>;
   }
 
+  /**
+   * IBlueObjectBuilder: the resource manager keeps one per object file and builds each LoadObject with
+   * `CreateObject(0)` (a runtime-called name).
+   */
+  export interface BlueObjectBuilder {
+    CreateObject(objectMarker?: number, callingProxy?: unknown): unknown;
+    CreateObjectWithYield?(objectMarker?: number, callingProxy?: unknown): unknown;
+  }
+
+  /**
+   * An object extension's builder factory (RegisterObjectBuilder): the file's bytes and preparation context in.
+   */
+  export type BlueObjectBuilderFactory = (bytes: Uint8Array, context: unknown) => BlueObjectBuilder;
+
   export interface BlueResMan {
     Register(options: { readonly source: BlueResourceSource }): unknown;
     UseWorkerLoading(enabled: boolean): void;
     LoadObject(path: string): Promise<unknown>;
+    /**
+     * The extension's registered loader (an object builder factory for `black` / `red`), or null.
+     */
+    GetObjectLoader(extension: string): BlueObjectBuilderFactory | null;
+    /**
+     * Replaces the extension's loader with a builder factory: every LoadObject builds through its builder.
+     */
+    RegisterObjectBuilder(extension: string, factory: BlueObjectBuilderFactory): BlueResMan;
   }
 
   export interface BluePaths {
@@ -954,6 +976,10 @@ declare module '@carbonenginejs/runtime/resource/object' {
   import type { BlueResMan } from '@carbonenginejs/runtime/blue';
 
   export function RegisterObjectResources(resMan: BlueResMan): void;
+  /**
+   * The object extensions RegisterObjectResources routes (`black`, `red`).
+   */
+  export const ObjectResourceExtensions: readonly string[];
 }
 
 declare module '@carbonenginejs/runtime/resource/shader' {
@@ -1174,13 +1200,20 @@ declare module '@carbonenginejs/runtime/audio' {
   }
 
   /**
+   * A game object registered with the audio manager (an AudGameObjResource: an emitter or the listener).
+   */
+  export interface AudGameObject {
+    readonly name: string;
+  }
+
+  /**
    * Carbon's audio manager (CjsAudioMan.manager).
    */
   export interface AudManager {
     /**
      * Every registered audio game object (emitters and the listener), a copy.
      */
-    GetPrioritizedEmitters(): readonly unknown[];
+    GetPrioritizedEmitters(): readonly AudGameObject[];
   }
 
   export class CjsAudioMan {

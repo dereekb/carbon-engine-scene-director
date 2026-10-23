@@ -117,8 +117,13 @@ export interface AudioSeams {
 }
 
 /**
+ * How deep each seams object is in RunDetached windows: only the outermost one detaches and re-attaches.
+ */
+const DETACHED_DEPTH = new WeakMap<AudioSeams, number>();
+
+/**
  * Runs a build with the audio seams detached, so the audio objects it creates (a SOF hull's emitters) stay headless,
- * and re-attaches them afterwards, also when the build throws. Not re-entrant: a nested call re-attaches early.
+ * and re-attaches them afterwards, also when the build throws. Re-entrant: nested windows detach once.
  *
  * @param seams - The audio manager; null (audio off) just builds.
  * @param build - The synchronous build.
@@ -126,12 +131,107 @@ export interface AudioSeams {
  */
 export function RunDetached<T>(seams: Maybe<AudioSeams>, build: () => T): T {
   if (!seams) return build();
-  seams.Detach();
+  const depth = DETACHED_DEPTH.get(seams) ?? 0;
+  if (depth === 0) seams.Detach();
+  DETACHED_DEPTH.set(seams, depth + 1);
   try {
     return build();
   } finally {
-    seams.Attach();
+    DETACHED_DEPTH.set(seams, depth);
+    if (depth === 0) seams.Attach();
   }
+}
+
+/**
+ * Runs a build with the runtime's audio seams detached (PageAudio.Detached once the page exists).
+ */
+export type AudioDetachScope = <T>(build: () => T) => T;
+
+let audioDetachScope: AudioDetachScope = (build) => build();
+
+/**
+ * Sets the page's detached-audio scope: the runtime's object builds and the scene update run in it.
+ *
+ * @param scope - The page's PageAudio.Detached.
+ */
+export function SetAudioDetachScope(scope: AudioDetachScope): void {
+  audioDetachScope = scope;
+}
+
+/**
+ * Runs a build in the page's detached-audio scope (the identity until SetAudioDetachScope).
+ *
+ * @param build - The synchronous build.
+ * @returns What the build returns.
+ */
+export function InAudioDetachScope<T>(build: () => T): T {
+  return audioDetachScope(build);
+}
+
+/**
+ * IBlueObjectBuilder as the resource manager calls it: `{ Create: builder => builder.CreateObject(0) }`.
+ */
+export interface ObjectBuilder {
+  CreateObject(objectMarker?: number, callingProxy?: unknown): unknown;
+  CreateObjectWithYield?(objectMarker?: number, callingProxy?: unknown): unknown;
+}
+
+/**
+ * What the resource manager keeps per object extension: one builder per file.
+ */
+export type ObjectBuilderFactory = (bytes: Uint8Array, context: unknown) => ObjectBuilder;
+
+/**
+ * The resource manager's object route (CjsBlueResMan GetObjectLoader / RegisterObjectBuilder).
+ */
+export interface ObjectRoutes {
+  GetObjectLoader(extension: string): ObjectBuilderFactory | null;
+  RegisterObjectBuilder(extension: string, factory: ObjectBuilderFactory): unknown;
+}
+
+/**
+ * The builder members DetachedBuilds wraps.
+ */
+const OBJECT_BUILDS = ['CreateObject', 'CreateObjectWithYield'] as const;
+
+/**
+ * Re-registers each extension's object builder so every object it builds is built inside `detach`. An extension
+ * without a loader is skipped.
+ *
+ * @param routes - blue.resMan.
+ * @param extensions - The object extensions (ObjectResourceExtensions: black, red).
+ * @param detach - The scope the builds run in (InAudioDetachScope).
+ * @returns The extensions re-registered.
+ */
+export function DetachObjectRoutes(routes: ObjectRoutes, extensions: readonly string[], detach: AudioDetachScope): readonly string[] {
+  const detached: string[] = [];
+  for (const extension of extensions) {
+    const factory = routes.GetObjectLoader(extension);
+    if (!factory) continue;
+    routes.RegisterObjectBuilder(extension, (bytes, context) => DetachedBuilds(factory(bytes, context), detach));
+    detached.push(extension);
+  }
+  return detached;
+}
+
+/**
+ * Patches one builder instance (its class untouched): CreateObject, and CreateObjectWithYield when present, run
+ * inside `detach`. The runtime keeps one builder per file, so this touches only that file's builds.
+ *
+ * @param builder - What the extension's factory returned.
+ * @param detach - The scope the builds run in.
+ * @returns The same builder.
+ */
+export function DetachedBuilds<B extends ObjectBuilder>(builder: B, detach: AudioDetachScope): B {
+  for (const name of OBJECT_BUILDS) {
+    const original: unknown = builder[name];
+    if (typeof original !== 'function') continue;
+    const value = function (this: unknown, ...args: unknown[]): unknown {
+      return detach(() => Reflect.apply(original, builder, args));
+    };
+    Object.defineProperty(builder, name, { value, writable: true, configurable: true, enumerable: false });
+  }
+  return builder;
 }
 
 function GuardedApplier(original: BackendMember, applier: VoiceApplier, options: WebAudioGuardOptions) {

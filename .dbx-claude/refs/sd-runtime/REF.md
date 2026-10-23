@@ -92,11 +92,9 @@ The running modules' client effects (what they are and when they play: `sd-fitti
 and `EveShip2.isAnimated` / `overlayEffects` / `AddOverlayEffect` / `RemoveOverlayEffect`.
 
 - **Hydration**: `ResourceValues` once per file, then `CjsSchema.from` on a `structuredClone` of the values inside
-  `PageAudio.Detached`, a new object per use. Not `blue.resMan.LoadObject`: it also builds a new object per call
-  (`CjsBlueResMan.js` LoadObject), but asynchronously, so it cannot run detached, and an EveStretch3's
-  `Tr2AudioStretchBase` (three `AudEmitter`s) or the web's `TriObserverLocal` would register with the page's audio.
-  A beam's `audio` / `stretchAudio` are then nulled: `StartFiring` triggers them and controller `Tr2ActionPlaySound`s
-  find their emitters through them.
+  `PageAudio.Detached`, a new object per use. `blue.resMan.LoadObject` builds run detached too (Audio), but
+  ModuleEffects keeps one values read per file and a synchronous build. A beam's `audio` / `stretchAudio` are then
+  nulled: `StartFiring` triggers them and controller `Tr2ActionPlaySound`s find their emitters through them.
 - **Beam ends: write the loaded adapters, never `SetFiringTransform`.** Every module stretch file loads `source` /
   `dest` as `Tr2TranslationAdapter`s (no child curve: they answer `value` at any time). The page copies the drawn
   ClientBall positions into their `value` each frame, before `engine.Frame`.
@@ -167,7 +165,10 @@ Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `Eve
   before makes a miss (no impact, the end point past the target).
 - **The impact gate**: a target's `CreateImpact` draws through its SOF-built `impactOverlay` only once
   `SetImpactDamageState(shield, armor, hull)` (remaining fractions) has been called (`Director.SyncImpactState`;
-  declared on `EveShip2` and `EveSpaceObject2`); without a call no impacts draw at all.
+  declared on `EveShip2` and `EveSpaceObject2`); without a call no impacts draw at all. It also drives the hull's VDS
+  controller (`res:/fisfx/vds/visualdamagecontroller.red`, the client's Visual Damage System): armor < 12.3 % or hull
+  < 100 % at shader quality 2 loads `vds_trail_fire_01a` (fire and smoke on the damage locators, about 1.5 s later;
+  its emitters inert, see Audio).
 
 ## Explosions (`explosions.ts`)
 
@@ -200,14 +201,34 @@ audio frame wakes it in range. `CjsAudioMan` starts only after a user gesture (o
 backend does not apply an event's authored stop relationships (a `_powerdown` that should stop `_on` leaves it looping),
 so the page stops such voices itself (`sd-ship-stats`). Which events play: `sd-ship-stats`.
 
-- **SOF audio stays inert: only the page's emitters play.** `AudGameObjResource` registers with whatever
-  `CjsAudioMan` attached to its static seams, so a hull hydrated while audio is on registers its own emitters
-  (`Engine_SFX`, `ShipDefense_Module_sfx`, ...; 29 for five battleship-to-capital hulls) and its controllers
-  (`Tr2ActionPlaySound`) post EVE's engine sounds (`ship_engine_M_booster_3rd_on`, 26 voices for the TFIs fleet) that
-  the page never posted and nothing releases with the ship. **Every SOF hydration runs inside `PageAudio.Detached`**
-  (`Director.Build`, and `BuildStaticObject`'s `detachAudio` for the dressing's stations and gates and the scene's
-  objects), which detaches the seams for the synchronous build. A new SOF build path must do the same; the engine hum
-  must adopt the graphs on purpose (follow-up), not by registration. A failed `Enable` detaches the seams too.
+- **Runtime-built audio stays inert: only the page's emitters play.** `AudGameObjResource` registers with whatever
+  `CjsAudioMan` attached to its static seams **in its constructor**, so anything built while audio is on registers its
+  emitters and nothing releases them (`CjsAudioSystem.ReleaseEmitter` releases only adopted ones): a hull's own
+  (`Engine_SFX`, `ShipDefense_Module_sfx`, ...; 29 for five battleship-to-capital hulls), whose controllers
+  (`Tr2ActionPlaySound`) post EVE's engine sounds the page never posted (`ship_engine_M_booster_3rd_on`, 26 voices for
+  the TFIs fleet), and a burning hull's fires (7 per frigate, 10 per Ferox, surviving the kill and a load: below).
+  **Three detached windows** keep the seams off for every build but the page's own emitters:
+  1. every page hydration inside `PageAudio.Detached`: SOF (`Director.Build`; `BuildStaticObject`'s `detachAudio` for
+     the dressing's stations and gates and the scene's objects), turrets, module effects, warp flashes, explosions;
+  2. every runtime object build: `ConfigureResources` re-registers the `.black` / `.red` route's builders through
+     `DetachObjectRoutes` (`audio-guard.ts`, over `GetObjectLoader` / `RegisterObjectBuilder`), so each file's
+     `CreateObject` runs detached: controller child effects (`Tr2ActionChildEffect`), overlays (`Tr2ActionOverlay`),
+     `EveChildRef`s and the page's own `LoadObject` calls;
+  3. the scene update: `main.ts` runs `engine.Frame` in the window, where effects copy their templates
+     (`EveChildInstanceContainer.CreateInstance` → `blue.classes.CopyTo`, per damage locator and per interval trigger).
+
+  The scope is `InAudioDetachScope` (`audio-guard.ts`, the identity until `main.ts` sets it to
+  `director.audio.Detached` right after the Director): a new hydration path or a node-tested module uses it.
+  `Detached` is re-entrant (a depth per seams object: nested windows detach once). An emitter built detached never
+  registers, stays culled, and its posts queue in `_eventsOnWake` for good. **Never post page audio inside a window**
+  (`engine.Frame`'s draw callback is pure runtime work; `DriveAudio`, `DriveTurrets` and `DriveExplosions` post outside
+  it): `PostEvent` finds no static data there and returns 0. The engine hum and the fire sound must adopt or post on
+  purpose (follow-ups), never by registration. A failed `Enable` detaches the seams too. **On a pin bump** re-check
+  `GetObjectLoader` / `RegisterObjectBuilder` / `CreateObject` (`ConfigureResources` warns `object builds attach
+  audio for .<ext>` when a route is missing; a renamed `CreateObject` shows up as `foreign`). **To find a stray**:
+  wrap `director.audio.man.manager.RegisterGameObject` in-page, record `new Error().stack` and skip stacks with
+  `CreateEmitter` (the page's own); the stack names the construction site, which goes into a window (never a release
+  sweep, which would hide the next leak).
 - **The backend is guarded (`audio-guard.ts`), because Chrome throws from the runtime's AudioParam scheduling.**
   Every per-voice scheduler (`ScheduleVoiceVolumeGain`, `ScheduleVoicePitchPlaybackRate`, `ApplyVoiceFilter`, the bus
   gains) runs on each placement and RTPC refresh: `cancelAndHoldAtTime(now)`, `setValueAtTime(v, now)`,
@@ -227,10 +248,12 @@ so the page stops such voices itself (`sd-ship-stats`). Which events play: `sd-s
 - `CjsAudioMan.Process` still schedules AudioParams the guard does not cover (`CjsWwiseSourceEffectRtpcLane.Apply`;
   41 `_on` loops: ~10 throws a second for 35 s); the page counts those frames and goes on.
 - `get_state.audio`: `emitters` (the page's), `gameObjects` (registered with the runtime's manager: those plus the
-  listener; more means something else registered), `frameErrors` / `lastFrameError` (`Process`), `rescheduled`
-  (applier retries that went through), `backendErrors` / `lastBackendError` (contained calls). Each is logged at most
-  once per 10 s (`console.info` for rescheduled, `console.warn` with the stack for contained). `verify-page` checks
-  that a TFI build leaves `gameObjects − emitters` unchanged (skipped without a renderer or with audio off).
+  listener), `foreign` (every other registered game object, counted by name; omitted when none: what built with the
+  seams attached), `frameErrors` / `lastFrameError` (`Process`), `rescheduled` (applier retries that went through),
+  `backendErrors` / `lastBackendError` (contained calls). Each is logged at most once per 10 s (`console.info` for
+  rescheduled, `console.warn` with the stack for contained). `verify-page` checks that a TFI build leaves
+  `gameObjects − emitters` unchanged with no `foreign` (skipped without a renderer or with audio off), and that a kill
+  does too (`sd-combat` → Verify-page (K3)).
 - **Undecodable events are learned once and not sent.** The runtime ships no Wwise PTADPCM decoder (removed upstream
   until its provenance is confirmed; `CjsWemFormat.registerPcmDecoder('wwise-ptadpcm', ...)` would add one), and
   `CjsAudioMan`'s loader turns a failed media load into no voice. Every turret firing and impact media is PTADPCM, so

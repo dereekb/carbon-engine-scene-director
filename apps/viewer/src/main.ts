@@ -16,6 +16,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { normalizeScene, SCENE_SCHEMA } from '@scene-director/scene';
+import { InAudioDetachScope, SetAudioDetachScope } from './lib/audio-guard';
 import { DressingText } from './lib/celestials';
 import { SceneClock } from './lib/clock';
 import { DestinyWorld } from './lib/destiny';
@@ -250,7 +251,9 @@ async function Start(): Promise<void> {
     liveDirector?.DriveWarpEffects(now);
     liveDirector?.DriveTurrets(now);
     liveDirector?.DriveExplosions(now);
-    engine?.Frame(timestamp, now);
+    // The scene update copies effect templates (a burning hull's fires, per damage locator): with the audio seams
+    // detached, so the copies' emitters stay inert. No page audio is posted inside engine.Frame (sd-runtime → Audio).
+    InAudioDetachScope(() => engine?.Frame(timestamp, now));
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
@@ -267,6 +270,9 @@ async function Start(): Promise<void> {
   const audioDisabled = new URLSearchParams(location.search).get('audio') === 'off';
   const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), audioDisabled });
   liveDirector = director;
+  // The runtime's own object loads and the scene update build effects too (a burning hull's fires): they run with the
+  // audio seams detached, like every SOF build, so only the page's emitters register (sd-runtime → Audio).
+  SetAudioDetachScope((build) => director.audio.Detached(build));
   // Browsers start audio only from a user gesture; at startup it goes on only when the tab may autoplay.
   // A touch activates on pointerup, not pointerdown.
   const gesture = (): void => director.audio.Gesture();

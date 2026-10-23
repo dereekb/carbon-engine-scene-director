@@ -340,6 +340,10 @@ shots, the kill 15 ticks after `engage`, by p2 high-0, dealt [824.6, 748]; seed 
 commander; the FC dead at tick 39, the wing commander acts for it and the member follows it. A load: 6 ships alive at
 full HP, no kills, the FC back.
 
+The kill check also asserts no `audio.foreign`. Headless draws no hull, so the hull's damage effects (the VDS fires)
+never load there and its result says `(no renderer: the hull's damage effects never load)`; the real-GPU run covers
+them (Real-GPU evidence → Audio).
+
 ## Real-GPU evidence (K3)
 
 2026-10-23, dbxpc (Windows Chrome, nvidia lovelace, 1600 × 900), SDE 3632936, a private hub on 5521; drivers and
@@ -370,11 +374,21 @@ explosion timeline, `calib.js` a private `ShipExplosions` that plays any file on
 - **Scale** (the TFIs, 44, vs 10 Ferox at 20 km, `run4-scale/`, re-engaging the next Ferox on each kill): 9 kills in
   ~75 s, up to 4 explosions at once, 11–14 fps through explosions, 17–23 between, 26–30 at rest, `gpuErrors` 0, no
   explosion errors; after cease-fire `scene.objects` 45 = the live ships, 0 explosion roots.
-- **Audio**: the explosion roots register no emitter (no `GlobalExplosionEmitter` anywhere). But `audio.gameObjects −
-  emitters` grows by 7 per frigate and 10 per Ferox when its armor runs out, before the kill: the impact overlay's
-  hull damage effects (`smoke_fire_sfx`, `smoke_fire_hangar_sfx`, `LocalExplosionEmitter1`), loaded asynchronously by
-  `SetImpactDamageState` outside `PageAudio.Detached`, never released (they survive the ball's removal and a load).
-  A follow-up, not the explosion.
+- **Audio**: the explosion roots register no emitter (no `GlobalExplosionEmitter` anywhere). Before the fix,
+  `audio.gameObjects − emitters` grew by 7 per frigate and 10 per Ferox when its armor ran out, before the kill (3v3
+  1 → 15, M and L 1 → 24, scale 38 → 115), surviving the ball's removal and a load. The cause was not the impact
+  overlay but the hull's VDS controller: `SetImpactDamageState` moves it to `addFires`, whose child effect
+  `vds_trail_fire_01a` loads through `LoadObject` (async) and copies its emitter template (`smoke_fire_sfx`,
+  `smoke_fire_hangar_sfx`, `LocalExplosionEmitter1`) per damage locator inside the scene update, both with the seams
+  attached. **Fixed** by running every runtime object build and `engine.Frame` detached (`sd-runtime` → Audio).
+  After (2026-10-23, same setup on a private hub on 5522, `.scratch/audio-leak/`): the in-page probe
+  (`SetImpactDamageState(1, 0, 0.5)` on a lone Punisher) loaded `vds_trail_fire_01a`, 1 → 1 game objects and 0
+  registrations, the fire still drawn (`probe-burning-hull-110m.png`); the 3v3 (`run1-3v3/`), M and L (`run2-ml/`)
+  and the scale run (`run3-scale/`, all 10 Ferox killed) kept `gameObjects − emitters` at 1 with no `foreign` on every
+  row, through each `load_scene`; the probe recorded 0 foreign registrations across all three; explosion sounds
+  `played: true`; `frameErrors`, `backendErrors` and `gpuErrors` 0; fps as before (3v3 median 60, 33 at a kill
+  frame; M and L mean 55.8; scale 10–29 through kills, 31 at rest, one 4 fps sample at the first `generic_01c` load).
+  A detached window costs 0.28 µs.
 - `frame_camera` on a destroyed ship frames every ship (the dead are skipped), so a driver must frame the victim before
   the kill.
 

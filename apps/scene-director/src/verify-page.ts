@@ -293,6 +293,10 @@ interface AudioState {
    * Audio game objects registered with the runtime's manager: the page's emitters and the listener.
    */
   readonly gameObjects?: number;
+  /**
+   * Registered audio game objects that are neither the page's emitters nor the listener, by name (omitted when none).
+   */
+  readonly foreign?: Readonly<Record<string, number>>;
   readonly posted: { readonly tick: number; readonly ship: string; readonly event: string; readonly played: boolean; readonly undecodable?: boolean }[];
   /**
    * Events the runtime decodes none of the media of: recorded, never sent.
@@ -1184,7 +1188,7 @@ try {
       const baseline = beyond(before);
       await call('patch_scene', { operations: [{ op: 'add_ship', ship: { id: 'audio-probe-tfi', dna: TFI_DNA, position: [-3000, 0, -60000] } }] });
       const built = await WaitFor('audio-probe-tfi built', 60, (state) => (ShipIn(state, 'audio-probe-tfi').status === 'ready' ? null : `${ShipIn(state, 'audio-probe-tfi').status}`));
-      Expect(beyond(built) === baseline, `audio game objects beyond the page's emitters went ${baseline} -> ${beyond(built)} with a TFI build: ${JSON.stringify(built.audio)}`);
+      Expect(beyond(built) === baseline && !built.audio?.foreign, `audio game objects beyond the page's emitters went ${baseline} -> ${beyond(built)} with a TFI build: ${JSON.stringify(built.audio)}`);
       return `${built.audio?.gameObjects} audio game objects for ${built.audio?.emitters} page emitter(s), unchanged by a TFI build`;
     });
   } finally {
@@ -1670,8 +1674,10 @@ try {
       return rifter.destroyed?.explosion?.gone && rifter.status === 'destroyed' && rifter.position == null ? null : Show({ status: rifter.status, explosion: rifter.destroyed?.explosion, tick: polled.simulation.tick });
     });
     const after = (gone.audio?.gameObjects ?? 0) - (gone.audio?.emitters ?? 0);
-    Expect(after === objects, `audio game objects − emitters: ${objects} before, ${after} after`);
-    return `killed by ${kill?.by} (${kill?.module}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(stopped, 'orbiter').orderNote}; order_ship refused (${refused}); sounds ${Show(sounds)}; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} ball gone at tick ${gone.simulation.tick} (removesAt ${ShipIn(gone, 'rifter').destroyed?.explosion?.removesAt}); gameObjects − emitters ${after}`;
+    Expect(after === objects && !gone.audio?.foreign, `audio game objects − emitters: ${objects} before, ${after} after (foreign ${Show(gone.audio?.foreign)})`);
+    // Headless draws no hull, so no damage controller loads the hull's fires: only the real GPU sees that leak.
+    const drawn = gone.renderer.available ? '' : " (no renderer: the hull's damage effects never load)";
+    return `killed by ${kill?.by} (${kill?.module}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(stopped, 'orbiter').orderNote}; order_ship refused (${refused}); sounds ${Show(sounds)}; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} ball gone at tick ${gone.simulation.tick} (removesAt ${ShipIn(gone, 'rifter').destroyed?.explosion?.removesAt}); gameObjects − emitters ${after}${drawn}`;
   });
 
   // An FC, a wing commander and a squad of two whose lead the squad anchors on; two Punishers kill the lead, then the FC.

@@ -70,9 +70,14 @@ export interface PageAudioReport {
   readonly posted: readonly PostedAudioEvent[];
   /**
    * Audio game objects registered with the runtime's manager (the page's emitters and the listener; 0 while off).
-   * More than `emitters + 1` means something else registered emitters.
+   * More than `emitters + 1`: see `foreign`.
    */
   readonly gameObjects: number;
+  /**
+   * Audio game objects registered with the runtime's manager that are neither the page's emitters nor the listener,
+   * counted by name (omitted when none): what built with the audio seams attached.
+   */
+  readonly foreign?: Readonly<Record<string, number>>;
   /**
    * Audio frames the runtime failed (CjsAudioMan.Process threw), with the last failure.
    */
@@ -286,7 +291,9 @@ export class PageAudio {
   /**
    * Runs a SOF build with the runtime's audio seams detached: SOF graphs hydrate inert; only the page's emitters play.
    * Their own emitters (Engine_SFX, the boosters' controllers) would otherwise register with the manager when audio is
-   * on and play sounds the page never posted, which nothing releases with the ship. Not re-entrant.
+   * on and play sounds the page never posted, which nothing releases with the ship. The page's detached-audio scope
+   * (InAudioDetachScope: the runtime's object builds and the scene update) is this too. Re-entrant: nested windows
+   * detach once. Never post page audio inside a window: PostEvent finds no static data there and returns 0.
    *
    * @param build - The synchronous hydration.
    * @returns What the build returns.
@@ -380,11 +387,20 @@ export class PageAudio {
   }
 
   Report(): PageAudioReport {
+    const objects = this.man?.manager?.GetPrioritizedEmitters() ?? [];
+    const mine = new Set<unknown>([...this.emitters.values(), this.man?.listener]);
+    const foreign: Record<string, number> = {};
+    for (const object of objects) {
+      if (mine.has(object)) continue;
+      const name = object.name || '(unnamed)';
+      foreign[name] = (foreign[name] ?? 0) + 1;
+    }
     return {
       state: this.state,
       ...(this.error ? { error: this.error } : {}),
       emitters: this.emitters.size,
-      gameObjects: this.man?.manager?.GetPrioritizedEmitters().length ?? 0,
+      gameObjects: objects.length,
+      ...(Object.keys(foreign).length ? { foreign } : {}),
       posted: [...this.posted],
       ...(this.frameErrors ? { frameErrors: this.frameErrors, ...(this.lastFrameError ? { lastFrameError: this.lastFrameError } : {}) } : {}),
       ...(this.rescheduled ? { rescheduled: this.rescheduled } : {}),

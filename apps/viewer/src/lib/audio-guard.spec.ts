@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { GuardWebAudioBackend, IsAutomationOverlap, RunDetached, type WebAudioGuardOptions } from './audio-guard';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DetachObjectRoutes, GuardWebAudioBackend, InAudioDetachScope, IsAutomationOverlap, RunDetached, SetAudioDetachScope, type AudioDetachScope, type ObjectBuilder, type ObjectBuilderFactory, type WebAudioGuardOptions } from './audio-guard';
 import type { CjsWebAudioSoundEngine, CjsWebAudioVoice } from './runtime';
 
 function Overlap(): DOMException {
@@ -183,5 +183,136 @@ describe('RunDetached', () => {
 
   it('just builds without seams', () => {
     expect(RunDetached(null, () => 3)).toBe(3);
+  });
+
+  it('detaches once for nested windows', () => {
+    const order: string[] = [];
+    const seams = { Detach: () => order.push('detach'), Attach: () => order.push('attach') };
+    RunDetached(seams, () => {
+      order.push('outer');
+      RunDetached(seams, () => order.push('inner'));
+      order.push('outer-end');
+    });
+    expect(order).toEqual(['detach', 'outer', 'inner', 'outer-end', 'attach']);
+  });
+
+  it('keeps the seams detached after an inner throw until the outer window exits', () => {
+    const order: string[] = [];
+    const seams = { Detach: () => order.push('detach'), Attach: () => order.push('attach') };
+    RunDetached(seams, () => {
+      expect(() =>
+        RunDetached(seams, () => {
+          throw new Error('inner');
+        })
+      ).toThrow('inner');
+      order.push('still detached');
+    });
+    expect(order).toEqual(['detach', 'still detached', 'attach']);
+  });
+
+  it('detaches again after an outer throw', () => {
+    const seams = { Detach: vi.fn(), Attach: vi.fn() };
+    expect(() =>
+      RunDetached(seams, () => {
+        throw new Error('outer');
+      })
+    ).toThrow('outer');
+    RunDetached(seams, () => undefined);
+    expect(seams.Detach).toHaveBeenCalledTimes(2);
+    expect(seams.Attach).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('InAudioDetachScope', () => {
+  afterEach(() => SetAudioDetachScope((build) => build()));
+
+  it('is the identity until a scope is set', () => {
+    expect(InAudioDetachScope(() => 'built')).toBe('built');
+  });
+
+  it('runs inside the set scope', () => {
+    const order: string[] = [];
+    SetAudioDetachScope((build) => {
+      order.push('enter');
+      try {
+        return build();
+      } finally {
+        order.push('exit');
+      }
+    });
+    expect(
+      InAudioDetachScope(() => {
+        order.push('build');
+        return 7;
+      })
+    ).toBe(7);
+    expect(order).toEqual(['enter', 'build', 'exit']);
+  });
+});
+
+describe('DetachObjectRoutes', () => {
+  function Routes(loaders: Record<string, ObjectBuilderFactory>) {
+    const registered = new Map<string, ObjectBuilderFactory>();
+    return {
+      registered,
+      GetObjectLoader: (extension: string) => registered.get(extension) ?? loaders[extension] ?? null,
+      RegisterObjectBuilder: vi.fn((extension: string, factory: ObjectBuilderFactory) => registered.set(extension, factory))
+    };
+  }
+
+  function Scope(order: string[]): AudioDetachScope {
+    return (build) => {
+      order.push('enter');
+      try {
+        return build();
+      } finally {
+        order.push('exit');
+      }
+    };
+  }
+
+  it('re-registers every extension with a loader and skips the rest', () => {
+    const factory: ObjectBuilderFactory = () => ({ CreateObject: () => null });
+    expect(DetachObjectRoutes(Routes({ black: factory, red: factory }), ['black', 'red'], (build) => build())).toEqual(['black', 'red']);
+    const routes = Routes({ black: factory });
+    expect(DetachObjectRoutes(routes, ['black', 'red'], (build) => build())).toEqual(['black']);
+    expect(routes.RegisterObjectBuilder).toHaveBeenCalledOnce();
+  });
+
+  it('passes the bytes and context through and builds inside the scope', () => {
+    const order: string[] = [];
+    const builder = { CreateObject: vi.fn((marker?: number) => (order.push(`inner ${marker}`), 'object')), Other: () => 'untouched' };
+    const factory = vi.fn<ObjectBuilderFactory>(() => builder);
+    const routes = Routes({ black: factory });
+    DetachObjectRoutes(routes, ['black'], Scope(order));
+    const bytes = new Uint8Array([1]);
+    const context = { path: 'res:/a.black' };
+    const built = routes.registered.get('black')?.(bytes, context) as typeof builder;
+    expect(factory).toHaveBeenCalledWith(bytes, context);
+    expect(built).toBe(builder);
+    expect(built.CreateObject(0)).toBe('object');
+    expect(order).toEqual(['enter', 'inner 0', 'exit']);
+    expect(built.Other()).toBe('untouched');
+  });
+
+  it('wraps CreateObjectWithYield only when present, and lets a failed build throw', () => {
+    const order: string[] = [];
+    const plain: ObjectBuilder = { CreateObject: () => null };
+    const yielding: ObjectBuilder = { CreateObject: () => null, CreateObjectWithYield: () => (order.push('yield'), 'yielded') };
+    const failing: ObjectBuilder = {
+      CreateObject: () => {
+        throw new Error('bad file');
+      }
+    };
+    const builders = [plain, yielding, failing];
+    const routes = Routes({ black: () => builders.shift() as ObjectBuilder });
+    DetachObjectRoutes(routes, ['black'], Scope(order));
+    const factory = routes.registered.get('black') as ObjectBuilderFactory;
+    const bytes = new Uint8Array();
+    expect(factory(bytes, null).CreateObjectWithYield).toBeUndefined();
+    expect(factory(bytes, null).CreateObjectWithYield?.(0)).toBe('yielded');
+    expect(order).toEqual(['enter', 'yield', 'exit']);
+    expect(() => factory(bytes, null).CreateObject(0)).toThrow('bad file');
+    expect(order.at(-1)).toBe('exit');
   });
 });
