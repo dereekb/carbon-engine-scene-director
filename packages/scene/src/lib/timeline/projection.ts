@@ -61,6 +61,33 @@ export function describeCueAdds(adds: Maybe<SceneCueAdds>): string[] {
 }
 
 /**
+ * The scene after each patch cue, in time order: the document without its timeline, then each patch cue due by
+ * `seconds` (cueDueSecond(at) ≤ seconds) applied in order. A patch that no longer applies is skipped (normalize reports
+ * it). The page prefetches the lookups of the ships these scenes add (Director.Prefetch).
+ *
+ * @param scene - A normalized document.
+ * @param apply - applySceneOperations.
+ * @param seconds - Timeline time, seconds from play start; default every cue.
+ * @returns The scene after each patch cue that applied, with its cue.
+ */
+export function timelinePatchScenes(scene: SceneDocument, apply: ApplySceneOperations, seconds = Number.POSITIVE_INFINITY): { readonly cueId: string; readonly scene: SceneDocument }[] {
+  const { timeline, ...rest } = scene;
+  const scenes: { readonly cueId: string; readonly scene: SceneDocument }[] = [];
+  let current: SceneDocument = rest;
+  for (const cue of (timeline as Maybe<SceneTimeline>)?.cues ?? []) {
+    if (cueDueSecond(cue.at) > seconds) break;
+    if (!('patch_scene' in cue)) continue;
+    try {
+      current = apply(current, cue.patch_scene.operations).scene;
+      scenes.push({ cueId: cue.id, scene: current });
+    } catch (error) {
+      if (!(error instanceof SceneError)) throw error;
+    }
+  }
+  return scenes;
+}
+
+/**
  * The scene as the timeline will have it at a time: the document without its timeline, with every patch cue due by then
  * (cueDueSecond(at) ≤ seconds) applied in order. A patch that no longer applies is skipped (normalize reports it).
  *
@@ -70,16 +97,6 @@ export function describeCueAdds(adds: Maybe<SceneCueAdds>): string[] {
  * @returns The projected document, without a timeline.
  */
 export function sceneAtTimelineTime(scene: SceneDocument, seconds: number, apply: ApplySceneOperations): SceneDocument {
-  const { timeline, ...rest } = scene;
-  let current: SceneDocument = rest;
-  for (const cue of (timeline as Maybe<SceneTimeline>)?.cues ?? []) {
-    if (cueDueSecond(cue.at) > seconds) break;
-    if (!('patch_scene' in cue)) continue;
-    try {
-      current = apply(current, cue.patch_scene.operations).scene;
-    } catch (error) {
-      if (!(error instanceof SceneError)) throw error;
-    }
-  }
-  return current;
+  const { timeline: _timeline, ...rest } = scene;
+  return timelinePatchScenes(scene, apply, seconds).at(-1)?.scene ?? rest;
 }

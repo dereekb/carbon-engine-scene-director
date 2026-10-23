@@ -321,6 +321,23 @@ describe('FleetOrders', () => {
     expect(rig.Order({ fleet: 'f', order: WARP }).delays).toBeUndefined();
   });
 
+  it('keys the pilot delays on seedTick: the same order at another absolute tick draws the same delays', () => {
+    const at = (wait: number) => {
+      const rig = new Rig();
+      rig.Step(wait);
+      const start = rig.world.tick;
+      const orders = new FleetOrders({ world: rig.world, following: rig.following, scene: () => rig.Live(), seedTick: (tick) => tick - start });
+      rig.Step(2);
+      const request = normalizeFleetOrderRequest({ fleet: 'f', delay: 1, order: { type: 'stop' } }, { ships: new Set(rig.scene.ships.map((doc) => doc.id)), objects: new Set<string>() });
+      return orders.Fly(orders.Resolve(request));
+    };
+    const early = at(0);
+    const late = at(37);
+    expect(late.tick - early.tick).toBe(37);
+    expect(new Set(Object.values(early.delays ?? {})).size).toBeGreaterThan(2);
+    expect(late.delays).toEqual(early.delays);
+  });
+
   it('records document orders: break-off sets the home, regroup restores it', () => {
     const rig = new Rig();
     const broken = rig.Order({ fleet: 'f', squad: 'logi', order: { type: 'break-off', range: 12000 } });

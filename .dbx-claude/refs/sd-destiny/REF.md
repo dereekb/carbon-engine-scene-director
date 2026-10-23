@@ -31,6 +31,13 @@
   `OnTick` with the same clock value. They stay bit-identical. Never reach into one park alone.
 - Absolute coordinates: the replica's ego is a fixed ball at the origin, so ClientBall samples are world positions.
   Ship balls take ids from `FIRST_SHIP_BALL_ID` up and never reuse one.
+- **The scene epoch** (`SetSceneEpoch(tick)`, called by `Director.ApplyNow` on every load with `loadTick`). Every
+  order is time-invariant in Destiny except the legacy orbit (`EvolveOldStyleOrbit`), whose plane precesses by the
+  park's absolute `currentTime × 0.001` rad and is seeded by the ball id's low 16 bits. Both parks are `ScenePark`s
+  (a `CjsBallparkController` subclass overriding `EvolveOldStyleOrbit` to pass `currentTime − orbitEpoch`, its only use
+  of the time), and after the first epoch a ship's new ball id is the next free id whose low 16 bits are
+  `unitHash("ball|<ship id>")`, so an orbit given at the same tick since the load flies the same in every timeline
+  replay (`sd-timeline` "Determinism"; `destiny-timeline.spec.ts`). Specs that never call it keep sequential ids.
 
 ## One clock, one loop
 

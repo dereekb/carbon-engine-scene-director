@@ -4167,6 +4167,74 @@ try {
     return `ready and held at tick ${ready.simulation.tick} for 3 s; played: ${TimelineOf(done)?.cues.fired} fired from tick ${TimelineOf(done)?.startedAt}`;
   });
 
+  // T3: a replay is the same run. (j) records it twice; (k) reads the two runs' delays and staggers.
+  interface ReplayRun {
+    readonly startedAt: number;
+    readonly fired: Record<string, number>;
+    readonly delays: unknown;
+    readonly landings: Record<string, number>;
+    readonly kills: Record<string, number>;
+    readonly positions: Record<string, number[]>;
+  }
+  const replays: ReplayRun[] = [];
+  const REPLAY_SECONDS = 55;
+  const ReplayRunOf = async (): Promise<ReplayRun> => {
+    const landings: Record<string, number> = {};
+    const end = await WaitFor(`timeline time ${REPLAY_SECONDS}`, REPLAY_SECONDS + 90, (polled) => {
+      const timeline = TimelineOf(polled);
+      const startedAt = timeline?.startedAt;
+      for (const group of (polled.arrivals ?? []) as unknown as { readonly ships: { readonly id: string; readonly landsIn?: number }[] }[]) {
+        for (const ship of group.ships) if (startedAt != null && ship.landsIn != null && landings[ship.id] == null) landings[ship.id] = polled.simulation.tick + ship.landsIn - startedAt;
+      }
+      return (timeline?.time ?? -1) >= REPLAY_SECONDS ? null : Show(timeline);
+    });
+    const report = await TimelineTool();
+    const startedAt = report.startedAt ?? 0;
+    const kills = Object.fromEntries((end.combat?.kills ?? []).filter((kill) => kill.tick - startedAt <= REPLAY_SECONDS).map((kill) => [kill.ship, kill.tick - startedAt]));
+    // Everyone is stopped by now (blue at 25 s, red never moves, the warp-ins formed): their positions are final.
+    const positions = Object.fromEntries(end.ships.filter((ship) => ship.position && !kills[ship.id]).map((ship) => [ship.id, (ship.position ?? [0, 0, 0]).map((value) => Math.round(value))]));
+    const delays = (report.list.find((cue) => cue.id === 'approach') as Maybe<{ readonly result?: { readonly delays?: unknown } }>)?.result?.delays ?? null;
+    return { startedAt, fired: FiredAt(report), delays, landings, kills, positions };
+  };
+
+  await Check('timeline: the same script replays the same: cue, landing and kill ticks, final positions', async () => {
+    const red = (id: string, position: SceneVector) => ({ ...Rifter(id, position), team: 'red' });
+    const blue = (id: string, position: SceneVector) => ({ ...Punisher(id, position), team: 'blue' });
+    const rifter = { hull: 'Rifter', dna: 'mf4_t1:minmatarbase:minmatar', radius: 31 };
+    await LoadCombatScene(
+      [blue('b1', [0, 0, 0]), blue('b2', [800, 0, 0]), blue('b3', [-800, 0, 0]), red('r1', [0, 0, 14000]), red('r2', [900, 0, 14500]), red('r3', [-900, 0, 14500])],
+      { seed: 7, death: 'explode' },
+      {
+        fleets: [{ id: 'b', commander: 'b1', wings: [{ id: 'b-w', squads: [{ id: 'b-s', role: 'dps', members: ['b2', 'b3'] }] }] }],
+        timeline: [
+          { id: 'engage', at: 1, engage: { ships: ['r1', 'r2', 'r3'], target: 'b1' } },
+          { id: 'approach', at: 2, order_fleet: { fleet: 'b', delay: 0.5, order: { type: 'approach', target: 'r1' } } },
+          { id: 'reinforce', at: 3, patch_scene: { operations: [{ op: 'add_fleet_composition', composition: { id: 'rw', commander: rifter, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ ...rifter, count: 1 }] }] }] }, position: [0, 0, 9000], heading: 180, team: 'red', warpIn: true }] } },
+          { id: 'call', at: 6, order_fleet: { fleet: 'b', order: { type: 'targets', set: ['r1', 'r2', 'r3'] } } },
+          { id: 'halt', at: 25, order_fleet: { fleet: 'b', order: { type: 'stop' } } }
+        ]
+      }
+    );
+    replays.length = 0;
+    replays.push(await ReplayRunOf());
+    await TimelineTool({ action: 'restart' });
+    replays.push(await ReplayRunOf());
+    const [first, second] = replays;
+    Expect(Object.keys(first.fired).length === 5 && Object.keys(first.landings).length === 2, `fired ${Show(first.fired)}, landings ${Show(first.landings)}`);
+    for (const key of ['fired', 'landings', 'kills', 'positions'] as const) Expect(Show(first[key]) === Show(second[key]), `${key}: ${Show(first[key])} then ${Show(second[key])}`);
+    return `t = 0 at ticks ${first.startedAt} and ${second.startedAt}; cues at ${Show(first.fired)}; landed at ${Show(first.landings)}; kills ${Show(first.kills)}; ${Object.keys(first.positions).length} final positions equal`;
+  });
+
+  await Check('timeline: pilot delays and warp-in staggers are keyed on scene ticks across restarts', async () => {
+    Expect(replays.length === 2, 'the replay check did not record two runs');
+    const [first, second] = replays;
+    Expect(first.startedAt !== second.startedAt, `both runs started at tick ${first.startedAt}`);
+    Expect(first.delays != null && Show(first.delays) === Show(second.delays), `delays ${Show(first.delays)} then ${Show(second.delays)}`);
+    const offsets = (run: ReplayRun) => Object.values(run.landings).map((tick) => tick - Math.min(...Object.values(run.landings)));
+    Expect(Show(offsets(first)) === Show(offsets(second)), `landing offsets ${Show(offsets(first))} then ${Show(offsets(second))}`);
+    return `started at ticks ${first.startedAt} and ${second.startedAt}: delays ${Show(first.delays)} both times, landing offsets ${Show(offsets(first))}`;
+  });
+
   if (rendering) {
     await Check('screenshot returns a PNG', async () => {
       const shot = await call<{ image: { data: string }; width: number; height: number }>('screenshot', { maxWidth: 960 });

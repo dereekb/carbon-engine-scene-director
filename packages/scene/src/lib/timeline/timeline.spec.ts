@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applySceneOperations, normalizeScene, type SceneDocument, SceneError } from '../scene';
 import { normalizeSceneTimeline } from './normalize';
-import { sceneAtTimelineTime } from './projection';
+import { sceneAtTimelineTime, timelinePatchScenes } from './projection';
 import { normalizeShipOrderSteps, shipStepCompletion } from './steps';
 import { cueActionOf, cueDueSecond, MAX_PATCH_CUES, MAX_SHIP_STEPS, type SceneCue } from './timeline';
 import { TIMELINE_ACTIONS } from './actions';
@@ -196,6 +196,15 @@ describe('the projection and adds', () => {
     const at5 = sceneAtTimelineTime(document, 5, applySceneOperations);
     expect(at5.ships.map((ship) => ship.id)).toContain('late');
     expect(at5.timeline).toBeUndefined();
+  });
+
+  it('lists the scene after each patch cue, up to a time', () => {
+    const document = scene({ timeline }).scene;
+    const scenes = timelinePatchScenes(document, applySceneOperations);
+    expect(scenes.length).toBeGreaterThan(0);
+    expect(scenes[0].scene.ships.map((ship) => ship.id)).toContain('late');
+    expect(scenes.every((step) => step.scene.timeline === undefined)).toBe(true);
+    expect(timelinePatchScenes(document, applySceneOperations, 4)).toEqual([]);
   });
 
   it('refuses a removal that breaks a patch cue, naming the cue', () => {

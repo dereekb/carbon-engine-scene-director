@@ -16,7 +16,7 @@
  * - delay (0 to 1): each pilot but the giver responds after its own time (toPilotDelays): the leader's order and each
  *   ship's formation warp wait that many ticks, and a formation warp also waits for its leader's order to apply.
  *   Without a delay a move waits on the pilots' reactions (options.reactionOf); warps and regroups never do (a fleet
- *   warp is simultaneous).
+ *   warp is simultaneous). The delays hash scene ticks (options.seedTick), so a timeline replay draws the same.
  *
  * Node-tested: it imports the world's and FleetFollowing's types only.
  */
@@ -54,6 +54,11 @@ export interface FleetOrdersOptions {
    * A pilot's reaction (0..1) for an order given without a delay; absent or null: it answers at once.
    */
   readonly reactionOf?: (ship: string) => Maybe<number>;
+  /**
+   * A world tick as the scene counts it (Director.SeedTick: ticks since the last load), which the pilot delays hash so a
+   * replay draws the same; default the world tick itself.
+   */
+  readonly seedTick?: (tick: number) => number;
 }
 
 /**
@@ -121,6 +126,7 @@ export class FleetOrders {
   private readonly following: FleetFollowing;
   private readonly scene: () => Maybe<SceneDocument>;
   private readonly reactionOf?: (ship: string) => Maybe<number>;
+  private readonly seedTick: (tick: number) => number;
   private readonly last = new Map<string, LastRecord>();
   private readonly warps = new Map<string, WarpRecord>();
   private readonly regroups = new Map<string, readonly string[]>();
@@ -129,6 +135,7 @@ export class FleetOrders {
     this.world = options.world;
     this.following = options.following;
     this.reactionOf = options.reactionOf;
+    this.seedTick = options.seedTick ?? ((tick) => tick);
     this.scene = options.scene;
     this.world.OnWarp((event) => {
       if (event.kind !== 'exit') return;
@@ -165,7 +172,7 @@ export class FleetOrders {
     const key = toFleetGroupKey(group);
     const tick = options.tick ?? this.world.tick;
     const simultaneous = order.type === 'warp' || order.type === 'regroup';
-    const delays = toPilotDelays({ key, tick, delay: request.delay, ships: resolved.ships, issuer: resolved.issuer, reactionOf: simultaneous ? undefined : this.reactionOf });
+    const delays = toPilotDelays({ key, tick: this.seedTick(tick), delay: request.delay, ships: resolved.ships, issuer: resolved.issuer, reactionOf: simultaneous ? undefined : this.reactionOf });
     let result: FleetOrderResult;
     if (order.type === 'warp') result = this.Warp(resolved, order, delays);
     else if (order.type === 'regroup') result = this.Regroup(resolved, delays);

@@ -8,7 +8,9 @@
  *   of its slowest hull's natural landing; by speed, each hull at its own pace plus its offset. The leader lands first.
  * - Arrivals holds the page's groups: Add parks each ship at a provisional point right after its ball exists (so a
  *   hull never shows at its landing), Boundary plans a group once every ship's flight numbers and build have settled
- *   (or after ARRIVAL_READY_TIMEOUT ticks), and Report gives get_state its per-ship and per-group states.
+ *   (a group added with `waitForBuild: false`, a timeline cue's, its flight numbers only), or after
+ *   ARRIVAL_READY_TIMEOUT ticks, and Report gives get_state its per-ship and per-group states. The landing staggers
+ *   hash scene ticks (config.seedTick), so a timeline replay lands the same.
  *
  * Node-tested: no runtime import (the world and the director are ports).
  */
@@ -268,9 +270,15 @@ export interface ArrivalsConfig {
    */
   readonly placement: (id: string) => Maybe<Pick<SceneShip, 'position' | 'rotation'>>;
   /**
-   * Whether a ship's flight numbers and build have settled (the hub answered /ship-stats, the SOF build finished).
+   * Whether a ship's flight numbers and build have settled (the hub answered /ship-stats, the SOF build finished);
+   * `build: false` (a group added with waitForBuild false, a timeline cue's) asks for the flight numbers only.
    */
-  readonly ready: (id: string) => boolean;
+  readonly ready: (id: string, options: { readonly build: boolean }) => boolean;
+  /**
+   * A world tick as the scene counts it (Director.SeedTick: ticks since the last load), which the landing staggers hash
+   * so a replay lands the same; default the world tick itself.
+   */
+  readonly seedTick?: (tick: number) => number;
   /**
    * Whether a fleet's formation is planned (FleetFollowing.Ready), for a group landing at its slots.
    */
@@ -299,6 +307,10 @@ interface ArrivalShip {
 interface ArrivalGroup {
   readonly arrival: SceneArrival;
   readonly added: number;
+  /**
+   * Whether planning waits for the SOF builds as well as the flight numbers (Add's option).
+   */
+  readonly waitForBuild: boolean;
   readonly ships: ArrivalShip[];
   planned: Maybe<{ readonly tick: number; readonly exits: ReadonlyMap<string, number> }>;
   formedAt: Maybe<number>;
@@ -318,13 +330,15 @@ export class Arrivals {
    * the balls exist and before the builds. A ship Destiny refuses (max velocity 0, ...) stays where it was placed.
    *
    * @param arrival - The group, from applySceneOperations' `arrivals`.
+   * @param options - `waitForBuild` (default true): plan once the builds settled too, so every hull is drawn before it
+   *   lands; false plans on the flight numbers alone (a timeline cue's group, at its own boundary).
    * @returns The group key (re-keyed when a group of that key is still arriving).
    */
-  Add(arrival: SceneArrival): string {
+  Add(arrival: SceneArrival, { waitForBuild = true }: { readonly waitForBuild?: boolean } = {}): string {
     const { world } = this.config;
     let key = arrival.group;
     for (let suffix = 2; this.groups.has(key); suffix++) key = `${arrival.group}#${suffix}`;
-    const group: ArrivalGroup = { arrival: { ...arrival, group: key }, added: world.tick, ships: [], planned: null, formedAt: null, notes: [] };
+    const group: ArrivalGroup = { arrival: { ...arrival, group: key }, added: world.tick, waitForBuild, ships: [], planned: null, formedAt: null, notes: [] };
     for (const id of arrival.ships) this.Remove(id);
     const lane = this.Lane(group);
     for (const id of arrival.ships) {
@@ -416,7 +430,7 @@ export class Arrivals {
     const { ready, fleetReady } = this.config;
     const { arrival } = group;
     const live = group.ships.filter((ship) => !ship.dropped);
-    const settled = live.every((ship) => ready(ship.id)) && (arrival.landing !== 'formation' || !arrival.fleet || fleetReady(arrival.fleet));
+    const settled = live.every((ship) => ready(ship.id, { build: group.waitForBuild })) && (arrival.landing !== 'formation' || !arrival.fleet || fleetReady(arrival.fleet));
     return live.length > 0 && (settled || boundary - group.added >= ARRIVAL_READY_TIMEOUT);
   }
 
@@ -425,7 +439,7 @@ export class Arrivals {
     const { arrival } = group;
     const lane = this.Lane(group);
     const landings = this.Landings(group);
-    const offsets = toArrivalOffsets({ key: arrival.group, tick: boundary, ships: group.ships.map((ship) => ship.id), leader: arrival.leader, stagger: arrival.stagger });
+    const offsets = toArrivalOffsets({ key: arrival.group, tick: this.config.seedTick?.(boundary) ?? boundary, ships: group.ships.map((ship) => ship.id), leader: arrival.leader, stagger: arrival.stagger });
     const planned: PlanArrivalShip[] = [];
     for (const ship of group.ships) {
       if (ship.dropped) continue;
@@ -452,7 +466,7 @@ export class Arrivals {
       else if (ship) this.Drop(ship, `not warped in: ${refusal ?? 'Destiny refused it'}`);
     }
     if (group.ships.some((ship) => ship.dropped)) group.notes.push(`${group.ships.filter((ship) => ship.dropped).length} of ${group.ships.length} ships could not warp in`);
-    if (boundary - group.added >= ARRIVAL_READY_TIMEOUT && group.ships.some((ship) => !ship.dropped && !this.config.ready(ship.id))) group.notes.push(`planned after ${ARRIVAL_READY_TIMEOUT} s without every ship's flight numbers or build`);
+    if (boundary - group.added >= ARRIVAL_READY_TIMEOUT && group.ships.some((ship) => !ship.dropped && !this.config.ready(ship.id, { build: group.waitForBuild }))) group.notes.push(`planned after ${ARRIVAL_READY_TIMEOUT} s without every ship's flight numbers${group.waitForBuild ? ' or build' : ''}`);
     group.planned = { tick: boundary, exits };
   }
 

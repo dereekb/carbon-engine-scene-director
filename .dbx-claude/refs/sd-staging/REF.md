@@ -149,6 +149,11 @@ off-grid and land from warp at their placements (Destiny's EntityWarpIn: `sd-des
   plans a group when every ship's `/ship-stats` answer and SOF build have settled (`Director.ArrivalReady`; a join
   also `FleetFollowing.Ready`), or after `ARRIVAL_READY_TIMEOUT` (20 ticks, with a note). A ship with max velocity 0
   is placed at its landing (dropped, noted).
+- **Scripted arrivals** (a timeline patch cue's warp-in, `Director.CueEdit`): `Arrivals.Add(arrival, { waitForBuild:
+  false })` plans on the **flight numbers** alone (`ready(id, { build: false })`: the `/ship-stats` answer, the prop mod
+  and the fit not pending), not the SOF builds, so the group plans at the cue's own boundary: prepare prefetched those
+  lookups (`sd-timeline` "Determinism"). The staggers hash **scene ticks** (`config.seedTick` = `Director.SeedTick`,
+  ticks since the last load), so a replay lands the same; a hull whose build is slow may be drawn after it landed.
 - **Planner** (`PlanArrivals`, pure over `DestinyWorld.WarpProfile`): `WarpInMinDistance` = the smallest lane (bisection
   on log D) whose remaining distance a tick past the 5-tick backdate is ≥ `WARP_IN_HIDDEN_DISTANCE` (2,000 km);
   `together`: target = the slowest hull's `WarpDropOutTime(D_min) − backdate` + its offset; by speed: its own + offset.

@@ -146,6 +146,46 @@ describe('Arrivals', () => {
     expect(report.notes?.[0]).toMatch(/without every ship's flight numbers/);
   });
 
+  it('plans a waitForBuild: false group on the flight numbers alone, at the boundary it is added at', () => {
+    const asked: boolean[] = [];
+    const ready = (_id: string, { build }: { readonly build: boolean }): boolean => {
+      asked.push(build);
+      return !build;
+    };
+    const built = MakeWorld([['a', rifter, [0, 0, 0]]], { ready });
+    built.harness.Ticks(6);
+    built.arrivals.Add(Group(['a']));
+    built.arrivals.Boundary(built.harness.world.tick);
+    expect(built.arrivals.Report()[0].state).toBe('waiting');
+    const cue = MakeWorld([['a', rifter, [0, 0, 0]]], { ready });
+    cue.harness.Ticks(6);
+    cue.arrivals.Add(Group(['a']), { waitForBuild: false });
+    cue.arrivals.Boundary(cue.harness.world.tick);
+    expect(cue.arrivals.Report()[0].state).toBe('scheduled');
+    expect(asked).toEqual([true, false]);
+  });
+
+  it('keys the landing staggers on seedTick, so a group added at another absolute tick lands the same', () => {
+    const landsIn = (start: number): (number | undefined)[] => {
+      const { harness, arrivals } = MakeWorld(
+        [
+          ['a', rifter, [0, 0, 0]],
+          ['b', rifter, [500, 0, 0]],
+          ['c', guardian, [-500, 0, 0]],
+          ['d', rifter, [0, 0, 500]]
+        ],
+        { seedTick: (tick) => tick - start }
+      );
+      harness.Ticks(start);
+      arrivals.Add(Group(['a', 'b', 'c', 'd'], { stagger: 8 }));
+      arrivals.Boundary(harness.world.tick);
+      return arrivals.Report()[0].ships.map((ship) => ship.landsIn);
+    };
+    const early = landsIn(10);
+    expect(new Set(early).size).toBeGreaterThan(1);
+    expect(landsIn(47)).toEqual(early);
+  });
+
   it("lands a join at its slots around the FC's live position, along its heading", () => {
     const offsets = new Map<string, SceneVector>([['m', [0, 0, -3000]]]);
     const { harness, arrivals, exits } = MakeWorld(

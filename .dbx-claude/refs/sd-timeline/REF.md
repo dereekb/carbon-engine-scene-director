@@ -6,9 +6,9 @@
 > `ShipScripts`. The plan this follows: `~/.claude/plans/scene-timeline-and-per-ship-orders-validated-played-on-the-scene-clock-reported.md`
 > (slices T1 document → T2 page player → T3 determinism → T4 `at` on the tools → T5 real-GPU look).
 
-**Status: T1 (the document) and T2 (the page player) have landed.** The page plays the script on Destiny ticks and
-reports it. T3 (pilot delays and warp-in staggers keyed on scene ticks, prefetched lookups for cue-added ships), T4 (`at`
-on the lever tools) and T5 (the real-GPU scripted fight) follow.
+**Status: T1 (the document), T2 (the page player) and T3 (determinism) have landed.** The page plays the script on
+Destiny ticks, reports it, and replays it the same. T4 (`at` on the lever tools) and T5 (the real-GPU scripted fight)
+follow.
 
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
@@ -17,7 +17,7 @@ on the lever tools) and T5 (the real-GPU scripted fight) follow.
 | `timeline.ts` | types, limits, `TIMELINE_ACTION_NAMES`, `cueActionOf`, `cueDueSecond` (ceil), the script thresholds the page uses. **No run-time imports**: the folder and `../scene` import each other |
 | `actions.ts` | `TIMELINE_ACTIONS`, one registry entry per lever (`kind`, `read`, `references`, `advise`), `toTimelineScope`, `checkCueReferences` |
 | `steps.ts` | ship `orders`: `SceneShipStep`, `shipStepCompletion`, `normalizeShipOrderSteps` |
-| `projection.ts` | `sceneAtTimelineTime`, `sceneAddsBetween`, the `ApplySceneOperations` type |
+| `projection.ts` | `sceneAtTimelineTime`, `timelinePatchScenes` (the scene after each patch cue: the page's prefetch), `sceneAddsBetween`, the `ApplySceneOperations` type |
 | `normalize.ts` | `normalizeSceneTimeline`: read, ids, sort, the projection walk, `adds` pinning |
 | `operations.ts` | `TIMELINE_OPERATIONS` + `applyTimelineOperation` (wired into `applyOperation`'s `default:`) |
 | `prune.ts` | `removeTimelineReferences`, called by `remove_ship`, `remove_object`, `remove_fleet`, `remove_wing`, `remove_squad` |
@@ -150,7 +150,8 @@ The director is both ports.
   `timeline restart`) holds the scene clock (`SceneClock.Hold`) and checks `Director.SceneSettled()` every frame
   (`DriveTimeline`, first in `main.ts`'s loop): every live ship's `/ship-stats` answered (a failure counts), its prop
   mod looked up, its fit not pending (or without a fit its hull type not `TypePending`), its build not queued /
-  building; every fleet planned (`FleetFollowing.Ready`); every object built; the location not loading. Then the clock
+  building; every fleet planned (`FleetFollowing.Ready`); every object built; the location not loading; every prefetch
+  for the ships the patch cues add settled (counted as lookups, "Determinism"). Then the clock
   releases and the next boundary is t = 0, so every run starts from the same state. Cap
   `TIMELINE_PREPARE_LIMIT_SECONDS` 60 s of wall time, then it starts anyway with `note: "started after 60 s with 3
   builds and 1 lookup pending: this run may differ"`. `load_scene` / `open_scene { timeline: "pause" }` and `timeline
@@ -199,6 +200,38 @@ target cue-added ships as names; the user sees the authored document's warnings,
   result), `ships` (every script), `liveEdits` (source, cue, tick, operation count, adds) and `held`; `restart` adds the
   load's `warnings` and `changes`. `play` on an idle scene throws "the scene has no timeline or ship orders".
 
+## Determinism (T3)
+
+One script on one tools-core replays the same: cue and step ticks relative to t = 0, landings, kills and final positions
+(verify-page (j)). What makes it so:
+
+- **Ticks, not frames.** Cues and steps fire in the world's pre-boundary hook in a fixed order; t = 0 is the first
+  boundary after a prepared, held load; combat rolls are keyed on the document's seed and module activation counts.
+- **Scene ticks.** `Director.SeedTick(tick)` = `tick − loadTick` (the world tick at the last load, set in `ApplyNow` on
+  a restart; t = 0 for a scripted load). Pilot delays (`FleetOrders` `seedTick`, the director's `PilotDelays`, free
+  fire, `switch_prop_mods`, `switch_modules`) and warp-in staggers (`Arrivals` `seedTick`) hash it. Reports keep
+  absolute ticks (`startedAt` is the world tick of t = 0).
+- **The scene epoch** (`DestinyWorld.SetSceneEpoch(loadTick)`, every load; `sd-destiny`). Destiny is time-invariant for
+  every order but the legacy orbit, whose plane turns by the park's absolute tick (`currentTime × 0.001` rad) and is
+  seeded by the ball id's low 16 bits: the parks (`ScenePark`) count orbit time from the epoch, and after it a ship's new
+  ball id takes its document id's hash as its low 16 bits, so a cue-added or revived ship orbits the same in every run.
+  `destiny-timeline.spec.ts` checks two worlds 37 ticks apart (with different ball histories) fly direction, approach,
+  orbit, keep-at-range, MWD and goto to identical ball states.
+- **Prefetch.** On a scripted load `Director.PrefetchCues` walks `timelinePatchScenes` (the scene after each patch cue)
+  and `Prefetch`es every ship it adds or changes (keyed on hull, fit text and prop mod; live ships skipped): its
+  `/ship-stats` answer, prop mod, fit names and types (or default weapons' hull dogma and fit), with no live entry.
+  `SceneSettled` waits for them, so a cue-added ship's flight numbers are cached when the cue fires and `Retune` flies
+  it at once.
+- **Scripted warp-ins plan on flight numbers** (`CueEdit` → `ApplyNow(…, { waitForBuild: false })` →
+  `Arrivals.Add(arrival, { waitForBuild: false })`): at the cue's own boundary, not after the SOF builds (`sd-staging`
+  "Warp-in").
+- **A fleet order cue's result keeps its `delays`** (the timeline tool's `list[].result`).
+
+**Limits.** A cue-added hull is drawn once built: on a slow machine a big fleet's hulls may appear after they land (the
+SOF build is not prefetched). Ships without the SDE take their class values' radius from the build, so a cue-added
+fleet's formation waits on builds and is not tick-exact. Live input during play (a user's command) changes the run, as it
+should. A prepare that hits the 60 s cap says the run may differ.
+
 ## Seams for Time control and Movie mode
 
 `TimelinePlayer.Snapshot()` / `Restore()` (cursor, played, cue records, camera, the scripts' plain state) round-trip
@@ -223,3 +256,9 @@ The full verify-page after the Apply split (T2): 129 ok, 1 skip (headless audio)
 pre-T2 commit (d272abf), built in a temp worktree: "a moving FC dies …" (a race: when the FC dies while the wing
 commander still catches up, it slows by design; 1 run in 5 on HEAD, the same numbers) and "the warp-in shot anchors …"
 (flank-port is not refused for an arriving fleet). Both filed as follow-ups.
+
+T3 (2026-10-23, dbxpc, SDE): (j) 3 Punishers (fleet b) vs 3 Rifters, seed 7, death `explode`; cues engage at 1, a fleet
+approach with `delay: 0.5` at 2, a patch warp-in of 2 Rifters (inline composition) at 3, a targets call at 6, a fleet
+stop at 25; run to 55 s, `timeline restart`, run again: t = 0 at world ticks 2 and 58, cues at +1/+2/+3/+6/+25, landings
+`rw-fc` +12 and `rw-dps-01` +15, kills b1 +22 and r1 +46, and the 6 surviving ships' final positions equal in both runs.
+(k) the approach cue's delays `{ b1: 0, b2: 4, b3: 4 }` and the landing offsets `[0, 3]` were equal across both runs.

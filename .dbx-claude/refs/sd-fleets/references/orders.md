@@ -117,9 +117,11 @@ follow-the-FC). An FC giving a wing or squad warp does not warp itself.
 
 `delay` (0–1) on `order_fleet`, `switch_prop_mods` and `switch_modules`: every ship but the giver responds after its own
 time, `toPilotDelays`: uniform in [0, delay × `MAX_FLEET_ORDER_DELAY` (10 s)] in whole ticks, from an FNV-1a hash of the
-group key, the tick and the ship id (`u`), so the same order at the same tick responds the same way. The tick is the
-world's absolute tick, which keeps counting across loads: keying it on scene ticks (so a timeline replay draws the same
-delays, and the same reactions) is the timeline's T3.
+group key, the tick and the ship id (`u`), so the same order at the same tick responds the same way. The tick is a
+**scene tick**: `Director.SeedTick(tick)` = ticks since the last load (t = 0 for a scripted load, the clock being held
+between them), passed to `FleetOrders` (`seedTick` option) and used by the director's own calls (called targets'
+`PilotDelays`, free fire, `switch_prop_mods`, `switch_modules`), so a timeline replay draws the same delays and the same
+reactions. Results and reports keep absolute ticks.
 
 - **Reactions** (S6 of the fleet-personalities plan): an order **without** `delay` reaches each pilot after its reaction
   `r` (`reactionOf`): `round((1 − r) × 10 s × (0.5 + 0.5u))`, so reaction 1 answers at once and 0 in 5–10 s. A pilot

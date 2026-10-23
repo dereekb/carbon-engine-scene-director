@@ -93,3 +93,46 @@ describe('DestinyWorld OnBeforeBoundary', () => {
     }
   });
 });
+
+describe('DestinyWorld time invariance', () => {
+  const tfi = ResolveFlight({ published: { ...TFI, published: { ...TFI.published, rigSize: 3 } }, hull: null, overrides: null, propMod: ResolveShipPropMod({ module: 'mwd', rigSize: 3, answer: null }) });
+
+  // A timeline replay rests on this: the same orders at the same ticks since t = 0 fly the same, whatever the world's
+  // absolute tick.
+  it('flies the same relative orders to the same ball states when started 37 ticks later, orbits from the epoch', () => {
+    const run = (start: number): number[][] => {
+      const harness = new Harness();
+      const { world } = harness;
+      // The later world had balls before (an earlier run's ships): ids are seeded, not counted.
+      for (let index = 0; index < start % 5; index++) world.AddShip(Ship(`old-${index}`, [0, 50_000, index * 1000]), Fly(RIFTER));
+      harness.Ticks(start);
+      for (let index = 0; index < start % 5; index++) world.RemoveShip(`old-${index}`);
+      // A load: orbit time and ship ball ids start from here (Director.ApplyNow).
+      world.SetSceneEpoch(world.tick);
+      world.AddShip(Ship('a', [0, 0, 0]), tfi);
+      world.AddShip(Ship('b', [8000, 0, 2000]), Fly(RIFTER));
+      world.AddShip(Ship('c', [-3000, 500, 0]), Fly(RIFTER));
+      let played = 0;
+      world.OnBeforeBoundary(() => {
+        played++;
+        if (played === 1) {
+          world.Order('a', { type: 'direction', direction: [0, 0, 1], speed: 1 });
+          world.Order('b', { type: 'approach', target: 'a', speed: 1 });
+        }
+        if (played === 3) world.SwitchPropMod('a', true);
+        if (played === 5) world.Order('c', { type: 'orbit', target: 'a', range: 2500, speed: 1 });
+        if (played === 12) world.Order('b', { type: 'keep-at-range', target: 'c', range: 5000, speed: 1 });
+        if (played === 16) world.SwitchPropMod('a', false);
+        if (played === 20) world.Order('a', { type: 'goto', point: [0, 2000, 40_000], speed: 0.5 });
+      });
+      harness.Ticks(30);
+      expect(played).toBe(30);
+      // Positions, velocities, mode, heading and physics; effectStamp is an absolute tick.
+      return ['a', 'b', 'c'].map((id) => {
+        const ball = world.master.GetBall(world.BallIdOf(id) ?? 0);
+        return ball ? [ball.x, ball.y, ball.z, ball.vx, ball.vy, ball.vz, ball.mode, ball.mNewYaw, ball.mNewPitch, ball.mass, ball.maxVelocity, ball.agility] : [];
+      });
+    };
+    expect(run(39)).toEqual(run(2));
+  });
+});

@@ -13,6 +13,10 @@
  *   `now` (100 ns ticks).
  * - Absolute coordinates. The replica's ego is a fixed reference ball at the origin, so ClientBall samples are world
  *   positions. Ship balls take ids from FIRST_SHIP_BALL_ID up and never reuse one.
+ * - Scene epoch (SetSceneEpoch, at every load). Destiny's legacy orbit turns its plane by the park's absolute tick and
+ *   seeds it with the ball id's low 16 bits. From the epoch on, the parks (ScenePark) count orbit time from the load,
+ *   and a ship's ball id has its document id's hash as its low 16 bits, so an orbit given at the same tick since the
+ *   load flies the same in every timeline replay. Every other order is time-invariant as Destiny has it (spec'd).
  * - Rotation. Destiny's legacy orientation faces the velocity, or the goto point at rest. A ship is seeded to face
  *   along its document forward vector; BallRotation then multiplies in the document's remaining attitude (its roll),
  *   so a ship at rest has exactly its document rotation and keeps its roll while flying.
@@ -80,7 +84,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, NO_FALLOFF_METRES, shipOrderTarget, toFollowTolerance, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
+import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, NO_FALLOFF_METRES, shipOrderTarget, toFollowTolerance, unitHash, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import { CycleEnd } from './module-cycle';
 import type { EveShip2 } from './runtime';
@@ -96,6 +100,27 @@ export { WARP_IN_BACKDATE_TICKS } from './warp';
  */
 export const REFERENCE_BALL_ID = 1;
 export const FIRST_SHIP_BALL_ID = 1000;
+
+/**
+ * A seeded ship ball id's low part (SetSceneEpoch): Destiny's legacy orbit seeds its plane with the id's low 16 bits.
+ */
+const BALL_ID_SEED_SPAN = 0x10000;
+
+/**
+ * A Destiny park whose legacy orbit plane precesses from the scene's epoch (the last load) rather than the park's first
+ * tick: EVE turns the plane by `currentTime × 0.001` rad, which is the only use EvolveOldStyleOrbit makes of the time.
+ * Everything else is the runtime's.
+ */
+class ScenePark extends CjsBallparkController {
+  /**
+   * The park tick orbit time counts from (DestinyWorld.SetSceneEpoch).
+   */
+  orbitEpoch = 0;
+
+  override EvolveOldStyleOrbit(ball: CjsDestinyBall, currentTime: number): void {
+    super.EvolveOldStyleOrbit(ball, currentTime - this.orbitEpoch);
+  }
+}
 /**
  * A static object ball's mass: it is neither free nor massive, so Destiny never reads it.
  */
@@ -879,11 +904,19 @@ export class DestinyWorld {
    */
   private missileEvents: MissileEvent[] = [];
   private nextBallId = FIRST_SHIP_BALL_ID;
+  /**
+   * Whether ship ball ids are seeded by their document ids (after the first SetSceneEpoch).
+   */
+  private seeded = false;
+  private readonly parks: readonly ScenePark[];
 
   constructor() {
-    this.master = new CjsBallparkController();
+    const master = new ScenePark();
+    const replica = new ScenePark();
+    this.parks = [master, replica];
+    this.master = master;
     this.master.isMaster = true;
-    this.replica = new CjsBallparkController();
+    this.replica = replica;
     // Both parks get the reference ball, so they hold the same balls.
     this.Both((park) => park.AddBall(REFERENCE_BALL_ID, 1, 0, 0, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 1, 0));
     this.replica.ego = REFERENCE_BALL_ID;
@@ -900,6 +933,42 @@ export class DestinyWorld {
   }
 
   /**
+   * Starts the scene's epoch (a load): both parks count their legacy orbit time from `tick`, and from now on a ship's
+   * new ball id has its document id's hash as its low 16 bits, so its orbit plane is the same in every replay, however
+   * many ticks and balls came before.
+   *
+   * @param tick - The world tick of the load.
+   */
+  SetSceneEpoch(tick: number): void {
+    for (const park of this.parks) park.orbitEpoch = tick;
+    this.seeded = true;
+  }
+
+  /**
+   * A ship's ball id on both parks.
+   *
+   * @param id - The ship id.
+   * @returns The ball id; null for an unknown ship.
+   */
+  BallIdOf(id: string): Maybe<number> {
+    return this.ships.get(id)?.ballId ?? null;
+  }
+
+  /**
+   * The next ship ball id: the next free one, or after SetSceneEpoch the next whose low 16 bits are the ship's seed.
+   * Never a used one.
+   */
+  private NextShipBallId(id: string): number {
+    let ballId = this.nextBallId;
+    if (this.seeded) {
+      const seed = Math.floor(unitHash(`ball|${id}`) * BALL_ID_SEED_SPAN);
+      ballId += (seed - (ballId % BALL_ID_SEED_SPAN) + BALL_ID_SEED_SPAN) % BALL_ID_SEED_SPAN;
+    }
+    this.nextBallId = ballId + 1;
+    return ballId;
+  }
+
+  /**
    * Gives a document ship a ball at rest at its placement. A ship that already has one is re-placed.
    *
    * @param doc - The document ship.
@@ -909,7 +978,7 @@ export class DestinyWorld {
   AddShip(doc: Pick<SceneShip, 'id' | 'position' | 'rotation'>, physics: ShipPhysics = DEFAULT_SHIP_PHYSICS): void {
     if (!this.ships.has(doc.id)) {
       RequireValidPhysics(physics);
-      const ballId = this.nextBallId++;
+      const ballId = this.NextShipBallId(doc.id);
       const [x, y, z] = doc.position;
       this.Both((park) => park.AddBall(ballId, physics.mass, physics.radius, physics.maxVelocity, true, false, false, true, false, x, y, z, 0, 0, 0, physics.agility, 1));
       const ball = this.replica.GetBall(ballId);

@@ -191,6 +191,7 @@ import {
   TIMELINE_OPERATION_NAMES,
   cueActionOf,
   sceneAtTimelineTime,
+  timelinePatchScenes,
   type SceneCue,
   type SceneCueAdds
 } from '@scene-director/scene';
@@ -272,6 +273,10 @@ const DEFAULT_SCREENSHOT_WIDTH = 1280;
  * The class-values note while a ship's /ship-stats lookup is in flight.
  */
 const LOOKUP_PENDING_NOTE = "waiting for the hub's /ship-stats answer";
+/**
+ * Rounds of a prefetched fit's lookups (its names, then their types, then a replacing prop mod's type).
+ */
+const PREFETCH_FIT_ROUNDS = 3;
 
 export type ShipStatus = 'queued' | 'building' | 'validated' | 'ready' | 'failed' | 'destroyed';
 
@@ -743,6 +748,14 @@ export class Director {
    */
   private liveEdits: LiveEdit[] = [];
   /**
+   * The world tick at the last load (a restart): pilot delays and warp-in staggers hash ticks since then (SeedTick).
+   */
+  private loadTick = 0;
+  /**
+   * Prefetches still running for the ships a scripted load's patch cues add (Prefetch); SceneSettled counts them.
+   */
+  private prefetching = 0;
+  /**
    * Plays the authored timeline and the ships' orders (timeline.ts).
    */
   readonly timeline: TimelinePlayer;
@@ -931,11 +944,12 @@ export class Director {
     this.onChange = onChange;
     // Fleets fly and take orders as they are live: the destroyed taken out (toLiveFleetScene).
     this.following = new FleetFollowing({ world, scene: () => this.LiveFleets()?.scene ?? null, radiusOf: (id) => this.FormationRadius(id) });
-    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null, reactionOf: (id) => this.ReactionOf(id) });
+    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null, reactionOf: (id) => this.ReactionOf(id), seedTick: (tick) => this.SeedTick(tick) });
     this.arrivals = new Arrivals({
       world,
       placement: (id) => this.scene?.ships.find((doc) => doc.id === id) ?? null,
-      ready: (id) => this.ArrivalReady(id),
+      ready: (id, options) => this.ArrivalReady(id, options),
+      seedTick: (tick) => this.SeedTick(tick),
       fleetReady: (fleet) => this.following.Ready(fleet),
       groupOffsets: (fleet, leader, ships) => this.following.GroupOffsets(fleet, leader, ships),
       followState: (id) => this.following.Report(id)?.state ?? null
@@ -1037,7 +1051,7 @@ export class Director {
       },
       // Free fire: what a member can pick from, and its pilot's reaction before it picks again.
       FreeFireView: (id) => this.FreeFireView(id),
-      FreeFireDelay: (id, tick) => toPilotDelays({ key: 'free-fire', tick, ships: [id], issuer: '', reactionOf: (ship) => this.ReactionOf(ship) }).get(id) ?? 0
+      FreeFireDelay: (id, tick) => toPilotDelays({ key: 'free-fire', tick: this.SeedTick(tick), ships: [id], issuer: '', reactionOf: (ship) => this.ReactionOf(ship) }).get(id) ?? 0
     });
     this.shots = new ShotQueue(world.master.tickInterval / 1000);
     this.missiles = new MissileFlights(world.master.tickInterval / 1000);
@@ -1445,7 +1459,7 @@ export class Director {
    * @returns Ticks per ship.
    */
   private PilotDelays(request: FleetOrderRequest, resolved: ResolvedFleetOrder, tick: number): Map<string, number> {
-    return toPilotDelays({ key: toFleetGroupKey(resolved.group), tick, delay: request.delay, ships: resolved.ships, issuer: resolved.issuer, reactionOf: (id) => this.ReactionOf(id) });
+    return toPilotDelays({ key: toFleetGroupKey(resolved.group), tick: this.SeedTick(tick), delay: request.delay, ships: resolved.ships, issuer: resolved.issuer, reactionOf: (id) => this.ReactionOf(id) });
   }
 
   /**
@@ -1569,7 +1583,7 @@ export class Director {
     if (selected.problems.length) throw new SceneError(selected.problems);
     const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
     const key = `prop-mods|${command.fleet ?? ''}|${command.wing ?? ''}|${command.squad ?? ''}`;
-    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay, ships: selected.ships, issuer: '', reactionOf: (ship) => this.ReactionOf(ship) });
+    const delays = toPilotDelays({ key, tick: this.SeedTick(this.world.tick), delay: command.delay, ships: selected.ships, issuer: '', reactionOf: (ship) => this.ReactionOf(ship) });
     const ships: SwitchedPropMod[] = [];
     const skipped: SwitchPropModsResult['skipped'] = [];
     for (const id of selected.ships) {
@@ -1618,7 +1632,7 @@ export class Director {
     if (problems.length) throw new SceneError(problems);
     const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
     const key = `modules|${command.fleet ?? ''}|${command.wing ?? ''}|${command.squad ?? ''}`;
-    const delays = toPilotDelays({ key, tick: this.world.tick, delay: command.delay, ships: selected.ships, issuer: '', reactionOf: (ship) => this.ReactionOf(ship) });
+    const delays = toPilotDelays({ key, tick: this.SeedTick(this.world.tick), delay: command.delay, ships: selected.ships, issuer: '', reactionOf: (ship) => this.ReactionOf(ship) });
     const ships: SwitchModulesResult['ships'] = [];
     const skipped: SwitchModulesResult['skipped'] = [];
     const notes: string[] = [];
@@ -2297,7 +2311,8 @@ export class Director {
   /**
    * Whether the live scene is ready for t = 0 (a scripted load's prepare): every live ship's /ship-stats lookup answered
    * (a failure counts), its prop mod looked up, its fit (or its default weapons' hull type) resolved and its build
-   * settled; every fleet planned; every object built; the location loaded.
+   * settled; every fleet planned; every object built; the location loaded; every prefetch for the ships the patch cues
+   * add settled (counted as lookups).
    */
   private SceneSettled(): TimelineSettled {
     const waiting = { lookups: 0, fits: 0, builds: 0, fleets: 0, objects: 0, location: 0 };
@@ -2318,6 +2333,7 @@ export class Director {
       if (status == null || status === 'queued' || status === 'building') waiting.objects += 1;
     }
     if (this.location.Report()?.status === 'loading') waiting.location = 1;
+    waiting.lookups += this.prefetching;
     return { settled: Object.values(waiting).every((count) => count === 0), waiting };
   }
 
@@ -2482,7 +2498,8 @@ export class Director {
    */
   private CueEdit(operations: unknown, cue: SceneCue): object {
     const normalized = applySceneOperations(this.Current(), operations);
-    const applied = this.ApplyNow(normalized);
+    // Its warp-ins plan on flight numbers (prefetched during prepare), not SOF builds, so they land on the same ticks.
+    const applied = this.ApplyNow(normalized, { waitForBuild: false });
     this.FleetLeversBack(operations);
     this.liveEdits.push({ source: 'cue', cue: cue.id, tick: this.world.tick, operations, ...(cue.adds ? { adds: cue.adds } : {}) });
     this.FinishApply(applied).catch((error: unknown) => console.warn(`timeline cue "${cue.id}": its builds failed: ${ErrorText(error)}`));
@@ -2537,6 +2554,8 @@ export class Director {
       const scripted = cues.length > 0 || authored.scene.ships.some((doc) => (doc.orders?.length ?? 0) > 0);
       if (restart) this.timeline.Load(cues, scripted, { paused });
       else this.timeline.Edit(cues, scripted);
+      // Prepare waits for the lookups of the ships its patch cues add, so they fly and warp in on the same ticks.
+      if (restart && scripted) this.PrefetchCues(authored.scene);
     }
     if (restart) this.liveEdits = [];
     if (authored) await this.store.Put(CURRENT_KEY, authored.scene);
@@ -2554,7 +2573,7 @@ export class Director {
    * itself, cinema releases, location, combat, a load's clears, balls, arrivals, object balls, retunes, prop mods and
    * formations. The builds' live entries are queued here, so readiness checks never see a missing one.
    */
-  private ApplyNow({ scene, arrivals }: NormalizedScene, { restart = false }: { readonly restart?: boolean } = {}): AppliedScene {
+  private ApplyNow({ scene, arrivals }: NormalizedScene, { restart = false, waitForBuild = true }: { readonly restart?: boolean; readonly waitForBuild?: boolean } = {}): AppliedScene {
     const previous = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
     const diff = diffScenes(this.scene, scene);
     // A load opens with the document's calls; a patch keeps the live calls it leaves standing, pruned.
@@ -2576,7 +2595,12 @@ export class Director {
     const objectBuilds = this.objects.Apply(diff.objects, scene);
     const stopped: string[] = [];
     const moduleEvents: ShipModuleEvent[] = [];
-    if (restart) this.arrivals.Clear();
+    if (restart) {
+      this.arrivals.Clear();
+      this.loadTick = this.world.tick;
+      // Orbits count from the load and ships' balls are seeded by their ids, so a replay orbits the same.
+      this.world.SetSceneEpoch(this.loadTick);
+    }
     for (const doc of diff.removed) {
       this.arrivals.Remove(doc.id);
       stopped.push(...this.world.RemoveShip(doc.id));
@@ -2679,7 +2703,7 @@ export class Director {
       } else if (restart || !before || !SamePlacement(before, doc)) this.world.PlaceShip(doc);
     }
     // Arriving ships park off-grid before anything is built, so a hull never shows at its landing.
-    const arrivalKeys = (arrivals ?? []).map((arrival) => this.arrivals.Add(arrival));
+    const arrivalKeys = (arrivals ?? []).map((arrival) => this.arrivals.Add(arrival, { waitForBuild }));
     const moved = new Set(diff.objects.moved.map((doc) => doc.id));
     const resized = new Set([...diff.objects.resized, ...diff.objects.rebuilt].map((doc) => doc.id));
     for (const doc of scene.objects ?? []) {
@@ -3717,10 +3741,88 @@ export class Director {
    * @param id - The ship id.
    * @returns False while either is pending.
    */
-  private ArrivalReady(id: string): boolean {
+  private ArrivalReady(id: string, { build = true }: { readonly build?: boolean } = {}): boolean {
     const doc = this.scene?.ships.find((ship) => ship.id === id);
     const status = this.live.get(id)?.status;
-    return Boolean(doc && this.hullStats.Cached(doc)) && status !== 'queued' && status !== 'building';
+    const answer = doc ? this.hullStats.Cached(doc) : null;
+    if (!doc || !answer) return false;
+    // A cue's warp-in plans on its final flight numbers: the prop mod and the fit answered too (prefetched in prepare).
+    if (!build) {
+      const propMod = this.PropModTarget(doc, answer);
+      return (propMod == null || Boolean(this.propMods.Cached(propMod))) && !this.fittings.get(id)?.pending;
+    }
+    return status !== 'queued' && status !== 'building';
+  }
+
+  /**
+   * A tick as the scene counts it: ticks since the last load (`loadTick`), which is t = 0 for a scripted load (the clock
+   * is held between them). Pilot delays and warp-in staggers hash it, so a replay draws the same; reports keep absolute
+   * ticks.
+   *
+   * @param tick - A world tick.
+   * @returns Ticks since the last load.
+   */
+  private SeedTick(tick: number): number {
+    return tick - this.loadTick;
+  }
+
+  /**
+   * Starts the lookups of every ship a scripted document's patch cues add or change (timelinePatchScenes), so their
+   * flight numbers are cached when the cue fires: Retune flies them at once and their warp-ins plan at the cue's own
+   * boundary. Ships the live scene already holds as they are are skipped (Retune looks them up).
+   *
+   * @param authored - The authored document.
+   */
+  private PrefetchCues(authored: SceneDocument): void {
+    const scene = this.scene;
+    const keyOf = (doc: SceneShip, of: SceneDocument): string => `${HullStatsKey(doc)}|${doc.fit ? (fitTextOf(doc, of) ?? '') : ''}|${JSON.stringify(doc.propMod?.module ?? null)}`;
+    const seen = new Set(scene ? scene.ships.map((doc) => keyOf(doc, scene)) : []);
+    for (const { cueId, scene: projected } of timelinePatchScenes(authored, applySceneOperations)) {
+      for (const doc of projected.ships) {
+        const key = keyOf(doc, projected);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        this.prefetching += 1;
+        this.Prefetch(doc, projected)
+          .catch((error: unknown) => console.warn(`timeline cue "${cueId}": prefetching ship ${doc.id} failed: ${ErrorText(error)}`))
+          .finally(() => {
+            this.prefetching -= 1;
+            this.onChange();
+          });
+      }
+    }
+  }
+
+  /**
+   * One ship's lookups ahead of its cue, without a live entry: its /ship-stats answer, its prop mod, and its fit's names
+   * and types (or its default weapons' hull dogma and fit), until its fit no longer waits on a lookup.
+   *
+   * @param doc - The ship as the cue will add it.
+   * @param scene - The projected document (its fits).
+   */
+  private async Prefetch(doc: SceneShip, scene: SceneDocument): Promise<void> {
+    const answer = await this.hullStats.Lookup(doc);
+    const module = shipPropModModuleOf(doc, fitTextOf(doc, scene));
+    const rigSize = RigSizeOf({ published: answer.hull, hull: null });
+    const target = PropModLookupTarget(module, rigSize);
+    const propMod = ResolveShipPropMod({ module, rigSize, answer: target == null ? null : await this.propMods.Lookup(target) });
+    const hullTypeID = answer.hull?.typeID ?? null;
+    if (!doc.fit && hullTypeID != null) await this.fitLookup.LookupTypes([hullTypeID]);
+    // A fit's names land first, then the types they give (a prop mod replacing the fit's own may add one more).
+    for (let round = 0; round < PREFETCH_FIT_ROUNDS; round++) {
+      const fitting = ResolveShipFitting({
+        doc,
+        scene,
+        lookup: this.fitLookup,
+        hullTypeID,
+        hullNote: answer.note,
+        propMod: propMod ? { module: propMod.module, typeID: propMod.stats.typeID, name: propMod.stats.name, explicit: doc.propMod?.module != null } : null,
+        fallback: this.DefaultFallback(doc, answer),
+        sofRace: doc.dna.split(':')[2] ?? null
+      });
+      if (!fitting?.pending) break;
+      await this.fitLookup.Prepare({ text: fitting.text, typeIDs: fitting.typeIDs });
+    }
   }
 
   private Retire(id: string): void {
@@ -5003,14 +5105,14 @@ function WithoutTimeline(scene: SceneDocument): SceneDocument {
 
 /**
  * A fired cue with its lever's result, compacted for the report: scalars kept, lists counted (the first 10 skips and
- * warnings kept).
+ * warnings kept), a fleet order's pilot `delays` kept (a replay draws the same).
  */
 function Fired(result: unknown): CueFireResult {
   if (result === null || typeof result !== 'object') return { state: 'fired', result };
   const compact: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(result)) {
     if (Array.isArray(value)) compact[key] = key === 'skipped' || key === 'warnings' ? value.slice(0, 10) : value.length;
-    else if (value === null || typeof value !== 'object') compact[key] = value;
+    else if (key === 'delays' || value === null || typeof value !== 'object') compact[key] = value;
   }
   return { state: 'fired', result: compact };
 }

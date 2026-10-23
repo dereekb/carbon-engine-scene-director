@@ -167,6 +167,11 @@ declare module '@carbonenginejs/server/destiny' {
      * Evolves every whole tick up to `simTime` (100 ns ticks).
      */
     OnTick(realTime: DestinyInt64, simTime: DestinyInt64, cookie: unknown): void;
+    /**
+     * The legacy orbit's step for one ball. `currentTime` (the park's tick) only turns the orbit plane: EVE precesses it
+     * by `currentTime × 0.001` rad, seeded by the ball id's low 16 bits.
+     */
+    EvolveOldStyleOrbit(ball: CjsDestinyBall, currentTime: number): void;
     GotoDirection(id: DestinyInt64, x: number, y: number, z: number): void;
     /**
      * Flies to a world point (mode GOTO), slowing within one tick's travel of it. Returns without a word, keeping the
