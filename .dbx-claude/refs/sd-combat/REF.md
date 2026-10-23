@@ -10,12 +10,10 @@
 slices. **K1 is in**: the runtime-free rules in `packages/scene` (below), the document's `combat` and `set_combat`, and
 `ship_stats`' turret numbers. **K2 is in**: the page runs them: `ShipLocks`, the lock gate on
 turrets, `CombatRules` rolling each shot through Destiny's `GetAccuracy`, damage into `DamageModel`, passive shield
-recharge, `engage` / `cease_fire`, get_state's locks and combat reports. **K3 is in, the GPU calibration pending**:
-deaths explode (the client's explosion, drawn on a renderer and scheduled headless), the ball leaves both parks after
-the linger, the fleets fall back through the live view, a load revives everyone (verify-page 6–8 green). Still open
-(the K3 follow-up item): the real-GPU fight (screenshots, fps, `gpuErrors`, explosion audio `played`), pinning
-`referenceRadius` per class from it, and a look at the Triglavian dreadnought file's older members on the GPU (the
-runtime's `Play` / `UpdateSyncronous` handle `localExplosion` and `globalExplosions`; untested drawn).
+recharge, `engage` / `cease_fire`, get_state's locks and combat reports. **K3 is in**: deaths explode (the client's
+explosion, drawn on a renderer and scheduled headless), the ball leaves both parks after the linger, the fleets fall
+back through the live view, a load revives everyone (verify-page 6–8 green), and the real-GPU fight calibrated and
+pinned `referenceRadius` (below, Real-GPU evidence). The plan is **delivered**.
 
 ## Files (K1)
 
@@ -26,7 +24,7 @@ runtime's `Play` / `UpdateSyncronous` handle `localExplosion` and `globalExplosi
 | `combat/locks.ts` | `lockTime`, `LOCK_TIME_CONSTANT` (40000), `pilotLockLimit`, `shipLockLimit`, the two Target Management skills |
 | `combat/random.ts` | `combatRoll(seed, key)`, `combatHash` (cyrb53), `combatPick`, `combatShuffle`, `CombatRollKey` |
 | `combat/weapon-numbers.ts` | `TurretCombatNumbers`, `turretCombatNumbersOf(ship, bundle, key)`, `ShipWeapons`, `shipWeaponsOf`, `TURRET_COMBAT_ATTRIBUTES`, `NO_CHARGE_DAMAGE_NOTE` |
-| `combat/explosions.ts` | `SHIP_EXPLOSIONS`, `SHIP_EXPLOSION_TIMINGS` (captured), `explosionDurationBound`, `shipExplosionOf`, `MAX_LOCAL_BLASTS` (8), `EXPLOSION_REFERENCE_RADII` |
+| `combat/explosions.ts` | `SHIP_EXPLOSIONS`, `SHIP_EXPLOSION_TIMINGS` (captured), `explosionDurationBound`, `shipExplosionOf`, `MAX_LOCAL_BLASTS` (8), `EXPLOSION_REFERENCE_RADII`, `TITAN_EXPLOSION_REFERENCE_RADIUS` |
 | `combat/document.ts` | `SceneCombat`, `COMBAT_DEATH_MODES`, `DEFAULT_COMBAT_SEED` (1), `DEFAULT_COMBAT_DEATH` (`explode`), `normalizeSceneCombat`, `sceneCombatOf`, `COMBAT_OPERATIONS` / `applyCombatOperation` (`set_combat`) |
 | `combat/commands.ts` | `normalizeEngageCommand` (`{ selection, target, modules = ["turret"] }`, a celestial refused), `normalizeCeaseFireCommand` (`{ selection, unlock }`) |
 | `combat/kill.ts` | `ShotOutcome`, `ShipKill`, `ShipKillReport`: the plain data the page will report and the timeline, time control and automatic camera read |
@@ -164,7 +162,8 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
 - `ShipExplosions.Start(id, { ship, curves, choice, radius, at, seed })` queues it; `Frame(now)` (from
   `DriveExplosions`, after `DriveTurrets` in `main.ts`) plays it at `at` once the file loaded: the values are copied
   with every `AudEventCurve` and `observers` list taken out (`WithoutAudio`), hydrated inside `PageAudio.Detached`, the
-  root put on the ball's curves, the child's `scaling` = `max(1, boundingSphereRadius / referenceRadius)`,
+  root put on the ball's curves at `scaling` 1, the child's own `scaling` multiplied by `max(1, boundingSphereRadius /
+  referenceRadius)` (the files author their size there; `sd-runtime` → Explosions),
   `SetLocalExplosionTransforms` with a keyed subset (`combatShuffle(seed, "explosion|<ship>")`) of up to 8 `damage`
   locators (8 Fibonacci points on the bounding sphere without them), `SetGlobalExplosionOffset(boundingSphereCenter)`,
   `engine.AddObject(root)`, `Play()`.
@@ -268,10 +267,12 @@ shared part, a `globalExplosion` container, timing values). The client picks one
   the runtime's `CalculateExplosionTimes`: `max(localDelay + localDuration + S, globalDelay + S + globalDuration)`,
   `S = interval × (1 − factor^N) / (1 − factor)` (`triFloatRandom01` ≤ 1): short 01a 16 s, generic 01a 21, long 01a
   52, titan amarr 44. The timing values are captured in `SHIP_EXPLOSION_TIMINGS` (tools-core `?format=json`, build
-  3632936). The Triglavian dreadnought file has the older single `localExplosion` / `globalExplosions` members: K3
-  checks the runtime plays it.
-- **`referenceRadius`** (the hull radius the authored size suits; the page scales by `max(1, radius / reference)`):
-  S 40 m, M 150, L 450, XL 1,500 per file to start; K3's GPU check tunes and pins them.
+  3632936). The Triglavian dreadnought file has the older single `localExplosion` / `globalExplosions` members; the
+  runtime plays and draws it (K3 GPU check).
+- **`referenceRadius`** (the drawn bounding radius the file's authored size suits; the page multiplies the file's own
+  scaling by `max(1, radius / reference)`), pinned from the GPU check: `EXPLOSION_REFERENCE_RADII` S 70 m, M 250, L
+  550, XL 1,500 (the Triglavian dreadnought's file); the titan files `TITAN_EXPLOSION_REFERENCE_RADIUS` 7,000; the
+  titan fallback (a long file) L's 550. A hull under its class's reference plays the authored size.
 
 ## Tools
 
@@ -331,6 +332,44 @@ shots, the kill 15 ticks after `engage`, by p2 high-0, dealt [824.6, 748]; seed 
 `audio.gameObjects − emitters` 1 before and after. Fleet: the lead dead at tick 21, the squad anchors on the wing
 commander; the FC dead at tick 39, the wing commander acts for it and the member follows it. A load: 6 ships alive at
 full HP, no kills, the FC back.
+
+## Real-GPU evidence (K3)
+
+2026-10-23, dbxpc (Windows Chrome, nvidia lovelace, 1600 × 900), SDE 3632936, a private hub on 5521; drivers and
+artifacts in `.scratch/combat-gpu/` on that machine (`fight.mjs` the controller driver, `probe.js` the per-frame
+explosion timeline, `calib.js` a private `ShipExplosions` that plays any file on a live hull at a given reference).
+
+- **The 3v3** (3 Rifters vs 3 Punishers at 6 km, `engage` each fleet on the other's FC): `run5-3v3/` at 450 m off
+  blue's FC: `006-fight-0-44-100.png` autocannon tracers past the hull and an armor impact, `009-fight-0-0-38.png` a
+  hull impact with the hull's damage fire; the kill `010`–`018-blue-fc-k{0.5,1.5,3,6,12}s.png`: blasts on the hull
+  (1.5 s), short 01b's global flash and plume enveloping where the hull was (3 s, hull gone at the wreck switch), debris
+  and smoke (6 s), the tail. Each kill: 8 local blasts and the global one, each sound posted on the dying ship's emitter
+  with `played: true`; the hide at the wreck switch (short 01a 1.87 s, 01b 2.55 s); roots off at `totalDuration`
+  (15.4 / 22.5 s), `scene.objects` back to the live ships. Red's fleet acts on `red-dps-01` (`actingFor: red-fc`),
+  in formation. 45–57 fps, `gpuErrors` 0, `ShipExplosions.Errors()` empty, `page_log` info only.
+- **M and L** (2 Ferox vs a Megathron at 5 km, `run2-ml/`): the Ferox dies (generic 01a, factor 1.011, wreck switch
+  2.77 s, done 17.8 s), then the Megathron (long 01c, factor 1, wreck switch 9.67 s, done 33.7 s):
+  `023-blue-fc-k3s.png` blasts along the hull, `025-blue-fc-k12s.png` the blue-white flash (~920 m) over the ~460 m
+  hull. 54 fps mean, p99 28 ms.
+- **Calibration** (`calib/`, hull left drawn, factor 1 = authored size): Rifter (bounding 68 m) short 01a fireball
+  ~640 m (`rifter-*`); Ferox (253 m) generic 01a ring ~1.3 km, fireball ~2.3 km (`ferox-1-3s.png`); Megathron (541 m)
+  long 01a flash ~880 m (`mega-2-5_2s.png`, blasts on the hull `mega-2-4s.png`); Zirnitra (1,446 m) tgdn01 red blasts
+  then a red flash about the hull (`zirn-1-1_5s.png`, `zirn-1-5s.png`: the older members draw); Avatar (6,954 m) titan
+  amarr fireball ~12 km (`avatar-1-6s.png`). Each class's authored size envelops its typical hull, so the reference is
+  that hull's radius: S 70, M 250, L 550, XL 1,500, titans 7,000.
+- **Fixed on the way** (`explosions.ts`): the child's `scaling` was overwritten (short 01a drew at 3.4× its authored
+  size, a 1.1 km fireball on a Rifter) and long 01a's root scale 5 threw its blasts up to 1.8 km off the hull
+  (`sd-runtime` → Explosions).
+- **Scale** (the TFIs, 44, vs 10 Ferox at 20 km, `run4-scale/`, re-engaging the next Ferox on each kill): 9 kills in
+  ~75 s, up to 4 explosions at once, 11–14 fps through explosions, 17–23 between, 26–30 at rest, `gpuErrors` 0, no
+  explosion errors; after cease-fire `scene.objects` 45 = the live ships, 0 explosion roots.
+- **Audio**: the explosion roots register no emitter (no `GlobalExplosionEmitter` anywhere). But `audio.gameObjects −
+  emitters` grows by 7 per frigate and 10 per Ferox when its armor runs out, before the kill: the impact overlay's
+  hull damage effects (`smoke_fire_sfx`, `smoke_fire_hangar_sfx`, `LocalExplosionEmitter1`), loaded asynchronously by
+  `SetImpactDamageState` outside `PageAudio.Detached`, never released (they survive the ball's removal and a load).
+  A follow-up, not the explosion.
+- `frame_camera` on a destroyed ship frames every ship (the dead are skipped), so a driver must frame the victim before
+  the kill.
 
 ## Test data
 

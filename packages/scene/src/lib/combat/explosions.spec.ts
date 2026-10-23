@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { explosionDurationBound, MAX_LOCAL_BLASTS, SHIP_EXPLOSION_TIMINGS, SHIP_EXPLOSIONS, type ShipExplosionFile, shipExplosionOf } from './explosions';
+import { EXPLOSION_REFERENCE_RADII, explosionDurationBound, MAX_LOCAL_BLASTS, SHIP_EXPLOSION_TIMINGS, SHIP_EXPLOSIONS, type ShipExplosionFile, shipExplosionOf } from './explosions';
 
 /**
  * Every file under `res:/fisfx/explosion/` in resources build 3632936's res index (captured 2026-10-23).
@@ -139,6 +139,16 @@ describe('shipExplosionOf', () => {
     expect(pathOf({ rigSize: 2, sofRace: 'jove', seed: 1, ship: 'drifter' })).toBe('drifter_cruiser_explosive_01a');
     expect(pathOf({ rigSize: 3, sofRace: 'drifter', seed: 1, ship: 'drifter-bs' })).toBe('drifter_explosive_01a');
     expect(pathOf({ rigSize: 2, sofRace: 'sleeper', seed: 1, ship: 'sleeper' })).toBe('sleeper_explosive_01a');
-    expect(shipExplosionOf({ groupID: 30, rigSize: 4, sofRace: 'caldari', seed: 1, ship: 'leviathan' })).toMatchObject({ resPath: 'res:/fisfx/explosion/ecx_titan_caldari_explosive_01a.black', referenceRadius: 1500, size: 'XL' });
+    expect(shipExplosionOf({ groupID: 30, rigSize: 4, sofRace: 'caldari', seed: 1, ship: 'leviathan' })).toMatchObject({ resPath: 'res:/fisfx/explosion/ecx_titan_caldari_explosive_01a.black', referenceRadius: 7000, size: 'XL' });
+    expect(shipExplosionOf({ groupID: 30, rigSize: 4, sofRace: 'sansha', seed: 1, ship: 'komodo' }).referenceRadius).toBe(550);
+    expect(shipExplosionOf({ groupID: 485, rigSize: 4, raceID: 135, seed: 1, ship: 'zirnitra' }).referenceRadius).toBe(1500);
+  });
+
+  it('pins the reference radii calibrated on the real GPU', () => {
+    expect(EXPLOSION_REFERENCE_RADII).toEqual({ S: 70, M: 250, L: 550, XL: 1500 });
+    expect(SHIP_EXPLOSIONS.S.map((file) => file.referenceRadius)).toEqual([70, 70]);
+    expect(SHIP_EXPLOSIONS.M.map((file) => file.referenceRadius)).toEqual([250, 250, 250]);
+    expect(SHIP_EXPLOSIONS.L.map((file) => file.referenceRadius)).toEqual([550, 550, 550]);
+    expect(Object.values(SHIP_EXPLOSIONS.titan).map((file) => file.referenceRadius)).toEqual([7000, 7000, 7000, 7000, 7000]);
   });
 });

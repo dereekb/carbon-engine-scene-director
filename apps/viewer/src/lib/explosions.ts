@@ -6,8 +6,9 @@
  *   PageAudio.Detached, with every AudEventCurve and observer taken out of the copied values first, so nothing in it
  *   registers with or posts to the page's audio: the page posts the explosion's sounds itself (`onSound`), on the
  *   dying ship's emitter, once per local blast spawned and once for the global blast.
- * - The root rides the ship's ball curves. On its EveChildExplosion: `scaling` = max(1, hull bounding radius /
- *   the file's referenceRadius) on all three axes; `SetLocalExplosionTransforms` with a keyed subset of up to
+ * - The root rides the ship's ball curves at scale 1 (an authored root scale would throw the blasts off the hull). On
+ *   its EveChildExplosion: the file's own `scaling` times max(1, hull bounding radius / the file's referenceRadius) on
+ *   all three axes; `SetLocalExplosionTransforms` with a keyed subset of up to
  *   MAX_LOCAL_BLASTS of the built hull's `damage` locators (8 keyed points on its bounding sphere without them);
  *   `SetGlobalExplosionOffset(boundingSphereCenter)`; then the root is added to the scene and `Play()` times it.
  * - At start + `wreckSwitchTime` it calls `onHide` (the director retires the hull's drawing); when it stops playing
@@ -226,11 +227,17 @@ export class ShipExplosions {
     root.observers = [];
     root.translationCurve = start.curves.translation;
     root.rotationCurve = start.curves.rotation;
+    // The root stands in the hull's frame: the runtime places the blasts and the global offset through the child's
+    // transform alone, so an authored root scale (5 on generic_explosive_long_01a) would throw the blasts off the hull.
+    root.scaling[0] = 1;
+    root.scaling[1] = 1;
+    root.scaling[2] = 1;
     const radius = start.ship?.boundingSphereRadius || start.radius;
     const scale = Math.max(1, radius / start.choice.referenceRadius);
-    child.scaling[0] = scale;
-    child.scaling[1] = scale;
-    child.scaling[2] = scale;
+    // The files author their own size on the child (0.5 on the generic ones): the hull's factor multiplies it.
+    child.scaling[0] *= scale;
+    child.scaling[1] *= scale;
+    child.scaling[2] *= scale;
     const blasts = LocalBlastTransforms({ id: entry.id, ship: start.ship, radius, seed: start.seed });
     child.SetLocalExplosionTransforms(blasts);
     child.SetGlobalExplosionOffset(start.ship?.boundingSphereCenter ?? new Float32Array(3));

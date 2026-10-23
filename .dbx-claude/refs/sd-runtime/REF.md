@@ -173,7 +173,13 @@ Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `Eve
 - The runtime's `Play()` times the blasts (`CalculateExplosionTimes` with `triFloatRandom01`, so the drawn timing is
   not seeded); `UpdateSyncronous` spawns them, removes the local blasts at `wreckSwitchTime` when a global part follows
   and stops after `totalDuration`. It handles both member shapes: `localExplosions` + `globalExplosion` and the older
-  `localExplosion` + `globalExplosions` (the Triglavian dreadnought's file).
+  `localExplosion` + `globalExplosions` (the Triglavian dreadnought's file; drawn on the GPU 2026-10-23).
+- **Scale lives on the child, the root stays at 1.** The runtime places each local blast at its transform's translation
+  through the inverse of the child's `localTransform`, and `SetGlobalExplosionOffset` divides by the child's `scaling`,
+  so both assume the root is in the hull's frame. The files author their size on all three levels (short 01a child
+  0.5; short 01b `globalScaling` 0.075; long 01a root 5, child 1.25, global 3; titans child 5): the page resets the
+  root's `scaling` to 1 (long 01a's root 5 threw its blasts up to 1.8 km off a Megathron) and multiplies the child's
+  own `scaling` by the hull factor (overwriting it drew short 01a at 3.4× its authored size).
 
 ## Audio (`audio.ts`)
 

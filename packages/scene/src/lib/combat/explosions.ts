@@ -87,19 +87,26 @@ export interface ShipExplosionFile {
    */
   readonly lingerSeconds: number;
   /**
-   * The hull bounding radius (m) the authored size suits; the page scales the explosion by `max(1, radius /
-   * referenceRadius)`. Starting values per size class; the real-GPU check calibrates them.
+   * The hull bounding radius (m) the file's authored size suits; the page multiplies the file's own scaling by `max(1,
+   * radius / referenceRadius)`. Calibrated on the real GPU (sd-combat, Real-GPU evidence).
    */
   readonly referenceRadius: number;
 }
 
 /**
- * The starting reference radius per size class.
+ * The reference radius per size class: the drawn bounding radius of the hull each class's files suit at their authored
+ * size, measured on the real GPU on 2026-10-23 (Rifter 68 m, Ferox 253, Megathron 541, Zirnitra 1,446): at it the
+ * global flash envelops the hull, and a bigger hull grows its explosion in proportion.
  */
-export const EXPLOSION_REFERENCE_RADII: Readonly<Record<HullSizeClass, number>> = { S: 40, M: 150, L: 450, XL: 1500 };
+export const EXPLOSION_REFERENCE_RADII: Readonly<Record<HullSizeClass, number>> = { S: 70, M: 250, L: 550, XL: 1500 };
 
-function explosionFile(name: string, size: HullSizeClass): ShipExplosionFile {
-  return { name, resPath: `res:/fisfx/explosion/ecx_${name}.black`, lingerSeconds: Math.ceil(explosionDurationBound(SHIP_EXPLOSION_TIMINGS[name])), referenceRadius: EXPLOSION_REFERENCE_RADII[size] };
+/**
+ * The titan files' reference radius: they author a titan's size (the child at 5×), which suits an Avatar's 6,954 m.
+ */
+export const TITAN_EXPLOSION_REFERENCE_RADIUS = 7000;
+
+function explosionFile(name: string, size: HullSizeClass, referenceRadius: number = EXPLOSION_REFERENCE_RADII[size]): ShipExplosionFile {
+  return { name, resPath: `res:/fisfx/explosion/ecx_${name}.black`, lingerSeconds: Math.ceil(explosionDurationBound(SHIP_EXPLOSION_TIMINGS[name])), referenceRadius };
 }
 
 /**
@@ -109,8 +116,9 @@ export const SHIP_EXPLOSIONS = {
   S: ['generic_explosive_short_01a', 'generic_explosive_short_01b'].map((name) => explosionFile(name, 'S')),
   M: ['generic_explosive_01a', 'generic_explosive_01b', 'generic_explosive_01c'].map((name) => explosionFile(name, 'M')),
   L: ['generic_explosive_long_01a', 'generic_explosive_long_01b', 'generic_explosive_long_01c'].map((name) => explosionFile(name, 'L')),
-  titan: Object.fromEntries(['amarr', 'caldari', 'gallente', 'minmatar', 'angel'].map((race) => [race, explosionFile(`titan_${race}_explosive_01a`, 'XL')])) as Readonly<Record<string, ShipExplosionFile>>,
-  titanFallback: explosionFile('generic_explosive_long_01a', 'XL'),
+  titan: Object.fromEntries(['amarr', 'caldari', 'gallente', 'minmatar', 'angel'].map((race) => [race, explosionFile(`titan_${race}_explosive_01a`, 'XL', TITAN_EXPLOSION_REFERENCE_RADIUS)])) as Readonly<Record<string, ShipExplosionFile>>,
+  // A battleship's file on a titan: the L reference, so it grows to the hull.
+  titanFallback: explosionFile('generic_explosive_long_01a', 'XL', EXPLOSION_REFERENCE_RADII.L),
   triglavian: explosionFile('triglavian_explosive_01a', 'M'),
   triglavianDreadnought: explosionFile('triglavian_explosive_tgdn01_t1', 'XL'),
   drifterCruiser: explosionFile('drifter_cruiser_explosive_01a', 'M'),
