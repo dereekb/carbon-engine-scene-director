@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { TICKS_PER_SECOND } from './clock';
 import type { ShipModuleEvent } from './modules';
 import { ShotQueue, WeaponShotsOf, type WeaponShotsPort } from './shots';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const PORT: WeaponShotsPort = {
   Turret: (ship, module) => (ship === 'rifter' && module.startsWith('high-') ? { typeID: 2889, name: '200mm AutoCannon II', charge: { typeID: 185, name: 'EMP S' } } : null),
@@ -65,5 +66,30 @@ describe('ShotQueue', () => {
     expect(queue.Due(10 * S).map((shot) => [shot.ship, shot.target])).toEqual([['ferox', 'astrahus']]);
     queue.Clear();
     expect(queue.Count('ferox')).toBe(0);
+  });
+});
+
+describe('ShotQueue snapshots (sd-time)', () => {
+  const S = TICKS_PER_SECOND;
+
+  it('restores the queued draws, counts, burst ends and stopped weapons', () => {
+    const queue = new ShotQueue(1);
+    queue.Add([Shot({ at: 10 }), Shot({ module: 'high-1', at: 9.25 })], 100 * S);
+    queue.Drawn(Shot({ module: 'high-2' }), 100 * S, 1.5);
+    queue.Off('rifter', 'high-2');
+    const trip = RoundTrip(
+      queue,
+      (q) => [q.pending, q.Count('rifter')],
+      (q) => {
+        q.Due(101 * S);
+        q.Add([Shot({ at: 11 })], 101 * S);
+        q.Settled(103 * S);
+        q.Forget('rifter');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    expect(queue.Due(100.25 * S).map((shot) => shot.module)).toEqual(['high-1']);
   });
 });

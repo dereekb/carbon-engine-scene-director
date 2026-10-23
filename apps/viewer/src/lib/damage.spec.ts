@@ -1,6 +1,7 @@
 import type { ShipDefense } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { DamageModel } from './damage';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const RESONANCES = { em: 0.4, thermal: 0.65, kinetic: 0.75, explosive: 0.9 };
 
@@ -85,5 +86,30 @@ describe('DamageModel', () => {
     const before = model.Report('rifter')?.shield.hp;
     expect(model.Recharge(10)).toEqual([]);
     expect(model.Report('rifter')?.shield.hp).toBe(before);
+  });
+});
+
+describe('DamageModel snapshots (sd-time)', () => {
+  it('restores HP, repairs and incoming reps', () => {
+    const model = new DamageModel();
+    model.SetDefense('fc', Defense(1000));
+    model.SetDefense('logi', Defense(800));
+    model.Damage('fc', 'shield', 500);
+    model.Damage('fc', 'armor', 250);
+    model.SetRepairs('fc', { shield: 0, armor: 12.345, structure: 0 });
+    model.SetIncoming('fc', [{ from: 'logi', module: 'high-0', layer: 'armor', amount: 360, cycleTime: 5, effectiveness: 0.9 }]);
+    const trip = RoundTrip(
+      model,
+      (m) => [m.Report('fc'), m.Report('logi'), m.Fractions('fc')],
+      (m) => {
+        m.Damage('fc', 'armor', 700);
+        m.Recharge(30);
+        m.SetIncoming('fc', []);
+        m.Remove('logi');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
   });
 });

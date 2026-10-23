@@ -1,6 +1,7 @@
 import { applySceneOperations, type FleetBrainAction, type FleetShipFacts, normalizeScene, type SceneDocument, type ShipOrder, toLiveFleetScene } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { type FleetBrainPort, FleetCommanders } from './fleet-commanders';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const DNA = 'mf1_t1:minmatarbase:minmatar';
 const FLEET = 'f';
@@ -344,5 +345,33 @@ describe('FleetCommanders: the FC brain', () => {
     expect(rig.commanders.PilotOf('r1')).toEqual({ command: 0.5, source: 'pilot' });
     expect(rig.commanders.PilotOf('r2')).toBeNull();
     expect(rig.commanders.ReactionOf('d2')).toBe(0.25);
+  });
+});
+
+describe('FleetCommanders snapshots (sd-time)', () => {
+  it("restores the brains, calls and book, and the brain then decides what an uncaptured twin's decides", () => {
+    const rig = BrainRig(BrainScene('slow'));
+    const twin = BrainRig(BrainScene('slow'));
+    rig.Steps(1, 3);
+    twin.Steps(1, 3);
+    rig.commanders.SetFreeFire(WHOLE, true);
+    twin.commanders.SetFreeFire(WHOLE, true);
+    const runs = rig.runs.length;
+    const trip = RoundTrip(
+      rig.commanders,
+      (c) => [c.Report(FLEET, 3), c.Overlay(), c.CallOf(WHOLE)],
+      (c) => {
+        for (let tick = 4; tick <= 20; tick++) c.Step(tick);
+        c.SetCall(DPS, ['r2']);
+      }
+    );
+    rig.runs.length = runs;
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    rig.Steps(4, 30);
+    twin.Steps(4, 30);
+    expect(rig.runs).toEqual(twin.runs);
+    expect(rig.commanders.Report(FLEET, 30)).toEqual(twin.commanders.Report(FLEET, 30));
   });
 });

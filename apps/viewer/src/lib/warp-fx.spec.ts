@@ -4,6 +4,7 @@ import type { WarpEvent } from './destiny';
 import { Fly, Gap, Harness, RequireMotion, RIFTER, Ship, TFI } from './destiny.spec-helper';
 import { vec3 } from './runtime-sim';
 import { RotationToward, WARP_IN_GLOW_PATH, WARP_IN_NOGLOW_PATH, WARP_OUT_PATH, WARP_OUT_START_PATH, WarpFlashScale, WarpFx, WarpInFlashPath, WarpInTriggerDistance, type WarpFxCommand } from './warp-fx';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const RIFTER_RADIUS = 31;
 const TFI_RADIUS = 250;
@@ -175,5 +176,23 @@ describe('WarpFx', () => {
       const along = Rotate(RotationToward(direction), [0, 0, 1]);
       direction.forEach((value, axis) => expect(along[axis]).toBeCloseTo(value, 9));
     }
+  });
+});
+
+describe('WarpFx snapshots (sd-time)', () => {
+  it('restores the tracked warps and the flash counts', () => {
+    const run = Setup();
+    const { world } = run.harness;
+    world.Order('r', { type: 'warp', point: AHEAD, range: 0 });
+    run.Until(() => run.events.some((event) => event.kind === 'enter'), 400);
+    const trip = RoundTrip(
+      run.fx,
+      (fx) => [fx.Tracking('r'), fx.Counts()],
+      () => run.Until(() => run.events.some((event) => event.kind === 'exit'), 400)
+    );
+    expect(trip.before).toEqual([true, expect.anything()]);
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
   });
 });

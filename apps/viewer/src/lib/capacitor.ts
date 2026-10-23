@@ -17,6 +17,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { passiveRecharge } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * The evaluated numbers the live level runs on (ShipCapacitor's).
@@ -60,6 +61,11 @@ interface CapacitorEntry {
   at: number;
 }
 
+/**
+ * What a CapacitorModel snapshot (sd-time) leaves out: its wiring (tickSeconds).
+ */
+const CAPACITOR_CAPTURE: CaptureOptions = { wiring: ['tickSeconds'] };
+
 export class CapacitorModel {
   private readonly tickSeconds: number;
   private readonly ships = new Map<string, CapacitorEntry>();
@@ -69,6 +75,26 @@ export class CapacitorModel {
    */
   constructor(tickSeconds = 1) {
     this.tickSeconds = tickSeconds;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, CAPACITOR_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, CAPACITOR_CAPTURE, memo);
   }
 
   /**

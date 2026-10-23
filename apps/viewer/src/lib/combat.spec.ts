@@ -3,6 +3,7 @@ import { combatRoll, type ShipDefense, type ShotTargetKind, type TurretCombatNum
 import { describe, expect, it } from 'vitest';
 import { type AccuracyNumbers, type CombatPort, CombatRules, DPS_WINDOW_SECONDS, MISSILE_EXPIRED_NOTE, MISSILE_TARGET_DESTROYED } from './combat';
 import { DamageModel } from './damage';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const ONES = { em: 1, thermal: 1, kinetic: 1, explosive: 1 };
 
@@ -326,5 +327,46 @@ describe('CombatRules missiles', () => {
     expect(rules.TakenSince('punisher', 26, 20)).toBeCloseTo(first.damage + second.damage, 0);
     expect(rules.TakenSince('rifter', 26, 10)).toBe(0);
     expect(rules.TakenSince('nobody', 26, 10)).toBe(0);
+  });
+});
+
+describe('CombatRules snapshots (sd-time)', () => {
+  it('restores tallies, kills, spools and totals, and the next Resolve rolls what an uncaptured twin rolls', () => {
+    const build = (): ReturnType<typeof Rules> => {
+      const built = Rules(400);
+      built.port.chance = 0.6;
+      built.rules.SetCombat({ seed: 7, death: 'explode' });
+      built.rules.Resolve(
+        Array.from({ length: 6 }, (_, i) => Shot({ cycle: i + 1, at: 9 + i / 10 })),
+        10
+      );
+      built.rules.Resolve([Shot({ cycle: 7, at: 10.5, ship: 'ferox', target: 'rifter' })], 11);
+      return built;
+    };
+    const { rules, damage } = build();
+    const twin = build();
+    const damageState = damage.Snapshot();
+    const trip = RoundTrip(
+      rules,
+      (r) => [r.Report('punisher', 11), r.Report('rifter', 11), r.Kills(), r.Totals(), r.Attackers('punisher', 11)],
+      (r) => {
+        r.Resolve(
+          Array.from({ length: 20 }, (_, i) => Shot({ cycle: 20 + i, at: 11 + i / 30 })),
+          12
+        );
+        r.Remove('rifter');
+      }
+    );
+    damage.Restore(damageState);
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    const next = (r: CombatRules): unknown[] => {
+      const shots = Array.from({ length: 12 }, (_, i) => Shot({ cycle: 40 + i, at: 11.5 + i / 30, ship: i % 2 ? 'ferox' : 'rifter', target: i % 2 ? 'rifter' : 'punisher' }));
+      r.Resolve(shots, 12);
+      return [shots.map((shot) => shot.outcome), r.Kills(), r.Totals()];
+    };
+    expect(next(rules)).toEqual(next(twin.rules));
+    expect(damage.Report('rifter')).toEqual(twin.damage.Report('rifter'));
   });
 });

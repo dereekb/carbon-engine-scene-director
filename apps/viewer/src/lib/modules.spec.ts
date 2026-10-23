@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
 import { DestinyWorld } from './destiny';
 import { ShipModules, type ShipModuleEvent, type ShipModuleSpec, type ShipModulesPort } from './modules';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const BASE: ModuleActivation = {
   key: '',
@@ -471,5 +472,34 @@ describe('DestinyWorld.OnBoundary', () => {
       Run(modules, 0, 0);
       expect(Kinds(modules.Remove('fc', 1, 'its target was destroyed'))).toEqual(['logi:high-0:off1@1 (its target was destroyed)']);
     });
+  });
+});
+
+describe('ShipModules snapshots (sd-time)', () => {
+  it('restores its cycles, and the next boundaries give the events an uncaptured twin gives', () => {
+    const build = (): ShipModules => {
+      const modules = new ShipModules(new FakePort());
+      modules.SetFit('logi', [Spec('low-0'), Spec('high-0', REMOTE_REP), Spec('mid-0', WEB), Spec('high-1', TURRET)], 0);
+      modules.Switch('logi', 'low-0', 'active', { boundary: 0 });
+      modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+      modules.Switch('logi', 'high-1', 'active', { boundary: 1, target: 'fc' });
+      Run(modules, 0, 3);
+      return modules;
+    };
+    const modules = build();
+    const twin = build();
+    const trip = RoundTrip(
+      modules,
+      (m) => [m.State('logi', 'low-0', 4), m.State('logi', 'high-0', 4), m.State('logi', 'high-1', 4), m.Incoming('fc'), m.LockAims()],
+      (m) => {
+        m.Switch('logi', 'low-0', 'online', { boundary: 4 });
+        m.Switch('logi', 'mid-0', 'active', { boundary: 4, target: 'fc' });
+        Run(m, 4, 12);
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    expect(Run(modules, 4, 24)).toEqual(Run(twin, 4, 24));
   });
 });

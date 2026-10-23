@@ -13,6 +13,7 @@
 | `apps/viewer/src/lib/destiny.ts` | `DestinyWorld`: the **only** code that touches the parks. Ships, static object balls, orders, warp, following, prop mod state |
 | `apps/viewer/src/lib/clock.ts` | the scene clock: one integer 100 ns tick count both parks and the renderer sample; its `rate` and `paused` (`sd-time`) |
 | `apps/viewer/src/lib/time-control.ts` | `TimeControl`: the frame's tick stepping, pause and rate (`sd-time`) |
+| `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark`: a park as its native full-state stream plus a scalar overlay (`sd-time`) |
 | `apps/viewer/src/main.ts` | the single rAF loop |
 | `apps/viewer/src/lib/flight.ts` | each ship's flight numbers (Ship stats from the hub's `/ship-stats`) |
 | `apps/viewer/src/lib/warp.ts` | warp factor, landing, Destiny's warp-profile math |
@@ -20,7 +21,7 @@
 | `apps/viewer/src/lib/steering.ts` | Follow the FC's steering math (`sd-fleets`) |
 | `packages/scene/src/lib/orders.ts` | `order_ship` request normalization (`normalizeShipOrderRequest`) |
 | `apps/viewer/src/lib/carbonenginejs-server.d.ts` | the server's types |
-| specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `destiny-warp-in.spec.ts` (arrivals), `destiny-missile.spec.ts` (missiles), `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only). New DestinyWorld specs share `destiny.spec-helper.ts` (`Harness` with `Ticks` / `Until` / `Sample`, the Rifter, Guardian and TFI fixtures, `BallStates` for lockstep) |
+| specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `destiny-warp-in.spec.ts` (arrivals), `destiny-missile.spec.ts` (missiles), `destiny-snapshot.spec.ts` (snapshots), `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only). New DestinyWorld specs share `destiny.spec-helper.ts` (`Harness` with `Ticks` / `Until` / `Sample`, the Rifter, Guardian and TFI fixtures, `BallStates` for lockstep) |
 
 ## The two parks (must stay in lockstep)
 
@@ -39,6 +40,16 @@
   of the time), and after the first epoch a ship's new ball id is the next free id whose low 16 bits are
   `unitHash("ball|<ship id>")`, so an orbit given at the same tick since the load flies the same in every timeline
   replay (`sd-timeline` "Determinism"; `destiny-timeline.spec.ts`). Specs that never call it keep sequential ids.
+- **Snapshot / Restore** (`sd-time`, time control's jump back). `world.Snapshot()` captures both parks
+  (`destiny-snapshot.ts`: the native stream plus every scalar field the stream omits), every ship entry but its curves
+  (plus the rotation curve's attitude and last sample), the objects, pending orders, missiles, queued events, the ball id
+  counter and the seeded flag; the listeners are wiring and stay. `world.Restore(snapshot)` builds **two fresh
+  `ScenePark`s** first (a failure changes nothing), then swaps them in: `master` / `replica` are getters over private
+  fields, so **read them through the world each time, never keep a park** (`world.master.tickInterval` is fine). Every
+  ship gets **new `ShipCurves`** on its new ClientBall: `Curves(id)` and `MissileCurves(id)` return the same objects
+  every call *until a Restore*, after which the director re-attaches the drawn hulls. `SampleCurves(time)` samples every
+  ship's and missile's curves (a jump's ClientBall warm-up). `destiny-snapshot.spec.ts` audits a restore field by field
+  against the uninterrupted run in every mode the page flies.
 
 ## One clock, one loop
 

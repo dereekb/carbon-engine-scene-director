@@ -32,6 +32,7 @@
 import type { Maybe } from '@dereekb/util';
 import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type MissileCombatNumbers, type ModuleActivation, type TurretCombatNumbers } from '@scene-director/scene';
 import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleReport, type ModuleCycleRequest, type ModuleCycleState } from './module-cycle';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * What the layer needs from the world: distances, warp and the ships there are.
@@ -206,12 +207,37 @@ interface ModuleEntry {
   applied: Maybe<number>;
 }
 
+/**
+ * What a ShipModules snapshot (sd-time) leaves out: its wiring (port).
+ */
+const SHIP_MODULES_CAPTURE: CaptureOptions = { wiring: ['port'], prototypes: [ModuleCycle.prototype] };
+
 export class ShipModules {
   private readonly port: ShipModulesPort;
   private readonly ships = new Map<string, Map<string, ModuleEntry>>();
 
   constructor(port: ShipModulesPort) {
     this.port = port;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, SHIP_MODULES_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, SHIP_MODULES_CAPTURE, memo);
   }
 
   /**

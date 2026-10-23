@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
 import { DestinyWorld, type ShipPhysics } from './destiny';
 import { FleetFollowing } from './following';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const PHYSICS: ShipPhysics = { mass: 1.2e6, agility: 3.2, maxVelocity: 400, radius: 40 };
 const RIFTER = 'mf1_t1:minmatarbase:minmatar';
@@ -321,5 +322,46 @@ describe('FleetFollowing groups apart', () => {
     rig.following.Reconcile();
     expect(rig.world.Following('d2')).toEqual(before);
     expect(rig.world.Following('d1')).toBeNull();
+  });
+});
+
+describe('FleetFollowing snapshots (sd-time)', () => {
+  it('restores detached, planned and apart groups with the world, and then flies what an uncaptured twin flies', () => {
+    const build = (): Rig => {
+      const rig = new Rig();
+      rig.following.Reconcile();
+      rig.world.Order('d1', { type: 'stop' });
+      rig.following.Detach('d1');
+      rig.Run(3);
+      return rig;
+    };
+    const rig = build();
+    const twin = build();
+    const world = rig.world.Snapshot();
+    const now = rig.now;
+    const ships = ['fc', 'd1', 'd2', 'l1', 'l2'];
+    const trip = RoundTrip(
+      rig.following,
+      (f) => [ships.map((id) => f.Report(id)), f.FleetReport({ id: 'f', commander: 'fc' })],
+      (f) => {
+        f.Rejoin('d1');
+        rig.world.Order('l1', { type: 'stop' });
+        f.BreakAway({ key: 'f/squad/logi', group: { fleet: 'f', kind: 'squad', id: 'logi' }, leader: 'l1', ships: ['l1', 'l2'] });
+        rig.Run(4);
+      },
+      () => {
+        rig.world.Restore(world);
+        rig.now = now;
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    for (const each of [rig, twin]) {
+      each.world.Order('fc', { type: 'direction', direction: [1, 0, 0], speed: 1 });
+      each.Run(6);
+    }
+    expect(ships.map((id) => rig.world.Motion(id))).toEqual(ships.map((id) => twin.world.Motion(id)));
+    expect(ships.map((id) => rig.following.Report(id))).toEqual(ships.map((id) => twin.following.Report(id)));
   });
 });

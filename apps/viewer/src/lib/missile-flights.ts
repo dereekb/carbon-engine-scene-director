@@ -21,6 +21,7 @@ import type { Maybe } from '@dereekb/util';
 import type { MissileCombatNumbers, ShotTargetKind, WeaponShot } from '@scene-director/scene';
 import { TICKS_PER_SECOND } from './clock';
 import { MISSILE_BALL_LINGER_TICKS, type MissileEvent, type MissileReport } from './destiny';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * Rows get_state lists at most.
@@ -158,6 +159,11 @@ export interface MissileFlightRow {
   readonly why?: string;
 }
 
+/**
+ * What a MissileFlights snapshot (sd-time) leaves out: its wiring (tickTicks, tickSeconds).
+ */
+const MISSILE_FLIGHTS_CAPTURE: CaptureOptions = { wiring: ['tickTicks', 'tickSeconds'] };
+
 export class MissileFlights {
   /**
    * Scene clock ticks (100 ns) per Destiny tick.
@@ -176,6 +182,26 @@ export class MissileFlights {
   constructor(tickSeconds: number) {
     this.tickSeconds = tickSeconds;
     this.tickTicks = tickSeconds * TICKS_PER_SECOND;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, MISSILE_FLIGHTS_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, MISSILE_FLIGHTS_CAPTURE, memo);
   }
 
   /**

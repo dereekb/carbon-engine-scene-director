@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { CapacitorFractionAfter, CapacitorModel, type CapacitorNumbers } from './capacitor';
+import { RoundTrip } from './state-capture.spec-helper';
 
 // A bare TFI with Capacitor Management V (6875 GJ) and a Rifter (312.5 GJ in 93.75 s).
 const TFI: CapacitorNumbers = { capacity: 6875, rechargeTime: 1031.25, energyWarfareResistance: 1, remoteCapacitorImpedance: 1 };
@@ -76,5 +77,27 @@ describe('CapacitorModel', () => {
     expect(capacitor.Nos('shooter', 'target', 120, true, 0)).toBe(120);
     expect(capacitor.Level('shooter', 0)).toBeCloseTo(312.5, 9);
     expect(capacitor.Nos('shooter', 'nobody', 120, true, 0)).toBe(0);
+  });
+});
+
+describe('CapacitorModel snapshots (sd-time)', () => {
+  it('restores every level and its tick', () => {
+    const capacitor = new CapacitorModel();
+    capacitor.Set('tfi', TFI, 100);
+    capacitor.Set('rifter', RIFTER, 100);
+    capacitor.Drain('tfi', 600, 100);
+    capacitor.Drain('rifter', 200, 104);
+    const trip = RoundTrip(
+      capacitor,
+      (c) => [c.Report('tfi', 120), c.Report('rifter', 120), c.Numbers('tfi')],
+      (c) => {
+        c.Drain('tfi', 3000, 110);
+        c.Give('rifter', 50, 111);
+        c.Remove('tfi');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
   });
 });

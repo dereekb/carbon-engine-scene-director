@@ -17,6 +17,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { applyLayeredDamage, DAMAGE_TYPES, DEFENSE_LAYERS, type DamageLayers, type DamageType, type DamageVector, type DefenseLayerName, passiveRecharge, type ShipDefense } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * A repair running on a ship from another one's module.
@@ -95,8 +96,33 @@ export interface AppliedHit {
   readonly structure: number;
 }
 
+/**
+ * What a DamageModel snapshot (sd-time) leaves out: nothing, every field is state.
+ */
+const DAMAGE_CAPTURE: CaptureOptions = {};
+
 export class DamageModel {
   private readonly ships = new Map<string, ShipDamage>();
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, DAMAGE_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, DAMAGE_CAPTURE, memo);
+  }
 
   /**
    * Sets a ship's max HP and resonances; current HP keeps its fraction of max.

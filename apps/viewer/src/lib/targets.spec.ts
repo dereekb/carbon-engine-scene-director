@@ -1,6 +1,7 @@
 import type { Maybe } from '@dereekb/util';
 import { describe, expect, it } from 'vitest';
 import { ShipTargets, type ShipTargetsPort } from './targets';
+import { RoundTrip } from './state-capture.spec-helper';
 
 class FakePort implements ShipTargetsPort {
   readonly ships = new Set(['rifter', 'punisher', 'ferox']);
@@ -73,5 +74,25 @@ describe('ShipTargets', () => {
       { ship: 'ferox', previous: 'punisher' }
     ]);
     expect(targets.Of('punisher')).toBe('rifter');
+  });
+});
+
+describe('ShipTargets snapshots (sd-time)', () => {
+  it('restores every target', () => {
+    const targets = new ShipTargets(new FakePort());
+    targets.Set('rifter', 'punisher');
+    targets.Set('ferox', 'astrahus');
+    const trip = RoundTrip(
+      targets,
+      (t) => [t.Report('rifter'), t.Report('ferox'), t.On('punisher')],
+      (t) => {
+        t.Set('rifter', 'ferox');
+        t.Forget('astrahus');
+        t.Set('punisher', 'rifter');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
   });
 });

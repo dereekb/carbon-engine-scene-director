@@ -10,6 +10,6 @@ export { quat } from '@carbonenginejs/runtime/math/quat';
 export type { Quat } from '@carbonenginejs/runtime/math/quat';
 export { vec3 } from '@carbonenginejs/runtime/math/vec3';
 export type { Vec3 } from '@carbonenginejs/runtime/math/vec3';
-export { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall } from '@carbonenginejs/server/destiny';
+export { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, CjsDestinyStream } from '@carbonenginejs/server/destiny';
 export type { DestinyInt64 } from '@carbonenginejs/server/destiny';
 export { CollideTwoSpheres } from '@carbonenginejs/server/destiny/geometry';

@@ -47,6 +47,7 @@ import {
   type WeaponShotMissile
 } from '@scene-director/scene';
 import type { DamageModel } from './damage';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * The turret numbers Destiny's GetAccuracy takes.
@@ -260,6 +261,11 @@ interface Spool {
 
 const NO_LAYERS: Readonly<Record<DefenseLayerName, number>> = { shield: 0, armor: 0, structure: 0 };
 
+/**
+ * What a CombatRules snapshot (sd-time) leaves out: its wiring (port, damage, onKill, onDamaged).
+ */
+const COMBAT_CAPTURE: CaptureOptions = { wiring: ['port', 'damage', 'onKill', 'onDamaged'] };
+
 export class CombatRules {
   private readonly port: CombatPort;
   private readonly damage: DamageModel;
@@ -279,6 +285,26 @@ export class CombatRules {
     this.damage = options.damage;
     this.onKill = options.onKill ?? (() => undefined);
     this.onDamaged = options.onDamaged ?? (() => undefined);
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, COMBAT_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, COMBAT_CAPTURE, memo);
   }
 
   /**

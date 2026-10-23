@@ -23,6 +23,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { CALLED_PRE_LOCKS, type CalledTargetSkip, type CalledTargetStatus, describeFleetGroup, type FleetGroup, type FleetGroupCall, type FreeFirePickInput, pickFreeFireTarget, type SceneDocument, type ShipCallPlan, toFleetGroupCalls, toFleetGroupKey, toShipCallPlans } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 export interface FleetTargetsPort {
   /**
@@ -145,6 +146,11 @@ interface CalledEntry {
   readonly group: FleetGroup;
 }
 
+/**
+ * What a FleetTargets snapshot (sd-time) leaves out: its wiring (port).
+ */
+const FLEET_TARGETS_CAPTURE: CaptureOptions = { wiring: ['port'] };
+
 export class FleetTargets {
   private readonly port: FleetTargetsPort;
   private readonly own = new Set<string>();
@@ -167,6 +173,26 @@ export class FleetTargets {
 
   constructor(port: FleetTargetsPort) {
     this.port = port;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, FLEET_TARGETS_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, FLEET_TARGETS_CAPTURE, memo);
   }
 
   /**

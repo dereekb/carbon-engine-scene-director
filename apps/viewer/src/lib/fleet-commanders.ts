@@ -55,6 +55,7 @@ import {
   toFleetSuccessor,
   toHandoverTicks
 } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * One group's live call.
@@ -317,6 +318,11 @@ function toFleetTraitBook(scene: SceneDocument): FleetTraitBook {
   return { scene, personalities, pilots };
 }
 
+/**
+ * What a FleetCommanders snapshot (sd-time) leaves out: its wiring (port).
+ */
+const FLEET_COMMANDERS_CAPTURE: CaptureOptions = { wiring: ['port'] };
+
 export class FleetCommanders {
   /**
    * The live calls by group key (toFleetGroupKey).
@@ -356,6 +362,26 @@ export class FleetCommanders {
    */
   get version(): number {
     return this.changes;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, FLEET_COMMANDERS_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, FLEET_COMMANDERS_CAPTURE, memo);
   }
 
   /**

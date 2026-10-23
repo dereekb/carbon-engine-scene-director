@@ -16,6 +16,7 @@ import type { Maybe } from '@dereekb/util';
 import type { ShotTargetKind, WeaponShot } from '@scene-director/scene';
 import { TICKS_PER_SECOND } from './clock';
 import type { ShipModuleEvent } from './modules';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * What WeaponShotsOf needs to know about the shooter's weapons and the targets.
@@ -82,6 +83,11 @@ interface QueuedShot {
   readonly drawAt: number;
 }
 
+/**
+ * What a ShotQueue snapshot (sd-time) leaves out: its wiring (tickTicks).
+ */
+const SHOT_QUEUE_CAPTURE: CaptureOptions = { wiring: ['tickTicks'] };
+
 export class ShotQueue {
   /**
    * Scene clock ticks (100 ns) per Destiny tick.
@@ -100,6 +106,26 @@ export class ShotQueue {
    */
   constructor(tickSeconds: number) {
     this.tickTicks = tickSeconds * TICKS_PER_SECOND;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, SHOT_QUEUE_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, SHOT_QUEUE_CAPTURE, memo);
   }
 
   /**

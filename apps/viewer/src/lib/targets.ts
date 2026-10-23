@@ -13,6 +13,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import type { ShotTargetKind } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 export interface ShipTargetsPort {
   HasShip(id: string): boolean;
@@ -43,12 +44,37 @@ export interface ClearedTarget {
   readonly previous: string;
 }
 
+/**
+ * What a ShipTargets snapshot (sd-time) leaves out: its wiring (port).
+ */
+const TARGETS_CAPTURE: CaptureOptions = { wiring: ['port'] };
+
 export class ShipTargets {
   private readonly port: ShipTargetsPort;
   private readonly targets = new Map<string, string>();
 
   constructor(port: ShipTargetsPort) {
     this.port = port;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, TARGETS_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, TARGETS_CAPTURE, memo);
   }
 
   /**

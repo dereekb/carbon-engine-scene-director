@@ -18,6 +18,7 @@
 import type { Maybe } from '@dereekb/util';
 import type { SceneVector } from '@scene-director/scene';
 import type { WarpEvent } from './destiny';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 export const WARP_OUT_START_PATH = 'res:/fisfx/jump/warp/warp_out_start.black';
 export const WARP_OUT_PATH = 'res:/fisfx/jump/warp/warp_out.black';
@@ -103,6 +104,11 @@ interface TrackedWarp {
   readonly direction: SceneVector;
 }
 
+/**
+ * What a WarpFx snapshot (sd-time) leaves out: its wiring (ships).
+ */
+const WARP_FX_CAPTURE: CaptureOptions = { wiring: ['ships'] };
+
 export class WarpFx {
   private readonly ships: WarpFxShips;
   private readonly tracked = new Map<string, TrackedWarp>();
@@ -111,6 +117,26 @@ export class WarpFx {
 
   constructor(ships: WarpFxShips) {
     this.ships = ships;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, WARP_FX_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, WARP_FX_CAPTURE, memo);
   }
 
   /**

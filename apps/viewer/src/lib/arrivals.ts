@@ -17,6 +17,7 @@
 import type { Maybe } from '@dereekb/util';
 import { type SceneArrival, type SceneShip, type SceneVector, toArrivalLane, toArrivalOffsets } from '@scene-director/scene';
 import type { ShipArrival, ShipArrivalReport, ShipMotion } from './destiny';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 import { FleetFrame, FramePoint, WarpFrame } from './steering';
 import { DEFAULT_WARP_SPEED, WARP_IN_BACKDATE_TICKS, WarpDropOutTime, WarpFactor, WarpInBackdate, WarpInExitTicks, type WarpProfileDistances, WarpRemainingAt } from './warp';
 
@@ -318,12 +319,37 @@ interface ArrivalGroup {
 }
 
 /**
+ * What an Arrivals snapshot (sd-time) leaves out: its wiring (config).
+ */
+const ARRIVALS_CAPTURE: CaptureOptions = { wiring: ['config'] };
+
+/**
  * The page's arriving groups.
  */
 export class Arrivals {
   private readonly groups = new Map<string, ArrivalGroup>();
 
   constructor(private readonly config: ArrivalsConfig) {}
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, ARRIVALS_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, ARRIVALS_CAPTURE, memo);
+  }
 
   /**
    * Parks a group's ships off-grid at once, each back along the lane from its provisional landing: call right after

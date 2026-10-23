@@ -12,7 +12,7 @@
 | `apps/viewer/src/lib/runtime.ts` | **every** runtime symbol the page uses, one file to fix on an API change. Re-exports `runtime-sim.ts` |
 | `apps/viewer/src/lib/runtime-sim.ts` | the light half: math, the Blue curve bases, the Destiny server. Node-tested modules import only this |
 | `apps/viewer/src/lib/carbonenginejs-runtime.d.ts` | types for the runtime imports (the runtime ships no `.d.ts`) |
-| `apps/viewer/src/lib/carbonenginejs-server.d.ts` | types for the Destiny server imports (missiles M2a: `DSTBALL_MISSILE`, `LaunchMissile`, `MissileFollow`, and the `@carbonenginejs/server/destiny/geometry` module's `CollideTwoSpheres`, which `runtime-sim.ts` re-exports) |
+| `apps/viewer/src/lib/carbonenginejs-server.d.ts` | types for the Destiny server imports (missiles M2a: `DSTBALL_MISSILE`, `LaunchMissile`, `MissileFollow`, and the `@carbonenginejs/server/destiny/geometry` module's `CollideTwoSpheres`, which `runtime-sim.ts` re-exports; time control: `CjsDestinyStream`, the park's `balls`, `time` setter, `WriteFullStateToStream`, `ReadFullStateFromStream`, `ClearAll`) |
 
 - **Add a member to the `.d.ts` when the page starts using it; never reach for `any`.**
 - A runtime-called method we implement either extends a runtime class or implements an interface declared in the
@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`, `time-control.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `state-capture.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts`, `destiny-warp-in.spec.ts` and `destiny-missile.spec.ts` cover `destiny.ts`' tackle, accuracy, arrivals and missiles on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`

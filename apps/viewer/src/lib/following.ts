@@ -22,6 +22,7 @@
 import type { Maybe } from '@dereekb/util';
 import { selectFleetShips, toFleetAnchors, toFleetFollowPlans, toFleetGroupFollowPlans, toFleetGroupOffsets, toFleetMemberships, toFollowTolerance, type FleetFollowPlan, type FleetGroup, type SceneDocument, type SceneFleet, type SceneVector, type ShipFleetMembership } from '@scene-director/scene';
 import type { DestinyWorld, ShipFollow } from './destiny';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * holding: stopped while its anchor or FC is in warp; it flies to its slot once that ship lands. warping: in a
@@ -145,6 +146,12 @@ interface PlannedFleet {
 }
 
 /**
+ * What a FleetFollowing snapshot (sd-time) leaves out: its wiring (world, scene, radiusOf) and the memberships memo
+ * (rebuilt on demand).
+ */
+const FOLLOWING_CAPTURE: CaptureOptions = { wiring: ['world', 'scene', 'radiusOf'], reset: { memberships: () => null } };
+
+/**
  * The page's fleet following: the document's fleets turned into the world's follows.
  */
 export class FleetFollowing {
@@ -177,6 +184,26 @@ export class FleetFollowing {
     this.world = options.world;
     this.scene = options.scene;
     this.radiusOf = options.radiusOf;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, FOLLOWING_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, FOLLOWING_CAPTURE, memo);
   }
 
   /**

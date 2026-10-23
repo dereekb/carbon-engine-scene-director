@@ -4,6 +4,7 @@ import { type ArrivalsConfig, Arrivals, PlanArrivals, type PlanArrivalShip, WARP
 import type { DestinyWorld, WarpEvent } from './destiny';
 import { Fly, Gap, GUARDIAN, Harness, RIFTER, Ship, TFI } from './destiny.spec-helper';
 import { WARP_IN_BACKDATE_TICKS, WarpDropOutTime, WarpFactor, WarpRemainingAt } from './warp';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const rifter = Fly(RIFTER);
 const guardian = Fly(GUARDIAN);
@@ -237,5 +238,42 @@ describe('Arrivals', () => {
     arrivals.Boundary(harness.world.tick);
     expect(arrivals.Report()[0].ships[0]).toMatchObject({ state: 'dropped', note: expect.stringMatching(/placed at its landing/) });
     expect(Gap(harness.world.Motion('a')?.position ?? [1, 1, 1], [0, 0, 0])).toBeLessThan(1);
+  });
+});
+
+describe('Arrivals snapshots (sd-time)', () => {
+  it('restores the groups with the world, and lands them on the ticks an uncaptured twin lands them', () => {
+    const build = (): World => {
+      const built = MakeWorld([
+        ['a', rifter, [0, 0, 0]],
+        ['b', rifter, [500, 0, 0]],
+        ['c', guardian, [-500, 0, 0]]
+      ]);
+      built.harness.Ticks(6);
+      built.arrivals.Add(Group(['a', 'b', 'c']));
+      built.harness.Ticks(2);
+      return built;
+    };
+    const { harness, arrivals, exits } = build();
+    const twin = build();
+    const world = harness.world.Snapshot();
+    const now = harness.now;
+    const trip = RoundTrip(
+      arrivals,
+      (a) => a.Report(),
+      () => harness.Until(() => exits.size === 3, 200),
+      () => {
+        harness.world.Restore(world);
+        harness.now = now;
+        exits.clear();
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    harness.Until(() => exits.size === 3, 200);
+    twin.harness.Until(() => twin.exits.size === 3, 200);
+    expect([...exits]).toEqual([...twin.exits]);
+    expect(arrivals.Report()).toEqual(twin.arrivals.Report());
   });
 });

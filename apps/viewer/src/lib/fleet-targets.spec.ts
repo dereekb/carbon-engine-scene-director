@@ -2,6 +2,7 @@ import type { Maybe } from '@dereekb/util';
 import { normalizeScene, type CalledTargetStatus, type FleetGroup, type SceneDocument, toFleetGroupKey } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { FleetTargets, type FleetTargetsPort, type FleetTargetsSync } from './fleet-targets';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const TFI = 'tfi:amarr:amarr';
 const RED = ['r1', 'r2', 'r3', 'r4'];
@@ -353,5 +354,38 @@ describe('FleetTargets free fire', () => {
     expect(targetsOf(port, ['a3'])).toEqual({ a3: 'r4' });
     expect(targets.Report('a1', 2)).toBeNull();
     expect(targets.Armed()).toEqual([]);
+  });
+});
+
+describe('FleetTargets snapshots (sd-time)', () => {
+  it('restores calls, primaries and holds, and the next sync changes what an uncaptured twin changes', () => {
+    const build = (): ReturnType<typeof lever> => {
+      const built = lever();
+      built.sync(twoWings({ fleet: ['r1', 'r2'], w1: ['r2'], dps: ['r3'] }), 0);
+      built.port.statuses.set('r3', 'destroyed');
+      built.sync(twoWings({ fleet: ['r1', 'r2'], w1: ['r2'], dps: ['r3', 'r4'] }), 1);
+      return built;
+    };
+    const { port, targets, sync } = build();
+    const twin = build();
+    const ports = new Map(port.targets);
+    const trip = RoundTrip(
+      targets,
+      (t) => [BLUE.map((ship) => t.Report(ship, 1)), t.Armed(), t.GroupReport({ fleet: 'f', kind: 'squad', id: 'dps' })],
+      () => {
+        port.statuses.set('r1', 'destroyed');
+        sync(twoWings({ fleet: ['r1', 'r2'], tackle: ['r4'] }), 2);
+      },
+      () => {
+        port.targets.clear();
+        for (const [ship, target] of ports) port.targets.set(ship, target);
+        port.statuses.delete('r1');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    const next = twoWings({ fleet: ['r2'], w1: ['r4'], dps: ['r4'] });
+    expect(sync(next, 2)).toEqual(twin.sync(next, 2));
   });
 });

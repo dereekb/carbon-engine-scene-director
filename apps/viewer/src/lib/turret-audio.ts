@@ -18,6 +18,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import type { ShotTargetKind } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 import type { TurretFileFacts } from './turret-plan';
 
 /**
@@ -119,10 +120,35 @@ export function TurretAudioPosts(input: TurretAudioInput): TurretAudioPost[] {
 }
 
 /**
+ * What a TurretSoundQueue snapshot (sd-time) leaves out: nothing, every field is state.
+ */
+const TURRET_SOUNDS_CAPTURE: CaptureOptions = {};
+
+/**
  * Turret sound posts waiting for their time.
  */
 export class TurretSoundQueue {
   private queued: TurretAudioPost[] = [];
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, TURRET_SOUNDS_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, TURRET_SOUNDS_CAPTURE, memo);
+  }
 
   Add(posts: readonly TurretAudioPost[]): void {
     if (!posts.length) return;

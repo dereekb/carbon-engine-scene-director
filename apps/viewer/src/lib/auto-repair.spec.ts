@@ -3,6 +3,7 @@ import type { DefenseLayerName, ModuleActivation, SceneDocument, SceneFleet } fr
 import { describe, expect, it } from 'vitest';
 import { AutoRepair, type AutoRepairCondition, type AutoRepairPort } from './auto-repair';
 import type { RemoteRepairerState, ShipModuleSpec } from './modules';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const LRAR: ModuleActivation = {
   key: '',
@@ -312,5 +313,48 @@ describe('AutoRepair', () => {
     const first = run();
     expect(first.map((call) => `${call.id}>${call.target}`)).toEqual(['g1>b1', 'g1>b1', 'g2>b2', 'g2>b2']);
     expect(run()).toEqual(first);
+  });
+});
+
+describe('AutoRepair snapshots (sd-time)', () => {
+  it('restores owned reps, targets and passes, and the next sync switches what an uncaptured twin switches', () => {
+    const build = (): Harness => {
+      const harness = new Harness({ b1: { taken: 1_000, armor: 600 }, b2: {}, d1: { modules: Logi() }, g1: { modules: Logi() }, g2: {} });
+      harness.Step();
+      harness.Step();
+      return harness;
+    };
+    const harness = build();
+    const twin = build();
+    const saved = { ships: structuredClone([...harness.ships]), fleet: harness.fleet, tick: harness.tick, switches: harness.switches.length };
+    const trip = RoundTrip(
+      harness.autoRepair,
+      (a) => [['g1', 'd1', 'b1'].map((id) => a.Report(id, saved.tick)), a.FleetReport('b', saved.tick), [...a.PreLocks()]],
+      () => {
+        harness.fleet = Fleet((fleet) => (fleet.wings[0].squads[0].autoRepair = { on: true }));
+        harness.ships.get('b2')!.taken = 1_500;
+        harness.Step();
+        harness.autoRepair.Manual('g1');
+        harness.Step();
+      },
+      () => {
+        harness.ships.clear();
+        for (const [id, ship] of saved.ships) harness.ships.set(id, ship);
+        harness.fleet = saved.fleet;
+        harness.tick = saved.tick;
+        harness.switches.length = saved.switches;
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    for (const rig of [harness, twin]) {
+      rig.ships.get('b1')!.taken = 0;
+      rig.ships.get('b2')!.taken = 2_000;
+      rig.Step();
+      rig.Step();
+    }
+    expect(harness.switches).toEqual(twin.switches);
+    expect(harness.autoRepair.Report('g1', harness.tick)).toEqual(twin.autoRepair.Report('g1', twin.tick));
   });
 });

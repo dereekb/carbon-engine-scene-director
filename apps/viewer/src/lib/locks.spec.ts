@@ -2,6 +2,7 @@ import type { Maybe } from '@dereekb/util';
 import { lockTime } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { type LockTargeting, ShipLocks, type ShipLocksPort } from './locks';
+import { RoundTrip } from './state-capture.spec-helper';
 
 /**
  * Ships on a line: distances are |x_a - x_b|; one-second ticks.
@@ -152,5 +153,32 @@ describe('ShipLocks', () => {
     for (const tick of [12, 13, 14]) locks.Boundary(tick, wanted);
     expect(locks.Lockers('punisher')).toContainEqual({ ship: 'rifter', target: 'punisher', state: 'locked' });
     expect(locks.Lockers('rifter')).toEqual([]);
+  });
+});
+
+describe('ShipLocks snapshots (sd-time)', () => {
+  it('restores locks waiting, locking and locked, and the keeps', () => {
+    const locks = new ShipLocks(new FakePort());
+    const wanted = Wanted({ rifter: ['punisher', 'ferox'], ferox: ['rifter'] });
+    locks.Request('rifter', 'punisher', 10);
+    locks.Boundary(11, wanted);
+    locks.Request('rifter', 'ferox', 11);
+    locks.Request('ferox', 'rifter', 11);
+    locks.Keep('ferox', 'rifter', 11);
+    locks.Boundary(12, wanted);
+    locks.Boundary(13, wanted);
+    locks.Boundary(14, wanted);
+    const trip = RoundTrip(
+      locks,
+      (l) => [l.Report('rifter', 14), l.Report('ferox', 14), l.On('rifter')],
+      (l) => {
+        l.Release('rifter', 'punisher');
+        l.Boundary(15, wanted);
+        l.Remove('ferox');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
   });
 });

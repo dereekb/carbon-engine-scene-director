@@ -7,6 +7,7 @@ import { FleetCommanders } from './fleet-commanders';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { FleetFollowing } from './following';
+import { RoundTrip } from './state-capture.spec-helper';
 
 // Published values (EVE typeDogma via ESI, 2026-10-21), the Ship-stats spec fixtures.
 const RIFTER: PublishedHull = { typeID: 587, name: 'Rifter', published: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35, radius: 31, warpSpeedMultiplier: 5 } };
@@ -388,5 +389,42 @@ describe('FleetOrders', () => {
     expect(rig.Command('squad', 'dps').last).toBeDefined();
     rig.orders.Reset();
     expect(rig.Command('squad', 'dps').last).toBeUndefined();
+  });
+});
+
+describe('FleetOrders snapshots (sd-time)', () => {
+  it('restores the last orders, warps and regroups with the world and following, and flies on like an uncaptured twin', () => {
+    const build = (): Rig => {
+      const rig = new Rig();
+      rig.Order({ fleet: 'f', order: { type: 'direction', direction: [0, 0, 1] } });
+      rig.Step(5);
+      return rig;
+    };
+    const rig = build();
+    const twin = build();
+    const saved = { world: rig.world.Snapshot(), following: rig.following.Snapshot(), scene: rig.scene, now: rig.now };
+    const trip = RoundTrip(
+      rig.orders,
+      (o) => [o.GroupReport({ fleet: 'f', kind: 'fleet', id: 'f' }), o.GroupReport({ fleet: 'f', kind: 'squad', id: 'dps' })],
+      () => {
+        rig.Order({ fleet: 'f', order: WARP });
+        rig.Step(4);
+      },
+      () => {
+        rig.world.Restore(saved.world);
+        rig.following.Restore(saved.following);
+        rig.scene = saved.scene;
+        rig.now = saved.now;
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    for (const each of [rig, twin]) {
+      each.Order({ fleet: 'f', order: { type: 'stop' } });
+      each.Step(8);
+    }
+    expect(['fc', ...MEMBERS].map((id) => rig.world.Motion(id))).toEqual(['fc', ...MEMBERS].map((id) => twin.world.Motion(id)));
+    expect(rig.Command('fleet', 'f')).toEqual(twin.Command('fleet', 'f'));
   });
 });

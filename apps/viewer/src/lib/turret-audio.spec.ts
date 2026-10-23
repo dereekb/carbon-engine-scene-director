@@ -2,6 +2,7 @@ import type { Maybe } from '@dereekb/util';
 import { describe, expect, it } from 'vitest';
 import { TICKS_PER_SECOND } from './clock';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const S = TICKS_PER_SECOND;
 
@@ -82,5 +83,23 @@ describe('TurretSoundQueue', () => {
     queue.Add(TurretAudioPosts({ shots: [Shot()], transitions: [], facts: Facts }));
     queue.Clear();
     expect(queue.pending).toBe(0);
+  });
+});
+
+describe('TurretSoundQueue snapshots (sd-time)', () => {
+  it('restores the queued posts', () => {
+    const queue = new TurretSoundQueue();
+    queue.Add(TurretAudioPosts({ shots: [Shot({ at: 11 * S }), Shot({ ship: 'punisher', target: 'rifter', at: 11.3 * S })], transitions: [], facts: Facts }));
+    const trip = RoundTrip(
+      queue,
+      (q) => q.pending,
+      (q) => {
+        q.Due(11.25 * S);
+        q.Forget('punisher');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
   });
 });

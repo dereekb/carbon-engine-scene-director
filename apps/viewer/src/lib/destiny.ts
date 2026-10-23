@@ -86,9 +86,11 @@
 import type { Maybe } from '@dereekb/util';
 import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, NO_FALLOFF_METRES, shipOrderTarget, toFollowTolerance, unitHash, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
+import { CapturePark, RestorePark, type ParkSnapshot } from './destiny-snapshot';
 import { CycleEnd } from './module-cycle';
 import type { EveShip2 } from './runtime';
 import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, CollideTwoSpheres, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
+import { CaptureFields, CloneState, RestoreFields, type CaptureOptions, type CapturedFields } from './state-capture';
 import { FleetFrame, FormationGoto, FramePoint, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, WarpFrame, type FormationGoto as FormationGotoResult } from './steering';
 import { DEFAULT_WARP_SPEED, LandingPoint, WarpExitTime, WarpFactor, WarpInBackdate, WarpInExitTicks, WarpLength, WarpPhaseAt, type WarpProfile, type WarpProfileDistances } from './warp';
 
@@ -874,11 +876,42 @@ interface PropModEntry {
 }
 
 /**
+ * A ship entry as Snapshot holds it: everything but its curves, plus the rotation curve's attitude and last sample.
+ */
+interface ShipSnapshot {
+  readonly entry: Omit<ShipEntry, 'curves'>;
+  readonly attitude: readonly number[];
+  readonly value: readonly number[];
+}
+
+/**
+ * The whole simulation between ticks (DestinyWorld.Snapshot).
+ */
+export interface DestinySnapshot {
+  readonly master: ParkSnapshot;
+  readonly replica: ParkSnapshot;
+  /**
+   * The world's own fields (objects, pending orders, missiles, events, ball ids), ships aside.
+   */
+  readonly fields: CapturedFields;
+  readonly ships: readonly ShipSnapshot[];
+}
+
+/**
+ * The world's wiring: the parks (snapshotted on their own), the ships (their curves are runtime objects) and the
+ * listeners.
+ */
+const WORLD_CAPTURE: CaptureOptions = { wiring: ['masterPark', 'replicaPark', 'ships', 'warpListeners', 'boundaryListeners', 'beforeBoundaryListeners', 'propModListeners'] };
+
+/**
  * The page's Destiny simulation: a master and a replica park in lockstep, one ball per document ship.
  */
 export class DestinyWorld {
-  readonly master: CjsBallparkController;
-  readonly replica: CjsBallparkController;
+  /**
+   * The parks; Restore swaps in new ones, so read them through master / replica each time.
+   */
+  private masterPark: ScenePark;
+  private replicaPark: ScenePark;
   private readonly ships = new Map<string, ShipEntry>();
   private readonly objects = new Map<string, ObjectEntry>();
   /**
@@ -908,19 +941,81 @@ export class DestinyWorld {
    * Whether ship ball ids are seeded by their document ids (after the first SetSceneEpoch).
    */
   private seeded = false;
-  private readonly parks: readonly ScenePark[];
 
   constructor() {
-    const master = new ScenePark();
-    const replica = new ScenePark();
-    this.parks = [master, replica];
-    this.master = master;
-    this.master.isMaster = true;
-    this.replica = replica;
+    this.masterPark = new ScenePark();
+    this.masterPark.isMaster = true;
+    this.replicaPark = new ScenePark();
     // Both parks get the reference ball, so they hold the same balls.
     this.Both((park) => park.AddBall(REFERENCE_BALL_ID, 1, 0, 0, false, false, false, false, false, 0, 0, 0, 0, 0, 0, 1, 0));
     this.replica.ego = REFERENCE_BALL_ID;
     this.master.ego = REFERENCE_BALL_ID;
+  }
+
+  /**
+   * The authoritative park.
+   *
+   * @returns The master park (a new object after Restore).
+   */
+  get master(): CjsBallparkController {
+    return this.masterPark;
+  }
+
+  /**
+   * The renderer's park: its ClientBalls are the ships' curves.
+   *
+   * @returns The replica park (a new object after Restore).
+   */
+  get replica(): CjsBallparkController {
+    return this.replicaPark;
+  }
+
+  private get parks(): readonly ScenePark[] {
+    return [this.masterPark, this.replicaPark];
+  }
+
+  /**
+   * Snapshots the whole simulation between ticks (sd-time): both parks (stream + scalar overlay), every ship entry with
+   * its curve attitude, the objects, pending orders, missiles, queued events and the ball id counter. The listeners are
+   * wiring and stay.
+   *
+   * @returns The snapshot, plain data.
+   */
+  Snapshot(): DestinySnapshot {
+    const ships: ShipSnapshot[] = [];
+    for (const entry of this.ships.values()) {
+      const { curves, ...rest } = entry;
+      ships.push({ entry: CloneState(rest), attitude: [...curves.rotation.attitude], value: [...curves.rotation.value] });
+    }
+    return { master: CapturePark(this.masterPark), replica: CapturePark(this.replicaPark), fields: CaptureFields(this, WORLD_CAPTURE), ships };
+  }
+
+  /**
+   * Restores a snapshot: both parks are rebuilt fresh first, so a failure there changes nothing; then they are swapped
+   * in, every map is replaced and every ship gets new curves on its new ClientBall (Curves returns the new objects:
+   * the director re-attaches the drawn hulls). The listeners stay.
+   *
+   * @param snapshot - From Snapshot.
+   * @throws {Error} When a park does not restore, or a ship's ball is not a ClientBall on the new replica.
+   */
+  Restore(snapshot: DestinySnapshot): void {
+    const master = RestorePark(snapshot.master, true, () => new ScenePark());
+    const replica = RestorePark(snapshot.replica, false, () => new ScenePark());
+    const ships = new Map<string, ShipEntry>();
+    for (const saved of snapshot.ships) {
+      const rest = CloneState(saved.entry);
+      const ball = replica.GetBall(rest.ballId);
+      if (!(ball instanceof CjsDestinyClientBall)) throw new Error(`a Destiny snapshot has no ClientBall for ${rest.id}`);
+      const rotation = new BallRotation(ball);
+      rotation.attitude.set(saved.attitude);
+      rotation.value.set(saved.value);
+      ships.set(rest.id, { ...rest, curves: { translation: ball, rotation } });
+    }
+    this.masterPark = master;
+    this.replicaPark = replica;
+    RestoreFields(this, snapshot.fields, WORLD_CAPTURE);
+    this.ships.clear();
+    for (const [id, entry] of ships) this.ships.set(id, entry);
   }
 
   /**
@@ -1973,7 +2068,7 @@ export class DestinyWorld {
   }
 
   /**
-   * The replica ClientBall a drawn missile flies on (translation only).
+   * The replica ClientBall a drawn missile flies on (translation only); a new object after a Restore.
    *
    * @param id - The flight id.
    * @returns The ClientBall, or null for an unknown missile.
@@ -2161,13 +2256,31 @@ export class DestinyWorld {
   }
 
   /**
-   * The curves a ship's ball drives; the same objects every call, so a rebuilt ship re-attaches to them.
+   * The curves a ship's ball drives; the same objects every call, so a rebuilt ship re-attaches to them, until a
+   * time-control Restore replaces them (the director re-attaches the drawn hulls).
    *
    * @param id - The ship id.
    * @returns The curves, or null when no ship has that id.
    */
   Curves(id: string): Maybe<ShipCurves> {
     return this.ships.get(id)?.curves ?? null;
+  }
+
+  /**
+   * Samples every ship's translation and rotation curve and every missile's translation at a time, the way the drawn
+   * frame does: a jump's re-simulation calls it over its last ticks (WARMUP_TICKS) so the ClientBalls' damped history
+   * is warm when drawing resumes.
+   *
+   * @param time - Scene ticks.
+   */
+  SampleCurves(time: number): void {
+    const position = vec3.create();
+    const rotation = quat.create();
+    for (const entry of this.ships.values()) {
+      entry.curves.translation.Update__Ticks(time, position);
+      entry.curves.rotation.Update__Ticks(time, rotation);
+    }
+    for (const id of this.missiles.keys()) this.MissileCurves(id)?.Update__Ticks(time, position);
   }
 
   /**

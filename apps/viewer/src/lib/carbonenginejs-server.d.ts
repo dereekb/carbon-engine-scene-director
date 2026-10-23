@@ -131,6 +131,21 @@ declare module '@carbonenginejs/server/destiny' {
   }
 
   /**
+   * A seekable byte stream for Destiny's packets (full state, balls). Bytes passed in are copied.
+   */
+  export class CjsDestinyStream {
+    constructor(bytes?: ArrayBuffer | ArrayBufferView);
+    /**
+     * Unread bytes after the cursor.
+     */
+    readonly remaining: number;
+    /**
+     * A copy of every written byte.
+     */
+    GetBytes(): Uint8Array;
+  }
+
+  /**
    * A Destiny ballpark. A replica (the default) creates CjsDestinyClientBall; a master creates CjsDestinyBall.
    */
   export class CjsBallparkController {
@@ -143,7 +158,12 @@ declare module '@carbonenginejs/server/destiny' {
     /**
      * The last simulation timestamp, in 100 ns ticks.
      */
-    readonly time: bigint;
+    get time(): bigint;
+    set time(value: DestinyInt64);
+    /**
+     * Every ball by id (the live map).
+     */
+    readonly balls: ReadonlyMap<bigint, CjsDestinyBall>;
     /**
      * The tick length, in milliseconds.
      */
@@ -156,6 +176,21 @@ declare module '@carbonenginejs/server/destiny' {
     set ego(value: DestinyInt64);
     AddBall(objectId: DestinyInt64, mass: number, radius: number, maxVel: number, isFree: boolean, isGlobal: boolean, isMassive: boolean, isInteractive: boolean, isSpaceJunk: boolean, x: number, y: number, z: number, vx: number, vy: number, vz: number, agility: number, speedFraction: number): CjsDestinyBall;
     GetBall(id: DestinyInt64): CjsDestinyBall | null;
+    /**
+     * Writes the park's tick and every live ball with id at or above DSTLOCALBALLS (all of the page's) as one full-state
+     * packet, the stream rewound after. It omits the park's clock, old samples, the legacy heading and roll state and
+     * every ClientBall cache (destiny-snapshot.ts lays those over).
+     */
+    WriteFullStateToStream(stream: CjsDestinyStream, sourceId?: DestinyInt64): void;
+    /**
+     * Reads full-state packets: `partial` 0 clears the free and proximity registries first; each ball is created or
+     * updated (its legacy heading snapped) and followers re-linked. A short or bad stream throws, keeping what it read.
+     */
+    ReadFullStateFromStream(stream: CjsDestinyStream, partial?: number): void;
+    /**
+     * Removes every ball and clears the registries; the clocks are kept.
+     */
+    ClearAll(): void;
     RemoveBall(id: DestinyInt64, delay?: number): void;
     /**
      * EVE's turret hit chance from the balls' new positions and velocities: `[accuracy, surfaceDistance,

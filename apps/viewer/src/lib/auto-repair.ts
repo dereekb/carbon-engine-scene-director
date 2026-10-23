@@ -40,6 +40,7 @@ import {
 import type { LockTargeting } from './locks';
 import type { ModuleCycleState } from './module-cycle';
 import type { RemoteRepairerState } from './modules';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * Whether a ship can repair or be repaired now: `ready`, or why not. `waiting` is a ship without its ball or whose fit
@@ -170,6 +171,11 @@ const ENGAGED_STATES = new Set<ModuleCycleState>(['activating', 'active']);
 
 const RUNNING_STATES = new Set<ModuleCycleState>(['active', 'stopping']);
 
+/**
+ * What an AutoRepair snapshot (sd-time) leaves out: its wiring (port).
+ */
+const AUTO_REPAIR_CAPTURE: CaptureOptions = { wiring: ['port'] };
+
 export class AutoRepair {
   private readonly port: AutoRepairPort;
   /**
@@ -190,6 +196,26 @@ export class AutoRepair {
 
   constructor(input: { readonly port: AutoRepairPort }) {
     this.port = input.port;
+  }
+
+  /**
+   * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, AUTO_REPAIR_CAPTURE, memo);
+  }
+
+  /**
+   * Restores a Snapshot, refilling every container in place.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, AUTO_REPAIR_CAPTURE, memo);
   }
 
   /**

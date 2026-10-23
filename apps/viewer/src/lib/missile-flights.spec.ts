@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { TICKS_PER_SECOND } from './clock';
 import type { MissileEvent, MissileReport } from './destiny';
 import { MISSILE_FLIGHT_KEEP_TICKS, MISSILE_REPORT_ROWS, MissileFlightId, MissileFlights, type MissileLaunchRecord } from './missile-flights';
+import { RoundTrip } from './state-capture.spec-helper';
 
 // A Caracal's HML II with Scourge Heavy at max skills (plan §1.6).
 const NUMBERS = {
@@ -148,5 +149,30 @@ describe('MissileFlights', () => {
     flights.Clear();
     expect(flights.any).toBe(false);
     expect(flights.Report(110, () => null)).toEqual({ inFlight: 0, launched: 0, hits: 0, expired: 0, lost: 0, refused: 0, flights: [] });
+  });
+});
+
+describe('MissileFlights snapshots (sd-time)', () => {
+  it('restores the flights, the due moments, refusals and totals', () => {
+    const flights = new MissileFlights(1);
+    flights.Add(Launch(), NOW);
+    flights.Add(Launch({ cycle: 2, tick: 101 }), NOW + TICKS_PER_SECOND);
+    flights.Refused('caracal', 'high-1', 'no charges');
+    flights.Due(NOW);
+    flights.End(Event('hit'), NOW + 3 * TICKS_PER_SECOND, 103);
+    const trip = RoundTrip(
+      flights,
+      (f) => [f.Report(103, () => null), f.Counts('caracal'), f.RefusalOf('caracal', 'high-1'), f.Flight('caracal|high-0|1|2')],
+      (f) => {
+        f.Add(Launch({ cycle: 3, tick: 104 }), NOW + 4 * TICKS_PER_SECOND);
+        f.End(Event('expired', { id: 'caracal|high-0|1|2', at: 110, tick: 110 }), NOW + 10 * TICKS_PER_SECOND, 110);
+        f.Prune(110 + MISSILE_FLIGHT_KEEP_TICKS);
+        f.Forget('caracal');
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    expect(flights.Due(NOW + 2 * TICKS_PER_SECOND)).toMatchObject([{ kind: 'launch', flight: { id: 'caracal|high-0|1|2' } }]);
   });
 });
