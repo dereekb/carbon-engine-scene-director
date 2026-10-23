@@ -85,6 +85,10 @@ export interface ModuleActivation extends Omit<ModuleNumbers, 'cycleTime'> {
    * What running it does not do yet.
    */
   readonly note?: string;
+  /**
+   * Its default effect's guid (`effects.ArmorHardening`): the client effect and sounds it plays (effects.ts).
+   */
+  readonly effectGuid?: string;
 }
 
 /**
@@ -119,7 +123,8 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
     maxGroupActive: ship.moduleAttribute(key, MAX_GROUP_ACTIVE) ?? 0,
     maxGroupOnline: ship.moduleAttribute(key, MAX_GROUP_ONLINE) ?? 0,
     flight,
-    ...(note && !refusal ? { note } : {})
+    ...(note && !refusal ? { note } : {}),
+    ...(effect?.guid ? { effectGuid: effect.guid } : {})
   };
 }
 

@@ -8,3 +8,4 @@ export * from './dogma';
 export * from './typed-fit';
 export * from './switch';
 export * from './activation';
+export * from './effects';

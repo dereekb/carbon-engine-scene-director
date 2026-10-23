@@ -521,6 +521,109 @@ declare module '@carbonenginejs/runtime/trinity' {
      * Samples the translation and rotation curves at `time` (100 ns ticks).
      */
     UpdateWorldTransform(time: number): boolean;
+    /**
+     * Set by the SOF for animated (skinned) hulls.
+     */
+    readonly isAnimated: boolean;
+    readonly overlayEffects: readonly EveMeshOverlayEffect[];
+    AddOverlayEffect(overlay: EveMeshOverlayEffect): void;
+    RemoveOverlayEffect(overlay: EveMeshOverlayEffect): void;
+  }
+
+  /**
+   * A named set of curves played together (an effect's `play_start`).
+   */
+  export interface TriCurveSet {
+    GetName(): string;
+    Play(): void;
+    PlayFrom(time: number): void;
+    Stop(): void;
+    ResetTimeRange(): void;
+    IsPlaying(): boolean;
+    /**
+     * Seconds.
+     */
+    GetMaxCurveDuration(): number;
+  }
+
+  /**
+   * A hull overlay (a module's hardener, booster or repair glow): its effects draw over the ship's mesh. Its curve set
+   * plays once on load (playOnLoad).
+   */
+  export class EveMeshOverlayEffect {
+    name: string;
+    readonly curveSet: TriCurveSet | null;
+    display: boolean;
+    readonly opaqueEffects: readonly Tr2Effect[];
+    readonly decalEffects: readonly Tr2Effect[];
+    readonly transparentEffects: readonly Tr2Effect[];
+    readonly additiveEffects: readonly Tr2Effect[];
+    readonly distortionEffects: readonly Tr2Effect[];
+  }
+
+  /**
+   * A beam between two points (energy transfer, neut, nos, scram, point): fired by its `play_start` curve set.
+   */
+  export class EveStretch {
+    source: TriVectorCurve | null;
+    dest: TriVectorCurve | null;
+    display: boolean;
+    readonly curveSets: readonly TriCurveSet[];
+    /**
+     * Pins the endpoints (a 3-vector source, or a 16-element transform) and marks the stretch -Z forward. The loaded
+     * `source` / `dest` curves stay and overwrite the ends unless nulled first.
+     */
+    SetFiringTransform(source: ArrayLike<number>, destination: ArrayLike<number>): void;
+    StartFiring(delay?: number): void;
+    StopFiring(): void;
+    /**
+     * Seconds.
+     */
+    GetCurveDuration(): number;
+  }
+
+  /**
+   * A remote repair beam (remote armor, shield and hull repair): fired through its controllers' IsFiring variable.
+   */
+  export class EveStretch3 {
+    source: TriVectorCurve | null;
+    dest: TriVectorCurve | null;
+    display: boolean;
+    readonly sourcePosition: Vec3;
+    readonly destinationPosition: Vec3;
+    readonly curveSets: readonly TriCurveSet[];
+    readonly controllers: readonly { Unlink(): void }[];
+    /**
+     * Pins both endpoints and drops the `source` / `dest` curves.
+     */
+    SetFiringTransform(source: ArrayLike<number>, destination: ArrayLike<number>): void;
+    StartFiring(delay?: number): void;
+    StopFiring(): void;
+    PlayCurveSet(name: string, rangeName?: string): void;
+  }
+
+  /**
+   * A transform with children, meshes and curve sets (the stasis web's trigger effect).
+   */
+  export class EveTransform {
+    name: string;
+    readonly scaling: Vec3;
+    readonly children: EveTransform[];
+    readonly curveSets: readonly TriCurveSet[];
+    display: boolean;
+    /**
+     * When true, small-on-screen curve sets update at 1 Hz.
+     */
+    useLodLevel: boolean;
+    PlayCurveSet(name: string, rangeName?: string): void;
+  }
+
+  /**
+   * A scene-level transform placed by its curves, like a ship.
+   */
+  export class EveRootTransform extends EveTransform {
+    translationCurve: TriVectorCurve | null;
+    rotationCurve: (ITriQuaternionFunction | Tr2RotationAdapter) | null;
   }
 
   /**

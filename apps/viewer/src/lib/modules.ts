@@ -62,6 +62,12 @@ export interface ShipModuleEvent extends ModuleCycleEvent {
   readonly module: string;
   readonly target?: string;
   readonly effectiveness?: number;
+  /**
+   * The module's default effect guid (its client effect, effects.ts) and cycle (s): what module-fx.ts and
+   * module-audio.ts need even after the module or its ship is gone.
+   */
+  readonly effectGuid?: string;
+  readonly cycleTime: number;
 }
 
 /**
@@ -379,7 +385,8 @@ export class ShipModules {
   }
 
   private Events(ship: string, module: string, entry: ModuleEntry, events: readonly ModuleCycleEvent[]): ShipModuleEvent[] {
-    return events.map((event) => ({ ...event, ship, module, ...(entry.target ? { target: entry.target } : {}), ...(entry.effectiveness == null ? {} : { effectiveness: entry.effectiveness }) }));
+    const { effectGuid, cycleTime } = entry.spec.activation;
+    return events.map((event) => ({ ...event, ship, module, ...(entry.target ? { target: entry.target } : {}), ...(entry.effectiveness == null ? {} : { effectiveness: entry.effectiveness }), ...(effectGuid ? { effectGuid } : {}), cycleTime }));
   }
 
   private Timing(spec: ShipModuleSpec): { readonly cycleTicks: number; readonly reactivationTicks: number } {

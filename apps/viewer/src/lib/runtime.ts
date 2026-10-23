@@ -29,9 +29,14 @@ export {
   EveChildBehaviorSystem,
   EveChildLineSet,
   EveLensflare,
+  EveMeshOverlayEffect,
+  EveRootTransform,
   EveSpaceScene,
   EveSpaceSceneRenderDriver,
   EveSpherePin,
+  EveStretch,
+  EveStretch3,
+  EveTransform,
   Tr2CurveLineSet,
   Tr2DirectInstanceData,
   Tr2GrannyPrimitiveSet,
@@ -47,7 +52,7 @@ export {
   Tr2TranslationAdapter,
   TriFloat
 } from '@carbonenginejs/runtime/trinity';
-export type { EvePlanet, EveShip2, EveSpaceObject2, Tr2Effect } from '@carbonenginejs/runtime/trinity';
+export type { EvePlanet, EveShip2, EveSpaceObject2, Tr2Effect, TriCurveSet } from '@carbonenginejs/runtime/trinity';
 export { Tr2RenderJobs, TriRenderJob, TriStepPythonCB } from '@carbonenginejs/runtime/trinity/renderJob';
 export { RenderingMode, TR2SHADERMODEL, TriBatchType } from '@carbonenginejs/runtime/consts/graphics';
 export { SetEffectPathDefaults } from '@carbonenginejs/runtime/utils';
