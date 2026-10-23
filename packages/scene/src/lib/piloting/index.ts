@@ -5,6 +5,7 @@ export * from './orbit';
 export * from './application';
 export * from './profile';
 export * from './stance';
+export * from './stances';
 export * from './envelope';
 export * from './ideal';
 export * from './maneuvers';

@@ -91,6 +91,11 @@ import {
   fitTextOf,
   isFleetDocumentOrder,
   isFleetFreeFireOrder,
+  isFleetStanceOrder,
+  type ResolvedShipStance,
+  resolveShipStances,
+  type StanceOrder,
+  stanceOfOrder,
   isFleetTargetsOrder,
   type FleetFreeFireOrder,
   type FleetPicturePropMods,
@@ -771,6 +776,10 @@ export interface OrderShipResult {
    * What a target given by name resolved to (resolveNamedOrderTarget).
    */
   readonly resolved?: ResolvedNamedOrderTarget;
+  /**
+   * A stance order's (or a rejoin's): the ship's live stance, resolved (resolveShipStances).
+   */
+  readonly stance?: ResolvedShipStance;
 }
 
 interface WorldSphere {
@@ -1430,7 +1439,16 @@ export class Director {
     if (this.IsDead(id)) throw new Error(`ship "${id}" was destroyed`);
     const named = this.NamedTarget({ order, from: id, where: 'order' });
     const normalized = normalizeShipOrderRequest(named.order, { ships, objects: this.TargetIds(), self: id });
-    if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
+    if (normalized.type === 'stance') {
+      this.commanders.SetShipStance(id, stanceOfOrder(normalized));
+      return { id, order: normalized, tick: this.world.tick, ...this.StanceReport(id) };
+    }
+    if (normalized.type === 'rejoin') {
+      const following = this.following.Rejoin(id);
+      // A rejoin takes the pilot back into formation: its own stance, live or written, ends.
+      if (this.commanders.ShipStances().get(id) ?? this.scene?.ships.find((doc) => doc.id === id)?.stance) this.commanders.SetShipStance(id, null);
+      return { id, order: normalized, tick: this.world.tick, following, ...this.StanceReport(id) };
+    }
     const refusal = this.world.OrderRefusal(id, normalized);
     if (refusal !== null || !this.world.Order(id, normalized)) throw new Error(refusal ?? `ship "${id}" or its target has no Destiny ball`);
     const following = this.following.Detach(id);
@@ -1454,6 +1472,7 @@ export class Director {
     const { request, resolved } = this.FleetRequest(input);
     if (isFleetTargetsOrder(request.order)) return Promise.resolve({ ...this.CallTargets(request), ...resolved });
     if (isFleetFreeFireOrder(request.order)) return Promise.resolve({ ...this.FreeFireOrder(request), ...resolved });
+    if (isFleetStanceOrder(request.order)) return Promise.resolve({ ...this.StanceOrder(request), ...resolved });
     if (!isFleetDocumentOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
       // Resolved against the document current at its turn in the queue; the tick is captured before the edit, which
@@ -1492,6 +1511,7 @@ export class Director {
     const { request, resolved: named } = this.FleetRequest(input);
     if (isFleetTargetsOrder(request.order)) return { ...this.CallTargets(request, { boundary }), ...named };
     if (isFleetFreeFireOrder(request.order)) return { ...this.FreeFireOrder(request, { boundary }), ...named };
+    if (isFleetStanceOrder(request.order)) return { ...this.StanceOrder(request), ...named };
     const resolved = this.orders.Resolve(request);
     if (!isFleetDocumentOrder(request.order)) return { ...this.orders.Fly(resolved), ...named };
     if (!cue) throw new SceneError([`order_fleet.order.type: "${request.order.type}" edits the document; only a tool call or a timeline cue gives it`]);
@@ -1610,6 +1630,54 @@ export class Director {
       return { id, target: this.targets.Of(id), ...(source ? { source } : {}), ...(respondsIn != null ? { respondsIn } : {}) };
     });
     return { ...result, freeFire: order.on, ships };
+  }
+
+  /**
+   * order_fleet's stance order, live and synchronous: resolved on the live fleets with a targets order's authority, the
+   * group's live stance set or cleared in the stance book (FleetCommanders.SetStance, with each pilot's response time),
+   * then `command.last` recorded. Never saved: a load resets the document's stances.
+   *
+   * @param request - The normalized order_fleet request, its order a stance order.
+   * @returns order_fleet's fields plus stance (the group's live stance, null when cleared) and ships (each one's resolved
+   *   type, who flies it and its response time).
+   * @throws {SceneError} When the request names an unknown group, a giver without command of it, or an `on` squad or
+   *   wing the fleet does not hold.
+   */
+  private StanceOrder(request: FleetOrderRequest): object {
+    const order = request.order as StanceOrder;
+    const resolved = this.orders.Resolve(request);
+    const tick = this.world.tick;
+    const delays = this.PilotDelays(request, resolved, tick);
+    this.commanders.SetStance(resolved.group, stanceOfOrder(order), { tick, delays });
+    const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
+    const stances = this.ResolvedStances();
+    const ships = resolved.ships.map((id) => {
+      const stance = stances.get(id);
+      const respondsIn = delays.get(id) ?? 0;
+      return { id, type: stance?.type ?? 'in-line', flownBy: stance?.flownBy ?? null, ...(respondsIn > 0 ? { respondsIn } : {}) };
+    });
+    return { ...result, stance: stanceOfOrder(order), ships };
+  }
+
+  /**
+   * Every ship's live stance: the stance book over the document (resolveShipStances on the live fleets, with the
+   * pilots' own live stances).
+   *
+   * @returns By ship id.
+   */
+  private ResolvedStances(): Map<string, ResolvedShipStance> {
+    return resolveShipStances(this.LiveFleets()?.scene ?? this.Current(), { ships: this.commanders.ShipStances() });
+  }
+
+  /**
+   * A ship's live stance for order_ship's result.
+   *
+   * @param id - The ship.
+   * @returns `{ stance }`, or nothing for a ship the live view does not hold.
+   */
+  private StanceReport(id: string): { readonly stance?: ResolvedShipStance } {
+    const stance = this.ResolvedStances().get(id);
+    return stance ? { stance } : {};
   }
 
   /**

@@ -184,7 +184,7 @@ export class FleetOrders {
 
   /**
    * The live half of an order, after any document edit it made has applied: moves, warps and regroups fly; anchor,
-   * break-off and targets only record the order (the director's FleetTargets runs a call).
+   * break-off, targets, free fire and stances only record the order (the director's FleetTargets runs a call).
    *
    * @param resolved - The resolved order.
    * @param options - `tick`: when the order was given, for its record and delays, if not now (a document order
@@ -202,7 +202,7 @@ export class FleetOrders {
     let result: FleetOrderResult;
     if (order.type === 'warp') result = this.Warp(resolved, order, delays);
     else if (order.type === 'regroup') result = this.Regroup(resolved, delays);
-    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets' || order.type === 'free-fire') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
+    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets' || order.type === 'free-fire' || order.type === 'stance') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
     else result = this.Move(resolved, order, delays);
     const waits = (request.delay ?? 0) > 0 || [...delays.values()].some((delay) => delay > 0);
     if (waits && order.type !== 'anchor' && order.type !== 'break-off') result = { ...result, delays: Object.fromEntries(delays) };

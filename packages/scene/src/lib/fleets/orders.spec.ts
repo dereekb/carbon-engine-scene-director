@@ -53,7 +53,7 @@ const WARP = { type: 'warp', point: [0, 0, 400000] } as const;
 
 describe('normalizeFleetOrderRequest', () => {
   it('lists the ship orders, then the document orders', () => {
-    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets', 'free-fire']);
+    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets', 'free-fire', 'stance']);
   });
 
   it('round-trips every order type with its defaults filled', () => {

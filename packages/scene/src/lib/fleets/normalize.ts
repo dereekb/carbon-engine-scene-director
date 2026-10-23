@@ -3,11 +3,12 @@ import { isPlainObject, readId, readList, readOptionalString, readString, report
 import { type SceneFleet, type SceneSquad, type SceneSquadAnchor, type SceneWing, SQUAD_ROLES, type SquadRole } from './fleet';
 import { toFleetAnchors } from './membership';
 import { readSceneAutoRepair } from '../logi/auto-repair';
+import { checkStanceReferences, readSceneStance } from '../piloting/stances';
 import { readCalledTargets } from './targets';
 
-const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'personality', 'targets', 'autoRepair', 'wings']);
-const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'autoRepair', 'squads']);
-const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home', 'targets', 'autoRepair']);
+const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'personality', 'targets', 'autoRepair', 'stance', 'wings']);
+const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'autoRepair', 'stance', 'squads']);
+const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home', 'targets', 'autoRepair', 'stance']);
 const ANCHOR_KEYS = new Set<string>(['ship', 'range']);
 
 export interface NormalizeFleetsInput {
@@ -102,6 +103,7 @@ export function normalizeFleets(config: NormalizeFleetsInput): NormalizedFleets 
     if (fleet.id && fleetIds.has(fleet.id)) report.problems.push(`${where}.id "${fleet.id}" is used more than once`);
     fleetIds.add(fleet.id);
     checkFleetReferences({ fleet, where, claims, problems: report.problems });
+    checkFleetStances({ fleet, where, shipIds, problems: report.problems });
     if (report.problems.length === before) checkAnchorLoops(fleet, where, report.problems);
     fleets.push(fleet);
   }
@@ -122,7 +124,8 @@ function normalizeFleet(input: unknown, where: string, report: Report): Maybe<Sc
   if (personality && report.personalityNames && !report.personalityNames.has(personality)) report.problems.push(`${where}.personality "${personality}" is not a built-in personality or a key of personalities`);
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
   const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
-  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(personality ? { personality } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), wings: [] };
+  const stance = readSceneStance(input['stance'], { where: `${where}.stance`, ...report });
+  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(personality ? { personality } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), ...(stance ? { stance } : {}), wings: [] };
 
   const wingIds = new Set<string>();
   const squadIds = new Set<string>();
@@ -152,7 +155,8 @@ function normalizeWing(input: unknown, where: string, report: Report): Maybe<Sce
   const commander = readOptionalString(input['commander'], `${where}.commander`, report.problems);
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
   const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
-  const wing: SceneWing = { id, ...(name ? { name } : {}), ...(commander ? { commander } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), squads: [] };
+  const stance = readSceneStance(input['stance'], { where: `${where}.stance`, ...report });
+  const wing: SceneWing = { id, ...(name ? { name } : {}), ...(commander ? { commander } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), ...(stance ? { stance } : {}), squads: [] };
   for (const [index, candidate] of readList(input['squads'], `${where}.squads`, report.problems).entries()) {
     const squad = normalizeSquad(candidate, `${where}.squads[${index}]`, report);
     if (squad) wing.squads.push(squad);
@@ -175,7 +179,8 @@ function normalizeSquad(input: unknown, where: string, report: Report): Maybe<Sc
   const home = normalizeAnchor(input['home'], `${where}.home`, report, { keepEmpty: true });
   const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
   const autoRepair = readSceneAutoRepair(input['autoRepair'], { where: `${where}.autoRepair`, ...report });
-  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}) };
+  const stance = readSceneStance(input['stance'], { where: `${where}.stance`, ...report });
+  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}), ...(targets ? { targets } : {}), ...(autoRepair ? { autoRepair } : {}), ...(stance ? { stance } : {}) };
 }
 
 interface NormalizeAnchorOptions {
@@ -214,6 +219,28 @@ interface FleetReferencesInput {
  *
  * @param config - The fleet, where it sits, the claims of the fleets before it and where problems go.
  */
+interface FleetStancesInput {
+  readonly fleet: SceneFleet;
+  readonly where: string;
+  readonly shipIds: ReadonlySet<string>;
+  readonly problems: string[];
+}
+
+/**
+ * Checks what the fleet's, its wings' and its squads' stances fly on: a ship of the scene, or a squad or wing of this
+ * fleet.
+ *
+ * @param config - The fleet, where it sits, the scene's ship ids and where problems go.
+ */
+function checkFleetStances(config: FleetStancesInput): void {
+  const { fleet, where, shipIds, problems } = config;
+  checkStanceReferences({ stance: fleet.stance, where: `${where}.stance`, shipIds, fleet, problems });
+  for (const [wingIndex, wing] of fleet.wings.entries()) {
+    checkStanceReferences({ stance: wing.stance, where: `${where}.wings[${wingIndex}].stance`, shipIds, fleet, problems });
+    for (const [squadIndex, squad] of wing.squads.entries()) checkStanceReferences({ stance: squad.stance, where: `${where}.wings[${wingIndex}].squads[${squadIndex}].stance`, shipIds, fleet, problems });
+  }
+}
+
 function checkFleetReferences(config: FleetReferencesInput): void {
   const { fleet, where, claims, problems } = config;
   // An empty id already has its problem from the shape pass.

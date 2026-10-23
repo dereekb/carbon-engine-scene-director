@@ -24,6 +24,8 @@ import { normalizeShipOrderSteps, type SceneShipStep, type ShipStepName, shipSte
 import { applyTimelineOperation, TIMELINE_OPERATIONS } from './timeline/operations';
 import { removeTimelineReferences } from './timeline/prune';
 import type { SceneTimeline } from './timeline/timeline';
+import type { ShipStance } from './piloting/stance';
+import { checkShipStances, readSceneStance, removeStanceReferences } from './piloting/stances';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -87,6 +89,11 @@ export interface SceneShip {
    * pilot name, is reserved for the character system: stored, not used yet. Ships fly with the max-skills pilot.
    */
   pilot?: SceneShipPilot;
+  /**
+   * The pilot's own opening stance (piloting/stances.ts): it flies it alone, out of formation, over any group stance;
+   * order_ship's stance order then sets it live. Omitted: its groups' stance, else it holds formation.
+   */
+  stance?: ShipStance;
 }
 
 /**
@@ -236,7 +243,7 @@ export interface SceneDiff {
 type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
 
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'asteroidFields', 'fits', 'personalities', 'combat', 'timeline']);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders']);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders', 'stance']);
 
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -334,6 +341,7 @@ export function normalizeScene(input: unknown): NormalizedScene {
   problems.push(...fleets.problems);
   warnings.push(...fleets.warnings);
   if (fleets.fleets) scene.fleets = fleets.fleets;
+  checkShipStances(scene, problems, warnings);
   if (objects.objects) scene.objects = objects.objects;
   if (fields.fields) scene.asteroidFields = fields.fields;
   if (fits.fits) scene.fits = fits.fits;
@@ -355,9 +363,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  * Operations:
  *   { op: "add_ship", ship, warpIn? }   warpIn (true, or { stagger?, together? }): it lands from warp at its placement,
  *                                       along its rotation's yaw (the result's arrivals; the page plans it)
- *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot? } }
- *                                       each key replaces the ship's value (stats, propMod and orders as a whole); null
- *                                       clears type, stats, propMod, fit, pilot and orders
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot?, stance? } }
+ *                                       each key replaces the ship's value (stats, propMod, orders and stance as a
+ *                                       whole); null clears type, stats, propMod, fit, pilot, orders and stance
  *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused) and off
  *                                       every fleet's, wing's and squad's called targets, with a warning
  *   { op: "set_camera", camera }            merged into the current camera
@@ -366,11 +374,11 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_location", location }   replaces the scene's location (system id, origin, anchor); the set_location tool
  *                                       resolves names. Ships stay where they are in the scene
  *   { op: "clear_location" }               removes it; a no-op without one
- *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander?, targets?, personality? } }
+ *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander?, targets?, personality?, stance? } }
  *                                       personality: a built-in name or a key of personalities (null clears)
  *   { op: "remove_fleet", fleet, withShips? }   withShips: true also removes every ship holding a position in it
- *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander?, targets? } }   { op: "remove_wing", fleet, wing }
- *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor?, targets? } }
+ *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander?, targets?, stance? } }   { op: "remove_wing", fleet, wing }
+ *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor?, targets?, stance? } }
  *                                       targets: the group's opening called targets (ship or object ids in kill
  *                                       order; null clears); order_fleet's targets order calls live (fleets/targets.ts)
  *   { op: "remove_squad", fleet, squad }
@@ -476,6 +484,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
         removeShipFromFleets(String(operation['id']), context);
         removeCalledTarget(String(operation['id']), context);
         removeTimelineReferences({ ships: [String(operation['id'])] }, context);
+        removeStanceReferences({ ships: [String(operation['id'])] }, context);
       }
       break;
     }
@@ -678,5 +687,7 @@ function normalizeShip(input: unknown, where: string, context: NormalizeShipCont
   problems.push(...pilot.problems);
   warnings.push(...pilot.warnings);
   if (pilot.pilot != null) ship.pilot = pilot.pilot;
+  const stance = readSceneStance(input['stance'], { where: `${where}.stance`, problems, warnings, level: 'ship' });
+  if (stance) ship.stance = stance;
   return ship;
 }

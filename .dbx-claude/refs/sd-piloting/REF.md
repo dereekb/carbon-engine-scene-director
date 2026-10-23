@@ -1,10 +1,10 @@
 # Piloting: stances, the ideal range, maneuvers and pilots that fly themselves
 
 > How a ship decides its own range and maneuvering from both sides' numbers, and the stances that tell it to. The
-> plan is `~/.claude/plans/i-want-to-work-woolly-flame.md` (slices P1-P6). **Status: P1, the pure math in
-> `packages/scene/src/lib/piloting/`, has landed.** Stances in the document and as live orders (P2), `get_overview`
+> plan is `~/.claude/plans/i-want-to-work-woolly-flame.md` (slices P1-P6). **Status: P1 (the pure math in
+> `packages/scene/src/lib/piloting/`) and P2 (stances in the document and as live orders) have landed.** `get_overview`
 > (P3), the page's pilots (P4), the outside-program driver (P5) and the dbxpc evidence (P6) are still to come; until
-> P4 nothing in the page calls this code. Related refs: `sd-destiny` (the parks, orders, the legacy orbit),
+> P4 no pilot flies a stance: the page checks, keeps and resolves them only. Related refs: `sd-destiny` (the parks, orders, the legacy orbit),
 > `sd-combat` (hit chance, missile application), `sd-fleets` (Follow the FC), `sd-personalities` (the FC brain's
 > `toFleetMove`, which keeps moving personality fleets until a stance takes its `move` lever in P4).
 
@@ -38,6 +38,7 @@ tackle `tackle`, logi `support`). A ship's own stance flies that ship alone.
 | `application.ts` | `PilotWeapon` (from turret / missile combat numbers), E(p), `weaponApplicationOf`, `appliedDpsOf`, reach |
 | `profile.ts` | `ShipCombatProfile` (flight off / on, EHP, weapons, tackle, lock range, remote reps) and its helpers |
 | `stance.ts` | the stance types above |
+| `stances.ts` | the document and live side: `readSceneStance`, `checkStanceReferences`, `resolveShipStances`, `StanceOrder` / `readStanceOrder`, `removeStanceReferences`, the book helpers (`groupStanceOf`, `stanceEdited`, `pruneStanceOn`) |
 | `envelope.ts` | `PilotContact`, `candidateRangesOf`, `envelopePointOf` (out / in DPS, kill and death rates, who tackles the spot) |
 | `ideal.ts` | `idealRangeOf`: scoring, constraints, ties, the window, `auto`, dictation |
 | `maneuvers.ts` | kite away, close in / spiral, threat centroid and burn out, out of reach, support point, lever bands and orders, re-aim |
@@ -45,6 +46,45 @@ tackle `tackle`, logi `support`). A ship's own stance flies that ship alone.
 | `piloting.spec-helper.ts` | fixture profiles (Rifter, Punisher, Caracal, Megathron: max skills, default weapons, baked MWD) |
 
 Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbitOf` against the parks.
+
+## Stances in the document and as live orders (P2)
+
+- **Document**: `stance?` on `SceneFleet` / `SceneWing` / `SceneSquad` (read in `fleets/normalize.ts`) and on
+  `SceneShip` (`scene.ts`), read by `readSceneStance` (bad values are problems; unknown keys warn and drop;
+  `formation` on a ship warns and drops: a ship's own stance flies it alone). Edited by `update_fleet` / `_wing` /
+  `_squad` / `update_ship` `set: { stance }` (whole; `null` clears). An `on` ship must exist and not be the ship
+  itself; a group's `{ squad }` / `{ wing }` must be in its fleet (a problem); a ship's own that its fleet does not
+  hold only warns (it flies on its focus).
+- **Resolution** (`resolveShipStances(scene, { ships })`, every ship in ships[] order): chain ship > squad > wing >
+  fleet, the FC skipping squad and wing (as it takes only its fleet's call). `type` + `on` + `range` from the nearest
+  level that sets `type` (a level's `range` without a `type` is ignored); `propMods`, `formation`, `disengage` key by
+  key; `sources` names each. No type: loose → the role default (`STANCE_ROLE_DEFAULTS`: logi `support`, tackle
+  `tackle`, the rest and a ship in no squad `auto`, source `role`), else `in-line` (`flownBy: null`). `flownBy`: the
+  ship for its own or a role type or a loose formation; else `fleetGroupLeaderOf` (`fleets/orders.ts`,
+  resolveFleetOrderRequest's leader rule with the nearest commander as issuer: the FC for a fleet, a squad's
+  commander, else the issuer in it, else its lead, else its first member). A ship that flies its stance gets `pilot`
+  (the P1 `PilotStance`: `on` as a ship id, a `{ squad }` / `{ wing }` resolved to that group's leader, `null` =
+  focus). An explicit `type: "in-line"` wins over a loose role default.
+- **Live**: `order_fleet { order: { type: "stance", set: {…} | clear: true } }` (exactly one; `set` replaces the
+  group's stance whole, unknown keys are problems) with the targets order's authority (`resolveFleetOrderRequest`;
+  an `on` squad or wing not in the fleet is refused there). The page (`Director.StanceOrder`) stores it in
+  `FleetCommanders`' stance book with the order's tick and each pilot's `toPilotDelays` (reported as `respondsIn`;
+  applying them is P4's), records `command.last`, and returns `stance` and `ships [{ id, type, flownBy,
+  respondsIn? }]`. `order_ship { order: { type: "stance", set | clear } }` sets the pilot's own (`SetShipStance`,
+  returns the resolved `stance`); `rejoin` clears a ship's own (live `null` over the document's). Neither takes an FC
+  brain's lever (`TakeLevers` skips stance orders). The book splices over the document: group stances through
+  `LiveFleetOverlay.stances` (`toLiveFleetScene`, null = cleared), ship stances through `resolveShipStances`'
+  `ships`; `Director.ResolvedStances()` is the live resolution. Never written; `Clear` (a load) empties it; it is in
+  the time-control snapshot (plain maps).
+- **Removal pruning**: `removeStanceReferences` (beside `removeTimelineReferences` at remove_ship, remove_fleet,
+  remove_wing, remove_squad) deletes an `on` naming a removed ship, or a squad / wing no longer held, with a warning
+  (`fleet "f": squad "logi"'s stance now flies on its focus (its on squad "dps" was removed)`). The book's
+  `AfterStanceEdit` does the same live (`pruneStanceOn`), and drops a live entry whose group or ship is gone or whose
+  document stance the patch edited (`stanceEdited` ignores a pruned `on`).
+- **Timeline**: stance orders are `live` cues; `orderReferences` names `order.set.on` (a ship; order_fleet's squad /
+  wing in its fleet), so removing it prunes the cue. A ship `orders` step may be a stance order (completion `given`).
+- Tools: the scene format's `stance` paragraph (`STANCE_TEXT` in `tools.ts`), the patch_scene `set` lists, order_ship
+  and order_fleet's stance lines and `set` / `clear` schemas (order_fleet's `set` is array | object).
 
 ## Destiny facts the math stands on
 

@@ -30,7 +30,7 @@ export type SceneShipStep = ShipOrderRequest & {
 /**
  * When a step's order completes on its own: `landed` (its own warp, begun after the order applied, has landed),
  * `arrived` (a goto: near its point and slow, SCRIPT_GOTO_ARRIVAL_RANGE / SCRIPT_GOTO_CLOSE_RANGE), `stopped` (slower
- * than SCRIPT_STOPPED_SPEED), `given` (at once: a rejoin hands the ship to its formation), `never`.
+ * than SCRIPT_STOPPED_SPEED), `given` (at once: a rejoin hands the ship to its formation, a stance to its pilot), `never`.
  */
 export const SHIP_STEP_COMPLETIONS = ['landed', 'arrived', 'stopped', 'given', 'never'] as const;
 
@@ -41,6 +41,7 @@ const COMPLETIONS: Readonly<Record<ShipOrderRequestType, ShipStepCompletion>> = 
   goto: 'arrived',
   stop: 'stopped',
   rejoin: 'given',
+  stance: 'given',
   direction: 'never',
   approach: 'never',
   'keep-at-range': 'never',

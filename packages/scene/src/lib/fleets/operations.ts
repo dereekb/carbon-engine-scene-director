@@ -3,6 +3,7 @@ import type { SceneArrivalCollector } from '../arrivals/arrival';
 import { isPlainObject, type JsonObject } from '../json';
 import { removeCalledTarget } from './targets';
 import { removeTimelineReferences } from '../timeline/prune';
+import { removeStanceReferences } from '../piloting/stances';
 
 /**
  * The patch operations that edit fleets. Each runs on an unvalidated draft (an earlier operation in the same
@@ -129,7 +130,9 @@ function removeFleet(operation: JsonObject, edit: FleetEdit): void {
     return;
   }
   removeFrom(context.draft, 'fleets', fleet);
-  removeTimelineReferences({ fleets: [String(fleet['id'])], ...(withShips ? { ships: [...fleetShips(fleet)] } : {}) }, context);
+  const removal = { fleets: [String(fleet['id'])], ...(withShips ? { ships: [...fleetShips(fleet)] } : {}) };
+  removeTimelineReferences(removal, context);
+  removeStanceReferences(removal, context);
   if (withShips) {
     const ships = fleetShips(fleet);
     const list = context.draft['ships'];
@@ -163,7 +166,9 @@ function editWing(operation: JsonObject, context: FleetOperationContext): void {
   if (fleet && wing && operation['op'] === 'remove_wing') {
     repairAfter({ fleet, context }, () => removeFrom(fleet, 'wings', wing));
     const squads = Array.isArray(wing['squads']) ? wing['squads'].filter(isPlainObject).map((squad) => `${String(fleet['id'])}/${String(squad['id'])}`) : [];
-    removeTimelineReferences({ wings: [`${String(fleet['id'])}/${String(wing['id'])}`], squads }, context);
+    const removal = { wings: [`${String(fleet['id'])}/${String(wing['id'])}`], squads };
+    removeTimelineReferences(removal, context);
+    removeStanceReferences(removal, context);
   } else if (fleet && wing) {
     const set = readSet(operation, context, { noun: 'wing', list: 'squads', listMessage: 'squads are edited with add_squad, update_squad and remove_squad' });
     if (set) repairAfter({ fleet, context }, () => assignSet(wing, set));
@@ -188,7 +193,9 @@ function editSquad(operation: JsonObject, context: FleetOperationContext): void 
   const op = fleet && location ? operation['op'] : null;
   if (op === 'remove_squad' && fleet && location) {
     repairAfter({ fleet, context }, () => removeFrom(location.wing, 'squads', location.squad));
-    removeTimelineReferences({ squads: [`${String(fleet['id'])}/${String(location.squad['id'])}`] }, context);
+    const removal = { squads: [`${String(fleet['id'])}/${String(location.squad['id'])}`] };
+    removeTimelineReferences(removal, context);
+    removeStanceReferences(removal, context);
   } else if (op === 'set_anchor' && location) {
     setAnchor(location.squad, operation['anchor'], context);
   } else if (op === 'update_squad' && location) {

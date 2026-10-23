@@ -170,9 +170,20 @@ function targetReference(value: unknown, kind: CueReferenceKind, path: string): 
   return typeof value === 'string' && value ? [{ kind, id: value, path }] : [];
 }
 
-function orderReferences(order: unknown): CueReference[] {
+/**
+ * The ids an order names. A stance's `on` names a ship, or a squad or wing of `fleet` (order_fleet's; order_ship's
+ * group is the ship's fleet when the cue fires, unchecked here).
+ */
+function orderReferences(order: unknown, fleet?: unknown): CueReference[] {
   if (!isPlainObject(order)) return [];
   const references = targetReference(order['target'], 'place', 'order.target');
+  const stance = order['type'] === 'stance' && isPlainObject(order['set']) ? order['set'] : null;
+  const on = stance?.['on'];
+  if (typeof on === 'string' && on !== 'focus') references.push(...targetReference(on, 'ship', 'order.set.on'));
+  else if (isPlainObject(on) && typeof fleet === 'string') {
+    if (typeof on['squad'] === 'string') references.push({ kind: 'squad', id: on['squad'], fleet, path: 'order.set.on.squad' });
+    if (typeof on['wing'] === 'string') references.push({ kind: 'wing', id: on['wing'], fleet, path: 'order.set.on.wing' });
+  }
   if (order['type'] === 'anchor' || order['type'] === 'break-off') references.push(...targetReference(order['ship'], 'ship', 'order.ship'));
   if (order['type'] === 'targets') {
     references.push(...targetReference(order['primary'], 'target', 'order.primary'));
@@ -297,7 +308,7 @@ export const TIMELINE_ACTIONS: Readonly<Record<TimelineActionName, TimelineActio
     name: 'order_fleet',
     kind: (args) => (isPlainObject(args['order']) && isFleetStructureOrder(args['order'] as never) ? 'document' : 'live'),
     read: (input, where) => readWith(() => normalizeFleetOrderRequest(input, { where })),
-    references: (args) => [...selectionReferences({ fleet: args['fleet'], wing: args['wing'], squad: args['squad'] }), ...targetReference(args['by'], 'ship', 'by'), ...orderReferences(args['order'])],
+    references: (args) => [...selectionReferences({ fleet: args['fleet'], wing: args['wing'], squad: args['squad'] }), ...targetReference(args['by'], 'ship', 'by'), ...orderReferences(args['order'], args['fleet'])],
     advise: adviseFleetOrder
   },
   switch_prop_mods: selectionEntry('switch_prop_mods', (input, where) => normalizePropModSwitch(input, where)),

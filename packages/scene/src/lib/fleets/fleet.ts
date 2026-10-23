@@ -1,4 +1,5 @@
 import type { SceneAutoRepair } from '../logi/auto-repair';
+import type { ShipStance } from '../piloting/stance';
 
 /**
  * EVE fleet structure in the scene document: a fleet commander (FC), wings, and squads with a role and an
@@ -87,6 +88,11 @@ export interface SceneSquad {
    * The group's logi auto-repair settings (logi/auto-repair.ts): each key inherits from the group above when omitted.
    */
   autoRepair?: SceneAutoRepair;
+  /**
+   * The group's opening stance (piloting/stances.ts): how its pilots fly, resolved down the chain like called targets.
+   * Flown in line by the group's leader unless `formation` is loose; order_fleet's stance order then sets it live.
+   */
+  stance?: ShipStance;
 }
 
 export interface SceneWing {
@@ -109,6 +115,11 @@ export interface SceneWing {
    * The group's logi auto-repair settings (logi/auto-repair.ts): each key inherits from the group above when omitted.
    */
   autoRepair?: SceneAutoRepair;
+  /**
+   * The group's opening stance (piloting/stances.ts): how its pilots fly, resolved down the chain like called targets.
+   * Flown in line by the group's leader unless `formation` is loose; order_fleet's stance order then sets it live.
+   */
+  stance?: ShipStance;
   squads: SceneSquad[];
 }
 
@@ -139,5 +150,10 @@ export interface SceneFleet {
    * The group's logi auto-repair settings (logi/auto-repair.ts): each key inherits from the group above when omitted.
    */
   autoRepair?: SceneAutoRepair;
+  /**
+   * The group's opening stance (piloting/stances.ts): how its pilots fly, resolved down the chain like called targets.
+   * Flown in line by the group's leader unless `formation` is loose; order_fleet's stance order then sets it live.
+   */
+  stance?: ShipStance;
   wings: SceneWing[];
 }

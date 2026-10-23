@@ -34,7 +34,7 @@
 
 ## The model
 
-`fleets: [{ id, name?, commander, targets?, autoRepair?, wings: [{ id, name?, commander?, targets?, autoRepair?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? }, targets?, autoRepair? }] }] }]`
+`fleets: [{ id, name?, commander, targets?, autoRepair?, stance?, wings: [{ id, name?, commander?, targets?, autoRepair?, stance?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? }, targets?, autoRepair?, stance? }] }] }]`
 
 - `role` is required: `dps`, `logi`, `tackle`, `ewar`, `boost`, `support` (case-insensitive). `wings` / `squads` /
   `members` default `[]`; empty is valid. `fleets: []` = no fleets.
@@ -49,6 +49,8 @@
   starts with them, order_fleet then calls live and never writes them. Memberships ignore it.
 - `autoRepair` (`{ on?, policy? }`) is the group's logi auto-repair, resolved key by key from the nearest group (squad,
   wing, fleet; default on for logi squads): `sd-logi`. Memberships ignore it.
+- `stance` is the group's opening stance (how its pilots fly; `order_fleet { type: "stance" }` sets it live, never
+  written): `sd-piloting`. Memberships ignore it; with no stance anywhere the fleet flies exactly as described here.
 
 Example: three TFIs keep 1 km on the FC; the logi squad anchors on its own lead, guardian-1, which holds 30 km off the
 FC while guardian-2 anchors up on it at 1 km.

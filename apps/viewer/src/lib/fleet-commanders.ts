@@ -3,7 +3,8 @@
  * order_fleet's targets order edits a group's live list here at once, as moves and warps fly at once, and never writes
  * the document: the document's `targets` are the opening calls a load starts with, so a reload replays the same fight.
  * Its free-fire order turns a group's free fire on or off here (FleetTargets picks the targets); the document has no
- * free fire, so a load ends it.
+ * free fire, so a load ends it. Its stance order (and order_ship's, for one pilot) sets a group's or ship's live stance
+ * in the stance book here, spliced over the document's stances the same way (piloting/stances.ts); a load resets it.
  *
  * - The book overlays the document (Overlay → toLiveFleetScene), so FleetTargets, FleetFollowing, FleetOrders and
  *   get_state read the live calls with no change of their own. `[]` shadows the document's list: the group calls
@@ -31,6 +32,7 @@ import {
   type FleetBrainLever,
   type FleetBrainMemory,
   type FleetGroup,
+  groupStanceOf,
   type FleetPicturePropMods,
   type FleetPilotTraitSource,
   type FleetReachNumbers,
@@ -46,6 +48,9 @@ import {
   selectFleetShips,
   shipPilotTraits,
   type ShipOrder,
+  type ShipStance,
+  pruneStanceOn,
+  stanceEdited,
   stepFleetBrain,
   toFleetGroupKey,
   toFleetMemberships,
@@ -63,6 +68,25 @@ import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields,
 interface LiveCall {
   readonly group: FleetGroup;
   readonly targets: readonly string[];
+}
+
+/**
+ * A group's live stance (order_fleet's stance order).
+ */
+export interface LiveStance {
+  readonly group: FleetGroup;
+  /**
+   * Null: cleared live (the document's stance at this level does not apply).
+   */
+  readonly stance: Maybe<ShipStance>;
+  /**
+   * The tick the order was given at.
+   */
+  readonly tick: number;
+  /**
+   * Each pilot's response, in ticks (toPilotDelays): the pilots flying the stance take it up after theirs.
+   */
+  readonly delays: ReadonlyMap<string, number>;
 }
 
 /**
@@ -88,6 +112,10 @@ function hasGroup(scene: Pick<SceneDocument, 'fleets'>, group: FleetGroup): bool
  */
 function pruneLabel(group: FleetGroup): string {
   return group.kind === 'fleet' ? `fleet "${group.fleet}"` : `fleet "${group.fleet}": ${group.kind} "${group.id}"`;
+}
+
+function isStanceOrder(order: unknown): boolean {
+  return order !== null && typeof order === 'object' && (order as Readonly<Record<string, unknown>>)['type'] === 'stance';
 }
 
 function sameList(a: readonly string[], b: readonly string[]): boolean {
@@ -333,6 +361,15 @@ export class FleetCommanders {
    */
   private readonly freeFire = new Map<string, FleetGroup>();
   /**
+   * The live group stances by group key, in the overlay.
+   */
+  private readonly stances = new Map<string, LiveStance>();
+  /**
+   * The pilots' own live stances by ship id (order_ship's stance order; a rejoin clears one): null clears the
+   * document's.
+   */
+  private readonly shipStances = new Map<string, Maybe<ShipStance>>();
+  /**
    * The acting commander by fleet id (a personality fleet's designate), in the overlay.
    */
   private readonly acting = new Map<string, string>();
@@ -440,6 +477,48 @@ export class FleetCommanders {
   }
 
   /**
+   * Sets a group's live stance: a stance over the document's, or null to clear it.
+   *
+   * @param group - The fleet, wing or squad.
+   * @param stance - Its stance.
+   * @param given - The tick the order was given at and each pilot's response, in ticks.
+   */
+  SetStance(group: FleetGroup, stance: Maybe<ShipStance>, given: { readonly tick: number; readonly delays: ReadonlyMap<string, number> }): void {
+    this.stances.set(toFleetGroupKey(group), { group, stance: stance ? structuredClone(stance) : null, tick: given.tick, delays: new Map(given.delays) });
+    this.Changed();
+  }
+
+  /**
+   * A group's live stance; null when the document's stands.
+   *
+   * @param group - The fleet, wing or squad.
+   * @returns Its entry.
+   */
+  StanceOf(group: FleetGroup): Maybe<LiveStance> {
+    return this.stances.get(toFleetGroupKey(group)) ?? null;
+  }
+
+  /**
+   * Sets a pilot's own live stance: a stance over the document's, or null to clear it.
+   *
+   * @param id - The ship.
+   * @param stance - Its stance.
+   */
+  SetShipStance(id: string, stance: Maybe<ShipStance>): void {
+    this.shipStances.set(id, stance ? structuredClone(stance) : null);
+    this.Changed();
+  }
+
+  /**
+   * The pilots' own live stances, for resolveShipStances.
+   *
+   * @returns By ship id; null clears the document's.
+   */
+  ShipStances(): ReadonlyMap<string, Maybe<ShipStance>> {
+    return this.shipStances;
+  }
+
+  /**
    * Brings the book in line with a patched document: a group gone or whose document list the patch edited drops its
    * live call (the document's new list stands), and ids no longer in the scene leave the live lists.
    *
@@ -451,6 +530,7 @@ export class FleetCommanders {
     const warnings: string[] = [];
     for (const [key, group] of [...this.freeFire]) if (!hasGroup(after, group)) this.freeFire.delete(key);
     this.AfterFleetEdit(before, after);
+    this.AfterStanceEdit(before, after, warnings);
     if (!this.calls.size) return warnings;
     const ids = new Set([...after.ships.map((doc) => doc.id), ...(after.objects ?? []).map((doc) => doc.id)]);
     let changed = false;
@@ -478,6 +558,52 @@ export class FleetCommanders {
   }
 
   /**
+   * The stance book after a patch: a group gone, or whose document stance the patch edited, drops its live stance (the
+   * document's stands); a ship gone, or whose own stance the patch edited, drops its own; a live `on` naming a ship
+   * that is gone, or a squad or wing its fleet no longer holds, falls back to the focus with a warning.
+   *
+   * @param before - The document before the patch.
+   * @param after - The patched document.
+   * @param warnings - Where the fall-backs' warnings go.
+   */
+  private AfterStanceEdit(before: Pick<SceneDocument, 'fleets'> & { readonly ships?: SceneDocument['ships'] }, after: Pick<SceneDocument, 'ships' | 'fleets'>, warnings: string[]): void {
+    if (!this.stances.size && !this.shipStances.size) return;
+    const ships = new Set(after.ships.map((doc) => doc.id));
+    const memberships = toFleetMemberships(after);
+    const fleetOf = (id: Maybe<string>): Maybe<SceneFleet> => (id == null ? null : (after.fleets?.find((fleet) => fleet.id === id) ?? null));
+    let changed = false;
+    for (const [key, entry] of [...this.stances]) {
+      const { group } = entry;
+      if (!hasGroup(after, group) || stanceEdited(groupStanceOf(before, group), groupStanceOf(after, group))) {
+        this.stances.delete(key);
+        changed = true;
+        continue;
+      }
+      const pruned = pruneStanceOn(entry.stance, { ships, fleet: fleetOf(group.fleet) });
+      if (pruned) {
+        this.stances.set(key, { ...entry, stance: pruned.stance });
+        warnings.push(`${pruneLabel(group)}'s live stance now flies on its focus (its on ${pruned.gone} was removed)`);
+        changed = true;
+      }
+    }
+    for (const [id, stance] of [...this.shipStances]) {
+      const written = (ship: Maybe<{ readonly stance?: ShipStance }>): Maybe<ShipStance> => ship?.stance ?? null;
+      if (!ships.has(id) || stanceEdited(written(before.ships?.find((doc) => doc.id === id)), written(after.ships.find((doc) => doc.id === id)))) {
+        this.shipStances.delete(id);
+        changed = true;
+        continue;
+      }
+      const pruned = pruneStanceOn(stance, { ships, fleet: fleetOf(memberships.get(id)?.fleet) });
+      if (pruned) {
+        this.shipStances.set(id, pruned.stance);
+        warnings.push(`ship "${id}"'s live stance now flies on its focus (its on ${pruned.gone} was removed)`);
+        changed = true;
+      }
+    }
+    if (changed) this.Changed();
+  }
+
+  /**
    * The live state toLiveFleetScene splices over the document; the same object until the next change.
    *
    * @returns The overlay.
@@ -487,16 +613,18 @@ export class FleetCommanders {
   }
 
   /**
-   * Forgets every live call and free fire (a load: the document's calls open the fight again).
+   * Forgets every live call, free fire and live stance (a load: the document's calls and stances open the fight again).
    */
   Clear(): void {
     this.freeFire.clear();
     this.brains.clear();
     this.unsettledSince.clear();
     this.book = null;
-    if (!this.calls.size && !this.acting.size) return;
+    if (!this.calls.size && !this.acting.size && !this.stances.size && !this.shipStances.size) return;
     this.calls.clear();
     this.acting.clear();
+    this.stances.clear();
+    this.shipStances.clear();
     this.Changed();
   }
 
@@ -620,7 +748,7 @@ export class FleetCommanders {
       const type = order !== null && typeof order === 'object' ? (order as Readonly<Record<string, unknown>>)['type'] : null;
       if (type === 'targets' || type === 'free-fire') take(record['fleet'], FLEET_TARGETING_LEVERS, false);
       else if (typeof type === 'string' && FLEET_MOVE_ORDERS.has(type) && record['wing'] == null && record['squad'] == null) take(record['fleet'], ['move']);
-    } else if (tool === 'order_ship') {
+    } else if (tool === 'order_ship' && !isStanceOrder(record['order'])) {
       for (const fleet of live.fleets ?? []) if (fleet.commander === record['id']) take(fleet.id, ['move']);
     } else if (tool === 'engage' || tool === 'cease_fire' || tool === 'switch_prop_mods') {
       const memberships = toFleetMemberships(live);
@@ -843,7 +971,8 @@ export class FleetCommanders {
     this.changes++;
     this.overlay = {
       ...(this.calls.size ? { calls: new Map([...this.calls].map(([key, call]) => [key, call.targets])) } : {}),
-      ...(this.acting.size ? { commanders: new Map(this.acting) } : {})
+      ...(this.acting.size ? { commanders: new Map(this.acting) } : {}),
+      ...(this.stances.size ? { stances: new Map([...this.stances].map(([key, entry]) => [key, entry.stance])) } : {})
     };
   }
 }

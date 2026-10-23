@@ -13,6 +13,7 @@ import { type SceneDocument, SceneError } from '../scene';
 import { DEFAULT_ANCHOR_RANGES, type SceneFleet, type SceneSquad, type SceneSquadAnchor, type SceneWing } from './fleet';
 import { describeFleetGroup, type FleetGroup } from './group';
 import { readFleetSelection, selectFleetShips } from './selection';
+import { readStanceOrder, type StanceOrder } from '../piloting/stances';
 import { type FleetTargetOperationsOptions, type FleetTargetsOrder, fleetTargetsOrderCalls, readFleetTargetsOrder, toFleetTargetOperations } from './targets';
 
 export { describeFleetGroup, toFleetGroupKey } from './group';
@@ -27,10 +28,10 @@ export type FleetStructureOrderType = (typeof FLEET_STRUCTURE_ORDER_TYPES)[numbe
 
 /**
  * What a fleet, wing or squad can be ordered: order_ship's movement orders and warp, then the document orders (the
- * anchor orders, then the called targets), then free fire. Written out rather than spread from SHIP_ORDER_TYPES:
- * `../orders` and this module import each other through `../scene`.
+ * anchor orders, then the called targets), then free fire and the group's stance. Written out rather than spread from
+ * SHIP_ORDER_TYPES: `../orders` and this module import each other through `../scene`.
  */
-export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets', 'free-fire'] as const;
+export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets', 'free-fire', 'stance'] as const;
 
 export type FleetOrderType = (typeof FLEET_ORDER_TYPES)[number];
 
@@ -97,9 +98,10 @@ export interface FleetFreeFireOrder {
 }
 
 /**
- * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, a document order, or free fire.
+ * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, a document order, free fire, or
+ * the group's stance (piloting/stances.ts: live, like free fire; the page keeps it in its stance book).
  */
-export type FleetOrder = ShipOrder | FleetDocumentOrder | FleetFreeFireOrder;
+export type FleetOrder = ShipOrder | FleetDocumentOrder | FleetFreeFireOrder | StanceOrder;
 
 /**
  * What order_fleet takes: one plain object, which a timeline beat will embed unchanged.
@@ -183,13 +185,23 @@ export function isFleetFreeFireOrder(order: FleetOrder): order is FleetFreeFireO
 }
 
 /**
+ * Whether a fleet order sets or clears the group's stance.
+ *
+ * @param order - A normalized fleet order.
+ * @returns True for stance.
+ */
+export function isFleetStanceOrder(order: FleetOrder): order is StanceOrder {
+  return order.type === 'stance';
+}
+
+/**
  * Whether a fleet order flies the group: order_ship's movement orders and warp.
  *
  * @param order - A normalized fleet order.
- * @returns False for the document orders and free fire.
+ * @returns False for the document orders, free fire and stances.
  */
 export function isFleetShipOrder(order: FleetOrder): order is ShipOrder {
-  return !isFleetDocumentOrder(order) && !isFleetFreeFireOrder(order);
+  return !isFleetDocumentOrder(order) && !isFleetFreeFireOrder(order) && !isFleetStanceOrder(order);
 }
 
 /**
@@ -250,6 +262,7 @@ function readFleetOrder(input: unknown, context: ReadOrderContext, problems: str
   else if ((SHIP_ORDER_TYPES as readonly string[]).includes(type)) order = readShipOrder(input, context, problems);
   else if (type === 'targets') order = readFleetTargetsOrder(input, context, problems);
   else if (type === 'free-fire') order = readFreeFireOrder(input, where, problems);
+  else if (type === 'stance') order = readStanceOrder(input, { where, ships: context.ships }, problems);
   else order = readStructureOrder(input, type as FleetStructureOrderType, context, problems);
   return order;
 }
@@ -419,6 +432,13 @@ export function resolveFleetOrderRequest(scene: Pick<SceneDocument, 'ships' | 'f
   const order = request.order;
   const target = isFleetShipOrder(order) ? shipOrderTarget(order) : null;
   if (target && inGroup.has(target)) throw new SceneError([`${where}.order.target: ${describeFleetGroup(group)} cannot target one of its own ships ("${target}")`]);
+  const on = isFleetStanceOrder(order) ? order.set?.on : null;
+  if (on != null && typeof on === 'object') {
+    const kind = 'squad' in on ? 'squad' : 'wing';
+    const id = 'squad' in on ? on.squad : on.wing;
+    const held = kind === 'wing' ? fleet.wings.some((candidate) => candidate.id === id) : fleet.wings.some((candidate) => candidate.squads.some((other) => other.id === id));
+    if (!held) throw new SceneError([`${where}.order.set.on: fleet "${fleet.id}" has no ${kind} "${id}"`]);
+  }
   if (isFleetTargetsOrder(order)) {
     const own = new Set(selected.ships);
     const called = fleetTargetsOrderCalls(order).filter((id) => own.has(id));
@@ -426,6 +446,30 @@ export function resolveFleetOrderRequest(scene: Pick<SceneDocument, 'ships' | 'f
   }
 
   return { request, group, ships, leader, issuer, commanders };
+}
+
+/**
+ * The ship a group flies on when it is ordered without `by` (resolveFleetOrderRequest's leader rule, its nearest
+ * commander giving the order): the FC for a fleet, a wing's or squad's leader otherwise. A group stance flown in line
+ * is flown by it (piloting/stances.ts).
+ *
+ * @param scene - The document, or the live fleet view.
+ * @param group - The fleet, wing or squad.
+ * @returns Its leader; null for an unknown group.
+ */
+export function fleetGroupLeaderOf(scene: Pick<SceneDocument, 'ships' | 'fleets'>, group: FleetGroup): Maybe<string> {
+  const place = placeOf(scene, group);
+  let leader: Maybe<string> = place?.fleet.commander ?? null;
+  if (place && group.kind !== 'fleet') {
+    const { fleet, wing, squad } = place;
+    const fc = fleet.commander;
+    const issuer = squad?.commander ?? wing?.commander ?? fc;
+    const selection = group.kind === 'wing' ? { fleet: fleet.id, wing: group.id } : { fleet: fleet.id, squad: group.id };
+    const inGroup = new Set(selectFleetShips(scene, selection, 'stance').ships.filter((id) => id !== fc));
+    if (squad) leader = squadLeader({ squad, fc, issuer: inGroup.has(issuer) ? issuer : null });
+    else if (wing) leader = wingLeader({ wing, fc, issuer: inGroup.has(issuer) ? issuer : null, inGroup });
+  }
+  return leader;
 }
 
 interface SquadLeaderInput {

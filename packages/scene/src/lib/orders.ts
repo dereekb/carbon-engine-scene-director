@@ -1,5 +1,6 @@
 import type { Maybe } from '@dereekb/util';
 import { SceneError, type SceneVector } from './scene';
+import { readStanceOrder, type StanceOrder } from './piloting/stances';
 
 /**
  * Live movement orders for a ship's Destiny ball (the `order_ship` tool): fly a direction, fly to a world point
@@ -23,9 +24,14 @@ export type ShipOrderType = (typeof SHIP_ORDER_TYPES)[number];
 export const FLEET_SHIP_ORDER_TYPES = ['rejoin'] as const;
 
 /**
+ * The pilot's own stance (piloting/stances.ts), set or cleared live.
+ */
+export const STANCE_SHIP_ORDER_TYPES = ['stance'] as const;
+
+/**
  * Every order type order_ship takes.
  */
-export const SHIP_ORDER_REQUEST_TYPES = [...SHIP_ORDER_TYPES, ...FLEET_SHIP_ORDER_TYPES] as const;
+export const SHIP_ORDER_REQUEST_TYPES = [...SHIP_ORDER_TYPES, ...FLEET_SHIP_ORDER_TYPES, ...STANCE_SHIP_ORDER_TYPES] as const;
 
 export type ShipOrderRequestType = (typeof SHIP_ORDER_REQUEST_TYPES)[number];
 
@@ -188,9 +194,9 @@ export interface RejoinShipOrder {
 }
 
 /**
- * What order_ship takes: a movement order for the ship's ball, or a fleet order.
+ * What order_ship takes: a movement order for the ship's ball, a fleet order, or the pilot's own stance.
  */
-export type ShipOrderRequest = ShipOrder | RejoinShipOrder;
+export type ShipOrderRequest = ShipOrder | RejoinShipOrder | StanceOrder;
 
 /**
  * What the normalizer checks an order against.
@@ -367,8 +373,8 @@ export function normalizeShipOrder(input: unknown, context: ShipOrderContext = {
 }
 
 /**
- * Validates what order_ship takes: a movement order (normalizeShipOrder) or the fleet order `rejoin`, which has no
- * fields.
+ * Validates what order_ship takes: a movement order (normalizeShipOrder), the fleet order `rejoin`, which has no
+ * fields, or a stance order for the pilot's own stance (readStanceOrder).
  *
  * @param input - The order as JSON.
  * @param context - The scene's ship ids, the ordered ship and the message prefix.
@@ -381,6 +387,7 @@ export function normalizeShipOrderRequest(input: unknown, context: ShipOrderCont
   const record = input as Record<string, unknown>;
   const type = record['type'];
   if (!SHIP_ORDER_REQUEST_TYPES.includes(type as ShipOrderRequestType)) throw new SceneError([`${where}.type must be one of ${SHIP_ORDER_REQUEST_TYPES.join(', ')}`]);
+  if (type === 'stance') return normalizeStanceShipOrder(record, context);
   if (type !== 'rejoin') return normalizeShipOrder(input, context);
 
   const problems = Object.keys(record)
@@ -388,4 +395,11 @@ export function normalizeShipOrderRequest(input: unknown, context: ShipOrderCont
     .map((key) => `${where}.${key} is not a rejoin order field`);
   if (problems.length) throw new SceneError(problems);
   return { type: 'rejoin' };
+}
+
+function normalizeStanceShipOrder(record: Record<string, unknown>, context: ShipOrderContext): StanceOrder {
+  const problems: string[] = [];
+  const order = readStanceOrder(record, { where: context.where ?? 'order', ships: context.ships, self: context.self }, problems);
+  if (problems.length || !order) throw new SceneError(problems);
+  return order;
 }

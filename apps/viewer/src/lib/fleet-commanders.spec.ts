@@ -1,4 +1,4 @@
-import { applySceneOperations, type FleetBrainAction, type FleetShipFacts, normalizeScene, type SceneDocument, type ShipOrder, toLiveFleetScene } from '@scene-director/scene';
+import { applySceneOperations, type FleetBrainAction, type FleetShipFacts, normalizeScene, resolveShipStances, type SceneDocument, type ShipOrder, toLiveFleetScene } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { type FleetBrainPort, FleetCommanders } from './fleet-commanders';
 import { RoundTrip } from './state-capture.spec-helper';
@@ -220,6 +220,71 @@ function BrainRig(scene: SceneDocument) {
 }
 
 const CallArgs = (by: string, set: string[]) => ({ fleet: FLEET, by, order: { type: 'targets', set } });
+
+describe('FleetCommanders: the stance book', () => {
+  it("splices live group stances over the document's, null clearing one, and keeps the pilots' own by ship", () => {
+    const scene = applySceneOperations(MakeScene(), [{ op: 'update_fleet', fleet: FLEET, set: { stance: { type: 'kite' } } }]).scene;
+    const commanders = new FleetCommanders();
+    const version = commanders.version;
+    commanders.SetStance(DPS, { type: 'orbit', on: 'r1', range: [20000, 30000], formation: 'loose' }, { tick: 7, delays: new Map([['d2', 3]]) });
+    commanders.SetStance(WHOLE, null, { tick: 7, delays: new Map() });
+    commanders.SetShipStance('d1', { type: 'brawl' });
+    expect(commanders.version).toBe(version + 3);
+    expect(commanders.StanceOf(DPS)).toMatchObject({ tick: 7, delays: new Map([['d2', 3]]) });
+    const live = Live(scene, commanders);
+    expect(live.fleets?.[0].stance).toBeUndefined();
+    expect(scene.fleets?.[0].stance).toEqual({ type: 'kite' });
+    const resolved = resolveShipStances(live, { ships: commanders.ShipStances() });
+    expect(resolved.get('fc')?.type).toBe('in-line');
+    expect(resolved.get('d1')).toMatchObject({ type: 'brawl', flownBy: 'd1' });
+    expect(resolved.get('d2')).toMatchObject({ type: 'orbit', flownBy: 'd2', pilot: { on: 'r1' } });
+
+    commanders.Clear();
+    expect(commanders.StanceOf(DPS)).toBeNull();
+    expect(commanders.ShipStances().size).toBe(0);
+    expect(Live(scene, commanders)).toBe(scene);
+  });
+
+  it('drops a live stance its patch edits or whose group is gone, and falls an on back to the focus when its ship goes', () => {
+    const scene = MakeScene();
+    const commanders = new FleetCommanders();
+    commanders.SetStance(DPS, { type: 'orbit', on: 'r1' }, { tick: 0, delays: new Map() });
+    commanders.SetStance(WHOLE, { type: 'kite' }, { tick: 0, delays: new Map() });
+    commanders.SetShipStance('d2', { type: 'keep-at-range', on: 'r1', range: 5000 });
+    commanders.SetShipStance('r3', { type: 'brawl' });
+    const after = applySceneOperations(scene, [
+      { op: 'remove_ship', id: 'r1' },
+      { op: 'remove_ship', id: 'r3' },
+      { op: 'update_fleet', fleet: FLEET, set: { stance: { type: 'snipe' } } }
+    ]);
+    const warnings = commanders.AfterEdit(scene, after.scene);
+    expect(warnings).toEqual(expect.arrayContaining([`fleet "f": squad "dps"'s live stance now flies on its focus (its on ship "r1" was removed)`, `ship "d2"'s live stance now flies on its focus (its on ship "r1" was removed)`]));
+    expect(commanders.StanceOf(DPS)?.stance).toEqual({ type: 'orbit' });
+    expect(commanders.StanceOf(WHOLE)).toBeNull();
+    expect(commanders.ShipStances().get('d2')).toEqual({ type: 'keep-at-range', range: 5000 });
+    expect(commanders.ShipStances().has('r3')).toBe(false);
+
+    const gone = applySceneOperations(after.scene, [{ op: 'remove_squad', fleet: FLEET, squad: 'dps' }]).scene;
+    commanders.AfterEdit(after.scene, gone);
+    expect(commanders.StanceOf(DPS)).toBeNull();
+  });
+
+  it('round-trips the stance book through a snapshot', () => {
+    const commanders = new FleetCommanders();
+    commanders.SetStance(DPS, { type: 'support' }, { tick: 3, delays: new Map([['d1', 2]]) });
+    commanders.SetShipStance('d2', null);
+    const trip = RoundTrip(
+      commanders,
+      (c) => [c.Overlay(), c.StanceOf(DPS), [...c.ShipStances()]],
+      (c) => {
+        c.SetStance(WHOLE, { type: 'kite' }, { tick: 9, delays: new Map() });
+        c.SetShipStance('d2', { type: 'brawl' });
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+  });
+});
 
 describe('FleetCommanders: the FC brain', () => {
   it('an FC of ability 1 calls the nearest in reach at the boundary it engages; ability 0 waits 5-10 s over it', () => {
