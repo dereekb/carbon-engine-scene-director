@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { applySceneOperations, normalizeScene, type SceneDocument } from '../scene';
 import { GUARDIAN, TFI_FLEET_SCENE } from './fleets.spec-helper';
-import { toLiveFleetScene } from './live';
+import { toDefaultFleetSuccessor, toLiveFleetScene } from './live';
 import { toFleetMemberships } from './membership';
 
 const base = (): SceneDocument => normalizeScene(TFI_FLEET_SCENE).scene;
@@ -71,5 +71,19 @@ describe('toLiveFleetScene', () => {
     const dead = toLiveFleetScene(scene, new Set(['guardian-1']), { calls });
     expect(squadOf(dead.scene, 'logi')).toMatchObject({ members: ['guardian-2'], targets: ['x', 'y'] });
     expect(toLiveFleetScene(scene, new Set(), { calls: new Map() }).scene).toBe(scene);
+  });
+});
+
+describe('toDefaultFleetSuccessor', () => {
+  it('keeps a live FC, else the first live wing commander, squad commander, then member', () => {
+    const fleet = applySceneOperations(base(), [
+      { op: 'add_ship', ship: { id: 'wc', dna: GUARDIAN } },
+      { op: 'update_wing', fleet: 'tfi', wing: 'wing-1', set: { commander: 'wc' } }
+    ]).scene.fleets![0];
+    expect(toDefaultFleetSuccessor(fleet, new Set())).toBe('fc');
+    expect(toDefaultFleetSuccessor(fleet, new Set(['fc']))).toBe('wc');
+    expect(toDefaultFleetSuccessor(fleet, new Set(['fc', 'wc']))).toBe('guardian-1');
+    expect(toDefaultFleetSuccessor(fleet, new Set(['fc', 'wc', 'guardian-1']))).toBe('tfi-1');
+    expect(toDefaultFleetSuccessor(fleet, new Set(['fc', 'wc', 'guardian-1', 'tfi-1', 'tfi-2', 'tfi-3', 'guardian-2']))).toBeNull();
   });
 });

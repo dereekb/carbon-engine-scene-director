@@ -24,6 +24,7 @@
 | `fleets/targets.ts` | called targets: the `targets` field (the opening calls), the `targets` order (`toFleetTargetList`), removal pruning, `toFleetGroupCalls` / `toShipCallPlans` (sub-doc `targets`) |
 | `fleets/group.ts` | `FleetGroup`, `toFleetGroupKey`, `describeFleetGroup` (shared by `orders.ts` and `targets.ts`; `orders.ts` re-exports them) |
 | `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
+| `apps/viewer/src/lib/fleet-succession.ts` | the heir of a dead FC flies on with its order (`CaptureFleetHeirs`, `HeirOrderOf`, `InheritFleetOrders`; node-tested) |
 | `apps/viewer/src/lib/fleet-commanders.ts` | `FleetCommanders`: the live call book order_fleet's targets order edits, spliced over the document by `toLiveFleetScene` (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-targets.ts` | `FleetTargets`: the targeting lever: members lock, pre-lock and shoot their groups' called primaries (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
@@ -109,10 +110,21 @@ ids.
 - A fleet commander is never removed implicitly: `update_fleet` a new commander or remove the fleet first. Ops run in
   order, so `update_fleet` then `remove_ship` in one patch works.
 - **A destroyed ship leaves its fleet live, never in the document** (`fleets/live.ts` `toLiveFleetScene`, `sd-combat`):
-  the same ops a removal runs, after a dead FC hands the fleet (`update_fleet`) to the first live wing commander in wing
-  order, else the first live squad commander, else the first live member; a fleet with nobody alive drops. The page's
-  `FleetFollowing`, `FleetOrders`, memberships and fleets report read that view, so the members re-form on the acting
-  FC (the same re-plan an `update_fleet` causes); a load revives everyone and the document's fleets come back.
+  the same ops a removal runs, after a dead FC hands the fleet (`update_fleet`) to its successor
+  (`toDefaultFleetSuccessor`: the first live wing commander in wing order, else the first live squad commander, else
+  the first live member); a fleet with nobody alive drops. The page's `FleetFollowing`, `FleetOrders`, memberships and
+  fleets report read that view, so the members re-form on the acting FC (the same re-plan an `update_fleet` causes); a
+  load revives everyone and the document's fleets come back.
+- **The FC dies, the fleet flies on** (`apps/viewer/src/lib/fleet-succession.ts`, node-tested, wired in
+  `Director.Destroy`). `DestinyWorld.Destroy` halts every ship anchored or framed on the dead FC, the heir included, and
+  the re-plan leaves the heir following nobody, so the heir **inherits** the FC's order (`HeirOrderOf`): its pending
+  order, else its applied one, the pending order's `respondsIn` carried as the delay; a `stop` inherits nothing; an
+  order aimed at the heir or one `OrderRefusal` refuses becomes `direction` along the dead FC's velocity at speed ÷ max
+  velocity (only at `SETTLE_SPEED` or more); a warp still aligning becomes `direction` toward its landing (the
+  tackle-cancel precedent). Only an heir that flew in the formation (its follow framed on the FC) inherits: a detached
+  heir or a group-apart leader keeps its own order. Kills resolve inside the boundary listeners and pending orders apply
+  after them in the same `Tick`, so the heir never flies a stopped tick (`fleet-succession.spec.ts`: a TFI heir's speed
+  never drops across the death boundary). A pending order with a delay leaves the heir halted until it applies.
 
 ## The formation (`fleets/formation.ts`)
 

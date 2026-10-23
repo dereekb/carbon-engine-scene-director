@@ -160,7 +160,8 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 
 | File | Holds |
 |---|---|
-| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone, overlay?)` → `{ scene, changes, warnings }` (`overlay.calls`: the live call book spliced in first): `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); spec'd |
+| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone, overlay?)` → `{ scene, changes, warnings }` (`overlay.calls`: the live call book spliced in first): `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); `toDefaultFleetSuccessor(fleet, gone)` (the acting commander rule); spec'd |
+| `viewer/fleet-succession.ts` | the heir flies on: `CaptureFleetHeirs`, `HeirOrderOf`, `InheritFleetOrders` (`sd-fleets` "Edits and fallback"); node-tested |
 | `viewer/destiny.ts` | `Destroy(id)` / `IsDestroyed(id)`, the `destroyed` refusals, prop mod cause `destroyed` (`destiny-destroy.spec.ts`) |
 | `viewer/explosion-plan.ts` | `ExplosionFileFacts`, `ExplosionFiles`, `ExplosionSchedule` / `ExplosionTimes`, `ExplosionRemoveTick`, `EXPLOSION_LINGER_MARGIN_SECONDS` (2); node-tested |
 | `viewer/explosions.ts` | `ShipExplosions` (runtime, renderer only): `Start`, `Frame`, `Report`, `Remove`, `Clear`, `Roots`, `Errors` |
@@ -198,12 +199,18 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 ## The live fleets (`toLiveFleetScene`)
 
 The document with the destroyed taken out of their fleets by the same fleet ops a removal runs: a dead FC first hands
-the fleet (`update_fleet`) to the first live wing commander in wing order, else the first live squad commander, else
-the first live member; then `removeShipFromFleets` per dead ship, so squads anchored on it fall back down the chain
+the fleet (`update_fleet`) to its successor (`toDefaultFleetSuccessor`: the first live wing commander in wing order,
+else the first live squad commander, else the first live member); then `removeShipFromFleets` per dead ship, so squads anchored on it fall back down the chain
 with remove_ship's warnings; a fleet with nobody alive is dropped. The page's live calls (`FleetCommanders`, the
 `overlay` argument, `sd-fleets` doc `targets`) replace their groups' document lists first. Never written.
 `Director.LiveFleets()` memoizes it by (document, destroyed set, call book `version`) and feeds `FleetTargets`, `FleetFollowing`, `FleetOrders`, get_state's memberships and fleets (`actingFor`,
 `destroyed`; a dropped fleet is not listed). An untouched scene is the same object.
+
+**The fleet flies on** (`fleet-succession.ts`): `Director.Destroy` reads, before `world.Destroy`, the fleets the dead
+ship commands (live view) and, after the death enters the view, each fleet's new commander, and `CaptureFleetHeirs`
+records the dead FC's `world.Motion` and whether the heir followed framed on it. After `following.Reconcile` re-plans
+the formation on the heir, `InheritFleetOrders` orders the heir on with the FC's order, so neither the heir nor the
+members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
 
 ## The explosion, drawn (`explosions.ts`)
 
@@ -473,6 +480,7 @@ shots, the kill 15 ticks after `engage`, by p2 high-0, dealt [824.6, 748]; seed 
 ## Verify-page (K3)
 
 `a ship at 0 hull explodes and leaves cleanly`, `a dead squad lead and a dead FC fall back like a removal`,
+`a moving FC dies and its fleet flies on: the heir inherits its order` (added 2026-10-23, not yet run on tools-core),
 `load_scene revives the dead`. Evidence (2026-10-23, SDE 3632936, headless): Rifter killed by p2 15 ticks after
 `engage`; the orbiter `stopped: target "rifter" was destroyed`; `order_ship` refused; posted
 `ecx_generic_explosive_short_individual_01b_play` and `..._global_01b_play`; the ball gone at tick 85 (removesAt 84),

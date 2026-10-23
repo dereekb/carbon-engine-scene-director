@@ -205,6 +205,7 @@ import {
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetCommanders } from './fleet-commanders';
+import { CaptureFleetHeirs, InheritFleetOrders } from './fleet-succession';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { type CalledPrimaryChange, type FleetGroupCalledReport, FleetTargets, type ShipCallReport, type ShipTargetSource } from './fleet-targets';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -3238,14 +3239,16 @@ export class Director {
   /**
    * A ship at 0 structure with death "explode": its modules stop and every module on it ("its target was destroyed"),
    * its locks go both ways, its engagement ends, its ball stops for good (DestinyWorld.Destroy: its followers and the
-   * ships ordered at it stop), and its fleet re-plans without it. Its explosion is chosen and its file loaded; it
-   * starts at the killing shot's draw (DriveTurrets) and plays in DriveExplosions.
+   * ships ordered at it stop), and its fleet re-plans without it. A dead fleet commander's heir flies on with its order
+   * (fleet-succession.ts), so the fleet keeps moving. Its explosion is chosen and its file loaded; it starts at the
+   * killing shot's draw (DriveTurrets) and plays in DriveExplosions.
    *
    * @param kill - The kill.
    */
   private Destroy(kill: ShipKill): void {
     const id = kill.ship;
     if (this.deaths.has(id)) return;
+    const commanded = (this.LiveFleets()?.scene.fleets ?? []).filter((fleet) => fleet.commander === id).map((fleet) => fleet.id);
     const doc = this.scene?.ships.find((ship) => ship.id === id);
     const answer = doc ? this.hullStats.Cached(doc) : null;
     const typeID = answer?.hull?.typeID;
@@ -3270,9 +3273,19 @@ export class Director {
       this.targets.Set(id, null);
       this.turrets?.Aim(id, null);
     }
+    const fleets = this.LiveFleets()?.scene.fleets ?? [];
+    const heirs = CaptureFleetHeirs(
+      this.world,
+      id,
+      commanded.flatMap((fleet) => {
+        const heir = fleets.find((candidate) => candidate.id === fleet)?.commander;
+        return heir ? [[fleet, heir] as const] : [];
+      })
+    );
     this.world.Destroy(id);
     this.liveFleets = null;
     this.following.Reconcile();
+    InheritFleetOrders(this.world, heirs);
     this.onChange();
   }
 

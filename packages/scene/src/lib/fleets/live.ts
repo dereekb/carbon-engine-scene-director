@@ -1,3 +1,4 @@
+import type { Maybe } from '@dereekb/util';
 import type { JsonObject } from '../json';
 import type { SceneFleet } from './fleet';
 import { toFleetGroupKey } from './group';
@@ -84,10 +85,23 @@ function fleetOrder(fleet: SceneFleet): string[] {
 }
 
 /**
+ * Who commands a fleet once some ships are gone, by the default rule: its fleet commander while alive, else the first
+ * live wing commander in wing order, else the first live squad commander, else the first live member. A fleet with a
+ * personality picks by its own protocol instead.
+ *
+ * @param fleet - The fleet.
+ * @param gone - The destroyed ships.
+ * @returns The acting commander; null when nobody in the fleet is alive.
+ */
+export function toDefaultFleetSuccessor(fleet: SceneFleet, gone: ReadonlySet<string>): Maybe<string> {
+  return fleetOrder(fleet).find((ship) => !gone.has(ship)) ?? null;
+}
+
+/**
  * The fleets as they fly once some ships are gone (destroyed): each gone ship leaves its fleet through the same
  * fleet ops a removal runs, so squads anchored on it fall back down the chain as remove_ship does. A gone fleet
- * commander first hands the fleet (update_fleet) to the first live wing commander in wing order, else the first live
- * squad commander, else the first live member. A fleet with nobody alive is dropped. The overlay's live calls replace
+ * commander first hands the fleet (update_fleet) to its successor (toDefaultFleetSuccessor). A fleet with nobody alive
+ * is dropped. The overlay's live calls replace
  * their groups' document lists first. Never written to the document.
  *
  * @param scene - The document.
@@ -109,7 +123,7 @@ export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(s
   for (const fleet of touched) {
     const order = fleetOrder(fleet);
     const destroyed = order.filter((ship) => gone.has(ship));
-    const successor = order.find((ship) => !gone.has(ship));
+    const successor = toDefaultFleetSuccessor(fleet, gone);
     if (!successor) {
       dropped.add(fleet.id);
       changes.set(fleet.id, { destroyed, dropped: true });
