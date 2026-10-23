@@ -112,7 +112,14 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly locks?: ShipLockState[];
   readonly engaged?: { readonly modules: string[] };
   readonly combat?: ShipCombatState;
-  readonly destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string };
+  readonly destroyed?: {
+    readonly tick: number;
+    readonly by: string;
+    readonly module: string;
+    readonly weapon: string;
+    readonly mode: string;
+    readonly explosion?: { readonly state: string; readonly file: string; readonly removesAt: number; readonly gone: boolean };
+  };
 }
 
 /**
@@ -336,7 +343,7 @@ interface ViewerState {
   readonly simulation: { readonly tick: number; readonly seconds: number };
   readonly ships: ShipState[];
   readonly distances: { readonly centreToCentre: number }[];
-  readonly fleets: (FleetReport & { readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
+  readonly fleets: (FleetReport & { readonly actingFor?: string; readonly destroyed?: string[]; readonly formation?: FleetFormationState; readonly propMods?: Record<string, number>; readonly modules?: Record<string, number>; readonly command?: FleetGroupCommandReport })[];
   readonly location?: Maybe<LocationReport & { readonly dressing?: Maybe<LocationDressingReport>; readonly targets?: LocationTargetReport[] }>;
   readonly audio?: AudioState;
   readonly objects?: SceneObjectStateReport[];
@@ -1399,9 +1406,9 @@ try {
   // Combat rules (K2): locks, hits and EVE damage on default-gunned Rifters and Punishers. Each check loads its own scene.
   const Rifter = (id: string, position: SceneVector) => ({ id, dna: 'mf4_t1:minmatarbase:minmatar', type: 'Rifter', position });
   const Punisher = (id: string, position: SceneVector) => ({ id, dna: 'af1_t1:amarrbase:amarr', type: 'Punisher', position });
-  const LoadCombatScene = async (ships: { readonly id: string }[], combat?: object): Promise<ViewerState> => {
+  const LoadCombatScene = async (ships: { readonly id: string }[], combat?: object, extra: object = {}): Promise<ViewerState> => {
     await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter' }).catch(SkipWithoutSde);
-    await call('load_scene', { scene: { name: 'verify-combat', ships, ...(combat ? { combat } : {}) } });
+    await call('load_scene', { scene: { name: 'verify-combat', ships, ...(combat ? { combat } : {}), ...extra } });
     return WaitFor('the combat scene resolves its default fits', 60, (polled) => {
       const pending = ships.map((ship) => ShipIn(polled, ship.id)).find((ship) => ship.fit?.math !== 'dogma' || !ship.targeting);
       return pending ? `${pending.id}: ${Show(pending.fit?.note ?? pending.fitNote ?? pending.fit?.math)}` : null;
@@ -1520,6 +1527,80 @@ try {
     const other = await Fight(2);
     Expect(other !== first, `seed 2 replayed seed 1: ${other}`);
     return `seed 1: ${first} (twice); seed 2: ${other}`;
+  });
+
+  await Check('a ship at 0 hull explodes and leaves cleanly', async () => {
+    const loaded = await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0]), Punisher('orbiter', [0, 0, 3000])]);
+    const objects = (loaded.audio?.gameObjects ?? 0) - (loaded.audio?.emitters ?? 0);
+    await call('order_ship', { id: 'orbiter', order: { type: 'orbit', target: 'rifter', range: 2500 } });
+    const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
+    const dead = await WaitFor('the kill', 60, (polled) => (ShipIn(polled, 'rifter').destroyed ? null : Show(ShipIn(polled, 'rifter').defense)));
+    const kill = ShipIn(dead, 'rifter').destroyed;
+    Expect(kill?.mode === 'explode' && ['p1', 'p2'].includes(kill.by) && dead.combat?.kills.some((row) => row.ship === 'rifter'), Show({ kill, kills: dead.combat?.kills }));
+    const stopped = await WaitFor('the guns on it stop, the orbiter stops', 10, (polled) => {
+      const guns = ['p1', 'p2'].flatMap((id) => ShipGuns(polled, id).filter((gun) => gun.state === 'active' || gun.state === 'stopping'));
+      const orbiter = ShipIn(polled, 'orbiter');
+      const targets = ['p1', 'p2'].map((id) => ShipIn(polled, id).target);
+      return !guns.length && targets.every((target) => target === null) && orbiter.order?.type === 'stop' && /target "rifter" was destroyed/u.test(orbiter.orderNote ?? '') ? null : Show({ guns, targets, orbiter: [orbiter.order, orbiter.orderNote] });
+    });
+    const refused = await call('order_ship', { id: 'rifter', order: { type: 'stop' } }).then(
+      () => 'taken',
+      (error: unknown) => String(error)
+    );
+    Expect(/was destroyed/u.test(refused), `order_ship on the dead: ${refused}`);
+    const target = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'p1' });
+    Expect(
+      target.skipped.some((skip) => skip.id === 'rifter' && skip.reason === 'it was destroyed'),
+      Show(target)
+    );
+    const heard = await WaitFor('the explosion posts its local and global sounds', 15, (polled) => {
+      const events = (polled.audio?.posted ?? []).filter((entry) => entry.ship === 'rifter' && entry.tick >= engaged.tick && /^ecx_generic_explosive_short_/u.test(entry.event)).map((entry) => entry.event);
+      return events.some((event) => /individual/u.test(event)) && events.some((event) => /global/u.test(event)) ? null : Show(events);
+    });
+    const sounds = (heard.audio?.posted ?? []).filter((entry) => entry.ship === 'rifter' && /^ecx_/u.test(entry.event)).map((entry) => entry.event);
+    const gone = await WaitFor('the ball leaves after the linger', 40, (polled) => {
+      const rifter = ShipIn(polled, 'rifter');
+      return rifter.destroyed?.explosion?.gone && rifter.status === 'destroyed' && rifter.position == null ? null : Show({ status: rifter.status, explosion: rifter.destroyed?.explosion, tick: polled.simulation.tick });
+    });
+    const after = (gone.audio?.gameObjects ?? 0) - (gone.audio?.emitters ?? 0);
+    Expect(after === objects, `audio game objects − emitters: ${objects} before, ${after} after`);
+    return `killed by ${kill?.by} (${kill?.module}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(stopped, 'orbiter').orderNote}; order_ship refused (${refused}); sounds ${Show(sounds)}; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} ball gone at tick ${gone.simulation.tick} (removesAt ${ShipIn(gone, 'rifter').destroyed?.explosion?.removesAt}); gameObjects − emitters ${after}`;
+  });
+
+  // An FC, a wing commander and a squad of two whose lead the squad anchors on; two Punishers kill the lead, then the FC.
+  const fleetFightShips = [Punisher('fc', [0, 0, 0]), Punisher('wc', [0, 0, -1500]), Rifter('lead', [1500, 0, 0]), Rifter('member', [3000, 0, 0]), Punisher('k1', [0, 0, 2500]), Punisher('k2', [1500, 0, 2500])];
+  const fleetFight = { fleets: [{ id: 'f', commander: 'fc', wings: [{ id: 'w', commander: 'wc', squads: [{ id: 's', role: 'dps', commander: 'lead', members: ['lead', 'member'], anchor: { ship: 'lead', range: 1500 } }] }] }] };
+
+  await Check('a dead squad lead and a dead FC fall back like a removal', async () => {
+    await LoadCombatScene(fleetFightShips, undefined, fleetFight);
+    await call<EngageResult>('engage', { ships: ['k1', 'k2'], target: 'lead' });
+    const leadDead = await WaitFor("the lead's death re-anchors the squad", 60, (polled) => {
+      const squad = polled.fleets[0]?.wings[0]?.squads[0];
+      return ShipIn(polled, 'lead').destroyed && polled.fleets[0]?.destroyed?.includes('lead') && squad?.anchor?.ship === 'wc' && ShipIn(polled, 'member').anchor?.ship === 'wc' ? null : Show({ squad, member: ShipIn(polled, 'member').anchor, destroyed: polled.fleets[0]?.destroyed });
+    });
+    await call<EngageResult>('engage', { ships: ['k1', 'k2'], target: 'fc' });
+    const fcDead = await WaitFor('the wing commander acts for the dead FC and the member follows it', 60, (polled) => {
+      const fleet = polled.fleets[0];
+      const member = ShipIn(polled, 'member');
+      return ShipIn(polled, 'fc').destroyed && fleet?.commander === 'wc' && fleet.actingFor === 'fc' && ShipIn(polled, 'wc').commands?.includes('fleet') && member.anchor?.ship === 'wc' && member.following
+        ? null
+        : Show({ fleet: fleet && { commander: fleet.commander, actingFor: fleet.actingFor, destroyed: fleet.destroyed }, member: [member.anchor, member.following?.state] });
+    });
+    return `lead dead at tick ${ShipIn(leadDead, 'lead').destroyed?.tick}: the squad anchors on wc; FC dead at tick ${ShipIn(fcDead, 'fc').destroyed?.tick}: wc acts for fc (destroyed ${Show(fcDead.fleets[0]?.destroyed)}), member ${ShipIn(fcDead, 'member').following?.state} on ${ShipIn(fcDead, 'member').anchor?.ship}`;
+  });
+
+  await Check('load_scene revives the dead', async () => {
+    const revived = await LoadCombatScene(fleetFightShips, undefined, fleetFight);
+    const ships = fleetFightShips.map((ship) => ShipIn(revived, ship.id));
+    const hurt = ships.filter((ship) => ship.destroyed || ship.position == null || (['shield', 'armor', 'structure'] as const).some((layer) => (ship.defense?.[layer].hp ?? 0) < (ship.defense?.[layer].max ?? 1)));
+    Expect(!hurt.length, Show(hurt.map((ship) => ({ id: ship.id, destroyed: ship.destroyed, position: ship.position, defense: ship.defense }))));
+    Expect(!revived.combat?.kills.length, Show(revived.combat));
+    Expect(revived.fleets[0]?.commander === 'fc' && !revived.fleets[0].actingFor && !revived.fleets[0].destroyed, Show(revived.fleets[0]));
+    const drawn = await WaitFor('every hull builds again', 30, (polled) => {
+      const pending = fleetFightShips.map((ship) => ShipIn(polled, ship.id)).filter((ship) => ship.status !== 'ready' && ship.status !== 'validated');
+      return pending.length ? Show(pending.map((ship) => [ship.id, ship.status])) : null;
+    });
+    return `${ships.length} ships alive at full HP, no kills, fleet commanded by fc again; statuses ${Show(fleetFightShips.map((ship) => ShipIn(drawn, ship.id).status))}`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

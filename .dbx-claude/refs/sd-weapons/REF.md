@@ -183,6 +183,10 @@ turrets fire only at a locked target. No hostility check, no pilot delay (the Fl
 - **Settle**: after a turret's `off`, its set returns to TARGETING (or IDLE without a target) once its queued shots
   drew and its last burst ran (`fx.GetFiringDuration()` after the draw).
 - The queue, the counts and `OnShot` run without a renderer too (headless shot counts; W4's sounds).
+- **Shots at a dying ship** (death `explode`, `sd-combat`): the boundary's shots after the killing one are `overkill`
+  and still draw; every target on it clears, so no later shots are raised. Queued shots at it keep drawing (its ball
+  stays) until its explosion's wreck switch hides the hull, when `shots.Forget(id)` drops the rest. The killing shot's
+  burst start (its draw plus the set's firing delay) starts the explosion.
 
 ### The turret state machine (`ShipTurrets`)
 

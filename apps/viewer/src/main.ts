@@ -248,6 +248,7 @@ async function Start(): Promise<void> {
     liveDirector?.DriveAudio(now);
     liveDirector?.DriveModuleEffects(now);
     liveDirector?.DriveTurrets(now);
+    liveDirector?.DriveExplosions(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);
   };

@@ -98,6 +98,11 @@ ids.
   anchors come back as warnings.
 - A fleet commander is never removed implicitly: `update_fleet` a new commander or remove the fleet first. Ops run in
   order, so `update_fleet` then `remove_ship` in one patch works.
+- **A destroyed ship leaves its fleet live, never in the document** (`fleets/live.ts` `toLiveFleetScene`, `sd-combat`):
+  the same ops a removal runs, after a dead FC hands the fleet (`update_fleet`) to the first live wing commander in wing
+  order, else the first live squad commander, else the first live member; a fleet with nobody alive drops. The page's
+  `FleetFollowing`, `FleetOrders`, memberships and fleets report read that view, so the members re-form on the acting
+  FC (the same re-plan an `update_fleet` causes); a load revives everyone and the document's fleets come back.
 
 ## The formation (`fleets/formation.ts`)
 
@@ -156,6 +161,8 @@ its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop`
 `holding` / `warping` / `leading` / `detached` / `waiting`), `propMods` counts, `modules` (every member's fitted module
 rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
+A fleet that lost ships (`sd-combat`) lists only its live members and adds `destroyed` (their ids) and `actingFor` (the
+dead FC its commander stands in for); a fleet with nobody alive is not listed.
 
 ## Limits
 

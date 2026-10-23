@@ -27,7 +27,9 @@ export { CjsBatchManager, gTriDev, Tr2QuadRenderer, Tr2Renderer, Tr2RenderContex
 export {
   EveCamera,
   EveChildBehaviorSystem,
+  EveChildExplosion,
   EveChildLineSet,
+  EveEffectRoot2,
   EveLensflare,
   EveMeshOverlayEffect,
   EveRootTransform,
@@ -55,7 +57,7 @@ export {
   Tr2TranslationAdapter,
   TriFloat
 } from '@carbonenginejs/runtime/trinity';
-export type { EvePlanet, EveShip2, EveSpaceObject2, Tr2Effect, TriCurveSet } from '@carbonenginejs/runtime/trinity';
+export type { EveLocatorSets, EvePlanet, EveShip2, EveSpaceObject2, Tr2Effect, TriCurveSet } from '@carbonenginejs/runtime/trinity';
 export { Tr2RenderJobs, TriRenderJob, TriStepPythonCB } from '@carbonenginejs/runtime/trinity/renderJob';
 export { RenderingMode, TR2SHADERMODEL, TriBatchType } from '@carbonenginejs/runtime/consts/graphics';
 export { SetEffectPathDefaults } from '@carbonenginejs/runtime/utils';

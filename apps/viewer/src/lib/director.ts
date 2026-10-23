@@ -143,7 +143,11 @@ import {
   normalizeCeaseFireCommand,
   normalizeEngageCommand,
   sceneCombatOf,
+  shipExplosionOf,
+  type ShipExplosionChoice,
   type ShipKill,
+  toLiveFleetScene,
+  type LiveFleetView,
   shipLockLimit,
   incomingModifiersOf,
   incomingSourceLabel,
@@ -164,6 +168,8 @@ import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type Pick
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
 import { DamageModel, type DamageReport } from './damage';
+import { ExplosionFiles, ExplosionRemoveTick, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
+import { ShipExplosions, type ShipExplosionReport } from './explosions';
 import {
   DogmaStateOf,
   FitLookup,
@@ -218,7 +224,35 @@ const DEFAULT_SCREENSHOT_WIDTH = 1280;
  */
 const LOOKUP_PENDING_NOTE = "waiting for the hub's /ship-stats answer";
 
-export type ShipStatus = 'queued' | 'building' | 'validated' | 'ready' | 'failed';
+export type ShipStatus = 'queued' | 'building' | 'validated' | 'ready' | 'failed' | 'destroyed';
+
+/**
+ * A ship destroyed with death "explode": its kill, the explosion chosen, when the explosion starts (the killing shot's
+ * draw plus its firing delay) and the boundary its ball leaves.
+ */
+interface ShipDeath {
+  readonly kill: ShipKill;
+  readonly choice: ShipExplosionChoice;
+  readonly removeTick: number;
+  /**
+   * The scene clock the explosion starts at, once the killing shot drew (or was dropped).
+   */
+  start: Maybe<number>;
+  begun: boolean;
+  /**
+   * Without a renderer: the schedule and how many of its sounds were posted.
+   */
+  schedule: Maybe<ExplosionTimes>;
+  posted: number;
+  /**
+   * Its hull's drawing retired (the wreck switch).
+   */
+  hidden: boolean;
+  /**
+   * Its ball left both parks.
+   */
+  gone: boolean;
+}
 
 /**
  * A document ship's live counterpart.
@@ -617,6 +651,19 @@ export class Director {
   private readonly engagements = new Map<string, { readonly modules: readonly string[] }>();
   private readonly killListeners = new Set<KillListener>();
   /**
+   * Ships destroyed with death "explode", until a load revives them or remove_ship removes them.
+   */
+  private readonly deaths = new Map<string, ShipDeath>();
+  private readonly explosionFiles = new ExplosionFiles({ read: (path) => ResourceValues(path) });
+  /**
+   * The drawn explosions (explosions.ts); null without a renderer.
+   */
+  private readonly explosions: Maybe<ShipExplosions>;
+  /**
+   * The live fleet view (toLiveFleetScene), memoized by document and destroyed set.
+   */
+  private liveFleets: Maybe<{ readonly scene: SceneDocument; readonly gone: string; readonly view: LiveFleetView<SceneDocument> }> = null;
+  /**
    * The shield fraction each ship's impact overlay was last synced at by the recharge.
    */
   private readonly rechargeSynced = new Map<string, number>();
@@ -660,16 +707,17 @@ export class Director {
     this.world = world;
     this.clock = clock;
     this.onChange = onChange;
-    this.following = new FleetFollowing({ world, scene: () => this.scene, radiusOf: (id) => this.FormationRadius(id) });
-    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.scene });
+    // Fleets fly and take orders as they are live: the destroyed taken out (toLiveFleetScene).
+    this.following = new FleetFollowing({ world, scene: () => this.LiveFleets()?.scene ?? null, radiusOf: (id) => this.FormationRadius(id) });
+    this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null });
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
-      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()],
+      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()],
       onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
-    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
+    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -683,8 +731,18 @@ export class Director {
       ? new ModuleEffects({
           engine,
           ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots()],
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ExplosionRoots()],
           detachAudio: (build) => this.audio.Detached(build)
+        })
+      : null;
+    this.explosions = engine
+      ? new ShipExplosions({
+          engine,
+          files: this.explosionFiles,
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()],
+          detachAudio: (build) => this.audio.Detached(build),
+          onHide: (id) => this.Hide(id),
+          onSound: (id, event) => this.PostExplosionSound(id, event)
         })
       : null;
     this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
@@ -731,6 +789,7 @@ export class Director {
     // Shields recharge, then locks advance and engagements re-arm, then cycles land: right after the prop mods apply
     // and before orders, so a siege module's physics fly from that tick.
     world.OnBoundary((boundary) => {
+      this.RemoveDead(boundary);
       this.SyncRecharged(this.combat.Recharge(world.master.tickInterval / 1000));
       this.LockEvents(this.locks.Boundary(boundary, this.WantedLocks()));
       this.Engagements(boundary);
@@ -798,6 +857,7 @@ export class Director {
   OrderShip(id: unknown, order: unknown): OrderShipResult {
     const ships = new Set((this.scene?.ships ?? []).map((doc) => doc.id));
     if (typeof id !== 'string' || !ships.has(id)) throw new Error(`no ship "${String(id)}"`);
+    if (this.IsDead(id)) throw new Error(`ship "${id}" was destroyed`);
     const normalized = normalizeShipOrderRequest(order, { ships, objects: this.TargetIds(), self: id });
     if (normalized.type === 'rejoin') return { id, order: normalized, tick: this.world.tick, following: this.following.Rejoin(id) };
     const refusal = this.world.OrderRefusal(id, normalized);
@@ -851,6 +911,10 @@ export class Director {
     const skipped: SwitchPropModsResult['skipped'] = [];
     for (const id of selected.ships) {
       const doc = docs.get(id);
+      if (this.IsDead(id)) {
+        skipped.push({ id, reason: 'it was destroyed' });
+        continue;
+      }
       const why = doc?.propMod?.module == null && doc?.fit ? 'its fit has no MWD or AB' : `propMod.module "${this.PropModModule(doc)}"`;
       const refusal = this.FitsPropMod(doc) ? this.world.PropModRefusal(id, command.active) : `it fits no prop mod (${why})`;
       const result = refusal === null ? this.world.SwitchPropMod(id, command.active, { delay: delays.get(id) }) : null;
@@ -896,6 +960,10 @@ export class Director {
     const skipped: SwitchModulesResult['skipped'] = [];
     for (const id of selected.ships) {
       const resolved = this.fittings.get(id);
+      if (this.IsDead(id)) {
+        skipped.push({ id, reason: 'it was destroyed' });
+        continue;
+      }
       if (!resolved?.dogma) {
         skipped.push({ id, reason: resolved ? `its fit has not resolved: ${resolved.note ?? 'waiting for the hub'}` : docs.get(id)?.fit ? 'its fit has not resolved yet' : 'it has no fit (ships[].fit)' });
         continue;
@@ -1128,7 +1196,12 @@ export class Director {
    * @param now - The scene clock, in integer 100 ns ticks.
    */
   DriveTurrets(now: number): void {
-    const drawn = this.shots.Due(now).flatMap((shot) => this.DrawShot(shot, now) ?? []);
+    const drawn = this.shots.Due(now).flatMap((shot) => {
+      const sound = this.DrawShot(shot, now);
+      // The explosion starts as the killing shot's burst lands; a shot dropped at the draw starts it at once.
+      if (shot.fatal) this.ExplosionStarts(shot.target, sound?.at ?? now);
+      return sound ?? [];
+    });
     if (drawn.length) this.turretSounds.Add(TurretAudioPosts({ shots: drawn, transitions: [], facts: (ship, module) => this.TurretSoundFactsOf(ship, module) }));
     for (const weapon of this.shots.Settled(now)) this.turrets?.Settle(weapon.ship, weapon.module);
     this.turrets?.Frame();
@@ -1136,6 +1209,42 @@ export class Director {
       // A ship that left (or not built into the world yet) posts nothing: its emitter is released with it.
       if (this.world.Curves(post.ship)) this.audio.Post({ ship: post.ship, tick: post.tick, events: post.events, placement: this.AudioPlacement(post.ship, now) });
     }
+  }
+
+  /**
+   * Plays the destroyed ships' explosions for the frame at `now`: with a renderer they draw (explosions.ts: the hull
+   * hides at the wreck switch, each blast posts its sound); without one the schedule (ExplosionSchedule) posts the
+   * sounds and hides the hull. A killing shot that never drew starts its explosion two ticks after the kill. Runs after
+   * DriveTurrets.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  DriveExplosions(now: number): void {
+    const tickSeconds = this.world.master.tickInterval / 1000;
+    for (const [id, death] of this.deaths) {
+      if (death.start == null && this.world.tick >= death.kill.tick + 2) death.start = now;
+      if (death.start == null || death.gone) continue;
+      if (!death.begun) {
+        const curves = this.world.Curves(id);
+        if (this.explosions && curves) {
+          death.begun = true;
+          const seed = sceneCombatOf(this.scene ?? {}).seed;
+          this.explosions.Start(id, { ship: this.live.get(id)?.ship ?? null, curves, choice: death.choice, radius: this.flights.get(id)?.radius ?? UNBUILT_RADIUS, at: death.start, seed });
+        } else if (!this.explosions) {
+          const path = death.choice.resPath;
+          const facts = this.explosionFiles.Cached(path)?.facts ?? null;
+          if (!facts && !this.explosionFiles.Failure(path)) continue;
+          death.begun = true;
+          death.schedule = ExplosionSchedule({ start: death.start / TICKS_PER_SECOND, facts, deathTick: death.kill.tick, lingerSeconds: death.choice.lingerSeconds, tickSeconds });
+        }
+      }
+      const { schedule } = death;
+      if (!schedule) continue;
+      const seconds = now / TICKS_PER_SECOND;
+      for (; death.posted < schedule.sounds.length && schedule.sounds[death.posted].at <= seconds; death.posted += 1) this.PostExplosionSound(id, schedule.sounds[death.posted].event);
+      if (!death.hidden && seconds >= schedule.hide) this.Hide(id);
+    }
+    this.explosions?.Frame(now);
   }
 
   /**
@@ -1251,7 +1360,7 @@ export class Director {
   }
 
   State(): object {
-    const memberships = this.scene ? toFleetMemberships(this.scene) : new Map<string, ShipFleetMembership>();
+    const memberships = this.scene ? toFleetMemberships(this.LiveFleets()?.scene ?? this.scene) : new Map<string, ShipFleetMembership>();
     const ships = (this.scene?.ships ?? []).map((doc) => this.ShipState(doc, memberships.get(doc.id)));
     const moduleRows = new Map(ships.map((ship) => [ship.id, ship.fit?.modules ?? []]));
     const distances = [];
@@ -1281,8 +1390,9 @@ export class Director {
       objects: this.ObjectRows(),
       combat: this.SceneCombatState(),
       fleets: this.scene
-        ? toFleetReports(this.scene).map((report) => ({
+        ? toFleetReports(this.LiveFleets()?.scene ?? this.scene).map((report) => ({
             ...report,
+            ...this.LiveFleetChange(report.id),
             formation: this.following.FleetReport(report),
             propMods: this.FleetPropMods(report.ships),
             modules: FleetModuleCountsOf(report.ships.flatMap((id) => moduleRows.get(id) ?? [])) satisfies FleetModuleCounts,
@@ -1352,11 +1462,18 @@ export class Director {
 
     const previous = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
     const diff = diffScenes(this.scene, scene);
+    // A load revives the destroyed: they retire here and rebuild as retried ships. A patch keeps them dead.
+    if (restart) this.Revive();
+    for (const doc of diff.removed) {
+      this.explosions?.Remove(doc.id);
+      this.deaths.delete(doc.id);
+    }
+    const alive = (doc: SceneShip): boolean => !this.IsDead(doc.id);
     // A ship that failed before is retried whenever the scene is applied again.
     const changed = new Set([...diff.rebuilt, ...diff.added].map((doc) => doc.id));
     const retried = scene.ships.filter((doc) => !changed.has(doc.id) && (this.live.get(doc.id)?.status ?? 'failed') === 'failed');
-    const builds = [...diff.rebuilt, ...diff.added, ...retried];
-    for (const doc of [...diff.removed, ...diff.rebuilt]) this.Retire(doc.id);
+    const builds = [...diff.rebuilt, ...diff.added, ...retried].filter(alive);
+    for (const doc of [...diff.removed, ...diff.rebuilt.filter(alive)]) this.Retire(doc.id);
     // Removed and rebuilt objects retire with the ships; added, rebuilt and failed ones queue.
     const objectBuilds = this.objects.Apply(diff.objects, scene);
     const stopped: string[] = [];
@@ -1404,6 +1521,7 @@ export class Director {
       this.fitLookup.ForgetFailures();
       this.weapons.ForgetFailures();
       this.turretFiles.ForgetFailures();
+      this.explosionFiles.ForgetFailures();
       // A load restarts every module online (or offline as fitted) and every ship at full HP.
       moduleEvents.push(...this.modules.Clear(this.world.tick));
       // Targets, locks, shots and kills are live state: a load starts with none, every ship alive.
@@ -1433,6 +1551,7 @@ export class Director {
     // before the store write, so an order arriving meanwhile always finds a ball for every document ship.
     for (const doc of scene.ships) {
       const before = previous.get(doc.id);
+      if (this.IsDead(doc.id)) continue;
       if (!this.world.Curves(doc.id)) {
         const flight = this.Flight(doc, this.hullStats.Cached(doc));
         this.world.AddShip(doc, flight ?? DEFAULT_SHIP_PHYSICS);
@@ -1447,12 +1566,12 @@ export class Director {
       else if (moved.has(doc.id) || resized.has(doc.id)) this.world.AddObject(doc, radius);
     }
     const retuned = restart ? scene.ships : [...diff.added, ...diff.rebuilt, ...diff.retuned];
-    for (const id of new Set(retuned.map((doc) => doc.id))) this.Retune(id);
+    for (const id of new Set(retuned.filter(alive).map((doc) => doc.id))) this.Retune(id);
     // The document's prop mod state applies at once, like a placement: on a load, for added ships, for ships whose
     // propMod.active changed, and off for a ship whose module became "none".
     const switching = new Map((restart ? scene.ships : [...diff.added, ...diff.switched]).map((doc) => [doc.id, doc]));
     for (const doc of diff.retuned) if (!this.FitsPropMod(doc)) switching.set(doc.id, doc);
-    for (const doc of switching.values()) this.world.SetPropModActive(doc.id, doc.propMod?.active === true && this.FitsPropMod(doc));
+    for (const doc of [...switching.values()].filter(alive)) this.world.SetPropModActive(doc.id, doc.propMod?.active === true && this.FitsPropMod(doc));
     if (restart) this.orders.Reset();
     stopped.push(...this.following.Reconcile({ regrouped: diff.regrouped.map((doc) => doc.id), restart }));
     await this.store.Put(CURRENT_KEY, scene);
@@ -1498,6 +1617,11 @@ export class Director {
       entry.diagnostics = diagnostics.slice(0, 10).map((item) => (typeof item === 'string' ? item : JSON.stringify(item)));
       if (this.live.get(doc.id) !== entry) return;
       entry.hull = hull;
+      // A ship destroyed while it built is not drawn once its explosion hid it.
+      if (this.deaths.get(doc.id)?.hidden) {
+        entry.status = 'destroyed';
+        return;
+      }
       this.Retune(doc.id);
       if (this.engine) {
         // Inert SOF audio: only the page's emitters play (PageAudio.Detached).
@@ -1532,7 +1656,7 @@ export class Director {
    */
   private Retune(id: string): void {
     const doc = this.scene?.ships.find((ship) => ship.id === id);
-    if (!doc) return;
+    if (!doc || this.IsDead(id)) return;
     const cached = this.hullStats.Cached(doc);
     this.SetFlight(doc, cached);
     this.LookupPropMod(doc, cached);
@@ -1541,7 +1665,7 @@ export class Director {
     const key = HullStatsKey(doc);
     void this.hullStats.Lookup(doc).then((answer) => {
       const current = this.scene?.ships.find((ship) => ship.id === id);
-      if (!current || HullStatsKey(current) !== key) return;
+      if (!current || HullStatsKey(current) !== key || this.IsDead(id)) return;
       this.SetFlight(current, answer);
       // The hull's size may pick a different hull-sized module; its type lets the fit's dogma run.
       this.LookupPropMod(current, answer);
@@ -1629,7 +1753,7 @@ export class Director {
    * @param answer - Its /ship-stats answer; null while the lookup is in flight.
    */
   private SetFlight(doc: SceneShip, answer: Maybe<HullStatsAnswer>): void {
-    if (!this.FlyFlight(doc, answer)) return;
+    if (this.IsDead(doc.id) || !this.FlyFlight(doc, answer)) return;
     // A refit that stopped running modules changes the states the flight was computed with: fly once more.
     const stoppedByRefit = this.SyncModules(doc);
     if (stoppedByRefit.length) this.FlyFlight(doc, answer);
@@ -1674,6 +1798,8 @@ export class Director {
    * @returns The `off` events of running modules the refit removed.
    */
   private SyncModules(doc: SceneShip): ShipModuleEvent[] {
+    // A destroyed ship gets no module specs: no re-fly or refit re-adds its modules.
+    if (this.IsDead(doc.id)) return [];
     const resolved = this.fittings.get(doc.id);
     const dogma = this.LiveDogma(doc.id, resolved?.dogma);
     const specs = resolved && dogma ? ShipModuleSpecsOf({ ...resolved, dogma }, this.fitLookup, doc.stats) : [];
@@ -1901,7 +2027,7 @@ export class Director {
   private WantedLocks(): Map<string, Set<string>> {
     const wanted = this.modules.TurretAims();
     for (const doc of this.scene?.ships ?? []) {
-      const target = this.targets.Of(doc.id);
+      const target = this.IsDead(doc.id) ? null : this.targets.Of(doc.id);
       if (target) wanted.set(doc.id, new Set([target, ...(wanted.get(doc.id) ?? [])]));
     }
     return wanted;
@@ -1969,7 +2095,7 @@ export class Director {
 
   /**
    * A ship's structure reached 0: every target on it clears (its attackers' turrets stop), and the kill listeners
-   * run. With death `explode` it is flagged too until the explosion lands (K3).
+   * run. With death `explode` it is destroyed (Destroy): it explodes and its ball leaves after the explosion.
    */
   private Killed(kill: ShipKill, shot: WeaponShot): void {
     const cleared = this.targets.Forget(kill.ship);
@@ -1978,6 +2104,7 @@ export class Director {
       this.turrets?.Aim(ship, null);
     }
     this.PostTurretAims(cleared.map(({ ship }) => ({ ship, aim: 'idle' })));
+    if (kill.mode === 'explode') this.Destroy(kill);
     for (const listener of [...this.killListeners]) {
       try {
         listener(kill, shot);
@@ -2334,7 +2461,168 @@ export class Director {
     this.turrets?.Remove(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
-    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()]);
+    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()]);
+  }
+
+  /**
+   * Retires a destroyed ship's drawing at its explosion's wreck switch, keeping its live entry (`destroyed`, no hull):
+   * its turrets come off, the hull leaves the scene, and the shots of it or at it still queued are dropped.
+   *
+   * @param id - The ship id.
+   */
+  private Hide(id: string): void {
+    const death = this.deaths.get(id);
+    if (!death || death.hidden) return;
+    death.hidden = true;
+    this.turrets?.Remove(id);
+    this.shots.Forget(id);
+    const entry = this.live.get(id);
+    if (entry) {
+      const { ship } = entry;
+      entry.ship = null;
+      entry.status = 'destroyed';
+      if (ship && this.engine) {
+        this.engine.RemoveShip(ship);
+        RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()]);
+      }
+    }
+    this.onChange();
+  }
+
+  /**
+   * What the live view changed in a fleet, for get_state: the dead FC its commander acts for, and its destroyed ships.
+   */
+  private LiveFleetChange(fleet: string): { readonly actingFor?: string; readonly destroyed?: readonly string[] } {
+    const change = this.LiveFleets()?.changes.get(fleet);
+    return change ? { ...(change.actingFor ? { actingFor: change.actingFor } : {}), destroyed: change.destroyed } : {};
+  }
+
+  /**
+   * The explosions' roots, for every retire's retained set.
+   */
+  private ExplosionRoots(): object[] {
+    return this.explosions?.Roots() ?? [];
+  }
+
+  /**
+   * Whether a ship was destroyed with death "explode" (its ball may still be on the parks): every tool and edit skips
+   * it until a load revives it.
+   *
+   * @param id - The ship id.
+   */
+  private IsDead(id: string): boolean {
+    return this.deaths.has(id);
+  }
+
+  /**
+   * The document as its fleets fly: the destroyed taken out of their fleets (toLiveFleetScene), memoized.
+   *
+   * @returns The view, null without a scene.
+   */
+  private LiveFleets(): Maybe<LiveFleetView<SceneDocument>> {
+    const scene = this.scene;
+    if (!scene) return null;
+    const gone = [...this.deaths.keys()].sort().join('|');
+    if (this.liveFleets?.scene !== scene || this.liveFleets.gone !== gone) this.liveFleets = { scene, gone, view: toLiveFleetScene(scene, new Set(this.deaths.keys())) };
+    return this.liveFleets.view;
+  }
+
+  /**
+   * A destroyed ship's ball leaves both parks at the first boundary at or after its linger (ExplosionRemoveTick), with
+   * or without a renderer: its emitter is released, its damage model dropped, and a cinema shot on it released.
+   *
+   * @param boundary - The master tick boundary.
+   */
+  private RemoveDead(boundary: number): void {
+    for (const [id, death] of this.deaths) {
+      if (death.gone || boundary < death.removeTick) continue;
+      death.gone = true;
+      this.Hide(id);
+      this.world.RemoveShip(id);
+      this.audio.Release(id);
+      this.damage.Remove(id);
+      this.capacitor.Remove(id);
+      this.rechargeSynced.delete(id);
+      if (this.cinema.Subjects().includes(id)) this.cinema.Release(this.clock.now, { note: 'its subject was destroyed', forget: true });
+      this.onChange();
+    }
+  }
+
+  /**
+   * A load revives every destroyed ship: its explosion comes off, its ball is taken off (Apply adds it back fresh) and
+   * its live entry retires, so it rebuilds as a retried ship.
+   */
+  private Revive(): void {
+    for (const id of this.deaths.keys()) {
+      this.explosions?.Remove(id);
+      this.world.RemoveShip(id);
+      this.audio.Release(id);
+      this.Retire(id);
+    }
+    this.deaths.clear();
+    this.liveFleets = null;
+  }
+
+  /**
+   * A ship at 0 structure with death "explode": its modules stop and every module on it ("its target was destroyed"),
+   * its locks go both ways, its engagement ends, its ball stops for good (DestinyWorld.Destroy: its followers and the
+   * ships ordered at it stop), and its fleet re-plans without it. Its explosion is chosen and its file loaded; it
+   * starts at the killing shot's draw (DriveTurrets) and plays in DriveExplosions.
+   *
+   * @param kill - The kill.
+   */
+  private Destroy(kill: ShipKill): void {
+    const id = kill.ship;
+    if (this.deaths.has(id)) return;
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    const answer = doc ? this.hullStats.Cached(doc) : null;
+    const typeID = answer?.hull?.typeID;
+    const record = typeID == null ? null : this.fitLookup.Bundle()?.types[typeID];
+    const choice = shipExplosionOf({
+      groupID: record?.groupID,
+      classRigSize: RigSizeOf({ published: answer?.hull, hull: this.live.get(id)?.hull }),
+      raceID: record?.raceID,
+      sofRace: doc?.dna.split(':')[2],
+      seed: sceneCombatOf(this.scene ?? {}).seed,
+      ship: id
+    });
+    const removeTick = ExplosionRemoveTick(kill.tick, choice.lingerSeconds, this.world.master.tickInterval / 1000);
+    this.deaths.set(id, { kill, choice, removeTick, start: null, begun: false, schedule: null, posted: 0, hidden: false, gone: false });
+    this.explosionFiles.Load(choice.resPath).catch((error: unknown) => console.warn(`ship ${id}: its explosion ${choice.resPath} did not load: ${ErrorText(error)}`));
+    this.ModuleOutputs(this.modules.Remove(id, this.world.tick, 'its target was destroyed'));
+    this.moduleSpecs.delete(id);
+    this.locks.Remove(id);
+    this.engagements.delete(id);
+    if (this.targets.Of(id) != null) {
+      this.targets.Set(id, null);
+      this.turrets?.Aim(id, null);
+    }
+    this.world.Destroy(id);
+    this.liveFleets = null;
+    this.following.Reconcile();
+    this.onChange();
+  }
+
+  /**
+   * Starts a destroyed ship's explosion clock at its killing shot's draw (its burst's start), once.
+   *
+   * @param id - The destroyed ship.
+   * @param at - The scene clock.
+   */
+  private ExplosionStarts(id: string, at: number): void {
+    const death = this.deaths.get(id);
+    if (death && death.start == null) death.start = at;
+  }
+
+  /**
+   * Posts an explosion sound on the dying ship's own emitter.
+   *
+   * @param id - The ship id.
+   * @param event - The sound event.
+   */
+  private PostExplosionSound(id: string, event: string): void {
+    if (!this.world.Curves(id)) return;
+    this.audio.Post({ ship: id, tick: this.world.tick, events: [event], placement: this.AudioPlacement(id, this.clock.now) });
   }
 
   /**
@@ -2410,7 +2698,8 @@ export class Director {
     // A view already following a ship glides from where it is to the new framing.
     const previous = this.cameraFollow.following ? Array.from(view.focus) : null;
     view.Set({ yaw: camera.yaw, pitch: camera.pitch, fov: camera.fov });
-    const ships = this.scene?.ships ?? [];
+    // A destroyed ship is not framed.
+    const ships = (this.scene?.ships ?? []).filter((doc) => !this.IsDead(doc.id));
     const objects = this.scene?.objects ?? [];
     const docs = camera.target ? ships.filter((doc) => doc.id === camera.target) : ships;
     const object = camera.target && !docs.length ? (objects.find((doc) => doc.id === camera.target) ?? null) : null;
@@ -2785,7 +3074,7 @@ export class Director {
     locks?: ShipLockReport[];
     engaged?: { readonly modules: readonly string[] };
     combat?: ShipCombatReport & { readonly paperDps: number };
-    destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string };
+    destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string; readonly explosion?: ShipExplosionReport & { readonly removesAt: number; readonly gone: boolean } };
   } {
     const tick = this.world.tick;
     const targeting = this.LockTargeting(id);
@@ -2802,8 +3091,20 @@ export class Director {
       ...(locks.length ? { locks } : {}),
       ...(engaged ? { engaged: { modules: engaged.modules } } : {}),
       ...(combat ? { combat: { ...combat, paperDps: Round(paperDps, 1) } } : {}),
-      ...(kill ? { destroyed: { tick: kill.tick, by: kill.by, module: kill.module, weapon: kill.weapon, mode: kill.mode } } : {})
+      ...(kill ? { destroyed: { tick: kill.tick, by: kill.by, module: kill.module, weapon: kill.weapon, mode: kill.mode, ...this.DeathState(id) } } : {})
     };
+  }
+
+  /**
+   * A destroyed ship's explosion for get_state: the file, the drawn explosion's state, when its ball leaves and whether
+   * it has.
+   */
+  private DeathState(id: string): { readonly explosion?: ShipExplosionReport & { readonly removesAt: number; readonly gone: boolean } } {
+    const death = this.deaths.get(id);
+    if (!death) return {};
+    const drawn = this.explosions?.Report(id);
+    const state = drawn?.state ?? (death.hidden ? 'done' : death.begun ? 'playing' : 'waiting');
+    return { explosion: { ...(drawn ?? { state, file: death.choice.name }), removesAt: death.removeTick, gone: death.gone } };
   }
 
   /**

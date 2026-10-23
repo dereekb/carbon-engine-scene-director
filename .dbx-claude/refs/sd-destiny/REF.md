@@ -95,6 +95,15 @@ Destiny's `RemoveBall` sends an interactive orbiter straight on along its veloci
 (`patch_scene`'s `changes.stopped` counts them). Formation followers are the exception: `FleetFollowing.Reconcile`
 re-anchors them in the same edit, and `Steer` halts any whose anchor or FC ball is gone.
 
+**A destroyed ship** (`sd-combat`) is stopped first and removed later. `Destroy(id)` stops its ball on both parks for
+good (order, pending order, following and formation warp end; its prop mod off with cause `destroyed`, delivered before
+it returns), stops every ship following it, ordered at it or queued at it (`stopped: target "x" was destroyed`, the ids
+returned so the caller re-points followers in the same call), and from then on `OrderRefusal` (`ship "x" was
+destroyed`, `target "x" was destroyed`), `Follow`, `WarpInFormation`, `PropModRefusal` and `SetPropModActive(on)`
+refuse it as ship, anchor, frame or target; `PlaceShip` ignores it. `IsDestroyed(id)` reads the flag. The ball stays
+for the explosion (the linger: `ExplosionRemoveTick`, death tick + ceil((lingerSeconds + 2) / tick)), then the director
+calls `RemoveShip` at that boundary, with or without a renderer; a re-added id is alive. Spec: `destiny-destroy.spec.ts`.
+
 ## Static object balls (`sd-objects`)
 
 `AddObject(doc, radius)` adds one ball per document object (and per celestial target) on **both** parks, from the ship

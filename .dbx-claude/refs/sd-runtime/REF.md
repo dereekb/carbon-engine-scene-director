@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts` (`destiny-tackle.spec.ts` and `destiny-accuracy.spec.ts`
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts` (`destiny-tackle.spec.ts` and `destiny-accuracy.spec.ts`
   cover `destiny.ts`' tackle and accuracy on `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
@@ -159,6 +159,21 @@ Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `Eve
 - **The impact gate**: a target's `CreateImpact` draws through its SOF-built `impactOverlay` only once
   `SetImpactDamageState(shield, armor, hull)` (remaining fractions) has been called (`Director.SyncImpactState`;
   declared on `EveShip2` and `EveSpaceObject2`); without a call no impacts draw at all.
+
+## Explosions (`explosions.ts`)
+
+- `EveEffectRoot2` (an effect root in `scene.objects`: `SceneObjectRoot`) and `EveChildExplosion` are exported from
+  `runtime.ts` and typed in `carbonenginejs-runtime.d.ts` (`SetLocalExplosionTransforms`, `SetGlobalExplosionOffset`,
+  `Play`, `Stop`, `isPlaying`, `wreckSwitchTime`, `totalDuration`, `generatedLocalExplosions` /
+  `generatedGlobalExplosions`); `EveShip2.locatorSets` (`EveLocatorSets`: `name`, `locators` with `position` and the
+  `direction` quaternion) gives the SOF `damage` set the local blasts use.
+- **The audio cut is in the values**: `WithoutAudio` copies the file's values with every `AudEventCurve` and every
+  `observers` list taken out before `CjsSchema.from` (inside `PageAudio.Detached`), so the hydrated root holds no
+  emitter at all; the page posts each blast's sound on the dying ship's emitter.
+- The runtime's `Play()` times the blasts (`CalculateExplosionTimes` with `triFloatRandom01`, so the drawn timing is
+  not seeded); `UpdateSyncronous` spawns them, removes the local blasts at `wreckSwitchTime` when a global part follows
+  and stops after `totalDuration`. It handles both member shapes: `localExplosions` + `globalExplosion` and the older
+  `localExplosion` + `globalExplosions` (the Triglavian dreadnought's file).
 
 ## Audio (`audio.ts`)
 

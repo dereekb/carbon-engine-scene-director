@@ -28,7 +28,8 @@ What works today:
   impact sounds wait on a PTADPCM decoder).
 - **Combat**: `set_target` and `engage` lock on EVE's lock time; each turret shot rolls
   EVE's hit chance through Destiny's `GetAccuracy` and does EVE damage through shield,
-  armor and hull; a ship at 0 hull is recorded as killed (explosions next).
+  armor and hull; a ship at 0 hull plays the client's death explosion and leaves the
+  scene, its fleet falling back as on a removal (a load revives it).
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.

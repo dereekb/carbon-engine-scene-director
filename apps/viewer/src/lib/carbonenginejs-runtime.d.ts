@@ -500,6 +500,10 @@ declare module '@carbonenginejs/runtime/trinity' {
    */
   export interface EveShip2 {
     translationCurve: TriVectorCurve | null;
+    /**
+     * The hull's locator sets once built (the SOF's `damage` set: where impacts and death blasts land).
+     */
+    readonly locatorSets: readonly EveLocatorSets[];
     rotationCurve: (ITriQuaternionFunction & { readonly value?: Quat }) | null;
     readonly boundingSphereCenter: Vec3;
     readonly boundingSphereRadius: number;
@@ -734,6 +738,64 @@ declare module '@carbonenginejs/runtime/trinity' {
   export class EveRootTransform extends EveTransform {
     translationCurve: TriVectorCurve | null;
     rotationCurve: (ITriQuaternionFunction | Tr2RotationAdapter) | null;
+  }
+
+  /**
+   * An effect's root in scene.objects (the ship-death explosion's `.black`): its effect children update on its curves.
+   */
+  export class EveEffectRoot2 {
+    readonly effectChildren: readonly object[];
+    translationCurve: TriVectorCurve | null;
+    rotationCurve: ITriQuaternionFunction | null;
+    readonly scaling: Vec3;
+    /**
+     * Its audio observers (TriObserverLocal); the page empties them before it adds the root.
+     */
+    observers: { observer: unknown }[];
+    readonly curveSets: readonly TriCurveSet[];
+    Start(): void;
+    Stop(): void;
+  }
+
+  /**
+   * The client's ship-death explosion (an EveEffectRoot2's effect child): local blasts at given hull points, then a
+   * global blast.
+   */
+  export class EveChildExplosion {
+    readonly scaling: Vec3;
+    readonly localScaling: Vec3;
+    readonly globalScaling: Vec3;
+    /**
+     * The local blast points, hull-local 4×4 matrices; set before Play.
+     */
+    SetLocalExplosionTransforms(transforms: Iterable<Float32Array | number[]>): void;
+    SetGlobalExplosionOffset(offset: Vec3): void;
+    /**
+     * Times the blasts (CalculateExplosionTimes) and starts: `wreckSwitchTime` and `totalDuration` are set then.
+     */
+    Play(): void;
+    Stop(): void;
+    readonly isPlaying: boolean;
+    /**
+     * Seconds after Play the client swaps the hull for its wreck (the global blast's start plus the file's offset).
+     */
+    readonly wreckSwitchTime: number;
+    readonly totalDuration: number;
+    readonly playTime: number;
+    /**
+     * Its spawned children: the shared part, each local blast, and the global container once it spawned.
+     */
+    readonly generatedLocalExplosions: readonly object[];
+    readonly generatedGlobalExplosions: object | null;
+    readonly localExplosionShared: object | null;
+  }
+
+  /**
+   * A named locator set on a built hull (`damage`, `turrets`, ...).
+   */
+  export interface EveLocatorSets {
+    readonly name: string;
+    readonly locators: readonly { readonly position: Vec3; readonly direction: Quat }[];
   }
 
   /**

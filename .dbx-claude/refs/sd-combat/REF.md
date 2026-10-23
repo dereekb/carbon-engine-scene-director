@@ -8,11 +8,14 @@
 **Status (2026-10-23)**: the combat-rules plan
 (`~/.claude/plans/combat-rules-locks-turret-hits-through-getaccuracy-damage-into-the-fit-s-damage.md`) lands in three
 slices. **K1 is in**: the runtime-free rules in `packages/scene` (below), the document's `combat` and `set_combat`, and
-`ship_stats`' turret numbers. **K2 is in: deaths flag until K3**: the page runs them: `ShipLocks`, the lock gate on
+`ship_stats`' turret numbers. **K2 is in**: the page runs them: `ShipLocks`, the lock gate on
 turrets, `CombatRules` rolling each shot through Destiny's `GetAccuracy`, damage into `DamageModel`, passive shield
-recharge, `engage` / `cease_fire`, get_state's locks and combat reports. A ship at 0 structure is recorded and flagged
-(`"explode"` acts as `"flag"`). **K3** (next): deaths that explode (the client's explosion) and leave both parks, the
-live fleet view, the real-GPU fight.
+recharge, `engage` / `cease_fire`, get_state's locks and combat reports. **K3 is in, the GPU calibration pending**:
+deaths explode (the client's explosion, drawn on a renderer and scheduled headless), the ball leaves both parks after
+the linger, the fleets fall back through the live view, a load revives everyone (verify-page 6–8 green). Still open
+(the K3 follow-up item): the real-GPU fight (screenshots, fps, `gpuErrors`, explosion audio `played`), pinning
+`referenceRadius` per class from it, and a look at the Triglavian dreadnought file's older members on the GPU (the
+runtime's `Play` / `UpdateSyncronous` handle `localExplosion` and `globalExplosions`; untested drawn).
 
 ## Files (K1)
 
@@ -107,6 +110,75 @@ the Entropic Disintegrator and Vorton Projector pages; Destiny's `GetAccuracy`
 | `viewer/damage.ts` | `ApplyHit`, `Recharge`, `Destroyed` (`capacitor.ts`' `CapacitorFractionAfter` is `passiveRecharge` too: one formula) |
 | `viewer/destiny.ts` | `Accuracy(source, target, numbers)`: the master park's `GetAccuracy` (`destiny-accuracy.spec.ts`) |
 | `viewer/director.ts` | the wiring below, `Engage` / `CeaseFire`, `OnKill`, get_state |
+
+## Files (K3)
+
+| File | Holds |
+|---|---|
+| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone)` → `{ scene, changes, warnings }`: `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); spec'd |
+| `viewer/destiny.ts` | `Destroy(id)` / `IsDestroyed(id)`, the `destroyed` refusals, prop mod cause `destroyed` (`destiny-destroy.spec.ts`) |
+| `viewer/explosion-plan.ts` | `ExplosionFileFacts`, `ExplosionFiles`, `ExplosionSchedule` / `ExplosionTimes`, `ExplosionRemoveTick`, `EXPLOSION_LINGER_MARGIN_SECONDS` (2); node-tested |
+| `viewer/explosions.ts` | `ShipExplosions` (runtime, renderer only): `Start`, `Frame`, `Report`, `Remove`, `Clear`, `Roots`, `Errors` |
+| `viewer/director.ts` | `Destroy`, `Hide`, `RemoveDead` (the linger), `Revive`, `LiveFleets`, `DriveExplosions`, `ExplosionStarts`, `PostExplosionSound`, `IsDead` skips |
+
+## Death (`combat.death`)
+
+- **`flag`**: the kill is recorded (`Killed`: targets on it clear, `OnKill` runs) and the ship flies on at 0 structure,
+  taking no more damage until a load.
+- **`explode`** (the default): `Killed` calls `Director.Destroy(kill)` before the `OnKill` listeners, at the boundary:
+  - `ModuleOutputs(modules.Remove(id, tick, 'its target was destroyed'))`: its modules stop, and every module on it;
+    `locks.Remove(id)` (both ways), its engagement and its own target end;
+  - `world.Destroy(id)`: its ball stops for good, its prop mod goes off, its followers and the ships ordered or queued
+    at it stop (`stopped: target "x" was destroyed`); orders, follows and prop mods on it are refused from then on;
+  - the live fleet view drops it and `following.Reconcile()` re-points the fleet;
+  - its explosion is chosen (`shipExplosionOf`: group and race from the fit bundle's hull record, size from
+    `RigSizeOf`, the seed) and its file loaded; `removeTick = ExplosionRemoveTick(kill.tick, lingerSeconds, tick)`.
+  - The killing shot draws as usual: `DriveTurrets` starts the explosion clock at its burst's start (draw + the set's
+    firing delay), or at the draw when the shot is dropped; a killing shot that never draws starts it two ticks after
+    the kill.
+  - **Hide** (`Hide(id)`): at the explosion's wreck switch the hull's drawing retires (turrets off,
+    `engine.RemoveShip`, `RetireShips` with every retained set), the live entry stays with `status: 'destroyed'`, no
+    hull; `shots.Forget(id)` runs then. Shots at it drawn before still draw.
+  - **Linger** (`RemoveDead`, first in the `OnBoundary` listener): at the first boundary at or after `removeTick` the
+    ball leaves both parks (`world.RemoveShip`), its emitter is released, its damage model and capacitor dropped, and
+    a cinema shot on it released (`its subject was destroyed`). The same with or without a renderer.
+  - **Skipped while dead** (`IsDead`): `Apply`'s builds, ball, retune and prop mod loops (a patch keeps the dead dead;
+    `remove_ship` removes it and its explosion), `Retune`, `SetFlight`, `SyncModules` (no specs, so no re-fly re-adds
+    modules), `WantedLocks`, framing (`ApplyCamera`), `Build` (a hull finishing after the hide is not drawn),
+    `switch_modules` / `switch_prop_mods` / `set_target` / `engage` selections (`it was destroyed`), `order_ship`
+    (`ship "x" was destroyed`). Fleet selections and `order_fleet` read the live view, so the dead are not members.
+  - **Revive** (`Revive`, a load): explosions removed, balls taken off (Apply adds them back fresh), live entries
+    retired so they rebuild as retried ships, deaths cleared.
+
+## The live fleets (`toLiveFleetScene`)
+
+The document with the destroyed taken out of their fleets by the same fleet ops a removal runs: a dead FC first hands
+the fleet (`update_fleet`) to the first live wing commander in wing order, else the first live squad commander, else
+the first live member; then `removeShipFromFleets` per dead ship, so squads anchored on it fall back down the chain
+with remove_ship's warnings; a fleet with nobody alive is dropped. Never written. `Director.LiveFleets()` memoizes it by
+(document, destroyed set) and feeds `FleetFollowing`, `FleetOrders`, get_state's memberships and fleets (`actingFor`,
+`destroyed`; a dropped fleet is not listed). An untouched scene is the same object.
+
+## The explosion, drawn (`explosions.ts`)
+
+- `ShipExplosions.Start(id, { ship, curves, choice, radius, at, seed })` queues it; `Frame(now)` (from
+  `DriveExplosions`, after `DriveTurrets` in `main.ts`) plays it at `at` once the file loaded: the values are copied
+  with every `AudEventCurve` and `observers` list taken out (`WithoutAudio`), hydrated inside `PageAudio.Detached`, the
+  root put on the ball's curves, the child's `scaling` = `max(1, boundingSphereRadius / referenceRadius)`,
+  `SetLocalExplosionTransforms` with a keyed subset (`combatShuffle(seed, "explosion|<ship>")`) of up to 8 `damage`
+  locators (8 Fibonacci points on the bounding sphere without them), `SetGlobalExplosionOffset(boundingSphereCenter)`,
+  `engine.AddObject(root)`, `Play()`.
+- Then: `onHide` at `wreckSwitchTime` (or when it stops); one `onSound` per spawned local blast and one for the global
+  container (diffing `generatedLocalExplosions` / `generatedGlobalExplosions`); the root comes off and is retired when
+  it stops or `totalDuration` passed. A failed load or play hides the hull at once and is reported.
+- **Without a renderer** `ExplosionSchedule` runs it: the first local event at the start, the first global one at start
+  + `localExplosionDelay` + `globalExplosionDelay`, the hide at the global start + `wreckSwitchOffsetFromGlobalStart`.
+- **Sounds** post through `PageAudio.Post` on the dying ship's emitter (released with the ball). The files' curves:
+  `local` / `global` (generic: `ecx_generic_explosive_short_individual_01a_play`, `..._global_01a_play`); the
+  Triglavian dreadnought's is `local_explosion_sfx` (`triglavian_structure_individual_explosion_play`) with no global
+  sound. `ExplosionFileFacts` matches curve names by prefix.
+- get_state `destroyed.explosion`: `{ state: waiting | playing | done | failed, file, scale?, localBlasts?,
+  wreckSwitchTime?, totalDuration?, removesAt, gone }`.
 
 ## Locks and the gate (`locks.ts`)
 
@@ -226,8 +298,9 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 ## State to snapshot (time control)
 
 Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies, kills, destroyed,
-spools), the `ModuleCycle` activation counters, `Director.engagements`, and (K3) the linger removal ticks. The RNG is
-the document's seed, so a re-simulation rolls the same.
+spools), the `ModuleCycle` activation counters, `Director.engagements`, and `Director.deaths` (kill, explosion choice,
+start, hidden, `removeTick`, gone). The RNG is the document's seed, so a re-simulation rolls the same; explosions
+re-trigger from their kills' times.
 
 ## Seams
 
@@ -248,6 +321,16 @@ lock's boundary; at 40 km `out of targeting range: 39.9 km, it locks at 28.1 km`
 16 / 16 hits, shield rows equal the volley through resists, dealt 803.1 = taken 803.1 (HP lost 794.3: the shield
 recharged the rest). Rifter at 20,085 m (chance 0.063): 11 of 12 missed, 1 impact sound for 1 hit. Seed 1 twice: 40
 shots, the kill 15 ticks after `engage`, by p2 high-0, dealt [824.6, 748]; seed 2: 32 shots, 12 ticks, p2 high-2.
+
+## Verify-page (K3)
+
+`a ship at 0 hull explodes and leaves cleanly`, `a dead squad lead and a dead FC fall back like a removal`,
+`load_scene revives the dead`. Evidence (2026-10-23, SDE 3632936, headless): Rifter killed by p2 15 ticks after
+`engage`; the orbiter `stopped: target "rifter" was destroyed`; `order_ship` refused; posted
+`ecx_generic_explosive_short_individual_01b_play` and `..._global_01b_play`; the ball gone at tick 85 (removesAt 84),
+`audio.gameObjects − emitters` 1 before and after. Fleet: the lead dead at tick 21, the squad anchors on the wing
+commander; the FC dead at tick 39, the wing commander acts for it and the member follows it. A load: 6 ships alive at
+full HP, no kills, the FC back.
 
 ## Test data
 

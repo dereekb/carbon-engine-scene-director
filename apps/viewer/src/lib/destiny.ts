@@ -185,7 +185,7 @@ export interface ShipPropModReport {
 /**
  * Why a prop mod changed: a live switch, the document's state, entering warp, or a warp scrambler.
  */
-export type PropModCause = 'switch' | 'document' | 'warp' | 'tackle';
+export type PropModCause = 'switch' | 'document' | 'warp' | 'tackle' | 'destroyed';
 
 /**
  * A prop mod starting (on) or stopping (off).
@@ -595,6 +595,10 @@ interface ShipEntry {
    * What tackle stops it doing; a placement keeps it.
    */
   tackle: ShipTackle;
+  /**
+   * Destroy stopped it for good: it takes no orders, follows nothing and is no one's target until RemoveShip.
+   */
+  destroyed: boolean;
 }
 
 interface PropModEntry {
@@ -688,7 +692,8 @@ export class DestinyWorld {
         held: null,
         formationWarp: null,
         prop: { state: 'off', since: null, stopAt: null, note: null, queued: null },
-        tackle: FREE
+        tackle: FREE,
+        destroyed: false
       });
     }
     this.PlaceShip(doc);
@@ -703,7 +708,7 @@ export class DestinyWorld {
    */
   PlaceShip(doc: Pick<SceneShip, 'id' | 'position' | 'rotation'>): void {
     const entry = this.ships.get(doc.id);
-    if (!entry) return;
+    if (!entry || entry.destroyed) return;
     const { ballId } = entry;
     this.pending.delete(doc.id);
     entry.order = STOP_ORDER;
@@ -789,6 +794,65 @@ export class DestinyWorld {
     }
     this.Both((park) => park.RemoveBall(entry.ballId));
     return stopped;
+  }
+
+  /**
+   * Stops a destroyed ship for good on both parks while its ball stays for its explosion: its order, pending order,
+   * following and formation warp end, its prop mod switches off (cause `destroyed`, delivered before this returns),
+   * and every ship following it, or ordered or queued at it, stops (re-point followers with Follow in the same call).
+   * From then on OrderRefusal, Follow, WarpInFormation and PropModRefusal refuse it, as an anchor, frame or target
+   * too. RemoveShip takes the ball off later.
+   *
+   * @param id - The ship id.
+   * @returns The ids of the ships it stopped, in the order they were added; empty for an unknown or destroyed ship.
+   */
+  Destroy(id: string): string[] {
+    const entry = this.ships.get(id);
+    if (!entry || entry.destroyed) return [];
+    entry.destroyed = true;
+    this.pending.delete(id);
+    this.pendingAt.delete(id);
+    entry.follow = null;
+    entry.settled = false;
+    entry.held = null;
+    entry.formationWarp = null;
+    entry.prop.queued = null;
+    this.PropModOffNow(entry, 'it was destroyed', 'destroyed');
+    this.Halt(entry, 'destroyed');
+    this.DeliverPropModEvents();
+    const stopped: string[] = [];
+    for (const other of this.ships.values()) {
+      if (other === entry) continue;
+      const pending = this.pending.get(other.id);
+      const queued = pending !== undefined && shipOrderTarget(pending) === id;
+      if (queued) {
+        this.pending.delete(other.id);
+        this.pendingAt.delete(other.id);
+      }
+      const follows = other.follow != null && (other.follow.anchor === id || other.follow.frame === id);
+      const leads = other.formationWarp?.leader === id;
+      if (follows || leads) {
+        other.follow = null;
+        other.settled = false;
+        other.held = null;
+        other.formationWarp = null;
+      }
+      if (queued || follows || leads || (!other.follow && TargetOf(other.order) === id)) {
+        this.Halt(other, `stopped: target "${id}" was destroyed`);
+        stopped.push(other.id);
+      }
+    }
+    return stopped;
+  }
+
+  /**
+   * Whether Destroy stopped a ship (its ball may still be on the parks).
+   *
+   * @param id - The ship id.
+   * @returns False for an unknown ship.
+   */
+  IsDestroyed(id: string): boolean {
+    return this.ships.get(id)?.destroyed === true;
   }
 
   /**
@@ -934,6 +998,10 @@ export class DestinyWorld {
     let refusal: Maybe<string> = null;
     if (!entry || !ball || (target && !targetBall)) {
       refusal = `ship "${id}" or its target has no Destiny ball`;
+    } else if (entry.destroyed) {
+      refusal = `ship "${id}" was destroyed`;
+    } else if (target && target !== id && this.ships.get(target)?.destroyed) {
+      refusal = `target "${target}" was destroyed`;
     } else if (ball.IsWarping()) {
       const landsIn = this.WarpReport(entry, ball)?.landsIn;
       const when = landsIn === undefined ? '' : `, in about ${landsIn} s`;
@@ -1032,6 +1100,8 @@ export class DestinyWorld {
     let refusal: Maybe<string> = null;
     if (!entry || !ball) {
       refusal = `ship "${id}" has no Destiny ball`;
+    } else if (on && entry.destroyed) {
+      refusal = `ship "${id}" was destroyed`;
     } else if (on && ball.IsWarping()) {
       const landsIn = this.WarpReport(entry, ball)?.landsIn;
       const when = landsIn === undefined ? '' : `, in about ${landsIn} s`;
@@ -1052,7 +1122,7 @@ export class DestinyWorld {
    */
   SetPropModActive(id: string, on: boolean): void {
     const entry = this.ships.get(id);
-    if (!entry) return;
+    if (!entry || (on && entry.destroyed)) return;
     const prop = entry.prop;
     // The document's state overrides a switch the pilot has yet to make.
     prop.queued = null;
@@ -1235,7 +1305,8 @@ export class DestinyWorld {
    */
   Follow(id: string, follow: ShipFollow): boolean {
     const entry = this.ships.get(id);
-    const valid = entry !== undefined && follow.anchor !== id && follow.frame !== id && this.ships.has(follow.anchor) && this.ships.has(follow.frame);
+    const live = (other: string): boolean => this.ships.get(other)?.destroyed === false;
+    const valid = entry !== undefined && !entry.destroyed && follow.anchor !== id && follow.frame !== id && live(follow.anchor) && live(follow.frame);
     if (valid) {
       this.pending.delete(id);
       entry.follow = follow;
@@ -1282,7 +1353,7 @@ export class DestinyWorld {
    */
   WarpInFormation(id: string, warp: FormationWarp): boolean {
     const entry = this.ships.get(id);
-    const valid = entry !== undefined && entry.follow !== null && warp.leader !== id && this.ships.has(warp.leader) && !this.InProperWarp(entry);
+    const valid = entry !== undefined && entry.follow !== null && warp.leader !== id && this.ships.get(warp.leader)?.destroyed === false && !this.InProperWarp(entry);
     if (valid) {
       entry.formationWarp = { leader: warp.leader, offset: [warp.offset[0], warp.offset[1], warp.offset[2]], at: this.tick + Math.max(0, Math.round(warp.delay ?? 0)), applied: false };
       entry.held = null;
