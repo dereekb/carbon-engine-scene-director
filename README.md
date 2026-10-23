@@ -232,6 +232,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Fleet personalities: templates, the library, pilot traits, the FC brain | [`sd-personalities`](.dbx-claude/refs/sd-personalities/REF.md) |
 | The timeline and ship orders: cues, steps, validation, the timeline ops | [`sd-timeline`](.dbx-claude/refs/sd-timeline/REF.md) |
 | Time control: rate, pause and fast-forward stepping, snapshots of the parks and per-tick state, the tape, jumps and what cuts the window | [`sd-time`](.dbx-claude/refs/sd-time/REF.md) |
+| Piloting: stances, the ideal range, the orbit model, maneuvers and the pilot step | [`sd-piloting`](.dbx-claude/refs/sd-piloting/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

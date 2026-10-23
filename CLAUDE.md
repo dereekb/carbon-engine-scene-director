@@ -50,6 +50,7 @@ files you touch and the scene-director tools you call. Fetch before designing or
   the timeline ops and pruning; later the page player, live vs authored, determinism
 - `sd-time`: time control: rate, pause and fast-forward stepping; later snapshots of the parks and per-tick state,
   the tape, jumps and what cuts the window
+- `sd-piloting`: stances, the ideal range from both sides' numbers, the orbit model, maneuvers and the pilot step
 
 When a change alters behavior a ref describes, update the ref in the same commit (a new area gets a new `sd-*` ref,
 declared with its triggers in `.dbx-claude/dbx-claude.json` `references.project`, and a row in the README's

@@ -19,3 +19,4 @@ export * from './lib/logi';
 export * from './lib/personalities';
 export * from './lib/timeline';
 export * from './lib/time';
+export * from './lib/piloting';
