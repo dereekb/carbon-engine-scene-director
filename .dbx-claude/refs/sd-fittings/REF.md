@@ -151,7 +151,12 @@ The merge of `/dogma/types` for 16 hulls (587 Rifter, 17732 TFI, 11987 Guardian,
 (Stasis Webifier II, Federation Navy Stasis Webifier), cap transmitter, siege, triage, suppressor, rig, neut, Heavy
 Energy Nosferatu II, Target Painter II, Warp Core Stabilizer II, a turret), the default weapons' 23 turrets, 3
 launchers and their charges, and the TFI's and Revelation's cargo charges (`sd-weapons`), with `/dogma/skills`: 618
-types, 869 effects, 782 attributes, ~567 KB (re-captured 2026-10-23 with effects' `resistanceAttributeID`). Every type
+types, 869 effects, 782 attributes, ~567 KB (re-captured 2026-10-23 with effects' `resistanceAttributeID`). Missiles M1
+added 43 types by merge (new keys only, every existing record unchanged): the T1 missiles of every default group
+(202-213, 266, 267, 2506-2516 even, 20306-20308, 21867, 17857-17863 odd, 32436-32442 even), the Kestrel 602, Raven 638
+and Drake 24698, Ballistic Control System II 22291, Rapid Light / Heavy Assault Missile Launcher II 1877 / 25715,
+Medium Warhead Calefaction Catalyst I 31622, Bomb Launcher I 27914, Core Probe Launcher II 4258, Core Scanner Probe
+I 30013 and Shrapnel Bomb 27918: 661 types. Every type
 record carries its `raceID` when it has one. Specs read it from disk (`readFileSync`), the hub's through
 `DogmaFixture()`. **Re-capture when CCP rebalances** (and re-check the stats parity spec, C3, and the weapon records,
 `sd-weapons`):
@@ -162,9 +167,17 @@ IDS=587,17732,11987,19720,22474,37604,438,440,12058,12076,12068,12084,41239,4125
 IDS=$IDS,597,16227,641,642,621,4310,47270,54732,2889,2913,37306,3041,3520,3057,37298,3074,3082,3090,37303,3178,3146,3186,37302,47914,47918,47922,52915,54742,54748,54753,2404,2410,19739
 IDS=$IDS,185,193,201,17668,246,254,262,17686,222,230,238,17648,47924,47928,47932,52916,54784,54786,54783,12775,12779,21894,41332,41330
 IDS=$IDS,17559,12263,19806,11640,17740,17920
+IDS=$IDS,202,203,204,205,206,207,208,209,210,211,212,213,266,267,2506,2508,2510,2512,2514,2516,20306,20307,20308,21867
+IDS=$IDS,17857,17859,17861,17863,32436,32438,32440,32442,602,638,24698,22291,1877,25715,31622,27914,4258,30013,27918
 curl -s "http://127.0.0.1:5521/dogma/types?ids=$IDS" -o types.json && curl -s http://127.0.0.1:5521/dogma/skills -o skills.json
 # merge: { sdeBuild, types, effects, attributes } = union of both, keys sorted numerically, compact JSON
 ```
+
+**The hub reads tools-core's latest SDE** (`/eve/latest/build` → `builds.sde`; `--build` pins only the resources).
+Since 2026-10-23 tools-core's latest is 3646012, so a capture for the 3632936 fixture needs the build pinned: run a
+proxy in front of tools-core that answers `/eve/latest/build` with `sde: 3632936` and forwards the rest, and point the
+hub's `--tools-core` at it (the missiles M1 capture did, `/tmp/msl/pin-proxy.mjs` on dbxpc). A batch over 200 ids
+splits across requests.
 
 ## The typed fit (`typeEftFit`)
 
@@ -199,9 +212,14 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   effect (category 1, e.g. hardeners) when active. Overload (5) never. A charge: category 0 while its module is on.
 - **Funcs**: `ItemModifier` (itemID, shipID, otherID), `LocationModifier`, `LocationGroupModifier` (groupID) and
   `LocationRequiredSkillModifier` (the skill among requiredSkill1-6, `-1` = the source skill) on the modules and
-  charges in the ship, `OwnerRequiredSkillModifier` on charges. Skipped and listed in `skipped`: target, structure and
-  character domains (the char-domain `LocationGroupModifier` targets boosters; drones come later). `EffectStopper` and
-  operation 9 are ignored.
+  charges in the ship, `OwnerRequiredSkillModifier` on charges. Skipped and listed in `skipped`: target and structure
+  domains, and charID `ItemModifier`s except `missileDamageMultiplier` (the char-domain `LocationGroupModifier` targets
+  boosters; drones come later). `EffectStopper` and operation 9 are ignored.
+- **The character item** (missiles M1): one synthetic item per evaluation for `CHARACTER_ATTRIBUTES` = {
+  `missileDamageMultiplier` 212 }, at the bundle's default (1 without a record). A charID `ItemModifier` on 212
+  targets it: Ballistic Control Systems (763 `missileDMGBonus`, category 4, so online) and Warhead Calefaction rigs
+  (2851) preMul it by 213, stacking-penalized like any module. `DogmaShip.characterAttribute(attribute)` reads it
+  (null for any other attribute); missile damage is the charge's × it (`sd-combat` → Missiles).
 - **Order**: preAssign, preMul, preDiv, modAdd, modSub, postMul, postDiv, postPercent, postAssign (the last assign
   wins). A modifier's amount is its modifying attribute evaluated on its source, so chains work: skill → the hull's
   `shipBonus*` → hull effect → resonance.
@@ -214,7 +232,12 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   `moduleBonusAfterburner` when active add `massAddition` (modAdd) and maxVelocity postPercent `speedFactor ×
   speedBoostFactor / mass` (the mass with the addition; never penalized), and the MWD adds signatureRadius postPercent
   `signatureRadiusBonus` (penalized). `adaptiveArmorHardener` when active preMuls the armor resonances by its own (a
-  static profile). Every other code effect (reps, webs, neuts, cap boosters) changes no attribute of its own ship: read
+  static profile). The missile skills' 660 `missileEMDmgBonus`, 661 `missileExplosiveDmgBonus`, 662
+  `missileThermalDmgBonus`, 668 `missileKineticDmgBonus2` (`MISSILE_SKILL_DAMAGE_EFFECTS`, on a skill only) add the
+  skill's evaluated `damageMultiplierBonus` (292) postPercent to EM 114 / explosive 116 / thermal 118 / kinetic 117 of
+  every charge requiring the skill (+25 % at V); the specializations' 1851 `selfRof` adds its `rofBonus` (293)
+  postPercent to the speed (51) of every module requiring it (−10 % at V, T2 launchers). Effects 152 / 163 already
+  multiply 292 / 293 by the level, so the code effects never do; skills are stacking-exempt. Every other code effect (reps, webs, neuts, cap boosters) changes no attribute of its own ship: read
   its numbers with `moduleAttribute` / `moduleNumbersOf`. What webs, painters, points and scrams do to their target
   enters the target's evaluation as `incoming` ("Target effects").
 - **Trace** steps: `{ source, effect, operation, amount, penalty?, from, to }`; sources are `ship`, `<module name>
@@ -286,9 +309,10 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   caches and returns `{ text, key, default?, fitting, modules, dogma, pending, note, typeIDs }` (null without a fit or a
   fallback). `fallback: { text, key }` is the fit of a ship without one: the director's default weapons fit
   (`sd-weapons`), keyed `default` and flagged `default: true`; the ship's own fit always wins. So **an unfitted ship
-  with an SDE hull rides the dogma path too**. After `WithPropMod`, `loadCargoCharges` gives each turret without a
-  charge the first fitting cargo charge (rows show `charge` and the note `loaded from cargo` / `no charge loaded`), and
-  the charge enters dogma as `chargeTypeID`. Pending names keep the
+  with an SDE hull rides the dogma path too**. After `WithPropMod`, `loadCargoCharges` gives each turret or launcher
+  without a charge the first fitting cargo charge, and a launcher with none there the hull race's default missile
+  (`sd-weapons` → Default missiles; its id joins `typeIDs`); rows show `charge` and the note `loaded from cargo` /
+  `default missile` / `no charge loaded`, and the charge enters dogma as `chargeTypeID`. Pending names keep the
   text's provisional keys and are not `unknown` yet. `dogma` is set once every name has settled, the hull's type is known
   (the ship's `/ship-stats` answer: a ship flies as its `type`, whatever its fit's header says), and the hull, modules,
   charges and skills are in the bundle; otherwise `note` says why (`resolving 3 of the fit's 40 names`, `waiting for the

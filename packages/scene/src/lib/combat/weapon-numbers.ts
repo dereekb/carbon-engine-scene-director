@@ -11,6 +11,7 @@ import { DAMAGE_TYPES, type DamageType } from '../fitting/defense';
 import type { DogmaShip } from '../fitting/dogma';
 import type { DogmaBundle } from '../fitting/dogma-bundle';
 import { damageTotal, type DamageVector, NO_DAMAGE } from './damage';
+import { missileCombatNumbersOf } from './missile-numbers';
 
 /**
  * The attributes the combat numbers read: damageMultiplier (64) on the module; EM 114, explosive 116, kinetic 117 and
@@ -137,7 +138,11 @@ export interface ShipWeapons {
    */
   readonly turrets: number;
   /**
-   * Their volleys summed.
+   * How many launchers count.
+   */
+  readonly launchers: number;
+  /**
+   * The turrets' and launchers' volleys summed.
    */
   readonly volley: number;
   /**
@@ -151,24 +156,27 @@ export interface ShipWeapons {
 }
 
 /**
- * A ship's turrets summed: volley, paper DPS, and DPS by type.
+ * A ship's turrets and launchers summed: volley, paper DPS, and DPS by type.
  *
  * @param ship - The evaluated ship.
  * @param bundle - Its bundle.
- * @param keys - The turrets to count; omitted: every turret that is not offline.
+ * @param keys - The weapons to count; omitted: every turret and launcher that is not offline.
  * @returns The sums.
  */
 export function shipWeaponsOf(ship: DogmaShip, bundle: DogmaBundle, keys?: Iterable<string>): ShipWeapons {
   const chosen = keys ? [...keys] : [...ship.modules].filter(([, module]) => module.state !== 'offline').map(([key]) => key);
   const damage: Record<DamageType, number> = { ...NO_DAMAGE };
   let turrets = 0;
+  let launchers = 0;
   let volley = 0;
   for (const key of chosen) {
-    const numbers = turretCombatNumbersOf(ship, bundle, key);
+    const turret = turretCombatNumbersOf(ship, bundle, key);
+    const numbers = turret ?? missileCombatNumbersOf(ship, bundle, key);
     if (!numbers) continue;
-    turrets += 1;
+    if (turret) turrets += 1;
+    else launchers += 1;
     volley += numbers.volley;
     for (const type of DAMAGE_TYPES) damage[type] += numbers.damage[type] / numbers.cycleTime;
   }
-  return { turrets, volley, dps: damageTotal(damage), damage };
+  return { turrets, launchers, volley, dps: damageTotal(damage), damage };
 }

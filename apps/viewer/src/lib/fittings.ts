@@ -38,6 +38,9 @@ import {
   fittingTypeIDs,
   isInlineFit,
   loadCargoCharges,
+  DEFAULT_MISSILE_LOADED,
+  defaultMissileOf,
+  missileDamageTypeOf,
   mergeDogmaBundles,
   moduleActivationOf,
   normalizePropModName,
@@ -514,6 +517,10 @@ export interface ResolveShipFittingInput {
    * The fit of a ship without one (its default weapons); never used when the ship has a fit.
    */
   readonly fallback?: Maybe<ShipFitFallback>;
+  /**
+   * The DNA's SOF race: a launcher's default missile follows the hull's SDE race, else this.
+   */
+  readonly sofRace?: Maybe<string>;
 }
 
 export interface ResolvedShipFitting {
@@ -548,7 +555,8 @@ export interface ResolvedShipFitting {
   readonly pending: boolean;
   readonly note: Maybe<string>;
   /**
-   * The types the fit's dogma needs besides its modules and charges: the hull and a replacing prop mod.
+   * The types the fit's dogma needs besides its modules and charges: the hull, a replacing prop mod and the default
+   * missiles of launchers with none.
    */
   readonly typeIDs: number[];
 }
@@ -560,7 +568,7 @@ export interface ResolvedShipFitting {
  * @returns The resolution; null for a ship without a fit.
  */
 export function ResolveShipFitting(input: ResolveShipFittingInput): Maybe<ResolvedShipFitting> {
-  const { doc, scene, lookup, hullTypeID, hullNote, propMod, fallback } = input;
+  const { doc, scene, lookup, hullTypeID, hullNote, propMod, fallback, sofRace = null } = input;
   const own = doc.fit ? fitTextOf(doc, scene) : null;
   const text = own ?? fallback?.text;
   if (!text) return null;
@@ -576,9 +584,12 @@ export function ResolveShipFitting(input: ResolveShipFittingInput): Maybe<Resolv
   // While names are pending the fit's own prop mod may not be typed yet: nothing is added or replaced until they land.
   const withPropMod = pendingNames.length ? { modules: fitting.modules, propModKey: null, extraTypeID: null } : WithPropMod(fitting, propMod ?? null);
   const { propModKey, extraTypeID } = withPropMod;
-  // A turret without a charge takes the first one in cargo that fits it, once the bundle holds both.
-  const modules: ShipFitModule[] = pendingNames.length ? withPropMod.modules : loadCargoCharges(withPropMod.modules, fitting.charges, bundle);
-  const typeIDs = [hullTypeID, extraTypeID].filter((id): id is number => id != null);
+  // A weapon without a charge takes the first one in cargo that fits it, once the bundle holds both; a launcher with
+  // none there takes the hull race's default missile, whose dogma joins typeIDs.
+  const damageType = missileDamageTypeOf(hullTypeID == null ? null : (bundle?.types[hullTypeID]?.raceID ?? null), sofRace);
+  const modules: ShipFitModule[] = pendingNames.length ? withPropMod.modules : loadCargoCharges(withPropMod.modules, fitting.charges, bundle, { defaultMissile: (launcher) => defaultMissileOf(launcher, damageType) });
+  const defaultMissiles = modules.flatMap((module) => (module.chargeNote === DEFAULT_MISSILE_LOADED && module.charge?.typeID != null ? [module.charge.typeID] : []));
+  const typeIDs = [...new Set([hullTypeID, extraTypeID, ...defaultMissiles].filter((id): id is number => id != null))];
   const needed = [...typeIDs, ...fittingTypeIDs({ ...fitting, modules })];
   let note: Maybe<string> = null;
   let pending = false;

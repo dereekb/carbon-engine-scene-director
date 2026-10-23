@@ -6,16 +6,19 @@
  * Rules (the sd-fittings ref has the detail):
  * - Effects that run: skills and the hull, category 0; modules, category 0 always, category 4 (online) when online or
  *   active, their default effect when active; charges, category 0 while their module is online or active. Overload
- *   (5) never runs. Modifiers on the target, structure and character domains are skipped (listed in `skipped`).
+ *   (5) never runs. Modifiers on the target and structure domains are skipped (listed in `skipped`), and so are
+ *   `ItemModifier`s on the character, except on the character attributes modelled here (CHARACTER_ATTRIBUTES: the
+ *   missileDamageMultiplier that Ballistic Control Systems raise).
  * - Operations apply in tools-core's order: preAssign, preMul, preDiv, modAdd, modSub, postMul, postDiv, postPercent,
  *   postAssign. A modifier's amount is its modifying attribute evaluated on its source item.
  * - Stacking penalty: on an attribute that is not stackable, from a source that is not a ship, charge, skill, implant
  *   or subsystem, for preMul, preDiv, postMul, postDiv and postPercent. Each operation is its own group, bonuses and
  *   maluses apart, strongest first; the i-th (from 0) counts `exp(-(i / 2.67)^2)`.
  * - `maxAttributeID` caps the result at the item's value of that attribute. A dependency cycle uses the base value.
- * - Code effects (no modifiers in the SDE; built in here as Pyfa does): the MWD and AB speed, mass and signature, and
- *   the reactive armor hardener's static profile. Other code effects (reps, webs, neuts) change no attribute of their
- *   own ship; their numbers are read with moduleAttribute.
+ * - Code effects (no modifiers in the SDE; built in here as Pyfa does): the MWD and AB speed, mass and signature, the
+ *   reactive armor hardener's static profile, the missile skills' damage bonus on the charges that require them and
+ *   the specializations' rate of fire bonus on the modules that require them. Other code effects (reps, webs, neuts)
+ *   change no attribute of their own ship; their numbers are read with moduleAttribute.
  * - Incoming modifiers (`incoming`: webs, painters, points and scrams on this ship, target-effects.ts) act on the ship
  *   from a module-category source, so they stack with its own penalized modifiers, each times the ship's resistance
  *   attribute (1 when it lacks it).
@@ -127,6 +130,10 @@ export interface DogmaShip {
    */
   chargeAttribute(key: string, attribute: string | number): Maybe<number>;
   /**
+   * A character attribute the evaluator models (CHARACTER_ATTRIBUTES), evaluated; null for any other.
+   */
+  characterAttribute(attribute: string | number): Maybe<number>;
+  /**
    * The steps that made a ship attribute (or a module's, with its key).
    */
   trace(attribute: string | number, key?: Maybe<string>): DogmaTraceStep[];
@@ -196,6 +203,38 @@ export const DOGMA_ATTRIBUTES = {
   armorThermalDamageResonance: 270
 } as const;
 
+/**
+ * The character attributes the evaluator models: missileDamageMultiplier (212), which Ballistic Control Systems and
+ * Warhead Calefaction rigs raise through charID ItemModifiers and every missile's damage is multiplied by. Every other
+ * charID ItemModifier is skipped.
+ */
+export const CHARACTER_ATTRIBUTES = {
+  missileDamageMultiplier: 212
+} as const;
+
+const CHARACTER_ATTRIBUTE_IDS: ReadonlySet<number> = new Set(Object.values(CHARACTER_ATTRIBUTES));
+
+/**
+ * The missile skills' damage code effects (no SDE modifiers): each adds the skill's evaluated damageMultiplierBonus
+ * (292, already times the level) as a postPercent to one damage type of every charge that requires the skill.
+ */
+export const MISSILE_SKILL_DAMAGE_EFFECTS: Readonly<Record<string, number>> = {
+  missileEMDmgBonus: 114,
+  missileExplosiveDmgBonus: 116,
+  missileThermalDmgBonus: 118,
+  missileKineticDmgBonus2: 117
+};
+
+/**
+ * The specializations' rate of fire code effect (no SDE modifiers): the skill's evaluated rofBonus (293, already
+ * times the level) as a postPercent to the speed (51) of every module that requires the skill.
+ */
+export const SELF_ROF_EFFECT = 'selfRof';
+
+const DAMAGE_MULTIPLIER_BONUS_ATTRIBUTE = 292;
+const ROF_BONUS_ATTRIBUTE = 293;
+const SPEED_ATTRIBUTE = 51;
+
 const REQUIRED_SKILL_ATTRIBUTES = [182, 183, 184, 1285, 1289, 1290] as const;
 
 const SKILL_CATEGORY = 16;
@@ -262,6 +301,7 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
   };
 
   const ship = makeItem({ id: 'ship', label: 'ship', type: hull, located: false });
+  const character = characterItem(bundle);
   for (const [key, id] of Object.entries(OVERRIDE_ATTRIBUTES)) {
     const value = overrides?.[key as keyof HullStatOverrides];
     if (value != null) ship.base.set(id, value);
@@ -349,7 +389,7 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
         continue;
       }
       if (modifier.modifiedAttributeID === DOGMA_ATTRIBUTES.skillLevel && item.type.categoryID === SKILL_CATEGORY) continue;
-      const targets = resolveTargets({ item, modifier, ship, located, charges });
+      const targets = resolveTargets({ item, modifier, ship, character, located, charges });
       if (targets == null) {
         skipped.add(effect.name);
         continue;
@@ -357,7 +397,7 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
       const applied: AppliedModifier = { source: item, effect: effect.name, operation: modifier.operation, amount: () => evaluate(item, modifier.modifyingAttributeID), penalizable: true };
       for (const target of targets) add(target, modifier.modifiedAttributeID, applied);
     }
-    addCodeEffect({ item, effect, ship, add, evaluate });
+    addCodeEffect({ item, effect, ship, located, charges, add, evaluate });
   }
 
   for (const [index, modifier] of (input.incoming ?? []).entries()) {
@@ -380,6 +420,10 @@ export function evaluateShipDogma(input: EvaluateShipDogmaInput): DogmaShip {
     chargeAttribute: (key, attribute) => {
       const charge = modules.get(key)?.charge;
       return charge ? evaluate(charge, attributeId(attribute)) : null;
+    },
+    characterAttribute: (attribute) => {
+      const id = typeof attribute === 'number' ? attribute : names.get(attribute);
+      return id != null && CHARACTER_ATTRIBUTE_IDS.has(id) ? evaluate(character, id) : null;
     },
     trace: (attribute, key = null) => {
       const item = key == null ? ship : modules.get(key)?.item;
@@ -455,6 +499,16 @@ function attributeNames(bundle: DogmaBundle): Map<string, number> {
   return names;
 }
 
+/**
+ * The character: one item per evaluation holding the character attributes the evaluator models, each at the bundle's
+ * default (1 without a record).
+ */
+function characterItem(bundle: DogmaBundle): DogmaItem {
+  const type: DogmaTypeRecord = { typeID: 0, name: 'character', groupID: 0, categoryID: 0, published: false, attributes: {}, effects: [] };
+  const base = new Map([...CHARACTER_ATTRIBUTE_IDS].map((id) => [id, bundle.attributes[id]?.defaultValue ?? 1]));
+  return { id: 'character', label: 'character', type, base, located: false, other: null, requiredSkills: new Set() };
+}
+
 function makeItem(config: { readonly id: string; readonly label: string; readonly type: DogmaTypeRecord; readonly located: boolean }): DogmaItem {
   const { type } = config;
   const base = new Map<number, number>(Object.entries(type.attributes).map(([id, value]) => [Number(id), value]));
@@ -475,16 +529,17 @@ interface ResolveTargetsInput {
   readonly item: DogmaItem;
   readonly modifier: DogmaEffectRecord['modifiers'][number];
   readonly ship: DogmaItem;
+  readonly character: DogmaItem;
   readonly located: readonly DogmaItem[];
   readonly charges: readonly DogmaItem[];
 }
 
 /**
  * The items a modifier acts on, or null when it acts on something this evaluator does not model (the character's own
- * attributes).
+ * attributes, but CHARACTER_ATTRIBUTES).
  */
 function resolveTargets(input: ResolveTargetsInput): Maybe<readonly DogmaItem[]> {
-  const { item, modifier, ship, located, charges } = input;
+  const { item, modifier, ship, character, located, charges } = input;
   const skill = modifier.skillTypeID === -1 ? item.type.typeID : modifier.skillTypeID;
   const ownerDomain = modifier.domain === 'shipID' || modifier.domain === 'charID';
   let targets: Maybe<readonly DogmaItem[]> = null;
@@ -493,6 +548,7 @@ function resolveTargets(input: ResolveTargetsInput): Maybe<readonly DogmaItem[]>
       if (modifier.domain === 'shipID') targets = [ship];
       else if (modifier.domain === 'itemID' || modifier.domain === '') targets = [item];
       else if (modifier.domain === 'otherID') targets = item.other ? [item.other] : [];
+      else if (modifier.domain === 'charID' && CHARACTER_ATTRIBUTE_IDS.has(modifier.modifiedAttributeID)) targets = [character];
       break;
     case 'LocationModifier':
       if (ownerDomain) targets = located;
@@ -514,6 +570,8 @@ interface CodeEffectInput {
   readonly item: DogmaItem;
   readonly effect: DogmaEffectRecord;
   readonly ship: DogmaItem;
+  readonly located: readonly DogmaItem[];
+  readonly charges: readonly DogmaItem[];
   readonly add: (target: DogmaItem, attribute: number, modifier: AppliedModifier) => void;
   readonly evaluate: (item: DogmaItem, attribute: number) => number;
 }
@@ -522,8 +580,10 @@ interface CodeEffectInput {
  * The code effects this evaluator builds in (their SDE records carry no modifiers).
  */
 function addCodeEffect(input: CodeEffectInput): void {
-  const { item, effect, ship, add, evaluate } = input;
+  const { item, effect, ship, located, charges, add, evaluate } = input;
   const own = (attribute: number) => () => evaluate(item, attribute);
+  const skill = item.type.categoryID === SKILL_CATEGORY ? item.type.typeID : null;
+  const damageAttribute = MISSILE_SKILL_DAMAGE_EFFECTS[effect.name];
   if (effect.name === MWD_EFFECT || effect.name === AB_EFFECT) {
     add(ship, DOGMA_ATTRIBUTES.mass, { source: item, effect: effect.name, operation: 2, amount: own(DOGMA_ATTRIBUTES.massAddition), penalizable: true });
     const boost = (): number => (evaluate(item, DOGMA_ATTRIBUTES.speedFactor) * evaluate(item, DOGMA_ATTRIBUTES.speedBoostFactor)) / evaluate(ship, DOGMA_ATTRIBUTES.mass);
@@ -533,6 +593,10 @@ function addCodeEffect(input: CodeEffectInput): void {
     for (const id of [DOGMA_ATTRIBUTES.armorEmDamageResonance, DOGMA_ATTRIBUTES.armorExplosiveDamageResonance, DOGMA_ATTRIBUTES.armorKineticDamageResonance, DOGMA_ATTRIBUTES.armorThermalDamageResonance]) {
       add(ship, id, { source: item, effect: effect.name, operation: 0, amount: own(id), penalizable: true });
     }
+  } else if (skill != null && damageAttribute != null) {
+    for (const charge of charges.filter((target) => target.requiredSkills.has(skill))) add(charge, damageAttribute, { source: item, effect: effect.name, operation: 6, amount: own(DAMAGE_MULTIPLIER_BONUS_ATTRIBUTE), penalizable: true });
+  } else if (skill != null && effect.name === SELF_ROF_EFFECT) {
+    for (const module of located.filter((target) => target.type.categoryID === MODULE_CATEGORY && target.requiredSkills.has(skill))) add(module, SPEED_ATTRIBUTE, { source: item, effect: effect.name, operation: 6, amount: own(ROF_BONUS_ATTRIBUTE), penalizable: true });
   }
 }
 

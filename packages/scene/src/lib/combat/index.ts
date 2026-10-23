@@ -3,6 +3,7 @@ export * from './damage';
 export * from './locks';
 export * from './random';
 export * from './weapon-numbers';
+export * from './missile-numbers';
 export * from './explosions';
 export * from './document';
 export * from './commands';

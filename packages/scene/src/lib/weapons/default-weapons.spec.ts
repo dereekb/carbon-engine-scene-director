@@ -21,7 +21,9 @@ describe('defaultWeaponsOf', () => {
     ['Megathron', 'turret', 7, 'Neutron Blaster Cannon II', 'Antimatter Charge L'],
     ['Tornado', 'turret', 8, '800mm Repeating Cannon II', 'EMP L'],
     ['Revelation', 'turret', 3, 'Dual Giga Pulse Laser II', 'Multifrequency XL'],
-    ['Caracal', 'launcher', 5, 'Heavy Missile Launcher II', null],
+    ['Caracal', 'launcher', 5, 'Heavy Missile Launcher II', 'Scourge Heavy Missile'],
+    ['Kestrel', 'launcher', 4, 'Light Missile Launcher II', 'Scourge Light Missile'],
+    ['Drake', 'launcher', 6, 'Heavy Missile Launcher II', 'Scourge Heavy Missile'],
     ['Vedmak', 'turret', 1, 'Heavy Entropic Disintegrator II', 'Baryon Exotic Plasma M'],
     ['Stormbringer', 'turret', 1, 'Medium Vorton Projector II', 'ElectroPunch Ultra M']
   ])('gives a %s %s × %i %s', (hull, kind, count, weapon, charge) => {
@@ -29,6 +31,14 @@ describe('defaultWeaponsOf', () => {
     expect({ kind: defaults.kind, count: defaults.count, weapon: defaults.weapon?.name, charge: defaults.charge?.name ?? null }).toEqual({ kind, count, weapon, charge });
     const highs = Array.from({ length: count }, () => (charge ? `${weapon}, ${charge}` : weapon));
     expect(defaults.text).toBe([`[${hull}, Default weapons]`, '[Empty Low slot]', '', '[Empty Med slot]', '', ...highs].join('\n'));
+  });
+
+  it("loads a launcher hull's missiles by its race, else its SOF race, else Scourge", () => {
+    const caracal = DOGMA_FIXTURE.types[fixtureTypeID('Caracal')];
+    expect(defaultWeaponsOf({ hull: { ...caracal, raceID: 2 } }).charge?.name).toBe('Nova Heavy Missile');
+    expect(defaultWeaponsOf({ hull: { ...caracal, raceID: undefined }, sofRace: 'amarr' }).charge?.name).toBe('Mjolnir Heavy Missile');
+    expect(defaultWeaponsOf({ hull: { ...caracal, raceID: undefined }, sofRace: 'serpentis' }).charge?.name).toBe('Inferno Heavy Missile');
+    expect(defaultWeaponsOf({ hull: { ...caracal, raceID: undefined } }).charge?.name).toBe('Scourge Heavy Missile');
   });
 
   it('gives a hull with no weapon hardpoints none, with a note', () => {
@@ -71,6 +81,6 @@ describe('defaultWeaponsOf', () => {
     ]);
     expect(parseEftFit(text).modules.map((line) => line.slot)).toEqual(['high', 'high', 'high']);
     const caracal = typeEftFit(parseEftFit(defaultsOf('Caracal').text as string), { answer: fixtureAnswer, bundle: DOGMA_FIXTURE });
-    expect(caracal.modules.map((module) => [module.key, module.weapon])).toContainEqual(['high-4', 'launcher']);
+    expect(caracal.modules.map((module) => [module.key, module.weapon, module.charge?.name])).toContainEqual(['high-4', 'launcher', 'Scourge Heavy Missile']);
   });
 });

@@ -1,13 +1,14 @@
 /**
  * Default weapons: the guns a ship without a fit carries. One Tech II turret per turret hardpoint, picked by the hull's
- * size and race, each loaded with a matching Tech I charge; a hull with launcher hardpoints only gets launchers (no
- * charge: missiles are the Missiles entry's). The result is EFT text, so a default fit runs through the same pipeline
+ * size and race, each loaded with a matching Tech I charge; a hull with launcher hardpoints only gets launchers, each
+ * loaded with the race's Tech I missile (default-missiles.ts). The result is EFT text, so a default fit runs through the same pipeline
  * as a document fit (names, dogma, activation, get_state). Names checked against SDE 3632936.
  */
 
 import type { Maybe } from '@dereekb/util';
 import type { DogmaTypeRecord } from '../fitting/dogma-bundle';
 import { HULL_SIZE_CLASSES, type HullSizeClass, readRigSize, type RigSize } from '../stats/prop-mods';
+import { DEFAULT_MISSILES, missileDamageTypeOf } from './default-missiles';
 
 /**
  * The turret families a default fit picks from.
@@ -83,6 +84,11 @@ export const DEFAULT_LAUNCHERS: Readonly<Record<HullSizeClass, Maybe<DefaultWeap
   L: { name: 'Cruise Missile Launcher II', typeID: 19739 },
   XL: null
 };
+
+/**
+ * The missile group each default launcher fires: light 384, heavy 385, cruise 386.
+ */
+export const DEFAULT_LAUNCHER_MISSILE_GROUPS: Readonly<Record<HullSizeClass, Maybe<number>>> = { S: 384, M: 385, L: 386, XL: null };
 
 /**
  * The weapon family of each SDE race: 1 Caldari, 2 Minmatar, 4 Amarr, 8 Gallente, 135 Triglavian, 168 EDENCOM.
@@ -219,18 +225,20 @@ export function defaultWeaponsOf(input: DefaultWeaponsInput): DefaultWeapons {
       : { text: null, kind: null, family, size, count: 0, weapon: null, charge: null, note: `${hull.name} has no default ${family} turret of size ${size}` };
   } else if (launchers > 0) {
     const launcher = DEFAULT_LAUNCHERS[size];
+    const group = DEFAULT_LAUNCHER_MISSILE_GROUPS[size];
+    const missile = group == null ? null : (DEFAULT_MISSILES[group]?.[missileDamageTypeOf(hull.raceID ?? null, sofRace)] ?? null);
     result = launcher
       ? {
           text: defaultFitText(
             hull.name,
-            Array.from({ length: launchers }, () => launcher.name)
+            Array.from({ length: launchers }, () => (missile ? `${launcher.name}, ${missile.name}` : launcher.name))
           ),
           kind: 'launcher',
           family: null,
           size,
           count: launchers,
           weapon: launcher,
-          charge: null
+          charge: missile
         }
       : { text: null, kind: null, family: null, size, count: 0, weapon: null, charge: null, note: `${hull.name} has no default launcher of size ${size}` };
   } else {

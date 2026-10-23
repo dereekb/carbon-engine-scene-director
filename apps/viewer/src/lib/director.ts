@@ -2618,7 +2618,8 @@ export class Director {
       hullTypeID: answer?.hull?.typeID ?? null,
       hullNote: answer ? answer.note : null,
       propMod: propMod ? { module: propMod.module, typeID: propMod.stats.typeID, name: propMod.stats.name, explicit: doc.propMod?.module != null } : null,
-      fallback: this.DefaultFallback(doc, answer)
+      fallback: this.DefaultFallback(doc, answer),
+      sofRace: doc.dna.split(':')[2] ?? null
     });
     if (fitting) this.fittings.set(doc.id, fitting);
     else this.fittings.delete(doc.id);

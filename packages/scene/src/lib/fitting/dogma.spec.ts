@@ -282,3 +282,40 @@ describe('evaluateShipDogma incoming modifiers', () => {
     expect(status('active')).toBe(-1);
   });
 });
+
+describe('evaluateShipDogma missile effects', () => {
+  const CARACAL_ID = fixtureTypeID('Caracal');
+  const SCOURGE_HEAVY = fixtureTypeID('Scourge Heavy Missile');
+  const launchers = (count: number) => Array.from({ length: count }, (_, index) => ({ key: `high-${index}`, typeID: fixtureTypeID('Heavy Missile Launcher II'), state: 'online' as const, chargeTypeID: SCOURGE_HEAVY }));
+  const bcs = (count: number) => Array.from({ length: count }, (_, index) => ({ key: `low-${index}`, typeID: fixtureTypeID('Ballistic Control System II'), state: 'online' as const }));
+  const caracal = (lows = 0) => evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: CARACAL_ID, modules: [...launchers(5), ...bcs(lows)] });
+
+  it("adds the missile skill's +25 % damage to its charges and the specialization's −10 % rate of fire to its launchers", () => {
+    const ship = caracal();
+    for (const key of ['high-0', 'high-4']) {
+      expect(ship.moduleAttribute(key, 51)).toBeCloseTo(6196.5, 6);
+      expect(ship.chargeAttribute(key, 117)).toBeCloseTo(149 * 1.1 * 1.25, 9);
+      expect(ship.chargeAttribute(key, 114)).toBe(0);
+    }
+    expect(ship.characterAttribute('missileDamageMultiplier')).toBe(1);
+    const untrained = evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: CARACAL_ID, modules: launchers(1), pilot: createPilotContext({ name: 'no heavy missiles', skills: { 'Heavy Missiles': 0, 'Heavy Missile Specialization': 0 }, defaultLevel: 5 }) });
+    expect(untrained.chargeAttribute('high-0', 117)).toBeCloseTo(149 * 1.1, 9);
+    expect(untrained.moduleAttribute('high-0', 51)).toBeCloseTo(6196.5 / 0.9, 6);
+  });
+
+  it("raises the character's missileDamageMultiplier with a Ballistic Control System, stacking-penalized, and speeds its launchers", () => {
+    const one = caracal(1);
+    expect(one.characterAttribute(212)).toBeCloseTo(1.1, 12);
+    expect(one.moduleAttribute('high-0', 51)).toBeCloseTo(6196.5 * 0.895, 6);
+    expect(one.skipped).not.toContain('missileDMGBonus');
+    const three = caracal(3);
+    expect(three.characterAttribute(212)).toBeCloseTo(1.1 * (1 + 0.1 * stackingFactor(1)) * (1 + 0.1 * stackingFactor(2)), 12);
+    expect(three.characterAttribute('maxVelocity')).toBeNull();
+  });
+
+  it("keeps a Kestrel's hull bonus on its light missiles", () => {
+    const ship = evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: fixtureTypeID('Kestrel'), modules: [{ key: 'high-0', typeID: fixtureTypeID('Light Missile Launcher II'), state: 'online', chargeTypeID: fixtureTypeID('Scourge Light Missile') }] });
+    expect(ship.chargeAttribute('high-0', 117)).toBeCloseTo(83 * 1.1 * 1.25 * 1.25, 9);
+    expect(ship.moduleAttribute('high-0', 51)).toBeCloseTo(12_800 * 0.9 * 0.85 * 0.9, 6);
+  });
+});

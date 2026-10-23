@@ -1,6 +1,7 @@
 /**
  * A weapon's graphic, as the hub's `GET /weapon?type=<typeID>` serves it from tools-core's `weapons/types/<id>`: the
- * turret `.black` to mount, its slot collection and size, and the SOF faction that paints it. Plain JSON, no runtime.
+ * turret `.black` to mount, its slot collection and size, and the SOF faction that paints it; a missile's graphics
+ * (`GET /missile`). Plain JSON, no runtime.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -67,6 +68,59 @@ export function readWeaponGraphic(value: unknown): Maybe<WeaponGraphic> {
       ...(typeof faction === 'string' && faction ? { sofFactionName: faction } : {}),
       ...(isId(value['chargeSize']) ? { chargeSize: value['chargeSize'] } : {}),
       ...(ammunition ? { ammunitionTypeIDs: ammunition } : {})
+    };
+  }
+  return graphic;
+}
+
+/**
+ * A missile's graphics, as the hub's `GET /missile?charge=<id>&launcher=<id>` serves them from tools-core's
+ * `weapons/types/<launcher>/ammunition` (the charge's impact effect) and `weapons/projectiles/<id>` (the EveMissile).
+ */
+export interface MissileGraphic {
+  readonly chargeTypeID: number;
+  /**
+   * The charge's name.
+   */
+  readonly name: string;
+  readonly launcherTypeID: number;
+  /**
+   * The impact effect's `.black` (an EveEffectRoot2), per size and damage type.
+   */
+  readonly impactResPath: string;
+  readonly projectileGraphicID: number;
+  /**
+   * The missile's `.black` (an EveMissile), one per size.
+   */
+  readonly projectileResPath: string;
+}
+
+/**
+ * Validates a hub `/missile` answer (the page reads untrusted JSON): ids and `res:/….black` paths only.
+ *
+ * @param value - The candidate.
+ * @returns The graphic, or null when it is malformed.
+ */
+export function readMissileGraphic(value: unknown): Maybe<MissileGraphic> {
+  let graphic: Maybe<MissileGraphic> = null;
+  if (
+    isPlainObject(value) &&
+    isId(value['chargeTypeID']) &&
+    typeof value['name'] === 'string' &&
+    isId(value['launcherTypeID']) &&
+    isId(value['projectileGraphicID']) &&
+    typeof value['impactResPath'] === 'string' &&
+    RES_PATH_PATTERN.test(value['impactResPath']) &&
+    typeof value['projectileResPath'] === 'string' &&
+    RES_PATH_PATTERN.test(value['projectileResPath'])
+  ) {
+    graphic = {
+      chargeTypeID: value['chargeTypeID'],
+      name: value['name'],
+      launcherTypeID: value['launcherTypeID'],
+      impactResPath: value['impactResPath'],
+      projectileGraphicID: value['projectileGraphicID'],
+      projectileResPath: value['projectileResPath']
     };
   }
   return graphic;

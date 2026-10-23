@@ -190,6 +190,40 @@ describe('ship_stats with a fit', () => {
     expect(gun?.volley).toBeGreaterThan(0);
   });
 
+  it("gives a default-fit Caracal's launchers their missiles' damage, flight and explosion, and the stats their sum", async () => {
+    const { shipData } = MakeFakeShipData();
+    const fit = ['[Caracal, Default weapons]', '[Empty Low slot]', '', '[Empty Med slot]', '', ...Array.from({ length: 5 }, () => 'Heavy Missile Launcher II, Scourge Heavy Missile')].join('\n');
+    const answer = await AnswerShipStats(shipData, { fit, type: 621 }, MakeFakeDogmaData());
+    const launcher = answer.fit?.modules.find((module) => module.key === 'high-0');
+    expect(launcher).toMatchObject({
+      charge: 'Scourge Heavy Missile',
+      cycleTime: 6.2,
+      damage: { em: 0, thermal: 0, kinetic: 204.88, explosive: 0 },
+      volley: 204.88,
+      dps: 33.06,
+      velocity: 9675,
+      flightTime: 9.771,
+      missileRange: { lower: 86_873, upper: 96_548, upperChance: 0.771, mean: 94_331 },
+      explosion: { radius: 105, velocity: 127.5, drf: 0.682 }
+    });
+    expect(launcher?.range).toBeUndefined();
+    expect(launcher?.tracking).toBeUndefined();
+    expect(answer.stats.weapons).toMatchObject({ turrets: 0, launchers: 5 });
+    expect(answer.stats.weapons?.volley).toBeCloseTo(1024.375, 3);
+    expect(answer.stats.weapons?.dps).toBeCloseTo(165.315, 3);
+  });
+
+  it('loads an empty launcher with a missile from cargo, else the hull race default, as the page does', async () => {
+    const { shipData } = MakeFakeShipData();
+    const lines = (cargo: readonly string[]) => ['[Caracal, Bare launcher]', '[Empty Low slot]', '', '[Empty Med slot]', '', 'Heavy Missile Launcher II', '', '', ...cargo].join('\n');
+    const fromCargo = await AnswerShipStats(shipData, { fit: lines(['Mjolnir Heavy Missile x100']), type: 621 }, MakeFakeDogmaData());
+    expect(fromCargo.fit?.modules[0]).toMatchObject({ charge: 'Mjolnir Heavy Missile', note: 'loaded from cargo', damage: { em: 204.88 } });
+    const dogmaData = MakeFakeDogmaData();
+    const defaulted = await AnswerShipStats(shipData, { fit: lines(['EMP S x100']), type: 621 }, dogmaData);
+    expect(defaulted.fit?.modules[0]).toMatchObject({ charge: 'Scourge Heavy Missile', note: 'default missile', volley: 204.88 });
+    expect(defaulted.stats.weapons?.launchers).toBe(1);
+  });
+
   it('runs the active modules by key, category or name, leaves offline ones off, and traces on request', async () => {
     const { shipData } = MakeFakeShipData();
     const dogmaData = MakeFakeDogmaData();

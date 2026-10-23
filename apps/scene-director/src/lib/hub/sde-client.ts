@@ -115,7 +115,18 @@ export class SdeClient {
    * @throws {ShipDataError} Mapped from tools-core's status.
    */
   async GetJson(request: SdeRequest): Promise<JsonObject> {
-    return this.Request(request, null);
+    return (await this.Request(request, null)).json;
+  }
+
+  /**
+   * GETs a route of the pinned build that answers a JSON array (`weapons/types/<id>/ammunition`).
+   *
+   * @param request - The route, what it is and the deadline.
+   * @returns The array's objects; empty when the body is no array.
+   * @throws {ShipDataError} Mapped from tools-core's status.
+   */
+  async GetJsonArray(request: SdeRequest): Promise<JsonObject[]> {
+    return ReadArray((await this.Request(request, null)).raw);
   }
 
   /**
@@ -127,7 +138,7 @@ export class SdeClient {
    * @throws {ShipDataError} Mapped from tools-core's status.
    */
   async PostJson(request: SdeRequest, body: unknown): Promise<JsonObject> {
-    return this.Request(request, body);
+    return (await this.Request(request, body)).json;
   }
 
   /**
@@ -173,18 +184,18 @@ export class SdeClient {
     return String(build);
   }
 
-  private async Request({ route, what, timeoutMs = REQUEST_TIMEOUT_MS }: SdeRequest, payload: unknown): Promise<JsonObject> {
+  private async Request({ route, what, timeoutMs = REQUEST_TIMEOUT_MS }: SdeRequest, payload: unknown): Promise<{ readonly json: JsonObject; readonly raw: unknown }> {
     const build = await this.SdeBuild();
     const body = await this.Fetch({ path: `${this.url}/eve/${build}/${route}`, what, timeoutMs, body: payload });
     const error = typeof body.json['error'] === 'string' ? body.json['error'] : `answered ${body.status}`;
-    if (body.ok) return body.json;
+    if (body.ok) return body;
     if (body.status >= 500 || (body.status === 404 && /not prepared/iu.test(error))) throw UnavailableSde({ build, error });
     if (body.status === 404) throw new ShipDataError('not-found', `tools-core has no ${what} (${error})`);
     if (body.status === 409) throw new ShipDataError('ambiguous', `${what} is ambiguous (${error}); use an EVE type id`);
     throw new ShipDataError('invalid', `tools-core refused ${what} (${error})`);
   }
 
-  private async Fetch({ path, what, timeoutMs, body }: { readonly path: string; readonly what: string; readonly timeoutMs: number; readonly body: unknown }): Promise<{ readonly ok: boolean; readonly status: number; readonly json: JsonObject }> {
+  private async Fetch({ path, what, timeoutMs, body }: { readonly path: string; readonly what: string; readonly timeoutMs: number; readonly body: unknown }): Promise<{ readonly ok: boolean; readonly status: number; readonly json: JsonObject; readonly raw: unknown }> {
     let response: Response;
     try {
       const init: RequestInit = body == null ? { signal: AbortSignal.timeout(timeoutMs) } : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) };
@@ -192,8 +203,8 @@ export class SdeClient {
     } catch (error) {
       throw new ShipDataError('unavailable', `tools-core at ${this.url} is unreachable for ${what}: ${ErrorMessage(error)}`);
     }
-    const json = ReadObject(await response.json().catch(() => null));
-    return { ok: response.ok, status: response.status, json };
+    const raw: unknown = await response.json().catch(() => null);
+    return { ok: response.ok, status: response.status, json: ReadObject(raw), raw };
   }
 }
 

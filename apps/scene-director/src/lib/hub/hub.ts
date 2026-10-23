@@ -6,7 +6,7 @@
  * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /prop-mod?module= (a prop mod's numbers by type id
  * or EVE name), /fit/type?name=&hull= (a fit line's EVE type and slot), /dogma/types?ids= (a DogmaBundle of up to 200
  * types) and /dogma/skills (every published skill's), /weapon?type= (a weapon's graphic: its .black, slot collection and
- * SOF faction), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
+ * SOF faction), /missile?charge=&launcher= (a missile's EveMissile and impact effect), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
  * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range;
  * with an audio cache, ranged reads come from local copies of the banks: audio-cache.ts), /health, and the viewer files.
  *
@@ -408,6 +408,8 @@ export class Hub implements ToolCaller {
       await this.ServeJson(response, () => this.AnswerDogma(pathname, url));
     } else if (pathname === '/weapon') {
       await this.ServeJson(response, () => this.AnswerWeapon(url));
+    } else if (pathname === '/missile') {
+      await this.ServeJson(response, () => this.AnswerMissile(url));
     } else if (pathname === '/audio/library') {
       await this.StreamProxy({ source: () => this.toolsCore.AudioLibraryUrl(), request, response });
     } else if (pathname.startsWith('/audio/path/')) {
@@ -477,6 +479,19 @@ export class Hub implements ToolCaller {
     const type = url.searchParams.get('type') ?? '';
     if (!/^\d+$/u.test(type)) throw new ShipDataError('invalid', 'type must be an EVE type id');
     return this.weaponData.Weapon(Number(type));
+  }
+
+  /**
+   * A missile's graphics for the page: `charge` and `launcher` are EVE type ids. Errors map as /ship-stats does.
+   *
+   * @param url - The request URL.
+   * @returns The MissileGraphic.
+   */
+  private async AnswerMissile(url: URL): Promise<unknown> {
+    const charge = url.searchParams.get('charge') ?? '';
+    const launcher = url.searchParams.get('launcher') ?? '';
+    if (!/^\d+$/u.test(charge) || !/^\d+$/u.test(launcher)) throw new ShipDataError('invalid', 'charge and launcher must be EVE type ids');
+    return this.weaponData.Missile(Number(charge), Number(launcher));
   }
 
   /**

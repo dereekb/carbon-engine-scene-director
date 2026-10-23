@@ -1,7 +1,7 @@
-# Weapons: turrets on every ship, default guns, slots, charges, the weapon route
+# Weapons: turrets on every ship, default guns and missiles, slots, charges, the weapon and missile routes
 
-> Fetch before touching `packages/scene/src/lib/weapons/`, a fit's weapon modules or charges, the hub's `/weapon`
-> route (`hub/weapon-data.ts`), or anything that mounts, aims or fires turrets on the page. The typed fit, dogma and
+> Fetch before touching `packages/scene/src/lib/weapons/`, a fit's weapon modules or charges, the hub's `/weapon` or
+> `/missile` route (`hub/weapon-data.ts`), or anything that mounts, aims or fires turrets or launchers on the page. The typed fit, dogma and
 > the activation layer the guns ride on: `sd-fittings`; the runtime classes: `sd-runtime`.
 
 **Status (2026-10-23)**: the turrets plan
@@ -9,7 +9,10 @@
 slices. **W1 is in**: the runtime-free half in `packages/scene` (default weapons, turret slots, charges, the weapon
 graphic) and the hub's `/weapon` route. **W2 is in**: the page's default fit, cargo charges, `WeaponLookup` and
 mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weapon cycle through `switch_modules`, the
-`Director.OnShot` hook, the cycle-exact draw and impacts. **W4 is in**: turret sounds (below); the plan is delivered. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
+`Director.OnShot` hook, the cycle-exact draw and impacts. **W4 is in**: turret sounds (below); the plan is delivered.
+**Missiles** (`~/.claude/plans/missiles-launchers-fire-destiny-pursued-evemissiles-that-hit-through-eve-s-missi.md`):
+**M1 is in** (default missiles, launcher charges, the `/missile` route; the numbers: `sd-combat` → Missiles); M2 (the
+page fires them, headless) and M3 (drawn, real GPU) are to come, so launchers are still refused activation. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
 ## Files
@@ -18,12 +21,14 @@ mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weap
 |---|---|
 | `weapons/default-weapons.ts` | `WEAPON_FAMILIES`, `DEFAULT_TURRETS`, `DEFAULT_LAUNCHERS`, `RACE_WEAPON_FAMILIES`, `SOF_RACE_WEAPON_FAMILIES`, `ATTACK_BATTLECRUISER_GROUP`, `DEFAULT_WEAPONS_FIT_NAME`, `weaponFamilyOf`, `weaponSizeOf`, `defaultWeaponsOf` |
 | `weapons/slots.ts` | `CLASSIC_TURRET_LOCATOR`, `TURRET_LOCATOR_COLLECTIONS`, `MAX_TURRET_SLOT`, `turretLocatorSlots`, `assignTurretSlots` |
-| `weapons/graphic.ts` | `WeaponGraphic`, `WEAPON_SLOTS`, `readWeaponGraphic` (the page reads the hub's answer through it) |
-| `weapons/charges.ts` | `CHARGE_GROUP_ATTRIBUTES`, `CHARGE_SIZE_ATTRIBUTE`, `chargeFitsModule`, `loadCargoCharges`, `ChargedModule` |
+| `weapons/graphic.ts` | `WeaponGraphic`, `WEAPON_SLOTS`, `readWeaponGraphic`; `MissileGraphic`, `readMissileGraphic` (the page reads the hub's answers through them) |
+| `weapons/charges.ts` | `CHARGE_GROUP_ATTRIBUTES`, `CHARGE_SIZE_ATTRIBUTE`, `chargeFitsModule`, `loadCargoCharges` (`defaultMissile` option), `ChargedModule`, `DEFAULT_MISSILE_LOADED` |
+| `weapons/default-missiles.ts` | `DEFAULT_MISSILES`, `RACE_MISSILE_DAMAGE_TYPES`, `SOF_RACE_MISSILE_DAMAGE_TYPES`, `missileDamageTypeOf`, `defaultMissileOf`, `isMissileCharge` |
+| `weapons/fixtures/missiles-3632936.json` | `{ ammunition: { <launcher>: rows }, projectiles: { <graphicID>: record } }` for launchers 2404, 2410, 19739, 1877, 25715 (rows trimmed to typeID, name, groupID, graphicID, graphicRole, resPath, projectileGraphicID) and projectiles 21934, 21936, 21937, 21938 |
 | `weapons/fixtures/weapons-3632936.json` | tools-core's `weapons/types/<id>` records for every default weapon, captured live; specs read it from disk, never the package |
 | `fitting/categories.ts` | `WEAPON_KIND_EFFECTS` (42 turret, 40 launcher), `weaponKindOf`; `typeEftFit` sets `FittedModule.weapon` when the bundle has the module's effects |
 | `apps/scene-director/src/lib/hub/weapon-data.ts` | `WeaponData` (`Weapon(typeID)`) over `SdeClient`, cached per hub |
-| `hub/weapon-data.testing.ts` | `WeaponRoutes`, `MakeRoutedWeaponData`, `MakeFakeWeaponData` over the captured records |
+| `hub/weapon-data.testing.ts` | `WeaponRoutes` (weapons, ammunition, projectiles), `MissileFixture`, `MakeRoutedWeaponData`, `MakeFakeWeaponData` over the captured records |
 | `apps/viewer/src/lib/weapon-lookup.ts` | `WeaponLookup`: the page's `/weapon` lookups (node-tested) |
 | `apps/viewer/src/lib/turret-plan.ts` | `TurretMountsOf`, `TurretMountsKey`, `HighIndexOf`, `TurretFiles`, `TurretFileFacts`, the mount report types (node-tested) |
 | `apps/viewer/src/lib/turrets.ts` | `ShipTurrets` (runtime): mount, remount, the animated-hull rebind, report |
@@ -46,8 +51,10 @@ fit carries its fit's weapons and nothing else: a logi fit without guns, or `[Hu
   serpentis blaster, minmatar / angel projectile, triglavian disintegrator, concord vorton), else projectile.
 - **Size**: rigSize 1547 (1 S, 2 M, 3 L, 4 XL); attack battlecruisers (group 1201) L; else the class's rig size; else S.
 - **Count**: one turret per turret hardpoint (102), at most the high slots (14). With no turret hardpoints but launcher
-  hardpoints (101): launchers (Light / Heavy / Cruise Missile Launcher II, no XL, no charge; refused activation until
-  the Missiles entry). Neither: no fit, note `<hull> has no weapon hardpoints`. A family with no gun of the size (XL
+  hardpoints (101): launchers (Light / Heavy / Cruise Missile Launcher II, no XL), each loaded with the race's Tech I
+  light / heavy / cruise missile (`DEFAULT_LAUNCHER_MISSILE_GROUPS`, Default missiles below):
+  `Heavy Missile Launcher II, Scourge Heavy Missile`. Launchers are refused activation until missiles M2. Neither: no
+  fit, note `<hull> has no weapon hardpoints`. A family with no gun of the size (XL
   vorton) gives no fit and a note. Hulls with both kinds (Raven, Typhoon) get turrets only.
 
 | Family | S | M | L | XL | Charge |
@@ -75,8 +82,9 @@ empty low and mid sections, so its lines key `high-0…` before the names resolv
 
 Fixture check (`default-weapons.spec.ts`): Rifter 3 × 200mm AutoCannon II, Punisher 4 × Small Focused Pulse Laser II,
 Ferox 6 × 250mm Railgun II, Megathron 7 × Neutron Blaster Cannon II, Tornado 8 × 800mm Repeating Cannon II, Revelation
-3 × Dual Giga Pulse Laser II, Caracal 5 × Heavy Missile Launcher II, Vedmak 1 × Heavy Entropic Disintegrator II,
-Stormbringer 1 × Medium Vorton Projector II, Apostle none.
+3 × Dual Giga Pulse Laser II, Caracal 5 × Heavy Missile Launcher II with Scourge Heavy Missile, Kestrel 4 × Light
+Missile Launcher II with Scourge Light Missile, Drake 6 × Heavy Missile Launcher II with Scourge Heavy Missile, Vedmak
+1 × Heavy Entropic Disintegrator II, Stormbringer 1 × Medium Vorton Projector II, Apostle none.
 
 ### On the page (W2)
 
@@ -288,13 +296,43 @@ bus. Clip and cues: `.scratch/turrets-gpu/w4-listen/` on dbxpc.
 
 - A charge fits a module when the module's chargeGroup1-5 (604, 605, 606, 609, 610) hold the charge's group and the
   chargeSize (128) matches (when the module names one). The 800mm Repeating Cannon II takes groups 83 / 372, size 3.
-- A turret with no loaded charge takes the first fitting cargo charge (`ShipFitting.charges`, written order):
-  `chargeNote: 'loaded from cargo'`; with none that fits, `'no charge loaded'` (it fires on its own numbers). A loaded
-  charge is kept; launchers and modules or charges the bundle lacks are left alone.
+- A turret or launcher with no loaded charge takes the first fitting cargo charge (`ShipFitting.charges`, written
+  order; a launcher only a missile, `isMissileCharge`): `chargeNote: 'loaded from cargo'`. Otherwise a launcher takes
+  the option's `defaultMissile(launcherRecord)` (`'default missile'`, `DEFAULT_MISSILE_LOADED`), and a turret, or a
+  launcher without a default, gets `'no charge loaded'` (a turret fires on its own numbers). A loaded charge is kept;
+  modules or cargo charges the bundle lacks are left alone; a default missile the bundle lacks still loads (the caller
+  fetches its dogma). Turrets get no default charge.
 - The TFIs doctrine fits load no charges: the TFI's guns load `Barrage L`, the Revelation's `Conflagration XL`.
 - `fittingTypeIDs` returns the cargo charges' ids too, so their dogma lands with the fit in one request. The page runs
   `loadCargoCharges` after `WithPropMod` (generic over the module type, so the page's notes ride along) and passes the
   charge to dogma as `chargeTypeID`.
+
+## Default missiles (`default-missiles.ts`, missiles M1)
+
+A launcher with no missile loaded and none fitting in cargo fires the Tech I missile of its first charge group
+(chargeGroup1-5) that `DEFAULT_MISSILES` names, at the hull's damage type (`missileDamageTypeOf`): SDE race 1
+Caldari kinetic, 2 Minmatar explosive, 4 Amarr EM, 8 Gallente thermal; else the SOF race (caldari / guristas kinetic,
+minmatar / angel explosive, amarr / sansha / bloodraider EM, gallente / serpentis thermal); else kinetic. Probe
+launchers carry no `launcherFitted` (40), so they are no launcher at all; bomb launchers (group 862) have no default.
+
+| Group | kinetic (Scourge) | thermal (Inferno) | EM (Mjolnir) | explosive (Nova) |
+|---|---|---|---|---|
+| light 384 (light, rapid light) | 210 | 211 | 212 | 213 |
+| heavy 385 | 209 | 208 | 207 | 206 |
+| cruise 386 | 203 | 204 | 202 | 205 |
+| rocket 387 | 266 | 2514 | 2512 | 2516 |
+| torpedo 89 | 267 | 2510 | 2506 | 2508 |
+| heavy assault 772 | 20307 | 20308 | 20306 | 21867 |
+| XL torpedo 476 | 17859 | 17861 | 17857 | 17863 |
+| XL cruise 1019 | 32436 | 32440 | 32442 | 32438 |
+
+- **The page** (`ResolveShipFitting`): the damage type from the hull record's `raceID` (the fit bundle's), else the
+  DNA's SOF race (`sofRace`, the director passes `doc.dna`'s third part). A default missile the bundle lacks joins the
+  resolution's `typeIDs`, so `LookupFit` prepares it and the ship resolves on the next pass ("a resolution still
+  pending prepares once more"); a default weapons fit names its missile in the text, so it needs no extra pass. Rows
+  report `charge` and the note `default missile`.
+- **The hub** (`ship_stats` `ResolveFit`): the same option; a second `Bundle(missing)` fetches the default missiles
+  the first bundle lacks.
 
 ## Turret slots (`assignTurretSlots`)
 
@@ -337,8 +375,25 @@ with no weapon graphic (tools-core: `Weapon type not found`) or an unusable reco
 The Small Focused Pulse Laser II draws `pulse_medium_t1.black`; the three neutron blasters share a file per size
 folder. Re-capture `weapons/fixtures/weapons-3632936.json` with the dogma fixture (below) when CCP rebalances.
 
+## The missile route (hub, missiles M1)
+
+`GET /missile?charge=<typeID>&launcher=<typeID>` answers `MissileGraphic { chargeTypeID, name, launcherTypeID,
+impactResPath, projectileGraphicID, projectileResPath }` (`WeaponData.Missile`): the launcher's
+`weapons/types/<launcher>/ammunition` row for the charge (its `resPath` is the impact effect, graphicRole `impact`,
+one per size and damage type: `heavy_impact_scourge.black`; its `projectileGraphicID`), then
+`weapons/projectiles/<id>` (the `EveMissile` file, one per size: light 21938, heavy 21936, cruise 21934, heavy
+assault 21937, rocket 21939, torpedo 21940, XL torpedo 21931, XL cruise 21933; `heavy_missile.black`). Ammunition is
+cached per launcher, projectiles per id. Errors: 400 for values that are not ids, 404 `not-found` for a charge the
+launcher does not fire (a launcher's rows list every charge it takes: rapid lights fire light missiles) or one with no
+projectile graphic, 503 without an SDE. tools-core answers the ammunition route with a JSON array:
+`SdeClient.GetJsonArray` reads it (`GetJson` flattens a non-object body to `{}`). The page reads the answer through
+`readMissileGraphic` (ids and `res:/….black` paths only); the page's lookup and drawing are missiles M3.
+
 ## Test data
 
 The dogma fixture (`sd-fittings`) carries the default weapons, their charges, the TFI's and the Revelation's cargo
 charges, the hulls the default-weapons spec names, and `raceID` on every record. Weapon records: for each default
 weapon id, `curl http://127.0.0.1:5510/eve/3632936/weapons/types/<id>`, merged by id into one compact JSON object.
+Missile records (2026-10-23): for launchers 2404, 2410, 19739, 1877 and 25715,
+`/eve/3632936/weapons/types/<id>/ammunition` (rows trimmed as above) and every `projectileGraphicID` they name from
+`/eve/3632936/weapons/projectiles/<id>`, written as `missiles-3632936.json`.

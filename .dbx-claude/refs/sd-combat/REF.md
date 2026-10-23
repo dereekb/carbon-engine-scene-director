@@ -15,15 +15,21 @@ explosion, drawn on a renderer and scheduled headless), the ball leaves both par
 back through the live view, a load revives everyone (verify-page 6–8 green), and the real-GPU fight calibrated and
 pinned `referenceRadius` (below, Real-GPU evidence). The plan is **delivered**.
 
+**Missiles** (`~/.claude/plans/missiles-launchers-fire-destiny-pursued-evemissiles-that-hit-through-eve-s-missi.md`):
+**M1 is in** (2026-10-23): EVE's missile rules and numbers in `packages/scene` (Missiles, below), the evaluator's
+missile effects (`sd-fittings`), default missiles and the `/missile` route (`sd-weapons`), `ship_stats` launcher rows.
+M2 (Destiny missiles, hits, expiry, kills in the page, headless) and M3 (drawn, real GPU) are to come.
+
 ## Files (K1)
 
 | File | Holds |
 |---|---|
-| `combat/accuracy.ts` | `turretHitChance` (Destiny's guards), `NO_FALLOFF_METRES` (1), `rollShot`, `HIT_RESULTS` / `hitResultOf`, `ShotResult`, `WRECKING_ROLL` (0.01), `WRECKING_QUALITY` (3), `QUALITY_OFFSET` (0.49), `vortonApplication` |
+| `combat/accuracy.ts` | `turretHitChance` (Destiny's guards), `NO_FALLOFF_METRES` (1), `rollShot`, `HIT_RESULTS` / `hitResultOf`, `ShotResult`, `WRECKING_ROLL` (0.01), `WRECKING_QUALITY` (3), `QUALITY_OFFSET` (0.49), `missileApplication` (`vortonApplication` is the same function) |
+| `combat/missile-numbers.ts` | `MISSILE_COMBAT_ATTRIBUTES`, `MissileCombatNumbers`, `missileCombatNumbersOf(ship, bundle, key)`, `missileFlightTime`, `missileRange` (`MissileRange`), `NO_MISSILE_NOTE`, `MISSILE_TICK_SECONDS` |
 | `combat/damage.ts` | `DamageVector`, `NO_DAMAGE`, `shotDamage`, `damageTotal`, `applyLayeredDamage` (pure), `passiveRecharge` (the closed form) |
 | `combat/locks.ts` | `lockTime`, `LOCK_TIME_CONSTANT` (40000), `pilotLockLimit`, `shipLockLimit`, the two Target Management skills |
 | `combat/random.ts` | `combatRoll(seed, key)`, `combatHash` (cyrb53), `combatPick`, `combatShuffle`, `CombatRollKey` |
-| `combat/weapon-numbers.ts` | `TurretCombatNumbers`, `turretCombatNumbersOf(ship, bundle, key)`, `ShipWeapons`, `shipWeaponsOf`, `TURRET_COMBAT_ATTRIBUTES`, `NO_CHARGE_DAMAGE_NOTE` |
+| `combat/weapon-numbers.ts` | `TurretCombatNumbers`, `turretCombatNumbersOf(ship, bundle, key)`, `ShipWeapons` (`turrets`, `launchers`), `shipWeaponsOf` (turrets and launchers summed), `TURRET_COMBAT_ATTRIBUTES`, `NO_CHARGE_DAMAGE_NOTE` |
 | `combat/explosions.ts` | `SHIP_EXPLOSIONS`, `SHIP_EXPLOSION_TIMINGS` (captured), `explosionDurationBound`, `shipExplosionOf`, `MAX_LOCAL_BLASTS` (8), `EXPLOSION_REFERENCE_RADII`, `TITAN_EXPLOSION_REFERENCE_RADIUS` |
 | `combat/document.ts` | `SceneCombat`, `COMBAT_DEATH_MODES`, `DEFAULT_COMBAT_SEED` (1), `DEFAULT_COMBAT_DEATH` (`explode`), `normalizeSceneCombat`, `sceneCombatOf`, `COMBAT_OPERATIONS` / `applyCombatOperation` (`set_combat`) |
 | `combat/commands.ts` | `normalizeEngageCommand` (`{ selection, target, modules = ["turret"] }`, a celestial refused), `normalizeCeaseFireCommand` (`{ selection, unlock }`) |
@@ -86,6 +92,43 @@ the Entropic Disintegrator and Vorton Projector pages; Destiny's `GetAccuracy`
   | Megathron, 7 × Neutron Blaster Cannon II, Antimatter Charge L | 334.72 | 4.2525 s | 551.0 | 8.93 | 4,500 + 12,500 | 380 | 155 | 8,662.5 / 8,937.5 / 10,312.5 |
   | Vedmak, 1 × Heavy Entropic Disintegrator II, Baryon Exotic Plasma M | 588.23 (spool 0) | 3.96 s | 148.5 | 52.5 | 32,897 + none | 110 | 375 | 1,000 / 4,125 / 2,500 |
   | Stormbringer, 1 × Medium Vorton Projector II, ElectroPunch Ultra M | 1,481.95 | 8.1 s | 183.0 | none | 33,000 + none (explosion 107.25 m, 118.1 m/s, drf 0.5) | 130 | 341.25 | 5,000 / 750 / 1,500 |
+
+### Missiles (missiles M1; checked 2026-10-23)
+
+Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRangeData`, effects 660-668, 1851, 763,
+2851, `_calcMissileFactor`, issue 2083); Destiny's missile code in the server fork (`PyLaunchMissile`,
+`MissileFollow`); SDE 3632936.
+
+- **Launchers**: default effect 101 `useMissiles` (category 1, not a target effect; duration attribute 51); no
+  `damageMultiplier`. Rate of fire 51: LML II 12.8 s, HML II 12.0, CML II 16.54, RLML II 6.24, HAML II 6.4.
+- **Missiles** (T1): effect 9 `missileLaunching`; radius column 300 m; damage 114-118 stackable, 37 / 70 / 281 / 653 /
+  654 not. Light 83 dmg, 3,750 m/s, 5.0 s, 40 m / 170 m/s / drf 0.604; heavy 149, 4,300, 6.5 s, 140 / 85 / 0.682;
+  cruise 375, 4,700, 14.0 s, 330 / 69 / 0.882.
+- **Damage per missile** = the charge's evaluated damage × the character's `missileDamageMultiplier` (212; BCS and
+  Warhead Calefaction rigs raise it, stacking-penalized). Skills (+25 % from the missile skill, +10 % Warhead
+  Upgrades), hull bonuses and the specializations' −10 % rate of fire come from the evaluator (`sd-fittings`).
+- **Flight time** T = explosionDelay + shipRadius / velocity (missiles start at the shooter's centre). **Range**: a
+  missile flies floor(T) or ceil(T) whole 1 s ticks, the longer with chance T − floor(T); each case `v / 2 × a + v ×
+  (t − a) − shipRadius`, a = min(t, mass × agility / 1e6) (T1 heavies: ~1e-7 s). `missileRange` gives `{ lower,
+  upper, upperChance, mean }`.
+- **Application** (`missileApplication`): `min(1, S / E, (S / E × Ve / Vt) ^ drf)` with the target's live signature
+  and speed at impact; no roll, no wrecking (a missile that arrives always hits). A signature ≤ 0 takes nothing; no
+  explosion radius applies fully; a target at rest or Ve 0 leaves S / E.
+- **Paper DPS** = volley / rate of fire, reloads left out (Pyfa's default, as for turrets).
+- Fixture check (`missile-numbers.spec.ts`, max skills, Scourge):
+
+  | Fit | Rate of fire | Per missile | Paper DPS (fit) | Velocity | Flight time | Range lower / upper (chance) / mean | Explosion |
+  |---|---|---|---|---|---|---|---|
+  | Caracal, 5 × HML II (default fit) | 6.1965 s | 204.875 | 165.3 (volley 1,024.4) | 9,675 m/s | 9.771 s | 86.87 / 96.55 (0.771) / 94.33 km | 105 m, 127.5 m/s, 0.682 |
+  | Kestrel, 4 × LML II | 8.8128 s | 142.66 | 64.7 | 8,437.5 | 7.505 | 59.02 / 67.45 / 63.28 km | 30 m, 255 m/s, 0.604 |
+  | Raven, 6 × CML II | 8.5408 s | 515.63 | 362.2 | 10,575 | 21.024 | 221.83 / 232.40 / 222.08 km | 247.5 m, 103.5 m/s, 0.882 |
+  | Drake, 6 × HML II | 8.262 s | 307.31 | 223.2 | 8,062.5 | 9.75 | mean 78.61 km | |
+
+  A BCS II multiplies the damage by 1.1 and the rate of fire by 0.895. Heavy Scourge on a Punisher (sig 37) at rest
+  applies 37 / 105 = 0.352.
+- `missileCombatNumbersOf` is null for a key the ship lacks, a module that is no launcher (probe launchers have no
+  `launcherFitted`) or one without a cycle; a launcher without a missile (or with a charge that is no missile) gets
+  zeros and `NO_MISSILE_NOTE`.
 
 ### Applying damage and passive shield recharge
 
@@ -280,8 +323,11 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 ## Tools
 
 - **`ship_stats`** (K1): turret rows in `fit.modules` carry `damage` (per shot by type, before quality), `volley`,
-  `dps`, `tracking`, `signatureResolution`, and `explosion` / `spool`; `stats`, `withPropMod` and `withActive.stats`
-  carry `weapons: { turrets, volley, dps, damage }` (DPS by type; a siege module in `active` raises it). Spec:
+  `dps`, `tracking`, `signatureResolution`, and `explosion` / `spool`; launcher rows (missiles M1) `damage` (per
+  missile), `volley`, `dps`, `velocity`, `flightTime`, `missileRange { lower, upper, upperChance, mean }` (m; `range`
+  stays a turret's optimal), `explosion { radius, velocity, drf }` and the charge `note` (`loaded from cargo`, `default
+  missile`, or `NO_MISSILE_NOTE`); `stats`, `withPropMod` and `withActive.stats` carry `weapons: { turrets, launchers,
+  volley, dps, damage }` (DPS by type; a siege module in `active` raises it). Spec:
   `ship-stats-tool.spec.ts` (a default-fit Rifter text gives the table's numbers; a TFI's empty guns load Barrage L).
 - **`patch_scene`**: `set_combat`.
 - **`set_target`** starts the lock (its answer's `lock`: `{ state, lockTime?, readyIn?, note? }` or `{ refused }`); a
@@ -315,7 +361,8 @@ re-trigger from their kills' times.
   before the lock sweep (not `OnKill`, which runs inside `Shots` and would re-enter ShipModules for no earlier first
   shot); `Director.OnPrimary(listener)` reports each group's primary change for the automatic camera.
 - Logi auto-repair: `DamageModel.Fractions` / `Report`, `CombatRules.Report(id).dps.taken`, `Attackers(id)`.
-- Missiles: a `missile` kind through `Resolve` with the shared `applyLayeredDamage`.
+- Missiles (M1 in: the numbers, `missileApplication`): M2 adds missile hits as `WeaponShot`s with a `missile` field
+  through `Resolve` and the shared `applyLayeredDamage`.
 
 ## Verify-page (K2)
 

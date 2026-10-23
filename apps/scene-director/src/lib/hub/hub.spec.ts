@@ -381,6 +381,27 @@ describe('fit routes', () => {
       await weapons.Stop();
     }
   });
+
+  it('GET /missile answers a missile graphic and maps failures', async () => {
+    const weapons = await StartHub({ shipData: MakeFakeShipData().shipData, weaponData: MakeFakeWeaponData() });
+    try {
+      expect(await (await fetch(`${weapons.url}missile?charge=209&launcher=2410`)).json()).toEqual({
+        chargeTypeID: 209,
+        name: 'Scourge Heavy Missile',
+        launcherTypeID: 2410,
+        impactResPath: 'res:/dx9/model/turret/launcher/heavy/heavy_impact_scourge.black',
+        projectileGraphicID: 21936,
+        projectileResPath: 'res:/dx9/model/turret/launcher/heavy/heavy_missile.black'
+      });
+      const wrong = await fetch(`${weapons.url}missile?charge=209&launcher=2404`);
+      expect(wrong.status).toBe(404);
+      expect(await wrong.json()).toMatchObject({ failure: 'not-found' });
+      expect((await fetch(`${weapons.url}missile?charge=209`)).status).toBe(400);
+      expect((await fetch(`${weapons.url}missile?charge=x&launcher=2410`)).status).toBe(400);
+    } finally {
+      await weapons.Stop();
+    }
+  });
 });
 
 describe('prop mods and audio', () => {

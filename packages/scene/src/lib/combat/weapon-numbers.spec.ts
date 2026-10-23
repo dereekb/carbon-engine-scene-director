@@ -35,6 +35,7 @@ describe('turretCombatNumbersOf', () => {
       expect(numbers?.volley, hull).toBeCloseTo(volley, 3);
       const weapons = shipWeaponsOf(ship, DOGMA_FIXTURE);
       expect(weapons.turrets, hull).toBe(turrets);
+      expect(weapons.launchers, hull).toBe(0);
       expect(weapons.volley, hull).toBeCloseTo(turrets * volley, 2);
       expect(weapons.dps, hull).toBeCloseTo(dps, 1);
     }
@@ -77,6 +78,6 @@ describe('turretCombatNumbersOf', () => {
     const ship = evaluateShipDogma({ bundle: DOGMA_FIXTURE, hullTypeID: RIFTER_ID, modules: [{ key: 'mid-0', typeID: fixtureTypeID('Stasis Webifier II'), state: 'online' }] });
     expect(turretCombatNumbersOf(ship, DOGMA_FIXTURE, 'high-0')).toBeNull();
     expect(turretCombatNumbersOf(ship, DOGMA_FIXTURE, 'mid-0')).toBeNull();
-    expect(shipWeaponsOf(ship, DOGMA_FIXTURE)).toEqual({ turrets: 0, volley: 0, dps: 0, damage: { em: 0, thermal: 0, kinetic: 0, explosive: 0 } });
+    expect(shipWeaponsOf(ship, DOGMA_FIXTURE)).toEqual({ turrets: 0, launchers: 0, volley: 0, dps: 0, damage: { em: 0, thermal: 0, kinetic: 0, explosive: 0 } });
   });
 });

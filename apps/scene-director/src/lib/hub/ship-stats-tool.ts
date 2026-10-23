@@ -7,8 +7,10 @@
  * With a `fit` (EFT text) the hub resolves its names and the dogma bundle (DogmaData) and
  * the numbers come from the dogma evaluator: HP, resists, capacitor and targeting too, the
  * fit's prop mod as `withPropMod`, and the `active` modules running as `withActive`. Turret rows carry their combat
- * numbers (damage per shot by type, volley, DPS, tracking) and the stats their sum (`weapons`), from the same
- * turretCombatNumbersOf the page runs; empty guns load a fitting charge from cargo, as on the page.
+ * numbers (damage per shot by type, volley, DPS, tracking), launcher rows their missiles' (damage per missile,
+ * volley, DPS, velocity, flight time, range, explosion), and the stats their sum (`weapons`), from the same
+ * turretCombatNumbersOf / missileCombatNumbersOf the page runs; empty guns load a fitting charge from cargo and empty
+ * launchers a fitting missile, else the hull race's default missile, as on the page.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -21,6 +23,8 @@ import {
   type DogmaShip,
   type DogmaTraceStep,
   type DamageVector,
+  DEFAULT_MISSILE_LOADED,
+  defaultMissileOf,
   dogmaShipStats,
   eftTypeNames,
   evaluateShipDogma,
@@ -30,6 +34,10 @@ import {
   loadCargoCharges,
   MAX_FIT_LENGTH,
   mergeDogmaBundles,
+  type MissileCombatNumbers,
+  missileCombatNumbersOf,
+  missileDamageTypeOf,
+  type MissileRange,
   type ModuleNumbers,
   moduleNumbersOf,
   parseEftFit,
@@ -121,7 +129,8 @@ export interface ShipStatsAnswer {
 }
 
 /**
- * Ship stats, with a fit's turrets summed (`weapons`: count, volley, paper DPS and DPS by type) when it fits any.
+ * Ship stats, with a fit's turrets and launchers summed (`weapons`: counts, volley, paper DPS and DPS by type) when it
+ * fits any.
  */
 export type FittedShipStats = ShipStats & { readonly weapons?: ShipWeapons };
 
@@ -162,6 +171,14 @@ export interface FitSummaryModule {
   readonly signatureResolution?: number;
   readonly explosion?: TurretCombatNumbers['explosion'];
   readonly spool?: TurretCombatNumbers['spool'];
+  /**
+   * A launcher's missile: max velocity (m/s), flight time (s) and range (m: the whole-tick cases, the longer's chance,
+   * the mean). `range` stays a turret's optimal.
+   */
+  readonly velocity?: number;
+  readonly flightTime?: number;
+  readonly missileRange?: MissileRange;
+  readonly note?: string;
 }
 
 /**
@@ -214,7 +231,7 @@ export async function AnswerShipStats(shipData: ShipDataApi, args: ToolArgs, dog
   let fitNote: Maybe<string> = null;
   if (fit && hull && dogmaData) {
     try {
-      fitted = await ResolveFit(dogmaData, { text: fit, hullTypeID: hull.typeID });
+      fitted = await ResolveFit(dogmaData, { text: fit, hullTypeID: hull.typeID, sofRace: hull.dna?.split(':')[2] ?? null });
     } catch (error) {
       if (!(error instanceof ShipDataError && error.failure === 'unavailable')) throw error;
       fitNote = `${error.message} The hull's values and the fit's prop mod were used instead.`;
@@ -268,9 +285,10 @@ interface ResolvedFit {
 
 /**
  * Resolves a fit's names (one tools-core call per unique name, cached by DogmaData) and its dogma bundle: the hull,
- * the fitted modules and charges, and every skill.
+ * the fitted modules and charges, and every skill. Charges load as on the page (loadCargoCharges): launchers with
+ * none take the hull race's default missile, whose dogma a second bundle fetches when the first lacks it.
  */
-async function ResolveFit(dogmaData: DogmaDataApi, input: { readonly text: string; readonly hullTypeID: number }): Promise<ResolvedFit> {
+async function ResolveFit(dogmaData: DogmaDataApi, input: { readonly text: string; readonly hullTypeID: number; readonly sofRace?: Maybe<string> }): Promise<ResolvedFit> {
   const parsed = parseEftFit(input.text);
   const answers = new Map<string, FitTypeAnswer>();
   await MapLimited(eftTypeNames(parsed), async (name) => {
@@ -282,9 +300,13 @@ async function ResolveFit(dogmaData: DogmaDataApi, input: { readonly text: strin
   });
   const answer = (name: string): Maybe<FitTypeAnswer> => answers.get(name) ?? null;
   const ids = fittingTypeIDs(typeEftFit(parsed, { answer }));
-  const bundle = mergeDogmaBundles(await dogmaData.Bundle([input.hullTypeID, ...ids]), await dogmaData.Skills());
+  let bundle = mergeDogmaBundles(await dogmaData.Bundle([input.hullTypeID, ...ids]), await dogmaData.Skills());
   const fitting = typeEftFit(parsed, { answer, bundle });
-  return { fitting: { ...fitting, modules: loadCargoCharges(fitting.modules, fitting.charges, bundle) }, bundle };
+  const damageType = missileDamageTypeOf(bundle.types[input.hullTypeID]?.raceID ?? null, input.sofRace ?? null);
+  const modules = loadCargoCharges(fitting.modules, fitting.charges, bundle, { defaultMissile: (launcher) => defaultMissileOf(launcher, damageType) });
+  const missing = [...new Set(modules.flatMap((module) => (module.chargeNote === DEFAULT_MISSILE_LOADED && module.charge?.typeID != null && !bundle.types[module.charge.typeID] ? [module.charge.typeID] : [])))];
+  if (missing.length) bundle = mergeDogmaBundles(bundle, await dogmaData.Bundle(missing));
+  return { fitting: { ...fitting, modules }, bundle };
 }
 
 interface AnswerFittedInput {
@@ -304,8 +326,9 @@ function Round(value: number, digits: number): number {
   return Math.round(value * scale) / scale;
 }
 
-function FitModuleRow(module: FittedModule, numbers: Maybe<ModuleNumbers>, combat: Maybe<TurretCombatNumbers>): FitSummaryModule {
+function FitModuleRow(module: FittedModule & { readonly chargeNote?: string }, numbers: Maybe<ModuleNumbers>, combat: Maybe<TurretCombatNumbers>, missile: Maybe<MissileCombatNumbers>): FitSummaryModule {
   const { cycleTime, range, falloff } = numbers ?? {};
+  const weapon = combat ?? missile;
   return {
     key: module.key,
     name: module.name,
@@ -318,23 +341,36 @@ function FitModuleRow(module: FittedModule, numbers: Maybe<ModuleNumbers>, comba
     ...(cycleTime ? { cycleTime: Math.round(cycleTime * 100) / 100 } : {}),
     ...(range ? { range: Math.round(range) } : {}),
     ...(falloff ? { falloff: Math.round(falloff) } : {}),
+    ...(weapon
+      ? {
+          damage: { em: Round(weapon.damage.em, 2), thermal: Round(weapon.damage.thermal, 2), kinetic: Round(weapon.damage.kinetic, 2), explosive: Round(weapon.damage.explosive, 2) },
+          volley: Round(weapon.volley, 2),
+          dps: Round(weapon.dps, 2)
+        }
+      : {}),
     ...(combat
       ? {
-          damage: { em: Round(combat.damage.em, 2), thermal: Round(combat.damage.thermal, 2), kinetic: Round(combat.damage.kinetic, 2), explosive: Round(combat.damage.explosive, 2) },
-          volley: Round(combat.volley, 2),
-          dps: Round(combat.dps, 2),
           ...(combat.tracking == null ? {} : { tracking: Round(combat.tracking, 4) }),
           ...(combat.signatureResolution == null ? {} : { signatureResolution: combat.signatureResolution }),
           ...(combat.explosion ? { explosion: combat.explosion } : {}),
           ...(combat.spool ? { spool: combat.spool } : {})
         }
-      : {})
+      : {}),
+    ...(missile && missile.velocity > 0
+      ? {
+          velocity: Round(missile.velocity, 2),
+          flightTime: Round(missile.flightTime, 3),
+          missileRange: { lower: Math.round(missile.range.lower), upper: Math.round(missile.range.upper), upperChance: Round(missile.range.upperChance, 3), mean: Math.round(missile.range.mean) },
+          explosion: { radius: Round(missile.explosion.radius, 2), velocity: Round(missile.explosion.velocity, 2), drf: missile.explosion.drf }
+        }
+      : {}),
+    ...(missile?.note ? { note: missile.note } : module.chargeNote && module.weapon === 'launcher' ? { note: module.chargeNote } : {})
   };
 }
 
 function WithWeapons(stats: ShipStats, ship: DogmaShip, bundle: DogmaBundle): FittedShipStats {
   const weapons = shipWeaponsOf(ship, bundle);
-  return weapons.turrets ? { ...stats, weapons } : stats;
+  return weapons.turrets || weapons.launchers ? { ...stats, weapons } : stats;
 }
 
 function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
@@ -373,7 +409,7 @@ function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
     fit: {
       name: fitting.name,
       hull: fitting.hull,
-      modules: fitting.modules.map((module) => FitModuleRow(module, moduleNumbersOf(traced, bundle, module.key), turretCombatNumbersOf(traced, bundle, module.key))),
+      modules: fitting.modules.map((module) => FitModuleRow(module, moduleNumbersOf(traced, bundle, module.key), turretCombatNumbersOf(traced, bundle, module.key), missileCombatNumbersOf(traced, bundle, module.key))),
       drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),
       unknown: fitting.unknown,
       warnings: fitting.warnings

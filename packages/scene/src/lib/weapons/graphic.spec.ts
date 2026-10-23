@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { readWeaponGraphic } from './graphic';
+import { readMissileGraphic, readWeaponGraphic } from './graphic';
 
 /**
  * The hub's `/weapon?type=2913` answer (tools-core `weapons/types/2913`, SDE 3632936), ammunition trimmed.
@@ -18,5 +18,20 @@ describe('readWeaponGraphic', () => {
     expect(readWeaponGraphic({ ...AUTOCANNON, slot: 'bays' })).toBeNull();
     expect(readWeaponGraphic({ ...AUTOCANNON, resPath: 'res:/dx9/model/turret/auto.red' })).toBeNull();
     expect(readWeaponGraphic({ ...AUTOCANNON, typeID: -1 })).toBeNull();
+  });
+});
+
+/**
+ * The hub's `/missile?charge=209&launcher=2410` answer (tools-core SDE 3632936).
+ */
+const SCOURGE_HEAVY = { chargeTypeID: 209, name: 'Scourge Heavy Missile', launcherTypeID: 2410, impactResPath: 'res:/dx9/model/turret/launcher/heavy/heavy_impact_scourge.black', projectileGraphicID: 21936, projectileResPath: 'res:/dx9/model/turret/launcher/heavy/heavy_missile.black' };
+
+describe('readMissileGraphic', () => {
+  it('reads the Scourge Heavy Missile answer and rejects junk', () => {
+    expect(readMissileGraphic({ ...SCOURGE_HEAVY, extra: 1 })).toEqual(SCOURGE_HEAVY);
+    expect(readMissileGraphic(null)).toBeNull();
+    expect(readMissileGraphic({ ...SCOURGE_HEAVY, impactResPath: 'res:/dx9/model/turret/launcher/heavy/heavy_impact_scourge.red' })).toBeNull();
+    expect(readMissileGraphic({ ...SCOURGE_HEAVY, projectileResPath: 'https://example.com/x.black' })).toBeNull();
+    expect(readMissileGraphic({ ...SCOURGE_HEAVY, chargeTypeID: '209' })).toBeNull();
   });
 });

@@ -279,6 +279,28 @@ describe('default weapons and cargo charges', () => {
     const row = ShipFitReportOf(resolved, () => ({ state: 'online' })).modules.find((module) => module.module === 'high-0');
     expect(row).toMatchObject({ charge: 'Barrage L', note: 'loaded from cargo' });
   });
+
+  it("loads a bare launcher with its hull race's default missile after one more Prepare", async () => {
+    const text = '[Caracal, Bare launcher]\n\n\nHeavy Missile Launcher II\n';
+    const lookup = new FitLookup({ fetch: FixtureHub(), retryDelaysMs: [] });
+    const input = { doc: Ship(text, { id: 'caracal', dna: 'cc1_t1:caldaribase:caldari' }), scene: null, lookup, hullTypeID: 621, propMod: null };
+    let resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    await lookup.Prepare({ text, typeIDs: resolved.typeIDs });
+    resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    // The names and the hull landed: the launcher takes Scourge, whose dogma is still to come.
+    expect(resolved.modules[0]).toMatchObject({ key: 'high-0', weapon: 'launcher', charge: { name: 'Scourge Heavy Missile', typeID: 209 }, chargeNote: 'default missile' });
+    expect(resolved.typeIDs).toContain(209);
+    expect(lookup.TypePending(209)).toBe(true);
+    expect(resolved).toMatchObject({ pending: true, dogma: null });
+    await lookup.Prepare({ text, typeIDs: resolved.typeIDs });
+    resolved = ResolveShipFitting(input) as ResolvedShipFitting;
+    expect(resolved).toMatchObject({ pending: false, note: null });
+    expect(resolved.dogma?.modules?.[0]).toMatchObject({ key: 'high-0', chargeTypeID: 209 });
+    expect(ShipFitReportOf(resolved, () => ({ state: 'online' })).modules[0]).toMatchObject({ charge: 'Scourge Heavy Missile', note: 'default missile' });
+    // The hull's SDE race wins (the Caracal's Caldari: Scourge); without a hull record, the DNA's SOF race.
+    expect((ResolveShipFitting({ ...input, sofRace: 'amarr' }) as ResolvedShipFitting).modules[0].charge?.name).toBe('Scourge Heavy Missile');
+    expect((ResolveShipFitting({ ...input, hullTypeID: null, sofRace: 'amarr' }) as ResolvedShipFitting).modules[0].charge?.name).toBe('Mjolnir Heavy Missile');
+  });
 });
 
 describe('ShipModuleSpecsOf', () => {

@@ -126,36 +126,38 @@ export function rollShot(roll: number, chance: number): ShotRoll {
   return result;
 }
 
-export interface VortonApplicationInput {
+export interface MissileApplicationInput {
   /**
    * The target's live signature radius (m).
    */
   readonly signatureRadius: number;
   /**
-   * The target's speed (m/s).
+   * The target's speed (m/s): absolute, not angular.
    */
   readonly targetSpeed: number;
   /**
-   * aoeCloudSize (654), evaluated.
+   * aoeCloudSize (654), evaluated: the explosion radius.
    */
   readonly explosionRadius: number;
   /**
-   * aoeVelocity (653), evaluated.
+   * aoeVelocity (653), evaluated: the explosion velocity.
    */
   readonly explosionVelocity: number;
   /**
-   * aoeDamageReductionFactor (1353).
+   * aoeDamageReductionFactor (1353): the SDE's combined exponent, ln(old DRF) / ln(5.5).
    */
   readonly drf: number;
 }
 
 /**
- * The missile-style application of a vorton projector: `min(1, S / E, (S / E × Ve / Vt) ^ drf)`. No roll, no wrecking.
+ * EVE's missile application: `min(1, S / E, (S / E × Ve / Vt) ^ drf)`. No roll, no wrecking: a missile that reaches
+ * its target always does this share of its damage. Guards: a signature of 0 or less takes nothing; no explosion
+ * radius applies fully; a target at rest or an explosion velocity of 0 leaves the radius term only.
  *
- * @param input - The target's signature and speed and the weapon's explosion numbers.
+ * @param input - The target's signature and speed and the missile's explosion numbers.
  * @returns The damage factor, 0 to 1.
  */
-export function vortonApplication(input: VortonApplicationInput): number {
+export function missileApplication(input: MissileApplicationInput): number {
   const { signatureRadius, targetSpeed, explosionRadius, explosionVelocity, drf } = input;
   let factor = 1;
   if (signatureRadius <= 0) factor = 0;
@@ -166,3 +168,10 @@ export function vortonApplication(input: VortonApplicationInput): number {
   }
   return factor;
 }
+
+export type VortonApplicationInput = MissileApplicationInput;
+
+/**
+ * A vorton projector applies like a missile (missileApplication).
+ */
+export const vortonApplication: (input: VortonApplicationInput) => number = missileApplication;
