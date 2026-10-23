@@ -35,7 +35,8 @@ What works today:
   as are the location's own stations and gates. A scene spans 10,000 km at most.
 - **Cinematic camera**: shots on hardpoints generated from the drawn ships, fleets
   and engagements, timed moves and waypoint fly-throughs over moving hulls, a
-  letterbox and a clean HUD (driven in the page until its MCP tools land).
+  letterbox and a clean HUD, directed by Claude over MCP: hardpoint listing,
+  shots, sequences and a named shot library.
 
 Combat and timelines come in later phases; the
 document's `orders` and `timeline` fields stay reserved until then.
@@ -141,6 +142,7 @@ connected tab.
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
+| `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |
 
 Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/tools.ts`).
 

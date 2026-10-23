@@ -102,9 +102,13 @@ import {
   type ShipOrderRequest,
   normalizeVec,
   scaleVec,
+  normalizeHardpointSubject,
+  toHardpointListing,
   type CinemaCelestial,
   type CinemaScene,
   type CinemaShip,
+  type CinemaWarp,
+  type HardpointListing,
   type SceneVector,
   type ShipCapacitor,
   type ShipDefense,
@@ -116,7 +120,7 @@ import type { SceneClock } from './clock';
 import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
-import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayResult } from './cinema';
+import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics } from './destiny';
 import { DamageModel, type DamageReport } from './damage';
 import {
@@ -549,7 +553,12 @@ export class Director {
       order_ship: ({ id, order }) => this.OrderShip(id, order),
       switch_prop_mods: (args) => this.SwitchPropMods(args),
       switch_modules: (args) => this.SwitchModules(args),
-      order_fleet: (args) => this.OrderFleet(args)
+      order_fleet: (args) => this.OrderFleet(args),
+      list_hardpoints: (args) => this.ListHardpoints(args),
+      play_shot: (args) => this.PlayShot(args),
+      play_sequence: (args) => this.PlayShot({ shots: args['shots'] }),
+      stop_shot: (args) => this.StopShot(args),
+      resume_shot: () => this.ResumeShot()
     };
   }
 
@@ -745,24 +754,51 @@ export class Director {
   /**
    * Plays a camera shot or sequence (cinema.ts) from now.
    *
-   * @param input - The shot, `{ shots: [...] }` or an array of shots.
+   * @param input - The shot, `{ shots: [...] }` or an array of shots; library references (`{ shot: "<name>" }`) too.
    * @param driver - Who asked, for get_state.
-   * @returns The rig's state and any warnings.
+   * @returns The rig's state, the driver, the shots as played and any warnings.
    * @throws {Error} When the shot is invalid.
    */
-  PlayShot(input: unknown, driver = 'claude'): CinemaPlayResult {
+  PlayShot(input: unknown, driver: CinemaPlayer = 'claude'): CinemaPlayResult & { readonly driver: CinemaPlayer } {
     const result = this.cinema.Play(input, this.clock.now, driver);
     this.onChange();
-    return result;
+    return { ...result, driver };
   }
 
   /**
-   * Stops the shot: a short blend back to the orbit camera, or with `cut` straight back.
+   * Stops the shot (stop_shot): by default hands the camera back to the user, the orbit camera adopting the shot's view
+   * (and following its ship); `adopt: false` blends back to the orbit's previous view, `cut` skips the blend, and
+   * `pause` freezes the shot instead.
    */
-  StopShot({ cut = false }: { readonly cut?: boolean } = {}): object {
-    this.cinema.Stop(this.clock.now, { cut, note: 'stopped' });
+  StopShot({ pause = false, adopt = true, cut = false }: { readonly pause?: unknown; readonly adopt?: unknown; readonly cut?: unknown } = {}): CinemaReport {
+    if (pause === true) this.cinema.Pause(this.clock.now);
+    else this.ReleaseCinema({ adopt: adopt !== false, cut: cut === true, note: 'stop_shot handed the camera back' });
     this.onChange();
     return this.cinema.Report(this.clock.now);
+  }
+
+  /**
+   * Resumes a paused shot, or replays the last stopped or released one from where it stopped (resume_shot).
+   *
+   * @throws {Error} When nothing is paused or stopped.
+   */
+  ResumeShot(): CinemaReport {
+    this.cinema.Resume(this.clock.now, 'claude');
+    this.onChange();
+    return this.cinema.Report(this.clock.now);
+  }
+
+  /**
+   * A subject's hardpoints on the scene as drawn now (list_hardpoints).
+   *
+   * @throws {Error} When the subject is invalid.
+   */
+  ListHardpoints(args: Record<string, unknown>): HardpointListing & { readonly warnings: string[] } {
+    const { subject, problems, warnings } = normalizeHardpointSubject(args);
+    if (!subject) throw new Error(`Invalid hardpoint subject:\n- ${problems.join('\n- ')}`);
+    const status = this.location.Report()?.status;
+    if (subject.celestial != null && status !== 'ready') warnings.push(`the location is ${status ?? 'not set'}: its celestials may be missing`);
+    return { ...toHardpointListing(subject, this.CinemaScene(this.clock.now)), warnings };
   }
 
   /**
@@ -918,8 +954,10 @@ export class Director {
     for (const doc of diff.objects.removed) stopped.push(...this.world.RemoveObject(doc.id));
     this.scene = scene;
     const cinema = CinemaReleases({ restart, cameraChanged: diff.camera, removed: [...diff.removed, ...diff.objects.removed].map((doc) => doc.id), subjects: this.cinema.Subjects() });
-    if (cinema === 'cut') this.cinema.Stop(this.clock.now, { cut: true, note: 'a scene load cut the shot' });
-    else if (cinema === 'release') this.cinema.Release(this.clock.now, { note: diff.camera ? "the document's camera changed" : 'its subject left the scene' });
+    const subjectLeft = this.cinema.Subjects().some((id) => diff.removed.some((doc) => doc.id === id) || diff.objects.removed.some((doc) => doc.id === id));
+    // A load or a removed subject forgets the shot; a camera change keeps it resumable.
+    if (cinema === 'cut') this.cinema.Stop(this.clock.now, { cut: true, forget: true, note: 'a scene load cut the shot' });
+    else if (cinema === 'release') this.cinema.Release(this.clock.now, subjectLeft ? { note: 'its subject left the scene', forget: true } : { note: "the document's camera changed" });
     if (restart || diff.location) {
       this.location.Update(scene.location ?? null, { retry: restart });
       this.Redress(scene.location ?? null);
@@ -1610,8 +1648,17 @@ export class Director {
       }),
       aspect: this.engine?.Aspect() ?? CINEMA_DEFAULT_ASPECT,
       reach: this.engine?.camera.reach ?? 0,
-      camera: this.engine?.DrawnCamera() ?? null
+      camera: this.engine?.DrawnCamera() ?? null,
+      warpOf: (id) => this.CinemaWarp(id)
     };
+  }
+
+  /**
+   * A ship's warp for the warp-landing hardpoint, read lazily from the Destiny master.
+   */
+  private CinemaWarp(id: string): Maybe<CinemaWarp> {
+    const warp = this.world.Motion(id)?.warp;
+    return warp ? { phase: warp.phase, landing: warp.landing } : null;
   }
 
   /**
@@ -1682,21 +1729,28 @@ export class Director {
   }
 
   /**
-   * The pointer takes the camera from a playing shot: the orbit camera adopts the cinematic eye and look (the roll and
-   * lens ease back over the release blend), following the shot's ship when it framed one.
+   * The pointer takes the camera from a playing or paused shot.
    */
   private TakeOverCinema(): void {
-    const orbit = this.engine?.camera;
-    if (!this.cinema.playing || !orbit) return;
+    if (!this.cinema.driving || !this.engine) return;
+    this.ReleaseCinema({ adopt: true, note: 'the pointer took the camera' });
+    this.onChange();
+  }
+
+  /**
+   * Hands the camera back to the user: with `adopt` the orbit camera takes the cinematic eye and look (the roll and lens
+   * ease back over the release blend) and follows the shot's ship when it framed one; the shot stays resumable.
+   */
+  private ReleaseCinema({ adopt, cut = false, note }: { readonly adopt: boolean; readonly cut?: boolean; readonly note: string }): void {
     const now = this.clock.now;
     const subjects = this.cinema.Subjects();
-    const view = this.cinema.Release(now, { adopt: true, note: 'the pointer took the camera' });
-    if (view) {
+    const orbit = this.engine?.camera;
+    const view = this.cinema.Release(now, { adopt: adopt && orbit != null, cut, note });
+    if (view && orbit) {
       orbit.Set({ focus: view.focus, distance: view.distance, yaw: view.yaw, pitch: view.pitch });
       const drawn = subjects.length === 1 ? this.DrawnShip(subjects[0], now) : null;
       this.cameraFollow.Follow(drawn ? { id: subjects[0], position: drawn.position } : null, null, now);
     }
-    this.onChange();
   }
 
   /**

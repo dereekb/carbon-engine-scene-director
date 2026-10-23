@@ -4,3 +4,4 @@ export * from './framing';
 export * from './subjects';
 export * from './hardpoints';
 export * from './shot';
+export * from './library';

@@ -135,7 +135,7 @@ describe('ship hardpoints', () => {
   it('anchors the flyby eye while the look follows the ship', () => {
     const moving = (z: number): CinemaScene => Scene([Ship('a', [0, 0, z], { velocity: [0, 0, 500] })]);
     const first = resolveHardpoint({ name: 'flyby', ship: 'a' }, moving(0));
-    expect(first.anchor?.[2]).toBeCloseTo(2000);
+    expect(first.anchor?.eye[2]).toBeCloseTo(2000);
     const later = resolveHardpoint({ name: 'flyby', ship: 'a' }, moving(1500), first.anchor);
     ExpectVector(later.pose?.eye ?? [], first.pose?.eye ?? []);
     ExpectVector(later.pose?.look ?? [], [0, 0, 1500]);

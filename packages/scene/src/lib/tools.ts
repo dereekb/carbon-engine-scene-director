@@ -19,6 +19,7 @@ import { DEFAULT_OBJECT_RADIUS, MAX_OBJECTS_PER_OPERATION, OBJECT_NEAREST_SHIPS 
 import { formatSceneDistance, LARGE_SCENE_DISTANCE, MAX_SCENE_DISTANCE } from './extent';
 import { MODULE_CATEGORIES } from './fitting/categories';
 import { MODULE_SWITCH_STATES } from './fitting/switch';
+import { CAMERA_MOVE_TYPES, CAMERA_SHOT_ENDS, CAMERA_SHOT_NAMES, CINEMA_EASINGS, ENGAGEMENT_HARDPOINT_NAMES, GROUP_HARDPOINT_NAMES, LANDMARK_HARDPOINT_NAMES, SHIP_HARDPOINT_NAMES } from './cinema';
 
 /**
  * Who answers a tool call.
@@ -477,7 +478,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
   {
     name: 'get_state',
     where: 'page',
-    description: `Live state of the viewer: renderer status, frame rate (renderer.moduleEffects counts the running modules' drawn effects: live, loading and failed, with the latest errors), camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, follow, orbit) and the physics it flies with (below). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client. Ships in a fleet also report fleet, wing, squad, role, commands and anchor (the ship they keep range on, and the range); fleets is the fleet tree with each squad's anchor resolved, plus formation (ready, the FC's heading, and how many members are following, in formation, catching up, holding, warping, leading, detached or waiting); every fleet, wing and squad also reports command (order_fleet): state (idle, moving, warping, broken-off or regrouping), leader, away (a wing or squad flying apart), home (a broken-off squad's), the leader's order while it moves, last (the last order_fleet: order, by, tick), warp (counts aligning, warping, landed, dropped, skipped) and regrouping (ships not yet back). A fleet member other than the FC also reports following: state (in-formation, catching-up, holding while its anchor or FC is in warp, warping in formation with warping naming its leader, leading a wing or squad apart, detached by an explicit order, or waiting for the ships' radii), group (kind, id, leader: while it flies in or leads a wing or squad apart), anchor and range (what it keeps range on), slot (its formation slot: range and direction in the FC's heading frame), distance (metres, surface to surface, to the anchor) and slotError (metres from its slot); its order is keep-at-range on the anchor, and its mode is goto while it steers to its slot and stop once settled. heading is each ship's [yaw, pitch] in degrees, the authoritative heading. Each ship also reports its order (what its ball is flying, with target, range and speed), pendingOrder (given, applying at the next tick), orderNote (why it stopped on its own, such as its target being removed) and targetDistance (metres, surface to surface on the balls' EVE radii, negative when they overlap); distances use the drawn bounding spheres. physics gives mass, agility, maxVelocity, radius (the ball's EVE radius), signatureRadius, alignTime (s) and source: sde (the hull's in-game values via tools-core), stats (the document's four stats) or class (class values when the EVE data cannot name the hull; note says why). location is the scene's EVE location, or null: system (id, name, region, securityStatus), origin (system metres), status (loading, ready or failed, with error), anchor (the celestial it was placed from, with its actual distance and surfaceDistance from the origin), star (distance and direction), and nearby: the ${LOCATION_NEARBY_LIMIT} celestials nearest the origin (id, name, kind, radius, position in scene metres, distance from the origin, surfaceDistance). location.dressing reports what the location drew: state, the nebula, the sun (graphic, environment template, lens flare, distance), counts per kind (drawn, validated without a renderer, loading, failed, skipped) and each dressed planet, moon, station and stargate with its state; environment.nebula says which nebula is drawn and whether it comes from the location or environment.universe. physics is what the ship flies with now: while its prop mod runs, the module's mass, maxVelocity, signatureRadius (the MWD bloom) and alignTime. propMod is null for a ship fitting "${PROP_MOD_MODULE_NONE}", else the module (module as written, name, typeID, kind, size S/M/L/XL, source: sde, baked (built-in values) or default (the hull-sized module standing in, note says why)), state (off, activating, active, stopping), cycleTime (s), since (the tick it started), stopsIn (s, while stopping), note (why it is off, such as entering warp) and its running numbers (maxVelocity, mass, signatureRadius, alignTime). boosters.maxVel stays the prop-mod-off max velocity. A ship with a fit flies by it once the hub has resolved its names and dogma (physics.math dogma: its modules online, with stacking penalties and the max-skills pilot; table until then or without the SDE): fit (null without one) gives name, key (its fits key, or inline), hull, typeID, unknown (names the EVE data lacks), modules ({ module: its key such as low-0 or mid-2, name, state: offline, online, activating, active, stopping or reactivating (switch_modules; the prop module's is its propMod state, off reading online), cycle? ({ number, endsIn } s while it runs), at? (the tick an activation applies), stopsIn?, activatesIn?, readyIn? (reactivation), respondsIn? (a delayed pilot), target?, targetDistance? (m, surface to surface), effectiveness? (falloff, 0-1), charge?, prop?: the module propMod stands for, note? (such as why it stopped: entered warp, its target gone or out of range) }), drones, math and note (why not dogma yet); physics, defense and capacitor follow the modules' live states (a running hardener's resists, a suppressor's signature, siege's speed). defense gives shield, armor and structure ({ hp: current, max, resists in percent by em, thermal, kinetic, explosive, ehp of the current HP }), ehp, shieldRecharge (s), repairs (HP/s per layer of its running local repairers) and incoming (remote repairs running on it: { from, module, layer, amount per cycle, cycleTime, effectiveness }); repairs land at cycle events (shield boosters at a cycle's start, armor and hull repairers at its end). capacitor gives capacity (GJ), rechargeTime (s), peakRecharge and drain (GJ/s, the running modules), stable with stableAt or lastsFor (s). Both are null on the table path. Each fleet reports propMods: counts of activating, active, stopping, off and none, and modules: its members' fitted modules by state. audio reports the page's audio (state, the emitters, the last engine events posted, each with played, frameErrors / lastFrameError when the runtime's audio frame failed, and context: the AudioContext's state, where suspended while on means the browser holds it until a click). objects lists the scene's static objects: id, type, name, dna, status (queued, building, ready, validated or failed, with error), position, rotation, radius (the Destiny ball's: what ranges are measured on) and radiusFrom (document, sof or default), sofRadius (the model's bounding radius), distance from the origin, nearestShips (up to ${OBJECT_NEAREST_SHIPS} { id, distance } surface to surface, negative inside) and targetedBy (ships ordered onto it); scene.objects counts them. location.targets lists the location's stations and stargates within the scene extent that order_ship takes as "celestial:<id>": target, id, name, kind, radius, distance and surfaceDistance.`,
+    description: `Live state of the viewer: renderer status, frame rate (renderer.moduleEffects counts the running modules' drawn effects: live, loading and failed, with the latest errors), camera, and per-ship build status, world position and bounding radius, plus pairwise distances between ships in metres. Each ship also reports its Destiny motion: position and velocity [x, y, z] (metres, m/s), speed, mode (stop, goto, follow, orbit) and the physics it flies with (below). simulation gives the Destiny tick and scene seconds. Motion is the authoritative state; the drawn ships trail it by up to one 1 s tick, as in EVE's client. Ships in a fleet also report fleet, wing, squad, role, commands and anchor (the ship they keep range on, and the range); fleets is the fleet tree with each squad's anchor resolved, plus formation (ready, the FC's heading, and how many members are following, in formation, catching up, holding, warping, leading, detached or waiting); every fleet, wing and squad also reports command (order_fleet): state (idle, moving, warping, broken-off or regrouping), leader, away (a wing or squad flying apart), home (a broken-off squad's), the leader's order while it moves, last (the last order_fleet: order, by, tick), warp (counts aligning, warping, landed, dropped, skipped) and regrouping (ships not yet back). A fleet member other than the FC also reports following: state (in-formation, catching-up, holding while its anchor or FC is in warp, warping in formation with warping naming its leader, leading a wing or squad apart, detached by an explicit order, or waiting for the ships' radii), group (kind, id, leader: while it flies in or leads a wing or squad apart), anchor and range (what it keeps range on), slot (its formation slot: range and direction in the FC's heading frame), distance (metres, surface to surface, to the anchor) and slotError (metres from its slot); its order is keep-at-range on the anchor, and its mode is goto while it steers to its slot and stop once settled. heading is each ship's [yaw, pitch] in degrees, the authoritative heading. Each ship also reports its order (what its ball is flying, with target, range and speed), pendingOrder (given, applying at the next tick), orderNote (why it stopped on its own, such as its target being removed) and targetDistance (metres, surface to surface on the balls' EVE radii, negative when they overlap); distances use the drawn bounding spheres. physics gives mass, agility, maxVelocity, radius (the ball's EVE radius), signatureRadius, alignTime (s) and source: sde (the hull's in-game values via tools-core), stats (the document's four stats) or class (class values when the EVE data cannot name the hull; note says why). location is the scene's EVE location, or null: system (id, name, region, securityStatus), origin (system metres), status (loading, ready or failed, with error), anchor (the celestial it was placed from, with its actual distance and surfaceDistance from the origin), star (distance and direction), and nearby: the ${LOCATION_NEARBY_LIMIT} celestials nearest the origin (id, name, kind, radius, position in scene metres, distance from the origin, surfaceDistance). location.dressing reports what the location drew: state, the nebula, the sun (graphic, environment template, lens flare, distance), counts per kind (drawn, validated without a renderer, loading, failed, skipped) and each dressed planet, moon, station and stargate with its state; environment.nebula says which nebula is drawn and whether it comes from the location or environment.universe. physics is what the ship flies with now: while its prop mod runs, the module's mass, maxVelocity, signatureRadius (the MWD bloom) and alignTime. propMod is null for a ship fitting "${PROP_MOD_MODULE_NONE}", else the module (module as written, name, typeID, kind, size S/M/L/XL, source: sde, baked (built-in values) or default (the hull-sized module standing in, note says why)), state (off, activating, active, stopping), cycleTime (s), since (the tick it started), stopsIn (s, while stopping), note (why it is off, such as entering warp) and its running numbers (maxVelocity, mass, signatureRadius, alignTime). boosters.maxVel stays the prop-mod-off max velocity. A ship with a fit flies by it once the hub has resolved its names and dogma (physics.math dogma: its modules online, with stacking penalties and the max-skills pilot; table until then or without the SDE): fit (null without one) gives name, key (its fits key, or inline), hull, typeID, unknown (names the EVE data lacks), modules ({ module: its key such as low-0 or mid-2, name, state: offline, online, activating, active, stopping or reactivating (switch_modules; the prop module's is its propMod state, off reading online), cycle? ({ number, endsIn } s while it runs), at? (the tick an activation applies), stopsIn?, activatesIn?, readyIn? (reactivation), respondsIn? (a delayed pilot), target?, targetDistance? (m, surface to surface), effectiveness? (falloff, 0-1), charge?, prop?: the module propMod stands for, note? (such as why it stopped: entered warp, its target gone or out of range) }), drones, math and note (why not dogma yet); physics, defense and capacitor follow the modules' live states (a running hardener's resists, a suppressor's signature, siege's speed). defense gives shield, armor and structure ({ hp: current, max, resists in percent by em, thermal, kinetic, explosive, ehp of the current HP }), ehp, shieldRecharge (s), repairs (HP/s per layer of its running local repairers) and incoming (remote repairs running on it: { from, module, layer, amount per cycle, cycleTime, effectiveness }); repairs land at cycle events (shield boosters at a cycle's start, armor and hull repairers at its end). capacitor gives capacity (GJ), rechargeTime (s), peakRecharge and drain (GJ/s, the running modules), stable with stableAt or lastsFor (s). Both are null on the table path. Each fleet reports propMods: counts of activating, active, stopping, off and none, and modules: its members' fitted modules by state. audio reports the page's audio (state, the emitters, the last engine events posted, each with played, frameErrors / lastFrameError when the runtime's audio frame failed, and context: the AudioContext's state, where suspended while on means the browser holds it until a click). objects lists the scene's static objects: id, type, name, dna, status (queued, building, ready, validated or failed, with error), position, rotation, radius (the Destiny ball's: what ranges are measured on) and radiusFrom (document, sof or default), sofRadius (the model's bounding radius), distance from the origin, nearestShips (up to ${OBJECT_NEAREST_SHIPS} { id, distance } surface to surface, negative inside) and targetedBy (ships ordered onto it); scene.objects counts them. location.targets lists the location's stations and stargates within the scene extent that order_ship takes as "celestial:<id>": target, id, name, kind, radius, distance and surfaceDistance. cinema is the cinematic camera: state (idle, playing, paused or releasing), driver (claude, director or user: user whenever the orbit camera draws), shot (name, library, hardpoint or pose, moves, transition, end, elapsed and duration in scene seconds, progress, holding), sequence (index, count, elapsed, duration, progress), resumable (what resume_shot would play), pose (eye, look, up, fov), near, far, letterbox, hud and note (why the last shot ended); camera.view says which camera draws (orbit or cinema) and camera.drawn what it drew.`,
     inputSchema: { type: 'object', properties: {} }
   },
   {
@@ -613,6 +614,121 @@ Returns { fleet, wing?, squad?, order, by, leader, tick, delays? (each respondin
         persist: { type: 'boolean', description: 'Also write this camera into the scene document.' }
       }
     }
+  },
+  {
+    name: 'list_hardpoints',
+    where: 'page',
+    description: `Lists the cinematic camera's generated positions (hardpoints) on a subject, resolved on the scene as drawn now: name, kind, description, eye, look, up (scene metres around the origin), fov, distance, anchored and a note when one cannot resolve. Four kinds of subject: a ship (ship: ${SHIP_HARDPOINT_NAMES.join(', ')}; scaled by its hull radius), a group (fleet [+ wing | squad], or ships: ${GROUP_HARDPOINT_NAMES.join(', ')}; scaled by the formation), a landmark (object, a scene object id, or celestial, an id, "celestial:<id>" or a name from get_state.location: ${LANDMARK_HARDPOINT_NAMES.join(', ')}, plus into-celestial aimed at it), or none for the engagement (teams?: the two teams, default the two biggest: ${ENGAGEMENT_HARDPOINT_NAMES.join(', ')}). Anchored hardpoints hold their eye once a shot places it: flyby waits ahead on the ship's path; warp-landing waits at the landing of the group's warp (order_fleet / order_ship warp), looking back up the lane, and frames the group where it is until it warps. Hardpoints re-resolve every frame, so a shot on one follows its subject. Play one with play_shot { hardpoint: { name, <subject> } }. Returns { kind, subject (its centre, radius and axes; the engagement's teams and their centroids a and b), hardpoints, warnings }.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ship: { type: 'string', description: 'A ship id: its ship hardpoints.' },
+        fleet: { type: 'string', description: 'A fleet id: its group hardpoints (narrow with wing or squad).' },
+        wing: { type: 'string' },
+        squad: { type: 'string' },
+        ships: { type: 'array', items: { type: 'string' }, minItems: 1, description: 'Ship ids framed as one group.' },
+        object: { type: 'string', description: 'A scene object id: its landmark hardpoints.' },
+        celestial: { type: ['string', 'integer'], description: 'A location celestial (id, "celestial:<id>" or exact name): its landmark hardpoints.' },
+        teams: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 2, description: "The engagement's two teams (with no subject), or the ships a landmark frames." },
+        target: { type: 'string', description: "over-the-shoulder's target ship (default the nearest enemy)." },
+        side: { type: 'string', enum: ['port', 'starboard'], description: 'The side the overlook, warp-landing and the landmark hero and foreground take.' },
+        fov: { type: 'number', minimum: 5, maximum: 120, description: 'Overrides every hardpoint lens, degrees.' },
+        fill: { type: 'number', minimum: 0.05, maximum: 1.5, description: 'Overrides how much of the frame the subject fills.' },
+        bank: { type: 'boolean', description: "Ship hardpoints stand in the hull's banked frame (rolling with it)." }
+      }
+    }
+  },
+  {
+    name: 'play_shot',
+    where: 'page',
+    description: `Plays one cinematic camera shot on the scene clock (driver claude), replacing whatever plays; a blend starts from the drawn pose. A shot is { hardpoint | pose | shot, moves?, duration?, end?, transition?, lag?, letterbox?, hud?, clearance?, name? }:
+- hardpoint: { name, <subject>, target?, side?, fov?, fill?, bank? }, a generated position that follows its subject every frame (list_hardpoints shows them): ship hardpoints take ship (${SHIP_HARDPOINT_NAMES.join(', ')}); group ones fleet [+ wing | squad] or ships (${GROUP_HARDPOINT_NAMES.join(', ')}); landmark ones object or celestial (${LANDMARK_HARDPOINT_NAMES.join(', ')}); engagement ones teams? (${ENGAGEMENT_HARDPOINT_NAMES.join(', ')}; into-celestial needs celestial or object).
+- pose: { eye, look, up?, roll? (degrees), fov? }, a free placement held until stopped. eye and look are each [x, y, z] scene metres, { position }, or a point on a hull { ship | object, offset?: [forward, starboard, up], units?: "metres" | "radii", bank? }: the eye rides the hull, the look follows it.
+- shot: a named library shot (list_shots): ${CAMERA_SHOT_NAMES.join(', ')}. Give its subject keys (ship, fleet, wing, squad, ships, teams, object, celestial, target) beside it, plus fov, fill, bank (on its hardpoint) and side, duration (the builder rescales its moves); end, transition, lag, letterbox, hud, clearance and name replace the library's, and moves are added after its own. Library shots hold their last frame when their time is up.
+- moves (applied in order in the hardpoint's frame), each with at? (s into the shot), duration?, easing? (${CINEMA_EASINGS.join(', ')}): dolly / truck / crane { distance m }, push { factor: < 1 in }, zoom { fov }, orbit { axis?, rate? °/s | angle? ° }, roll { rate? | angle? }, spin { axis, rate? | angle? } (axis up, subject-up, view-up or [x, y, z]), path { points (waypoints as above, bare [forward, starboard, up] with frame "subject"), frame?: world | subject, units?: metres | radii (of the subject), look?: path | subject | a waypoint, up?: base | world | { ship | object } }, track { lag s }, shake { amplitude °, frequency? Hz, decay? s }. Types: ${CAMERA_MOVE_TYPES.join(', ')}.
+- duration s (omitted: hold until stopped); end: release (default: blend back to the orbit camera) or hold (keep the last frame); transition: "cut" (default) or "blend" or { type: "blend", duration? (1.5 s), easing? }; lag { eye?, look? } (time constants, s); letterbox: an aspect (2.39) or false; hud: false hides the overlay; clearance: hull radii the eye keeps out of (false: none).
+Examples: { "hardpoint": { "name": "hero-port", "ship": "tfis-fc" }, "duration": 8, "transition": "blend", "moves": [{ "type": "push", "factor": 0.7 }, { "type": "roll", "angle": 12 }] }; { "pose": { "eye": [0, 3000, -12000], "look": { "ship": "tfis-fc" }, "roll": 8, "fov": 35 } }; { "shot": "overlook-pull-out" }.
+The user's drag or wheel on the view takes the camera back. Returns { state, driver, shots (the normalized shots as played, library shots expanded: copy and tweak one as an explicit shot), warnings }; get_state.cinema shows its progress; look with screenshot.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        shot: { type: 'string', enum: [...CAMERA_SHOT_NAMES], description: 'A library shot (list_shots).' },
+        hardpoint: { type: 'object', description: '{ name, ship | fleet [+ wing | squad] | ships | teams | object | celestial, target?, side?, fov?, fill?, bank? }' },
+        pose: { type: 'object', description: '{ eye, look, up?, roll?, fov? }: eye and look are [x, y, z], { position } or { ship | object, offset?, units?, bank? }.' },
+        moves: { type: 'array', items: { type: 'object' }, description: `Moves: ${CAMERA_MOVE_TYPES.join(', ')}.` },
+        duration: { type: 'number', exclusiveMinimum: 0, description: 'Seconds; omit to hold until stopped.' },
+        end: { type: 'string', enum: [...CAMERA_SHOT_ENDS], description: 'What the shot does when its duration is up.' },
+        transition: { description: '"cut", "blend" or { type: "blend", duration?, easing? }.', anyOf: [{ type: 'string', enum: ['cut', 'blend'] }, { type: 'object' }] },
+        lag: { type: 'object', description: '{ eye?, look? } time constants, seconds.' },
+        letterbox: {
+          description: 'An aspect in [0.5, 4] (2.39 for scope), or false.',
+          anyOf: [
+            { type: 'number', minimum: 0.5, maximum: 4 },
+            { type: 'boolean', enum: [false] }
+          ]
+        },
+        hud: { type: 'boolean' },
+        clearance: {
+          description: 'Hull radii the eye is kept out of each hull (default 1.15), or false.',
+          anyOf: [
+            { type: 'number', minimum: 0, maximum: 10 },
+            { type: 'boolean', enum: [false] }
+          ]
+        },
+        name: { type: 'string' },
+        ship: { type: 'string', description: "A library shot's ship." },
+        fleet: { type: 'string', description: "A library shot's fleet." },
+        wing: { type: 'string' },
+        squad: { type: 'string' },
+        ships: { type: 'array', items: { type: 'string' } },
+        teams: { type: 'array', items: { type: 'string' }, minItems: 2, maxItems: 2 },
+        object: { type: 'string' },
+        celestial: { type: ['string', 'integer'] },
+        target: { type: 'string' },
+        side: { type: 'string', enum: ['port', 'starboard'] },
+        fov: { type: 'number', minimum: 5, maximum: 120 },
+        fill: { type: 'number', minimum: 0.05, maximum: 1.5 },
+        bank: { type: 'boolean' }
+      }
+    }
+  },
+  {
+    name: 'play_sequence',
+    where: 'page',
+    description:
+      "Plays cinematic camera shots back to back on the scene clock (driver claude): shots is a list of play_shot shots, explicit or library references ({ shot: '<name>', ... }). Every shot but the last needs a duration; each starts on its own transition (a cut, or a blend from the previous shot's pose); the last holds without a duration, else releases or holds per its end. Returns as play_shot; get_state.cinema.sequence shows the index and the whole sequence's progress.",
+    inputSchema: {
+      type: 'object',
+      properties: { shots: { type: 'array', minItems: 1, items: { type: 'object' }, description: 'The shots, in order.' } },
+      required: ['shots']
+    }
+  },
+  {
+    name: 'stop_shot',
+    where: 'page',
+    description:
+      "Stops the cinematic camera. By default it hands the camera back to the user: the orbit camera takes the shot's last eye and look (and follows its ship when it framed one) and the view blends there in 0.5 s. adopt: false blends back to the orbit's previous view instead; cut: true switches at once. pause: true freezes the shot instead (its clock, moves and sequence stop; the hardpoint still follows its subject) until resume_shot. A stopped or released shot (stop_shot, frame_camera, the user's drag) stays resumable until a new play, a load, or its subject leaving. Returns get_state.cinema.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        pause: { type: 'boolean', description: 'Freeze the shot instead of stopping it.' },
+        adopt: { type: 'boolean', description: 'The orbit camera takes the shot view (default true).' },
+        cut: { type: 'boolean', description: 'No blend back.' }
+      }
+    }
+  },
+  {
+    name: 'resume_shot',
+    where: 'page',
+    description: 'Resumes the cinematic camera: a paused shot continues where it froze; otherwise the last stopped or released shot or sequence plays again from where it stopped, blending in from the drawn view over 1.5 s. Errors when nothing is paused or stopped; a no-op while a shot plays. Returns get_state.cinema.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'list_shots',
+    where: 'hub',
+    description:
+      "Lists the named cinematic shot library (works with no viewer tab): each shot's name, description, subject kind (engagement, group, ship or landmark), the options it reads, its default duration (none: holds until stopped), end, an example reference for play_shot / play_sequence, and that example expanded into the explicit shot it plays.",
+    inputSchema: { type: 'object', properties: {} }
   }
 ];
 

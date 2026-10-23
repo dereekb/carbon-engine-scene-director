@@ -3,7 +3,7 @@ import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { describe, expect, it } from 'vitest';
-import { TOOLS } from '@scene-director/scene';
+import { CAMERA_SHOT_NAMES, TOOLS } from '@scene-director/scene';
 
 /** The built CLI: `nx test` builds it first (test dependsOn build), so this runs what .mcp.json launches. */
 const CLI = path.resolve(import.meta.dirname, '../../../../../dist/apps/scene-director/main.js');
@@ -40,6 +40,11 @@ describe('mcp server', () => {
       const missing = (await client.callTool({ name: 'get_scene', arguments: {} })) as { isError?: boolean; content: { text: string }[] };
       expect(missing.isError).toBe(true);
       expect(missing.content[0].text).toMatch(/No viewer tab is connected/);
+
+      // The shot library is static data on the hub: it answers with no tab.
+      const shots = (await client.callTool({ name: 'list_shots', arguments: {} })) as { isError?: boolean; content: { text: string }[] };
+      expect(shots.isError).toBeFalsy();
+      expect((JSON.parse(shots.content[0].text) as { shots: { name: string }[] }).shots.map((shot) => shot.name)).toEqual(CAMERA_SHOT_NAMES);
 
       const map = (await client.callTool({ name: 'search_map', arguments: { query: 'Jita' } })) as { isError?: boolean; content: { text: string }[] };
       expect(map.isError).toBe(true);

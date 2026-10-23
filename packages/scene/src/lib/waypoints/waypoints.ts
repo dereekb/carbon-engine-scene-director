@@ -82,8 +82,9 @@ export interface WaypointContext {
   readonly anchorOf: (ref: { readonly ship?: string; readonly object?: string }) => Maybe<WaypointAnchor>;
   /**
    * The frame bare [x, y, z] waypoints are given in ([forward, starboard, up] off its centre); null for world space.
+   * `scale` multiplies the bare points (a subject's radius, so one path fits any subject size); default 1.
    */
-  readonly frame?: Maybe<FrameAxes & { readonly centre: SceneVector }>;
+  readonly frame?: Maybe<FrameAxes & { readonly centre: SceneVector; readonly scale?: number }>;
 }
 
 const WAYPOINT_KEYS = new Set(['position', 'ship', 'object', 'offset', 'units', 'bank', 'time']);
@@ -98,7 +99,7 @@ const WAYPOINT_KEYS = new Set(['position', 'ship', 'object', 'offset', 'units', 
 export function resolveWaypoint(waypoint: Waypoint, context: WaypointContext): Maybe<SceneVector> {
   let position: Maybe<SceneVector> = null;
   if (Array.isArray(waypoint)) {
-    position = context.frame ? fromFrame(context.frame.centre, context.frame, waypoint) : [...waypoint];
+    position = context.frame ? fromFrame(context.frame.centre, context.frame, scaleVec(waypoint, context.frame.scale ?? 1)) : [...waypoint];
   } else if (waypoint.position) {
     position = [...waypoint.position];
   } else {

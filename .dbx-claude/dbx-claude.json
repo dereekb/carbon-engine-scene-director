@@ -414,7 +414,13 @@
               "flyby",
               "letterbox",
               "SetCinematicFrame",
-              "TakeOverCinema"
+              "TakeOverCinema",
+              "stop_shot",
+              "resume_shot",
+              "list_shots",
+              "shot library",
+              "warp-landing",
+              "warp-in"
             ]
           },
           {

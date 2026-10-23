@@ -234,11 +234,14 @@ type PathMove = Extract<CameraMove, { type: 'path' }>;
  * @param pose - The base pose.
  * @param move - The path.
  * @param t - Eased seconds into the path.
- * @param context - The subject (bare points in `frame: "subject"`) and the scene.
+ * @param context - The subject (bare points in `frame: "subject"`, scaled by its radius with `units: "radii"`) and the
+ *   scene.
  */
 function PathPose(pose: CameraPose, move: PathMove, t: number, context: MoveContext): CameraPose {
   const scene = context.scene;
-  const waypoints: WaypointContext = { anchorOf: (ref) => (scene ? cinemaAnchor(scene, ref) : null), frame: move.frame === 'subject' ? context.subject : null };
+  const subject = context.subject;
+  const frame = move.frame === 'subject' && subject ? { ...subject, scale: move.units === 'radii' ? subject.radius : 1 } : null;
+  const waypoints: WaypointContext = { anchorOf: (ref) => (scene ? cinemaAnchor(scene, ref) : null), frame };
   const resolved = move.points.flatMap((waypoint) => {
     const point = resolveWaypoint(waypoint, waypoints);
     return point ? [{ point, time: waypointTime(waypoint) }] : [];

@@ -230,9 +230,9 @@ describe('CinemaRig', () => {
     );
     const scene = Scene([Ship('a', [0, 0, 0])]);
     const chase = rig.Frame(0.9 * SECOND, () => scene);
-    expect(rig.Report().sequence).toEqual({ index: 0, count: 2 });
+    expect(rig.Report().sequence).toMatchObject({ index: 0, count: 2 });
     const start = rig.Frame(SECOND, () => scene);
-    expect(rig.Report().sequence).toEqual({ index: 1, count: 2 });
+    expect(rig.Report().sequence).toMatchObject({ index: 1, count: 2 });
     // The blend starts on the chase pose and swings round to bow-on.
     expect(distanceVec(start?.pose.eye ?? [0, 0, 0], chase?.pose.eye ?? [0, 0, 0])).toBeLessThan(1);
     const end = rig.Frame(3 * SECOND, () => scene);
@@ -334,5 +334,147 @@ describe('LetterboxRect', () => {
     expect(LetterboxRect(1600, 900, 2.39)).toEqual({ left: 0, top: 115, width: 1600, height: 669 });
     expect(LetterboxRect(1600, 900, 1)).toEqual({ left: 350, top: 0, width: 900, height: 900 });
     expect(LetterboxRect(1600, 900, false)).toEqual({ left: 0, top: 0, width: 1600, height: 900 });
+  });
+});
+
+describe('CinemaRig over MCP', () => {
+  const moving = (z: number): CinemaScene => Scene([Ship('a', [0, 0, z], [0, 0, 100])]);
+  const dolly = { hardpoint: { name: 'chase', ship: 'a' }, duration: 10, moves: [{ type: 'dolly', distance: 100 }] };
+
+  it('pauses the shot clock while the hardpoint keeps tracking, and resumes with the same progress', () => {
+    const rig = new CinemaRig();
+    rig.Play(dolly, 0);
+    rig.Frame(0, () => moving(0));
+    const frozen = rig.Frame(2 * SECOND, () => moving(200))?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    rig.Pause(2 * SECOND);
+    const eye = rig.Frame(4 * SECOND, () => moving(400))?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    expect(rig.Report().state).toBe('paused');
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(2);
+    expect(rig.Report().driver).toBe('claude');
+    // The dolly is frozen while the chase follows the ship 200 m on.
+    expect(eye[2] - frozen[2]).toBeCloseTo(200, 3);
+    rig.Resume(4 * SECOND);
+    rig.Frame(5 * SECOND, () => moving(500));
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(3);
+    expect(rig.Report().shot?.progress).toBeCloseTo(0.3);
+  });
+
+  it('hands back on stop and replays from where it stopped, blending in from the drawn pose', () => {
+    const rig = new CinemaRig();
+    rig.Play(dolly, 0);
+    rig.Frame(0, () => moving(0));
+    rig.Frame(3 * SECOND, () => moving(0));
+    rig.Release(3 * SECOND, { adopt: true });
+    expect(rig.Report().driver).toBe('user');
+    expect(rig.Report().resumable).toMatchObject({ index: 0, count: 1, elapsed: 3 });
+    const drawn: CameraPose = { eye: [5000, 0, 0], look: [0, 0, 0], up: [0, 1, 0], fov: 60 };
+    rig.Resume(10 * SECOND);
+    expect(rig.Report().resumable).toBeNull();
+    expect(rig.Report().driver).toBe('claude');
+    const first = rig.Frame(10 * SECOND, () => Scene([Ship('a', [0, 0, 0])], drawn));
+    expect(first?.pose.eye[0]).toBeCloseTo(5000);
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(3);
+    const settled = rig.Frame(12 * SECOND, () => Scene([Ship('a', [0, 0, 0])], drawn));
+    expect(Math.abs(settled?.pose.eye[0] ?? 1)).toBeLessThan(1);
+  });
+
+  it('forgets on a cut stop with forget, and refuses to resume nothing', () => {
+    const rig = new CinemaRig();
+    rig.Play(dolly, 0);
+    rig.Frame(0, () => moving(0));
+    rig.Stop(SECOND, { cut: true, forget: true });
+    expect(rig.Report().state).toBe('idle');
+    expect(rig.Report().resumable).toBeNull();
+    expect(() => rig.Resume(2 * SECOND)).toThrow(/nothing to resume/u);
+  });
+
+  it('holds the last frame of a shot that ends with hold', () => {
+    const rig = new CinemaRig();
+    rig.Play({ ...dolly, duration: 1, end: 'hold' }, 0);
+    const scene = Scene([Ship('a', [0, 0, 0])]);
+    const start = rig.Frame(0, () => scene)?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    const end = rig.Frame(3 * SECOND, () => scene)?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    expect(rig.Report()).toMatchObject({ state: 'playing', shot: { progress: 1, holding: true, elapsed: 1 } });
+    expect(distanceVec(start, end)).toBeCloseTo(100);
+  });
+
+  it('reports the director as the driver when it plays', () => {
+    const rig = new CinemaRig();
+    rig.Play(dolly, 0, 'director');
+    expect(rig.Report().driver).toBe('director');
+  });
+
+  it('tracks a moving ship with a pose look and rides a hull without clearing it', () => {
+    const rig = new CinemaRig();
+    rig.Play({ pose: { eye: [1000, 0, 0], look: { ship: 'a' } } }, 0);
+    rig.Frame(0, () => moving(0));
+    expect(rig.Frame(SECOND, () => moving(500))?.pose.look).toEqual([0, 0, 500]);
+    const deck = new CinemaRig();
+    deck.Play({ pose: { eye: { ship: 'a', offset: [0, 0, 0.2], units: 'radii' }, look: [0, 0, 1000] } }, 0);
+    expect(deck.Frame(0, () => moving(0))?.pose.eye).toEqual([0, 10, 0]);
+    expect(deck.Subjects()).toEqual(['a']);
+  });
+
+  it('holds the warp-landing eye down the lane and cuts to a late anchor', () => {
+    const warping = { value: false };
+    const scene = (z: number): CinemaScene => ({ ...moving(z), warpOf: (id) => (warping.value && id === 'a' ? { phase: 'warping', landing: [0, 0, 1e6] } : null) });
+    const rig = new CinemaRig();
+    rig.Play({ hardpoint: { name: 'warp-landing', ship: 'a' }, lag: { eye: 2, look: 2 } }, 0);
+    const before = rig.Frame(0, () => scene(0))?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    expect(before[2]).toBeLessThan(1e5);
+    warping.value = true;
+    const cut = rig.Frame(SECOND / 60, () => scene(10))?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    expect(cut[2]).toBeGreaterThan(1e6);
+    const later = rig.Frame(SECOND, () => scene(5e5))?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    Close(later, cut, 3);
+  });
+
+  it('scales a radius path by the subject', () => {
+    const subject = {
+      centre: [0, 0, 0] as SceneVector,
+      radius: 1000,
+      forward: [0, 0, 1] as SceneVector,
+      up: [0, 1, 0] as SceneVector,
+      starboard: [-1, 0, 0] as SceneVector,
+      velocity: [0, 0, 0] as SceneVector,
+      extents: { forward: [-1000, 1000] as [number, number], starboard: [-1000, 1000] as [number, number], up: [-1000, 1000] as [number, number] }
+    };
+    const path: CameraMove = {
+      type: 'path',
+      points: [
+        [0, 0, 1],
+        [1, 0, 1]
+      ],
+      frame: 'subject',
+      units: 'radii',
+      look: 'subject',
+      up: 'base',
+      duration: 1
+    };
+    Close(At([path], 1, { ...CONTEXT, subject }).eye, [0, 1000, 1000]);
+  });
+
+  it('swings the hero toward the beam', () => {
+    const rig = new CinemaRig();
+    rig.Play({ shot: 'hero', ship: 'a', transition: 'cut', lag: { look: 0 } }, 0);
+    const scene = Scene([Ship('a', [0, 0, 0])]);
+    const start = rig.Frame(0, () => scene)?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    const end = rig.Frame(10 * SECOND, () => scene)?.pose.eye ?? ([0, 0, 0] as SceneVector);
+    // Port is +X at yaw 0: the eye swings from the bow toward the port beam.
+    expect(end[2] / distanceVec(end, [0, 0, 0])).toBeLessThan(start[2] / distanceVec(start, [0, 0, 0]));
+    expect(end[0]).toBeGreaterThan(0);
+  });
+
+  it('returns the shots as played, library shots expanded', () => {
+    const result = new CinemaRig().Play(
+      {
+        shots: [
+          { shot: 'chase', ship: 'a', duration: 2 },
+          { shot: 'flyby', ship: 'a' }
+        ]
+      },
+      0
+    );
+    expect(result.shots.map((shot) => shot.library)).toEqual(['chase', 'flyby']);
   });
 });

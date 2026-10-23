@@ -3,18 +3,25 @@
  * presentation. A sequence is shots played back to back. The viewer's CinemaRig plays them on the scene clock; the
  * MCP tools and timeline cues send the same JSON.
  *
- *   { hardpoint: { name, ship | fleet [+ wing | squad] | ships | teams, target?, celestial?, fill?, fov?, bank?, side? }
- *       | pose: { eye, look, up?, roll?, fov? },
- *     moves?: [...], duration?: s, transition?: { type: "cut" } | { type: "blend", duration?, easing? },
- *     lag?: { eye?, look? }, letterbox?: aspect | false, hud?: boolean, name? }
+ *   { hardpoint: { name, ship | fleet [+ wing | squad] | ships | teams | object | celestial, target?, fill?, fov?, bank?, side? }
+ *       | pose: { eye, look, up?, roll?, fov? }      eye and look: [x, y, z], { position } or a waypoint on a hull
+ *       | shot: "<library name>", ...its subject, options and overrides (cinema/library.ts),
+ *     moves?: [...], duration?: s, end?: "release" | "hold", transition?: { type: "cut" } | { type: "blend", duration?, easing? },
+ *     lag?: { eye?, look? }, letterbox?: aspect | false, hud?: boolean, clearance?: radii | false, name? }
+ *
+ * `end` decides what the last shot does once its duration is up: release back to the orbit camera (the default), or hold
+ * its last frame (its moves at their end values, the hardpoint still tracking) until stopped or replaced. A library
+ * reference is expanded into the explicit shot before it is read, so a timeline cue can embed `{ shot: "<name>" }`
+ * unchanged.
  *
  * Moves, each with `at?` (seconds into the shot it starts), `duration?` and `easing?`:
  *   dolly { distance }, truck { distance }, crane { distance }, push { factor }, zoom { fov },
  *   orbit { axis?, rate? | angle? }, roll { rate? | angle? }, spin { axis, rate? | angle? },
- *   path { points, frame?, look?, up? }, track { lag }, shake { amplitude, frequency?, decay? }
+ *   path { points, frame?, units?, look?, up? }, track { lag }, shake { amplitude, frequency?, decay? }
  *
  * A path flies the eye through waypoints (waypoints/waypoints.ts): bare [x, y, z] in `frame` (world, or the subject's
- * [forward, starboard, up]), points in space, or points riding on any ship or object, so a fly-through can pass over
+ * [forward, starboard, up], in metres or, with `units: "radii"`, the subject's radius), points in space, or points
+ * riding on any ship or object, so a fly-through can pass over
  * another ship's hull as it flies. It looks along the path, at the subject, or at a waypoint, with its up from the base
  * pose, the world, or a hull. The hulls its waypoints ride on are exempt from the eye's hull clearance; `clearance`
  * (a multiple of each bounding radius, or false) sets it for the whole shot.
@@ -23,8 +30,9 @@
 import type { Maybe } from '@dereekb/util';
 import { isPlainObject, readVector, reportUnknownKeys, type JsonObject } from '../json';
 import type { SceneVector } from '../scene';
-import { readWaypoint, readWaypoints, waypointAnchorId, type Waypoint } from '../waypoints/waypoints';
-import { ENGAGEMENT_HARDPOINT_NAMES, GROUP_HARDPOINT_NAMES, hardpointKind, SHIP_HARDPOINT_NAMES, type HardpointRef } from './hardpoints';
+import { readWaypoint, readWaypoints, waypointAnchorId, type Waypoint, type WaypointUnits } from '../waypoints/waypoints';
+import { ENGAGEMENT_HARDPOINT_NAMES, GROUP_HARDPOINT_NAMES, hardpointKind, hardpointNames, LANDMARK_HARDPOINT_NAMES, type HardpointRef, type HardpointSubject } from './hardpoints';
+import { CAMERA_SHOT_LIBRARY, expandLibraryShot, type CameraShotLibrarySubject } from './library';
 
 export const CINEMA_EASINGS = ['linear', 'ease-in', 'ease-out', 'ease-in-out'] as const;
 export type CinemaEasing = (typeof CINEMA_EASINGS)[number];
@@ -38,6 +46,18 @@ export type CameraMoveType = (typeof CAMERA_MOVE_TYPES)[number];
 export type CameraMoveAxis = 'up' | 'subject-up' | 'view-up' | SceneVector;
 
 export const CAMERA_MOVE_AXES = ['up', 'subject-up', 'view-up'] as const;
+
+/**
+ * What the last shot does once its duration is up: blend back to the orbit camera, or hold its last frame.
+ */
+export const CAMERA_SHOT_ENDS = ['release', 'hold'] as const;
+export type CameraShotEnd = (typeof CAMERA_SHOT_ENDS)[number];
+
+/**
+ * Who drives the camera: Claude over MCP, the automatic director (reserved), or the user (the orbit camera).
+ */
+export const CINEMA_DRIVERS = ['claude', 'director', 'user'] as const;
+export type CinemaDriver = (typeof CINEMA_DRIVERS)[number];
 
 /**
  * The default blend into a shot, seconds.
@@ -70,7 +90,17 @@ export type CameraMove = CameraMoveTiming &
     | { readonly type: 'orbit'; readonly axis: CameraMoveAxis; readonly rate?: number; readonly angle?: number }
     | { readonly type: 'roll'; readonly rate?: number; readonly angle?: number }
     | { readonly type: 'spin'; readonly axis: CameraMoveAxis; readonly rate?: number; readonly angle?: number }
-    | { readonly type: 'path'; readonly points: readonly Waypoint[]; readonly frame: 'world' | 'subject'; readonly look: 'path' | 'subject' | Waypoint; readonly up: CameraPathUp }
+    | {
+        readonly type: 'path';
+        readonly points: readonly Waypoint[];
+        readonly frame: 'world' | 'subject';
+        /**
+         * What bare subject-frame points count: metres, or the subject's radius (one path fits any subject size).
+         */
+        readonly units?: WaypointUnits;
+        readonly look: 'path' | 'subject' | Waypoint;
+        readonly up: CameraPathUp;
+      }
     | { readonly type: 'track'; readonly lag: number }
     | { readonly type: 'shake'; readonly amplitude: number; readonly frequency: number; readonly decay?: number }
   );
@@ -80,9 +110,13 @@ export type CameraMove = CameraMoveTiming &
  */
 export type CameraPathUp = 'base' | 'world' | { readonly ship: string } | { readonly object: string };
 
+/**
+ * A free placement. Eye and look are waypoints: a world point, or a point on a hull (the eye rides it; the look follows
+ * it).
+ */
 export interface CameraPoseSpec {
-  readonly eye: SceneVector;
-  readonly look: SceneVector;
+  readonly eye: Waypoint;
+  readonly look: Waypoint;
   readonly up?: SceneVector;
   /**
    * Degrees about the view direction, on top of `up`.
@@ -95,6 +129,10 @@ export type CameraTransition = { readonly type: 'cut' } | { readonly type: 'blen
 
 export interface CameraShot {
   readonly name?: string;
+  /**
+   * The library shot this was expanded from.
+   */
+  readonly library?: string;
   readonly hardpoint?: HardpointRef;
   readonly pose?: CameraPoseSpec;
   readonly moves: readonly CameraMove[];
@@ -102,6 +140,10 @@ export interface CameraShot {
    * Seconds; omitted holds until stopped.
    */
   readonly duration?: number;
+  /**
+   * What the last shot does once its duration is up; default release.
+   */
+  readonly end: CameraShotEnd;
   readonly transition: CameraTransition;
   /**
    * Time constants, seconds, of the eye and the look point trailing the shot (0: locked on).
@@ -138,8 +180,12 @@ export interface NormalizedCameraSequence {
   readonly warnings: string[];
 }
 
-const SHOT_KEYS = new Set(['name', 'hardpoint', 'pose', 'moves', 'duration', 'transition', 'lag', 'letterbox', 'hud', 'clearance']);
-const HARDPOINT_KEYS = new Set(['name', 'ship', 'fleet', 'wing', 'squad', 'ships', 'teams', 'target', 'celestial', 'fill', 'fov', 'bank', 'side']);
+const SHOT_KEYS = new Set(['name', 'library', 'hardpoint', 'pose', 'moves', 'duration', 'end', 'transition', 'lag', 'letterbox', 'hud', 'clearance']);
+/**
+ * A hardpoint subject's keys (list_hardpoints' arguments, and a hardpoint less its name).
+ */
+export const HARDPOINT_SUBJECT_KEYS = ['ship', 'fleet', 'wing', 'squad', 'ships', 'teams', 'object', 'celestial', 'target', 'fill', 'fov', 'bank', 'side'] as const;
+const HARDPOINT_KEYS = new Set(['name', ...HARDPOINT_SUBJECT_KEYS]);
 const POSE_KEYS = new Set(['eye', 'look', 'up', 'roll', 'fov']);
 const TIMING_KEYS = ['type', 'at', 'duration', 'easing'];
 const MOVE_KEYS: Record<CameraMoveType, readonly string[]> = {
@@ -151,7 +197,7 @@ const MOVE_KEYS: Record<CameraMoveType, readonly string[]> = {
   orbit: ['axis', 'rate', 'angle'],
   roll: ['rate', 'angle'],
   spin: ['axis', 'rate', 'angle'],
-  path: ['points', 'frame', 'look', 'up'],
+  path: ['points', 'frame', 'units', 'look', 'up'],
   track: ['lag'],
   shake: ['amplitude', 'frequency', 'decay']
 };
@@ -166,13 +212,23 @@ export function normalizeCameraShot(input: unknown, where = 'shot'): NormalizedC
   const problems: string[] = [];
   const warnings: string[] = [];
   if (!isPlainObject(input)) return { shot: null, problems: [`${where} must be an object`], warnings };
-  reportUnknownKeys(input, SHOT_KEYS, where, warnings);
-  const { hardpoint, pose, moves, duration, transition, lag, letterbox, hud, name, clearance } = input;
-  if ((hardpoint == null) === (pose == null)) problems.push(`${where} needs exactly one of hardpoint (a generated camera position) and pose (eye and look)`);
-  const shot: { -readonly [K in keyof CameraShot]: CameraShot[K] } = { moves: [], transition: { type: 'cut' }, lag: { eye: 0, look: 0 } };
+  const spec = input['shot'] == null ? input : expandLibraryShot(input, where, problems, warnings);
+  if (!spec) return { shot: null, problems, warnings };
+  reportUnknownKeys(spec, SHOT_KEYS, where, warnings);
+  const { hardpoint, pose, moves, duration, end, transition, lag, letterbox, hud, name, clearance, library } = spec;
+  if ((hardpoint == null) === (pose == null)) problems.push(`${where} needs exactly one of hardpoint (a generated camera position), pose (eye and look) and shot (a library shot)`);
+  const shot: { -readonly [K in keyof CameraShot]: CameraShot[K] } = { moves: [], end: 'release', transition: { type: 'cut' }, lag: { eye: 0, look: 0 } };
   if (name != null) {
     if (typeof name === 'string' && name.trim()) shot.name = name.trim();
     else problems.push(`${where}.name must be a non-empty string`);
+  }
+  if (library != null) {
+    if (typeof library === 'string' && library.trim()) shot.library = library.trim();
+    else problems.push(`${where}.library must be a library shot name`);
+  }
+  if (end != null) {
+    if (CAMERA_SHOT_ENDS.includes(end as CameraShotEnd)) shot.end = end as CameraShotEnd;
+    else problems.push(`${where}.end must be "release" (blend back to the orbit camera) or "hold" (keep the last frame)`);
   }
   const ref = hardpoint == null ? null : readHardpoint(hardpoint, `${where}.hardpoint`, problems, warnings);
   if (ref) shot.hardpoint = ref;
@@ -210,6 +266,30 @@ export function normalizeCameraShot(input: unknown, where = 'shot'): NormalizedC
 }
 
 /**
+ * A library shot in list_shots: its entry, its example reference, and that example expanded and normalized.
+ */
+export interface CameraShotListing {
+  readonly name: string;
+  readonly description: string;
+  readonly subject: CameraShotLibrarySubject;
+  readonly options: readonly string[];
+  readonly duration?: number;
+  readonly end: CameraShotEnd;
+  readonly example: JsonObject;
+  readonly expanded: Maybe<CameraShot>;
+}
+
+/**
+ * The named shot library, for list_shots.
+ */
+export function listCameraShots(): CameraShotListing[] {
+  return CAMERA_SHOT_LIBRARY.map((entry) => {
+    const expanded = normalizeCameraShot(entry.example).shot;
+    return { name: entry.name, description: entry.description, subject: entry.subject, options: entry.options, ...(entry.duration == null ? {} : { duration: entry.duration }), end: expanded?.end ?? 'hold', example: entry.example, expanded };
+  });
+}
+
+/**
  * Normalizes a sequence: `{ shots: [...] }` or a bare array of shots. Every shot but the last needs a duration.
  */
 export function normalizeCameraSequence(input: unknown, where = 'sequence'): NormalizedCameraSequence {
@@ -238,14 +318,31 @@ export function normalizeCameraSequence(input: unknown, where = 'sequence'): Nor
 
 function readHardpoint(input: unknown, where: string, problems: string[], warnings: string[]): Maybe<HardpointRef> {
   if (!isPlainObject(input)) {
-    problems.push(`${where} must be an object: { name, ship | fleet | ships | teams, ... }`);
+    problems.push(`${where} must be an object: { name, ship | fleet | ships | teams | object | celestial, ... }`);
     return null;
   }
   reportUnknownKeys(input, HARDPOINT_KEYS, where, warnings);
   const before = problems.length;
   const name = typeof input['name'] === 'string' ? input['name'].trim() : '';
-  const ref: { -readonly [K in keyof HardpointRef]: HardpointRef[K] } = { name };
-  for (const key of ['ship', 'fleet', 'wing', 'squad', 'target'] as const) {
+  const ref: HardpointRef = { name, ...readHardpointFields(input, where, problems) };
+  const kind = hardpointKind(ref);
+  const names = hardpointNames(kind);
+  if (!name) problems.push(`${where}.name must be a hardpoint name`);
+  else if (!names.includes(name)) {
+    const others = kind === 'ship' ? `; group hardpoints (${GROUP_HARDPOINT_NAMES.join(', ')}) take fleet or ships, landmark ones (${LANDMARK_HARDPOINT_NAMES.join(', ')}) object or celestial, engagement ones (${ENGAGEMENT_HARDPOINT_NAMES.join(', ')}) teams` : '';
+    problems.push(`${where}.name "${name}" is not a ${kind} hardpoint (${names.join(', ')})${others}`);
+  }
+  if (kind === 'ship' && ref.ship == null && name) problems.push(`${where} needs ship (the ship to frame)`);
+  if (name === 'into-celestial' && ref.celestial == null && ref.object == null) problems.push(`${where}: into-celestial needs celestial (an id or a name from get_state.location) or object (an object id)`);
+  return problems.length > before ? null : ref;
+}
+
+/**
+ * Reads a hardpoint's subject and options (every key but its name), with the subject exclusivity checks.
+ */
+function readHardpointFields(input: JsonObject, where: string, problems: string[]): { -readonly [K in keyof HardpointSubject]: HardpointSubject[K] } {
+  const ref: { -readonly [K in keyof HardpointSubject]: HardpointSubject[K] } = {};
+  for (const key of ['ship', 'fleet', 'wing', 'squad', 'target', 'object'] as const) {
     const value = input[key];
     if (value == null) continue;
     if (typeof value === 'string' && value.trim()) ref[key] = value.trim();
@@ -276,19 +373,35 @@ function readHardpoint(input: unknown, where: string, problems: string[], warnin
     if (input['side'] === 'port' || input['side'] === 'starboard') ref.side = input['side'];
     else problems.push(`${where}.side must be "port" or "starboard"`);
   }
-  const kind = hardpointKind(ref);
-  const names = kind === 'engagement' ? ENGAGEMENT_HARDPOINT_NAMES : kind === 'group' ? GROUP_HARDPOINT_NAMES : SHIP_HARDPOINT_NAMES;
-  if (!name) problems.push(`${where}.name must be a hardpoint name`);
-  else if (!names.includes(name)) {
-    const others = kind === 'ship' ? '; group hardpoints (' + GROUP_HARDPOINT_NAMES.join(', ') + ') take fleet or ships, engagement ones (' + ENGAGEMENT_HARDPOINT_NAMES.join(', ') + ') teams' : '';
-    problems.push(`${where}.name "${name}" is not a ${kind} hardpoint (${names.join(', ')})${others}`);
-  }
-  if (kind === 'ship' && ref.ship == null && name) problems.push(`${where} needs ship (the ship to frame)`);
+  const subjects = (['ship', 'fleet', 'ships', 'object'] as const).filter((key) => ref[key] != null);
+  if (subjects.length > 1 || (ref.celestial != null && ref.object != null)) problems.push(`${where}: give one subject: ship, fleet (+ wing | squad), ships, object or celestial`);
   if ((ref.wing != null || ref.squad != null) && ref.fleet == null) problems.push(`${where}: wing and squad select within a fleet; give fleet too`);
   if (ref.wing != null && ref.squad != null) problems.push(`${where}: give wing or squad, not both`);
-  if (ref.fleet != null && ref.ships != null) problems.push(`${where}: give fleet or ships, not both`);
-  if (name === 'into-celestial' && ref.celestial == null) problems.push(`${where}: into-celestial needs celestial (an id or a name from get_state.location)`);
-  return problems.length > before ? null : ref;
+  return ref;
+}
+
+export interface NormalizedHardpointSubject {
+  readonly subject: Maybe<HardpointSubject>;
+  readonly problems: string[];
+  readonly warnings: string[];
+}
+
+/**
+ * Normalizes list_hardpoints' arguments: one subject (ship, fleet [+ wing | squad], ships, object or celestial; none for
+ * the engagement, with teams?) and the options (target, side, fov, fill, bank).
+ */
+export function normalizeHardpointSubject(input: unknown, where = 'subject'): NormalizedHardpointSubject {
+  const problems: string[] = [];
+  const warnings: string[] = [];
+  let subject: Maybe<HardpointSubject> = null;
+  if (input != null && !isPlainObject(input)) problems.push(`${where} must be an object`);
+  else {
+    const object = input ?? {};
+    reportUnknownKeys(object, new Set(HARDPOINT_SUBJECT_KEYS), where, warnings);
+    const fields = readHardpointFields(object, where, problems);
+    if (!problems.length) subject = fields;
+  }
+  return { subject, problems, warnings };
 }
 
 function readPose(input: unknown, where: string, problems: string[], warnings: string[]): Maybe<CameraPoseSpec> {
@@ -298,13 +411,15 @@ function readPose(input: unknown, where: string, problems: string[], warnings: s
   }
   reportUnknownKeys(input, POSE_KEYS, where, warnings);
   const before = problems.length;
-  const eye = readVector(input['eye'], `${where}.eye`, problems);
-  const look = readVector(input['look'], `${where}.look`, problems);
-  const pose: { -readonly [K in keyof CameraPoseSpec]: CameraPoseSpec[K] } = { eye, look };
+  const eye = input['eye'] == null ? null : readWaypoint(input['eye'], `${where}.eye`, problems, warnings);
+  const look = input['look'] == null ? null : readWaypoint(input['look'], `${where}.look`, problems, warnings);
+  if (input['eye'] == null) problems.push(`${where}.eye is required: [x, y, z], { position } or { ship | object, offset?, units?, bank? }`);
+  if (input['look'] == null) problems.push(`${where}.look is required: [x, y, z], { position } or { ship | object, offset?, units?, bank? }`);
+  const pose: { -readonly [K in keyof CameraPoseSpec]: CameraPoseSpec[K] } = { eye: eye ?? [0, 0, 0], look: look ?? [0, 0, 1] };
   if (input['up'] != null) pose.up = readVector(input['up'], `${where}.up`, problems);
   if (input['roll'] != null) pose.roll = readRange(input['roll'], `${where}.roll`, problems, -360, 360);
   if (input['fov'] != null) pose.fov = readRange(input['fov'], `${where}.fov`, problems, MIN_SHOT_FOV, MAX_SHOT_FOV);
-  if (problems.length === before && eye.every((value, axis) => value === look[axis])) problems.push(`${where}: eye and look must differ`);
+  if (problems.length === before && Array.isArray(pose.eye) && Array.isArray(pose.look) && pose.eye.every((value, axis) => value === (pose.look as SceneVector)[axis])) problems.push(`${where}: eye and look must differ`);
   return problems.length > before ? null : pose;
 }
 
@@ -386,6 +501,9 @@ function readPath(input: JsonObject, where: string, problems: string[], warnings
   const points = readWaypoints(input['points'], `${where}.points`, problems, warnings);
   const frame = input['frame'] ?? 'world';
   if (frame !== 'world' && frame !== 'subject') problems.push(`${where}.frame must be "world" or "subject" ([forward, starboard, up] metres off the subject)`);
+  const units = input['units'];
+  if (units != null && units !== 'metres' && units !== 'radii') problems.push(`${where}.units must be "metres" or "radii" (the subject's radius)`);
+  else if (units === 'radii' && frame !== 'subject') problems.push(`${where}: units "radii" scales bare points by the subject's radius; it needs frame "subject"`);
   let look: 'path' | 'subject' | Waypoint = 'subject';
   const lookInput = input['look'];
   if (lookInput === 'path' || lookInput === 'subject') look = lookInput;
@@ -396,7 +514,7 @@ function readPath(input: JsonObject, where: string, problems: string[], warnings
   else if (isPlainObject(upInput) && typeof upInput['ship'] === 'string' && upInput['ship'].trim()) up = { ship: upInput['ship'].trim() };
   else if (isPlainObject(upInput) && typeof upInput['object'] === 'string' && upInput['object'].trim()) up = { object: upInput['object'].trim() };
   else if (upInput != null) problems.push(`${where}.up must be "base", "world", { ship } or { object }`);
-  return { ...timing, type: 'path', points, frame: frame === 'subject' ? 'subject' : 'world', look, up };
+  return { ...timing, type: 'path', points, frame: frame === 'subject' ? 'subject' : 'world', ...(units === 'radii' ? { units: 'radii' as const } : {}), look, up };
 }
 
 function readAxis(input: unknown, where: string, problems: string[], fallback: Maybe<CameraMoveAxis>): Maybe<CameraMoveAxis> {
@@ -446,21 +564,24 @@ function readNonNegative(input: unknown, where: string, problems: string[]): num
 }
 
 /**
- * The ship and object ids a shot depends on: its hardpoint's ship and target, then the hulls its paths ride on, look at
- * or take their up from. Removing one ends the shot.
+ * The ship and object ids a shot depends on: its hardpoint's ship, target and object, its pose's eye and look hulls,
+ * then the hulls its paths ride on, look at or take their up from. Removing one ends the shot.
  */
 export function cameraShotSubjects(shot: Maybe<CameraShot>): string[] {
   const ref = shot?.hardpoint;
-  const ids = ref ? [ref.ship, ref.target] : [];
+  const ids: Maybe<string>[] = ref ? [ref.ship, ref.target, ref.object] : [];
+  if (shot?.pose) ids.push(waypointAnchorId(shot.pose.look));
   ids.push(...cameraPathAnchors(shot));
   return [...new Set(ids.filter((id): id is string => typeof id === 'string'))];
 }
 
 /**
- * The hulls a shot's paths ride on, look at or take their up from: exempt from its hull clearance.
+ * The hulls a shot's paths ride on, look at or take their up from, and the hull its pose's eye rides on (a deck camera):
+ * exempt from its hull clearance.
  */
 export function cameraPathAnchors(shot: Maybe<CameraShot>): string[] {
   const ids: string[] = [];
+  if (shot?.pose) ids.push(waypointAnchorId(shot.pose.eye) ?? '');
   for (const move of shot?.moves ?? []) {
     if (move.type !== 'path') continue;
     for (const point of move.points) ids.push(waypointAnchorId(point) ?? '');

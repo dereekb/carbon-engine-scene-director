@@ -7,10 +7,13 @@
  * then writes the result into EveCamera's view and projection.
  *
  * - Time is the scene clock's: a paused clock holds the shot, fixed steps replay it exactly.
- * - A sequence advances on each shot's duration; the last shot holds unless it has one, and then the rig releases.
+ * - A sequence advances on each shot's duration; the last shot holds unless it has one, and then the rig releases
+ *   (or, with `end: "hold"`, keeps its last frame until stopped).
+ * - A pause freezes the shot's clock while its hardpoint keeps tracking; resume continues it, or replays the last
+ *   stopped or released shot from where it stopped, blending in from the drawn pose.
  * - Releasing blends from the last cinematic pose back to the orbit camera over CINEMA_RELEASE_SECONDS; with `adopt`
  *   the orbit is first set to the cinematic eye and look, so a drag continues from the image.
- * - A subject that left the scene ends the shot (released, with a note).
+ * - A subject that left the scene ends the shot (released and forgotten, with a note).
  *
  * Node-tested: it imports only the scene package, the clock and cinema-moves.ts.
  */
@@ -20,19 +23,25 @@ import {
   cameraClips,
   cameraPathAnchors,
   cameraShotSubjects,
+  cinemaAnchor,
   HULL_CLEARANCE,
   cinemaSpheres,
   clearHulls,
+  DEFAULT_BLEND_SECONDS,
   normalizeCameraSequence,
   normalizeCameraShot,
   resolveHardpoint,
+  resolveWaypoint,
   rollPose,
   toOrbitView,
   WORLD_UP,
   blendPoses,
   type CameraPose,
   type CameraShot,
+  type CinemaDriver,
+  type CinemaEasing,
   type CinemaScene,
+  type HardpointAnchor,
   type OrbitView,
   type SceneVector,
   type SubjectFrame
@@ -55,7 +64,12 @@ export const CINEMA_DEFAULT_ASPECT = 16 / 9;
  */
 export const CINEMA_DEFAULT_FOV = 45;
 
-export type CinemaState = 'idle' | 'playing' | 'releasing';
+export type CinemaState = 'idle' | 'playing' | 'paused' | 'releasing';
+
+/**
+ * Who can play a shot: Claude over MCP, or the automatic director (reserved). The user drives the orbit camera.
+ */
+export type CinemaPlayer = Exclude<CinemaDriver, 'user'>;
 
 /**
  * What the engine draws this frame.
@@ -72,7 +86,10 @@ export interface CinemaFrame {
 
 export interface CinemaPlayResult {
   readonly state: CinemaState;
-  readonly shots: number;
+  /**
+   * The shots as played: normalized, library shots expanded.
+   */
+  readonly shots: readonly CameraShot[];
   readonly warnings: string[];
 }
 
@@ -82,6 +99,14 @@ export interface CinemaReleaseOptions {
    */
   readonly adopt?: boolean;
   readonly note?: string;
+  /**
+   * Straight back to the orbit camera, with no release blend.
+   */
+  readonly cut?: boolean;
+  /**
+   * Forget the shot: resume cannot replay it.
+   */
+  readonly forget?: boolean;
 }
 
 /**
@@ -89,23 +114,61 @@ export interface CinemaReleaseOptions {
  */
 export interface CinemaShotReport {
   readonly name?: string;
+  readonly library?: string;
   readonly hardpoint?: CameraShot['hardpoint'];
   readonly pose?: CameraShot['pose'];
   readonly moves: string[];
   readonly transition: CameraShot['transition']['type'];
+  readonly end: CameraShot['end'];
   readonly elapsed: number;
   readonly duration: Maybe<number>;
   /**
-   * elapsed / duration; null while it holds.
+   * elapsed / duration; null while it holds with no duration.
    */
   readonly progress: Maybe<number>;
+  /**
+   * The last shot's duration is up and it holds its last frame (`end: "hold"`).
+   */
+  readonly holding?: boolean;
+}
+
+export interface CinemaSequenceReport {
+  readonly index: number;
+  readonly count: number;
+  /**
+   * Seconds into the whole sequence.
+   */
+  readonly elapsed: number;
+  /**
+   * The whole sequence's seconds; null when its last shot holds with no duration.
+   */
+  readonly duration: Maybe<number>;
+  readonly progress: Maybe<number>;
+}
+
+/**
+ * What resume_shot would replay.
+ */
+export interface CinemaResumableReport {
+  readonly name?: string;
+  readonly library?: string;
+  readonly index: number;
+  readonly count: number;
+  /**
+   * Seconds into the shot it stopped at.
+   */
+  readonly elapsed: number;
 }
 
 export interface CinemaReport {
   readonly state: CinemaState;
-  readonly driver: Maybe<string>;
+  /**
+   * Who drives: the player while a shot plays or is paused, else the user (the orbit camera).
+   */
+  readonly driver: CinemaDriver;
   readonly shot: Maybe<CinemaShotReport>;
-  readonly sequence: Maybe<{ readonly index: number; readonly count: number }>;
+  readonly sequence: Maybe<CinemaSequenceReport>;
+  readonly resumable: Maybe<CinemaResumableReport>;
   readonly pose: Maybe<{ readonly eye: number[]; readonly look: number[]; readonly up: number[]; readonly fov: number }>;
   readonly near: Maybe<number>;
   readonly far: Maybe<number>;
@@ -117,15 +180,37 @@ export interface CinemaReport {
 interface ShotRun {
   readonly shot: CameraShot;
   /**
-   * The scene tick the shot started at.
+   * The scene tick the shot started at (moved on by a pause).
    */
-  readonly start: number;
+  start: number;
   readonly seed: number;
-  anchor: Maybe<SceneVector>;
+  anchor: Maybe<HardpointAnchor>;
   /**
    * The pose a blend starts from; null until the first frame captures the drawn one.
    */
   blendFrom: Maybe<CameraPose>;
+  /**
+   * A resume's blend in from the drawn pose, read instead of the shot's own transition.
+   */
+  resumeBlend?: { start: number; readonly duration: number; readonly easing: CinemaEasing };
+  /**
+   * Whether a frame has been drawn on it.
+   */
+  framed: boolean;
+}
+
+/**
+ * A stopped or released shot, for resume.
+ */
+interface StoppedShots {
+  readonly shots: readonly CameraShot[];
+  readonly index: number;
+  /**
+   * Ticks into the shot it stopped at.
+   */
+  readonly elapsed: number;
+  readonly anchor: Maybe<HardpointAnchor>;
+  readonly seed: number;
 }
 
 interface Release {
@@ -137,7 +222,7 @@ interface Release {
 
 export class CinemaRig {
   private state: CinemaState = 'idle';
-  private driver: Maybe<string> = null;
+  private driver: CinemaPlayer = 'claude';
   private shots: CameraShot[] = [];
   private index = 0;
   private run: Maybe<ShotRun> = null;
@@ -147,9 +232,11 @@ export class CinemaRig {
   private lastTick: Maybe<number> = null;
   private note: Maybe<string> = null;
   private reportedAt = 0;
+  private pausedAt: Maybe<number> = null;
+  private stopped: Maybe<StoppedShots> = null;
 
   /**
-   * True while a shot plays or the release blend runs.
+   * True while a shot plays, is paused, or the release blend runs.
    */
   get active(): boolean {
     return this.state !== 'idle';
@@ -160,81 +247,150 @@ export class CinemaRig {
   }
 
   /**
-   * Plays a shot, or a sequence (`{ shots: [...] }` or an array). A blend transition starts from the pose drawn last
-   * frame; a cut starts on the hardpoint.
+   * True while a shot plays or is paused: the cinematic camera has the view.
+   */
+  get driving(): boolean {
+    return this.state === 'playing' || this.state === 'paused';
+  }
+
+  /**
+   * Plays a shot, or a sequence (`{ shots: [...] }` or an array), replacing whatever plays and forgetting any paused
+   * or stopped shot. A blend transition starts from the pose drawn last frame; a cut starts on the hardpoint.
    *
-   * @param input - The shot or sequence JSON.
+   * @param input - The shot or sequence JSON (library references expand here).
    * @param now - The scene clock, in integer 100 ns ticks.
    * @param driver - Who asked (get_state's `cinema.driver`).
-   * @returns The new state and any warnings.
+   * @returns The new state, the shots as played, and any warnings.
    * @throws {Error} When the shot or sequence is invalid.
    */
-  Play(input: unknown, now: number, driver = 'claude'): CinemaPlayResult {
+  Play(input: unknown, now: number, driver: CinemaPlayer = 'claude'): CinemaPlayResult {
     const sequence = Array.isArray(input) || (typeof input === 'object' && input !== null && (input as Record<string, unknown>)['shots'] != null);
     const normalized = sequence ? normalizeCameraSequence(input) : normalizeCameraShot(input);
     const shots = 'sequence' in normalized ? (normalized.sequence?.shots ?? null) : normalized.shot ? [normalized.shot] : null;
     if (!shots?.length) throw new Error(`Invalid camera ${sequence ? 'sequence' : 'shot'}:\n- ${normalized.problems.join('\n- ')}`);
-    // A new play while one runs blends from its pose; from idle or a release it captures the drawn pose.
+    // A new play while one runs blends from its pose; from idle, a pause or a release it captures the drawn pose.
     if (this.state !== 'playing') this.last = null;
     this.shots = [...shots];
     this.index = 0;
     this.driver = driver;
     this.note = null;
     this.release = null;
+    this.pausedAt = null;
+    this.stopped = null;
     this.state = 'playing';
     this.StartShot(now);
-    return { state: this.state, shots: shots.length, warnings: normalized.warnings };
+    return { state: this.state, shots: this.shots, warnings: normalized.warnings };
   }
 
   /**
-   * Stops the shot: a release blend back to the orbit camera, or with `cut` straight back.
+   * Stops the shot: a release blend back to the orbit camera, or with `cut` straight back. It stays resumable unless
+   * `forget`.
    */
-  Stop(now: number, { cut = false, note }: { readonly cut?: boolean; readonly note?: string } = {}): void {
-    if (cut) {
-      if (note && this.state !== 'idle') this.note = note;
-      this.state = 'idle';
-      this.run = null;
-      this.release = null;
-      this.smoothed = null;
-    } else {
-      this.Release(now, { note });
+  Stop(now: number, { cut = false, note, forget = false }: { readonly cut?: boolean; readonly note?: string; readonly forget?: boolean } = {}): void {
+    if (this.driving) this.Release(now, { note, cut, forget });
+    else {
+      if (forget) this.stopped = null;
+      if (cut && this.state === 'releasing') {
+        if (note) this.note = note;
+        this.state = 'idle';
+        this.release = null;
+      }
     }
   }
 
   /**
-   * Hands the camera back to the orbit camera with a short blend.
+   * Hands the camera back to the orbit camera with a short blend (none with `cut`), remembering the shot for resume
+   * unless `forget`.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
    * @param options - `adopt` returns the orbit view at the cinematic eye and look.
-   * @returns The orbit view to adopt, when asked and a shot was playing.
+   * @returns The orbit view to adopt, when asked and a shot was driving.
    */
-  Release(now: number, { adopt = false, note }: CinemaReleaseOptions = {}): Maybe<OrbitView> {
-    if (this.state !== 'playing') return null;
+  Release(now: number, { adopt = false, note, cut = false, forget = false }: CinemaReleaseOptions = {}): Maybe<OrbitView> {
+    if (!this.driving) {
+      if (forget) this.stopped = null;
+      return null;
+    }
     if (note) this.note = note;
+    const run = this.run;
+    this.stopped = forget || !run ? null : { shots: this.shots, index: this.index, elapsed: this.ShotNow(now) - run.start, anchor: run.anchor, seed: run.seed };
     const last = this.last;
     this.run = null;
     this.smoothed = null;
-    if (last) {
+    this.pausedAt = null;
+    if (last && !cut) {
       this.release = { start: now, from: last.pose, near: last.near, far: last.far };
       this.state = 'releasing';
     } else {
+      this.release = null;
       this.state = 'idle';
     }
     return adopt && last ? toOrbitView(last.pose) : null;
   }
 
   /**
-   * The ship ids the shot depends on.
+   * Freezes the playing shot: its clock, moves, paths and sequence stop, while its hardpoint still follows the subject.
+   *
+   * @throws {Error} When no shot is playing.
+   */
+  Pause(now: number): void {
+    if (this.state === 'paused') return;
+    if (this.state !== 'playing') throw new Error('nothing to pause: no shot is playing');
+    this.pausedAt = now;
+    this.state = 'paused';
+  }
+
+  /**
+   * Continues a paused shot where it froze, or replays the last stopped or released shot or sequence from where it
+   * stopped, blending in from the drawn pose. A no-op while a shot plays.
+   *
+   * @throws {Error} When nothing is paused or stopped.
+   */
+  Resume(now: number, driver: CinemaPlayer = this.driver): void {
+    if (this.state === 'playing') return;
+    if (this.state === 'paused' && this.run && this.pausedAt != null) {
+      const frozen = now - this.pausedAt;
+      this.run.start += frozen;
+      if (this.run.resumeBlend) this.run.resumeBlend.start += frozen;
+      this.pausedAt = null;
+      this.driver = driver;
+      this.state = 'playing';
+      return;
+    }
+    const stopped = this.stopped;
+    if (!stopped) throw new Error('nothing to resume: no shot is paused or stopped');
+    this.shots = [...stopped.shots];
+    this.index = stopped.index;
+    this.run = {
+      shot: this.shots[this.index],
+      start: now - stopped.elapsed,
+      seed: stopped.seed,
+      anchor: stopped.anchor,
+      blendFrom: null,
+      resumeBlend: { start: now, duration: DEFAULT_BLEND_SECONDS, easing: 'ease-in-out' },
+      framed: false
+    };
+    this.stopped = null;
+    this.release = null;
+    this.last = null;
+    this.smoothed = null;
+    this.note = null;
+    this.driver = driver;
+    this.state = 'playing';
+  }
+
+  /**
+   * The ship and object ids the shot depends on.
    */
   Subjects(): string[] {
-    return this.state === 'playing' ? cameraShotSubjects(this.run?.shot) : [];
+    return this.driving ? cameraShotSubjects(this.run?.shot) : [];
   }
 
   /**
    * The frame's presentation the shot asks for; undefined fields keep the page's.
    */
   Presentation(): { readonly letterbox?: number | false; readonly hud?: boolean } {
-    const shot = this.state === 'playing' ? this.run?.shot : null;
+    const shot = this.driving ? this.run?.shot : null;
     return shot ? { ...(shot.letterbox === undefined ? {} : { letterbox: shot.letterbox }), ...(shot.hud === undefined ? {} : { hud: shot.hud }) } : {};
   }
 
@@ -242,14 +398,14 @@ export class CinemaRig {
    * The camera for the frame at `now`, or null when the orbit camera has it.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
-   * @param sceneOf - The scene as drawn at `now` (built only while a shot plays).
+   * @param sceneOf - The scene as drawn at `now` (built only while a shot drives).
    */
   Frame(now: number, sceneOf: () => CinemaScene): Maybe<CinemaFrame> {
     const seconds = this.lastTick == null ? 0 : Math.max(0, (now - this.lastTick) / TICKS_PER_SECOND);
     this.lastTick = now;
     this.reportedAt = now;
     let frame: Maybe<CinemaFrame> = null;
-    if (this.state === 'playing') frame = this.PlayFrame(now, seconds, sceneOf());
+    if (this.driving) frame = this.PlayFrame(now, seconds, sceneOf());
     if (this.state === 'releasing') frame = this.ReleaseFrame(now);
     return frame;
   }
@@ -258,28 +414,51 @@ export class CinemaRig {
    * Get_state's `cinema`.
    */
   Report(now = this.reportedAt): CinemaReport {
-    const run = this.state === 'playing' ? this.run : null;
+    const run = this.driving ? this.run : null;
     const shot = run?.shot;
-    const elapsed = run ? Math.max(0, (now - run.start) / TICKS_PER_SECOND) : 0;
+    const raw = run ? Math.max(0, (this.ShotNow(now) - run.start) / TICKS_PER_SECOND) : 0;
+    const holding = shot?.duration != null && shot.end === 'hold' && this.index === this.shots.length - 1 && raw >= shot.duration;
+    const elapsed = holding && shot?.duration != null ? shot.duration : raw;
     const pose = this.state === 'idle' ? null : this.last?.pose;
     const presentation = this.Presentation();
+    let sequence: Maybe<CinemaSequenceReport> = null;
+    if (run && this.shots.length > 1) {
+      const before = this.shots.slice(0, this.index).reduce((sum, entry) => sum + (entry.duration ?? 0), 0);
+      const total = this.shots.every((entry) => entry.duration != null) ? this.shots.reduce((sum, entry) => sum + (entry.duration ?? 0), 0) : null;
+      sequence = { index: this.index, count: this.shots.length, elapsed: Round(before + elapsed, 100), duration: total, progress: total ? Round(Math.min(1, (before + elapsed) / total), 1000) : null };
+    }
+    const stopped = this.stopped;
+    const stoppedShot = stopped?.shots[stopped.index];
     return {
       state: this.state,
-      driver: this.state === 'idle' ? null : this.driver,
+      driver: this.driving ? this.driver : 'user',
       shot:
         run && shot
           ? {
               ...(shot.name ? { name: shot.name } : {}),
+              ...(shot.library ? { library: shot.library } : {}),
               ...(shot.hardpoint ? { hardpoint: shot.hardpoint } : {}),
               ...(shot.pose ? { pose: shot.pose } : {}),
               moves: shot.moves.map((move) => move.type),
               transition: shot.transition.type,
+              end: shot.end,
               elapsed: Round(elapsed, 100),
               duration: shot.duration ?? null,
-              progress: shot.duration ? Round(Math.min(1, elapsed / shot.duration), 1000) : null
+              progress: shot.duration ? Round(Math.min(1, elapsed / shot.duration), 1000) : null,
+              ...(holding ? { holding: true } : {})
             }
           : null,
-      sequence: this.shots.length > 1 && this.state === 'playing' ? { index: this.index, count: this.shots.length } : null,
+      sequence,
+      resumable:
+        stopped && stoppedShot
+          ? {
+              ...(stoppedShot.name ? { name: stoppedShot.name } : {}),
+              ...(stoppedShot.library ? { library: stoppedShot.library } : {}),
+              index: stopped.index,
+              count: stopped.shots.length,
+              elapsed: Round(stopped.elapsed / TICKS_PER_SECOND, 100)
+            }
+          : null,
       pose: pose ? { eye: pose.eye.map((value) => Round(value, 100)), look: pose.look.map((value) => Round(value, 100)), up: pose.up.map((value) => Round(value, 1000)), fov: Round(pose.fov, 100) } : null,
       near: this.state === 'idle' || !this.last ? null : Round(this.last.near, 1000),
       far: this.state === 'idle' || !this.last ? null : Math.round(this.last.far),
@@ -289,19 +468,32 @@ export class CinemaRig {
     };
   }
 
+  /**
+   * The shot clock: frozen at the pause while paused.
+   */
+  private ShotNow(now: number): number {
+    return this.state === 'paused' && this.pausedAt != null ? this.pausedAt : now;
+  }
+
   private StartShot(now: number): void {
     const shot = this.shots[this.index];
     const blend = shot.transition.type === 'blend';
-    this.run = { shot, start: now, seed: SeedOf(`${this.index}:${JSON.stringify(shot)}`), anchor: null, blendFrom: blend ? (this.last?.pose ?? null) : null };
+    this.run = { shot, start: now, seed: SeedOf(`${this.index}:${JSON.stringify(shot)}`), anchor: null, blendFrom: blend ? (this.last?.pose ?? null) : null, framed: false };
     if (!blend) this.smoothed = null;
   }
 
   private PlayFrame(now: number, seconds: number, scene: CinemaScene): Maybe<CinemaFrame> {
+    const shotNow = this.ShotNow(now);
     let run = this.run;
+    let holding = false;
     // Advance the sequence on each shot's duration, from its exact end so the timing never drifts.
-    while (run?.shot.duration != null && now - run.start >= run.shot.duration * TICKS_PER_SECOND) {
+    while (run?.shot.duration != null && shotNow - run.start >= run.shot.duration * TICKS_PER_SECOND) {
       if (this.index + 1 >= this.shots.length) {
-        this.Release(now, { note: this.shots.length > 1 ? 'the sequence finished' : 'the shot finished' });
+        if (run.shot.end === 'hold') {
+          holding = true;
+          break;
+        }
+        this.Release(now, { note: this.shots.length > 1 ? 'the sequence finished' : 'the shot finished', forget: true });
         return null;
       }
       const end = run.start + Math.round(run.shot.duration * TICKS_PER_SECOND);
@@ -311,22 +503,36 @@ export class CinemaRig {
     }
     if (!run) return null;
     const { shot } = run;
-    const t = (now - run.start) / TICKS_PER_SECOND;
+    const elapsed = (shotNow - run.start) / TICKS_PER_SECOND;
+    const t = holding && shot.duration != null ? Math.min(elapsed, shot.duration) : elapsed;
     let base: Maybe<CameraPose> = null;
     let subject: Maybe<SubjectFrame> = null;
     if (shot.hardpoint) {
       const resolved = resolveHardpoint(shot.hardpoint, scene, run.anchor);
-      if (resolved.anchor && !run.anchor) run.anchor = resolved.anchor;
+      if (resolved.anchor && !run.anchor) {
+        // An anchor seen after the first frame (warp-landing once the warp is known) cuts there instead of smearing.
+        if (run.framed) this.smoothed = null;
+        run.anchor = resolved.anchor;
+      }
       base = resolved.pose;
       subject = resolved.subject;
       if (!base) {
-        this.Release(now, { note: resolved.note ?? 'the hardpoint has no pose' });
+        this.Release(now, { note: resolved.note ?? 'the hardpoint has no pose', forget: true });
         return null;
       }
       this.note = resolved.note ?? null;
     } else if (shot.pose) {
-      const { eye, look, up, roll, fov } = shot.pose;
-      base = { eye: [...eye], look: [...look], up: up ? [...up] : [...WORLD_UP], fov: fov ?? CINEMA_DEFAULT_FOV };
+      const context = { anchorOf: (ref: { readonly ship?: string; readonly object?: string }) => cinemaAnchor(scene, ref) };
+      const eye = resolveWaypoint(shot.pose.eye, context);
+      const look = resolveWaypoint(shot.pose.look, context);
+      if (!eye || !look) {
+        this.Release(now, { note: 'its subject left the scene', forget: true });
+        return null;
+      }
+      // An eye riding the hull it looks at, at its centre: hold the last pose.
+      if (eye.every((value, axis) => value === look[axis])) return this.last ? { pose: this.last.pose, toOrbit: 0, near: this.last.near, far: this.last.far } : null;
+      const { up, roll, fov } = shot.pose;
+      base = { eye, look, up: up ? [...up] : [...WORLD_UP], fov: fov ?? CINEMA_DEFAULT_FOV };
       if (roll) base = rollPose(base, roll);
     }
     if (!base) return null;
@@ -335,16 +541,21 @@ export class CinemaRig {
     const smoothed = this.smoothed ?? { eye: moved.eye, look: moved.look };
     this.smoothed = { eye: Smooth(smoothed.eye, moved.eye, seconds, shot.lag.eye), look: Smooth(smoothed.look, moved.look, seconds, lookLag) };
     let pose: CameraPose = { ...moved, eye: this.smoothed.eye, look: this.smoothed.look };
-    if (shot.transition.type === 'blend') {
+    if (run.resumeBlend) {
+      run.blendFrom ??= scene.camera ?? null;
+      const share = (shotNow - run.resumeBlend.start) / TICKS_PER_SECOND / run.resumeBlend.duration;
+      if (run.blendFrom && share < 1) pose = blendPoses(run.blendFrom, pose, Ease(run.resumeBlend.easing, share));
+    } else if (shot.transition.type === 'blend') {
       run.blendFrom ??= scene.camera ?? null;
       if (run.blendFrom) pose = blendPoses(run.blendFrom, pose, Ease(shot.transition.easing, t / shot.transition.duration));
     }
-    // The hulls a path rides on are exempt from clearance: its waypoints put the eye there on purpose (a pass over a hull).
+    // The hulls a path or the pose's eye rides on are exempt from clearance: the shot puts the eye there on purpose.
     const spheres = cinemaSpheres(scene);
     const eye = shot.clearance === false ? pose.eye : clearHulls(pose.eye, cinemaSpheres(scene, new Set(cameraPathAnchors(shot))), shot.clearance ?? HULL_CLEARANCE);
     pose = { ...pose, eye };
     const { near, far } = cameraClips({ eye, spheres, reach: scene.reach ?? 0 });
     this.last = { pose, near, far };
+    run.framed = true;
     return { pose, toOrbit: 0, near, far };
   }
 

@@ -71,8 +71,27 @@ export interface CinemaObject extends CinemaSphere {
   readonly rotation: CinemaQuaternion;
 }
 
+/**
+ * A ship's warp phases as the camera reads them (Destiny's ShipWarp.phase).
+ */
+export const CINEMA_WARP_PHASES = ['aligning', 'warping', 'exiting', 'landed'] as const;
+export type CinemaWarpPhase = (typeof CINEMA_WARP_PHASES)[number];
+
+/**
+ * A ship's warp: its phase and where it lands (Destiny's landing point once in warp, the estimate while aligning),
+ * origin-relative scene metres.
+ */
+export interface CinemaWarp {
+  readonly phase: CinemaWarpPhase;
+  readonly landing: SceneVector;
+}
+
 export interface CinemaScene {
   readonly ships: readonly CinemaShip[];
+  /**
+   * A ship's warp, or null when it is not warping: read lazily, only by the warp-landing hardpoint.
+   */
+  readonly warpOf?: (id: string) => Maybe<CinemaWarp>;
   /**
    * The document's fleets, for group subjects.
    */
@@ -320,4 +339,66 @@ export function cinemaAnchor(scene: CinemaScene, ref: { readonly ship?: string; 
  */
 export function aheadOf(frame: SubjectFrame, metres: number): SceneVector {
   return addScaledVec(frame.centre, frame.forward, metres);
+}
+
+/**
+ * A landmark's radius when its celestial gives none, metres.
+ */
+export const DEFAULT_LANDMARK_RADIUS = 1000;
+
+/**
+ * A landmark subject: a scene object or a location celestial.
+ */
+export interface CinemaLandmark {
+  readonly kind: 'object' | 'celestial';
+  readonly id: string | number;
+  readonly name?: string;
+  readonly centre: SceneVector;
+  readonly radius: number;
+  /**
+   * An object's facing (its rotation's forward); celestials have none.
+   */
+  readonly forward?: SceneVector;
+}
+
+/**
+ * A landmark by object id or by celestial (an id, "celestial:<id>" or an exact name, case-insensitive).
+ */
+export function findLandmark(scene: CinemaScene, ref: { readonly object?: string; readonly celestial?: string | number }): Maybe<CinemaLandmark> {
+  let landmark: Maybe<CinemaLandmark> = null;
+  if (ref.object != null) {
+    const object = scene.objects?.find((candidate) => candidate.id === ref.object);
+    if (object) landmark = { kind: 'object', id: object.id, centre: [...object.centre], radius: object.radius, forward: headingAxes(object.rotation).forward };
+  } else if (ref.celestial != null) {
+    const celestials = scene.celestials ?? [];
+    let found: Maybe<CinemaCelestial> = null;
+    if (typeof ref.celestial === 'number') found = celestials.find((candidate) => candidate.id === ref.celestial);
+    else {
+      const text = ref.celestial.trim().replace(/^celestial:/u, '');
+      const id = /^\d+$/u.test(text) ? Number(text) : null;
+      found = celestials.find((candidate) => candidate.id === id) ?? celestials.find((candidate) => candidate.name.toLowerCase() === text.toLowerCase());
+    }
+    if (found) landmark = { kind: 'celestial', id: found.id, name: found.name, centre: [...found.position], radius: found.radius > 0 ? found.radius : DEFAULT_LANDMARK_RADIUS };
+  }
+  return landmark;
+}
+
+/**
+ * Where the scene's action is: the engagement frame's centre and radius, or the origin with radius 0 when there are no
+ * ships.
+ */
+export function sceneFocus(scene: CinemaScene, teams?: readonly [string, string]): { readonly centre: SceneVector; readonly radius: number; readonly ships: boolean } {
+  const frame = engagementFrame(scene, teams);
+  return frame ? { centre: frame.centre, radius: frame.radius, ships: true } : { centre: [0, 0, 0], radius: 0, ships: false };
+}
+
+/**
+ * A landmark's frame: forward from the landmark toward the scene's focus (else its own facing, else +Z), up squared from
+ * world up, extents ±r.
+ */
+export function landmarkFrame(landmark: CinemaLandmark, focus: SceneVector): SubjectFrame {
+  const toward = normalizeVec(subVec(focus, landmark.centre)) ?? (landmark.forward ? normalizeVec(landmark.forward) : null) ?? [0, 0, 1];
+  const up = Math.abs(dotVec(toward, WORLD_UP)) > NEAR_VERTICAL ? (orthogonalizeVec([0, 0, 1], toward) ?? [1, 0, 0]) : (orthogonalizeVec(WORLD_UP, toward) ?? [0, 1, 0]);
+  const r = landmark.radius;
+  return { centre: [...landmark.centre], radius: r, forward: toward, up, starboard: crossVec(toward, up), velocity: [0, 0, 0], extents: { forward: [-r, r], starboard: [-r, r], up: [-r, r] } };
 }

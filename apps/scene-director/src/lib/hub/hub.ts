@@ -31,7 +31,7 @@ import path from 'node:path';
 import { Readable } from 'node:stream';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { findTool, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
+import { findTool, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
@@ -289,6 +289,8 @@ export class Hub implements ToolCaller {
     const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args);
     if (saved) return saved;
     switch (name) {
+      case 'list_shots':
+        return { shots: listCameraShots() };
       case 'viewer_status':
         return {
           viewerUrl: this.url,

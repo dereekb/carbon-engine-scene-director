@@ -136,3 +136,5 @@ origin drawn ships jitter (float32), as for any warp.
 heading into each ship's landing. A warp-in would add a `DestinyWorld` method calling `EntityWarpIn` on both parks
 (`WarpFactor` first, the same `WarpEntry` / `TrackWarps` tracking) and set `formationWarp` so arrivals hold until the
 FC lands: the same wait rule. `OnWarp` `enter` / `exit` already fire per member for the effects.
+The camera's `warp-in` shot (`sd-cinema`, the `warp-landing` hardpoint) frames any ship with a `WarpEntry` through
+`world.Motion(id).warp`; check it against warp-in arrivals.

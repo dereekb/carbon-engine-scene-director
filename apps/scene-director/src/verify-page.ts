@@ -246,12 +246,31 @@ interface ViewerState {
  * get_state's `cinema` (the viewer's cinema.ts CinemaRig.Report).
  */
 interface CinemaStateReport {
-  readonly state: 'idle' | 'playing' | 'releasing';
-  readonly shot: Maybe<{ readonly hardpoint?: { readonly name: string }; readonly elapsed: number; readonly duration: Maybe<number>; readonly progress: Maybe<number> }>;
-  readonly sequence: Maybe<{ readonly index: number; readonly count: number }>;
+  readonly state: 'idle' | 'playing' | 'paused' | 'releasing';
+  readonly driver: 'claude' | 'director' | 'user';
+  readonly shot: Maybe<{
+    readonly library?: string;
+    readonly hardpoint?: { readonly name: string };
+    readonly elapsed: number;
+    readonly duration: Maybe<number>;
+    readonly progress: Maybe<number>;
+    readonly holding?: boolean;
+  }>;
+  readonly sequence: Maybe<{ readonly index: number; readonly count: number; readonly elapsed: number; readonly duration: Maybe<number>; readonly progress: Maybe<number> }>;
+  readonly resumable: Maybe<{ readonly index: number; readonly count: number; readonly elapsed: number }>;
   readonly pose: Maybe<{ readonly eye: number[]; readonly look: number[] }>;
   readonly near: Maybe<number>;
   readonly note: Maybe<string>;
+}
+
+/**
+ * list_hardpoints' answer.
+ */
+interface HardpointListingResult {
+  readonly kind: string;
+  readonly subject: Maybe<{ readonly centre: number[]; readonly radius: number; readonly teams?: string[] }>;
+  readonly hardpoints: { readonly name: string; readonly eye?: number[]; readonly look?: number[]; readonly note?: string }[];
+  readonly warnings: string[];
 }
 
 interface AddObjectsResult {
@@ -2046,8 +2065,7 @@ try {
     });
   }
 
-  // The cinematic camera has no MCP tool yet: the checks play shots through the page's director.
-  const playShot = (shot: unknown): Promise<unknown> => page.evaluate((input) => (globalThis as unknown as { sceneDirector: { director: { PlayShot(value: unknown, driver: string): unknown } } }).sceneDirector.director.PlayShot(input, 'verify-page'), shot);
+  const playShot = (shot: Record<string, unknown>): Promise<unknown> => call('play_shot', shot);
   const cinemaOf = (state: ViewerState): CinemaStateReport => {
     if (!state.cinema) throw new Error('get_state has no cinema');
     return state.cinema;
@@ -2091,9 +2109,92 @@ try {
   });
 
   await Check('a cinema sequence advances on its durations', async () => {
-    await playShot({ shots: [{ hardpoint: { name: 'chase', ship: 'hero' }, duration: 1 }, { hardpoint: { name: 'behind-fc', ships: ['hero', 'wing'] }, transition: { type: 'blend', duration: 1 }, duration: 1 }, { hardpoint: { name: 'overlook' } }] });
+    await call('play_sequence', { shots: [{ hardpoint: { name: 'chase', ship: 'hero' }, duration: 1 }, { hardpoint: { name: 'behind-fc', ships: ['hero', 'wing'] }, transition: { type: 'blend', duration: 1 }, duration: 1 }, { hardpoint: { name: 'overlook' } }] });
     const state = await WaitFor('the third shot', 10, (polled) => (cinemaOf(polled).sequence?.index === 2 ? null : JSON.stringify(polled.cinema?.sequence ?? polled.cinema?.state)));
     return `shot ${cinemaOf(state).sequence?.index} of ${cinemaOf(state).sequence?.count}`;
+  });
+
+  await Check('cinema list_hardpoints resolves a ship, a group, the engagement and an object', async () => {
+    const ship = await call<HardpointListingResult>('list_hardpoints', { ship: 'hero' });
+    const centre = ship.subject?.centre ?? [0, 0, 0];
+    const radius = ship.subject?.radius ?? Infinity;
+    const inside = ship.hardpoints.filter((entry) => !entry.eye || Math.hypot(entry.eye[0] - centre[0], entry.eye[1] - centre[1], entry.eye[2] - centre[2]) <= radius);
+    Expect(ship.kind === 'ship' && ship.hardpoints.some((entry) => entry.name === 'warp-landing') && !inside.length, `inside the hull or unresolved: ${JSON.stringify(inside)}`);
+    const group = await call<HardpointListingResult>('list_hardpoints', { ships: ['hero', 'wing'] });
+    Expect(group.kind === 'group' && group.hardpoints.every((entry) => entry.eye), JSON.stringify(group.hardpoints));
+    const engagement = await call<HardpointListingResult>('list_hardpoints', {});
+    Expect(engagement.kind === 'engagement' && engagement.subject?.teams?.length === 2, JSON.stringify(engagement.subject));
+    const placed = await call('add_objects', { type: 'Astrahus', id: 'cinema-astra', position: [0, 0, 100000] }).then(
+      () => true,
+      (error: unknown) => (error instanceof ShipDataError && error.failure === 'unavailable' ? false : Promise.reject(error))
+    );
+    let object = 'object skipped (no SDE)';
+    if (placed) {
+      const listing = await call<HardpointListingResult>('list_hardpoints', { object: 'cinema-astra' });
+      Expect(listing.kind === 'landmark' && listing.hardpoints.every((entry) => entry.eye), JSON.stringify(listing.hardpoints));
+      object = `object ${listing.hardpoints.map((entry) => entry.name).join(', ')}`;
+      await call('patch_scene', { operations: [{ op: 'remove_object', id: 'cinema-astra' }] });
+    }
+    return `ship ${ship.hardpoints.length}, group ${group.hardpoints.length}, engagement ${engagement.hardpoints.length}; ${object}`;
+  });
+
+  await Check('a cinema library shot pauses and resumes on the scene clock', async () => {
+    const played = await call<{ driver: string; shots: { library?: string }[] }>('play_shot', { shot: 'overlook-pull-out' });
+    Expect(played.driver === 'claude' && played.shots[0]?.library === 'overlook-pull-out', JSON.stringify(played));
+    await WaitFor('the pull-out to play', 10, (polled) => (cinemaOf(polled).state === 'playing' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
+    await Delay(600);
+    const paused = await call<CinemaStateReport>('stop_shot', { pause: true });
+    Expect(paused.state === 'paused' && paused.driver === 'claude' && paused.shot?.library === 'overlook-pull-out', JSON.stringify(paused));
+    await Delay(1000);
+    const still = cinemaOf(await call<ViewerState>('get_state'));
+    Expect(still.state === 'paused' && Math.abs((still.shot?.elapsed ?? -1) - (paused.shot?.elapsed ?? 0)) < 0.02, `paused ${paused.shot?.elapsed} -> ${still.shot?.elapsed}`);
+    await call('resume_shot', {});
+    await Delay(1000);
+    const resumed = cinemaOf(await call<ViewerState>('get_state'));
+    Expect(resumed.state === 'playing' && (resumed.shot?.elapsed ?? 0) > (paused.shot?.elapsed ?? 0) + 0.5, `resumed at ${resumed.shot?.elapsed}: ${JSON.stringify(resumed)}`);
+    return `frozen at ${paused.shot?.elapsed} s, resumed to ${resumed.shot?.elapsed} s`;
+  });
+
+  await Check('a stopped cinema shot hands back to the user and resumes where it stopped', async () => {
+    await playShot({ hardpoint: { name: 'chase', ship: 'hero' }, duration: 60 });
+    await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
+    await Delay(1000);
+    const stopped = await call<CinemaStateReport>('stop_shot', {});
+    Expect(stopped.driver === 'user' && (stopped.resumable?.elapsed ?? 0) > 0.5, JSON.stringify(stopped));
+    const resumed = await call<CinemaStateReport>('resume_shot', {});
+    Expect(resumed.driver === 'claude' && resumed.state === 'playing' && (resumed.shot?.elapsed ?? 0) >= (stopped.resumable?.elapsed ?? Infinity) - 0.01 && resumed.resumable === null, JSON.stringify(resumed));
+    return `stopped at ${stopped.resumable?.elapsed} s; resumed at ${resumed.shot?.elapsed} s`;
+  });
+
+  await Check('a held cinema shot stays on its last frame', async () => {
+    await playShot({ hardpoint: { name: 'chase', ship: 'hero' }, duration: 1, end: 'hold' });
+    await Delay(2500);
+    const held = cinemaOf(await call<ViewerState>('get_state'));
+    Expect(held.state === 'playing' && held.shot?.progress === 1 && held.shot.holding === true, JSON.stringify(held));
+    return `progress ${held.shot?.progress}, holding`;
+  });
+
+  await Check('the cinema warp-in waits at the landing', async () => {
+    await call('patch_scene', { operations: [{ op: 'add_ship', ship: { id: 'lander', dna: 'mf1_t1:minmatarbase:minmatar', position: [0, 0, -300000] } }] });
+    await WaitFor('the lander gets its warp speed', 60, (state) => ((ShipIn(state, 'lander').physics?.warpSpeed ?? 0) > 0 ? null : JSON.stringify(ShipIn(state, 'lander').physics)));
+    await call('order_ship', { id: 'lander', order: { type: 'warp', point: [0, 0, -2000] } });
+    await playShot({ shot: 'warp-in', ship: 'lander' });
+    const anchored = await WaitFor('the warp-in anchor', 20, (polled) => (/lander is (aligning|warping)|landing of lander/u.test(cinemaOf(polled).note ?? '') && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
+    const eye = cinemaOf(anchored).pose?.eye ?? [0, 0, 0];
+    let held = true;
+    const landed = await WaitFor('the lander to land', 90, (polled) => {
+      held &&= JSON.stringify(cinemaOf(polled).pose?.eye) === JSON.stringify(eye);
+      return ShipIn(polled, 'lander').warp?.phase === 'landed' ? null : JSON.stringify(ShipIn(polled, 'lander').warp?.phase);
+    });
+    const cinema = cinemaOf(landed);
+    const look = cinema.pose?.look ?? [0, 0, 0];
+    const ship = ShipIn(landed, 'lander').position ?? [Infinity, 0, 0];
+    const toLook = [0, 1, 2].map((axis) => look[axis] - eye[axis]);
+    const toShip = [0, 1, 2].map((axis) => ship[axis] - eye[axis]);
+    const ahead = toLook[0] * toShip[0] + toLook[1] * toShip[1] + toLook[2] * toShip[2];
+    const range = Math.hypot(toShip[0], toShip[1], toShip[2]);
+    Expect(held && ahead > 0 && range < 12000, `held ${held}; eye ${JSON.stringify(eye)}, ship ${JSON.stringify(ship)}, ${Math.round(range)} m: ${JSON.stringify(cinema)}`);
+    return `the eye held; the ship landed ${Math.round(range)} m in front of the lens`;
   });
 
   await Check('removing the subject releases the cinema shot, and a load cuts it', async () => {
@@ -2106,7 +2207,7 @@ try {
     await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' ? null : JSON.stringify(polled.cinema)));
     await call('load_scene', { scene: CINEMA_SCENE });
     const cut = cinemaOf(await call<ViewerState>('get_state'));
-    Expect(cut.state === 'idle', JSON.stringify(cut));
+    Expect(cut.state === 'idle' && cut.resumable === null, JSON.stringify(cut));
     return `released: ${released.note}; load: ${cut.note}`;
   });
 
