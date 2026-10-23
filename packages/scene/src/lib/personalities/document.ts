@@ -11,6 +11,17 @@ export const PERSONALITY_OPERATIONS: ReadonlySet<string> = new Set(['set_persona
 
 const SET_PERSONALITIES_KEYS = new Set<string>(['op', 'personalities']);
 
+/**
+ * Whether a name can be a key of the document's `personalities`: an id (1-64 letters, digits, "_", "-" or ".") that is
+ * not a built-in's name.
+ *
+ * @param name - The candidate.
+ * @returns Whether it can be one.
+ */
+export function isFleetPersonalityKey(name: unknown): name is string {
+  return typeof name === 'string' && ID_PATTERN.test(name) && !builtInFleetPersonalities().has(name);
+}
+
 export interface NormalizedScenePersonalities {
   /**
    * The templates by key, or null when there are none.

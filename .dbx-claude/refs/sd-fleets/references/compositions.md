@@ -42,7 +42,7 @@ counts, roles and anchors. Code: `packages/scene/src/lib/compositions/` (`compos
 | line | `count` | 1..256, default 1 |
 | line | `name`, `propMod`, `fit` | name base; prop mod (→ each ship's `propMod`); a `fits` key |
 | line | `pilot` | `{ command?, reaction? }` (`personalities/pilots.ts`) → each ship's `pilot`; also on the commander |
-| top | `personality` | a personality name → the scene fleet's `personality` (the op's `personality` overrides it); checked against the scene's names when the document normalizes |
+| top | `personality` | a personality name → the scene fleet's `personality` (the op's `personality` overrides it); checked against the scene's names when the document normalizes. The hub tools take a built-in or saved name (or the tool's inline template) and embed a saved one first (`sd-personalities`) |
 
 A line needs `hull`, `dna` or `fit`; a string `hull` must match its fit's header. All validated together; unknown keys
 warn and drop; values kept as written (a saved composition reads back as written). ≤ 256 ships with the FC.

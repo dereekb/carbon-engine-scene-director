@@ -709,6 +709,43 @@
             ]
           }
         ]
+      },
+      {
+        "name": "sd-personalities",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "personality",
+              "personalities",
+              "fleet personality",
+              "FC ability",
+              "succession",
+              "handover",
+              "free fire",
+              "free-fire",
+              "pilot traits"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/personalities/",
+              "fleet-personalities",
+              "personality-files",
+              "fleet-commanders"
+            ]
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__list_fleet_personalities",
+              "mcp__scene-director__get_fleet_personality",
+              "mcp__scene-director__save_fleet_personality",
+              "mcp__scene-director__delete_fleet_personality",
+              "mcp__scene-director__set_fleet_personality"
+            ]
+          }
+        ]
       }
     ]
   }

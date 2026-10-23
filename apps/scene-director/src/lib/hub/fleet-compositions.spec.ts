@@ -4,7 +4,9 @@ import path from 'node:path';
 import { applySceneOperations, type MapCelestial, normalizeScene, type SceneDocument, type SceneVector, toLocationPlacement } from '@scene-director/scene';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FleetCompositionFileStore } from '../store/composition-files';
+import { FleetPersonalityFileStore } from '../store/personality-files';
 import { FleetCompositions, requireFleetComposition, resolveCompositionHulls, resolveCompositionPropMods } from './fleet-compositions';
+import { FleetPersonalities } from './fleet-personalities';
 import { Locations } from './locations';
 import { MakeFakeMapData } from './map-data.testing';
 import type { SavedScenesPage } from './saved-scenes';
@@ -62,10 +64,14 @@ let calls: string[];
 function MakeCompositions(page: SavedScenesPage, files: FleetCompositionFileStore): FleetCompositions {
   const fake = MakeFakeShipData();
   calls = fake.calls;
-  return new FleetCompositions({ files, shipData: fake.shipData, mapData: MakeFakeMapData().mapData, page });
+  const mapData = MakeFakeMapData().mapData;
+  return new FleetCompositions({ files, shipData: fake.shipData, mapData, personalities: new FleetPersonalities({ files: personalityFiles, shipData: fake.shipData, mapData, page }), page });
 }
 
+let personalityFiles: FleetPersonalityFileStore;
+
 beforeEach(async () => {
+  personalityFiles = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-personalities-')));
   compositions = MakeCompositions(NO_PAGE, new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-'))));
 });
 
@@ -169,6 +175,19 @@ describe('FleetCompositions', () => {
       expect(result.scene.ships).toHaveLength(44);
     }
     expect(calls.filter((call) => call.includes('/dna/') || call.includes('/dogma/types/'))).toEqual([]);
+  });
+
+  it("embeds a saved personality, over the composition's, in the same patch", async () => {
+    await personalityFiles.Put('my-brawler', { schema: 'cjs-fleet-personality/1', id: 'my-brawler', extends: 'brawler', engage: 'on-sight' });
+    const result = (await compositions.call('add_fleet_composition', { name: 'tfis', personality: 'My-Brawler', position: [0, 0, 0], scene: { name: 'empty' } })) as { personality: object; scene: SceneDocument };
+    expect(result.personality).toEqual({ name: 'my-brawler', from: 'disk', chain: ['my-brawler', 'brawler', 'line'], embedded: ['my-brawler'] });
+    expect(result.scene.fleets?.[0].personality).toBe('my-brawler');
+    expect(result.scene.personalities?.['my-brawler']).toMatchObject({ extends: 'brawler', engage: 'on-sight' });
+    const tfis = ((await compositions.call('get_fleet_composition', { name: 'tfis' })) as { composition: object }).composition;
+    const sniper = (await compositions.call('add_fleet_composition', { composition: { ...tfis, personality: 'sniper' }, position: [0, 0, 0], scene: { name: 'empty' } })) as { personality: object; scene: SceneDocument };
+    expect(sniper.personality).toEqual({ name: 'sniper', from: 'built-in', chain: ['sniper', 'line'] });
+    expect(sniper.scene.personalities).toBeUndefined();
+    await expect(compositions.call('add_fleet_composition', { name: 'tfis', personality: 'nobody', position: [0, 0, 0], scene: { name: 'empty' } })).rejects.toThrow(/no fleet personality "nobody"/u);
   });
 
   it('refuses composition and name together, and neither, and explains a missing tab', async () => {

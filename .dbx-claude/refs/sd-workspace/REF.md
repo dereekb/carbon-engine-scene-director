@@ -73,7 +73,7 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 
 - **The MCP process writes nothing to stdout but MCP protocol messages**; the hub logs to stderr.
 - **Tests never touch per-user data dirs.** Specs and verify-page pass a temp `SceneFileStore` /
-  `FleetCompositionFileStore`. tools-core is faked with `hub/ship-data.testing.ts` and `hub/map-data.testing.ts`
+  `FleetCompositionFileStore` / `FleetPersonalityFileStore` (server.spec passes `--personalities <tmp>`). tools-core is faked with `hub/ship-data.testing.ts` and `hub/map-data.testing.ts`
   (shapes captured live against SDE build 3632936); tests run offline.
 - **Node-tested viewer modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine). See
   `sd-runtime`.

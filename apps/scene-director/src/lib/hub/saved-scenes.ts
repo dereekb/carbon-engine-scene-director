@@ -111,7 +111,7 @@ export class SavedScenes {
 
     if (store !== 'browser') {
       const listing = await this.files.List();
-      scenes.push(...listing.scenes.map((entry) => ({ ...entry, store: 'disk' as const })));
+      scenes.push(...listing.scenes.map((entry) => ({ ...entry, ships: entry.ships ?? 0, store: 'disk' as const })));
       unreadable = listing.unreadable;
     }
     if (store !== 'disk') {

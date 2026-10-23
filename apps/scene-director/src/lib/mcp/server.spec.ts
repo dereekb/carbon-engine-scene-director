@@ -1,9 +1,11 @@
 import { existsSync } from 'node:fs';
+import { mkdtemp } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { describe, expect, it } from 'vitest';
-import { CAMERA_SHOT_NAMES, TOOLS } from '@scene-director/scene';
+import { BUILT_IN_FLEET_PERSONALITY_NAMES, CAMERA_SHOT_NAMES, TOOLS } from '@scene-director/scene';
 
 /** The built CLI: `nx test` builds it first (test dependsOn build), so this runs what .mcp.json launches. */
 const CLI = path.resolve(import.meta.dirname, '../../../../../dist/apps/scene-director/main.js');
@@ -11,10 +13,11 @@ const CLI = path.resolve(import.meta.dirname, '../../../../../dist/apps/scene-di
 describe('mcp server', () => {
   it('the stdio MCP server lists every tool and answers a hub tool', async () => {
     expect(existsSync(CLI), `${CLI} is missing; run "npx nx build scene-director"`).toBe(true);
-    // Port 0 picks a free port; an unreachable tools-core keeps the test offline.
+    // Port 0 picks a free port; an unreachable tools-core keeps the test offline; the personalities store is a temp one.
+    const personalities = await mkdtemp(path.join(os.tmpdir(), 'scene-director-mcp-personalities-'));
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: [CLI, 'mcp', '--port', '0', '--tools-core', 'http://127.0.0.1:9'],
+      args: [CLI, 'mcp', '--port', '0', '--tools-core', 'http://127.0.0.1:9', '--personalities', personalities],
       stderr: 'ignore'
     });
     const client = new Client({ name: 'scene-director-test', version: '0.0.0' });
@@ -30,6 +33,8 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/"targets"/u);
       expect(orderFleet).toMatch(/locks and shoots the primary/u);
       expect(client.getInstructions()).toMatch(/calls the group's primary and target queue/u);
+      expect(client.getInstructions()).toMatch(/list_fleet_personalities/u);
+      expect(tools.find((tool) => tool.name === 'stage_engagement')?.inputSchema).toMatchObject({ properties: { sides: { items: { properties: { personality: {} } } } } });
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/stage_engagement/u);
@@ -39,6 +44,14 @@ describe('mcp server', () => {
       const body = JSON.parse(status.content[0].text) as { connectedTabs: number; toolsCore: { reachable: boolean } };
       expect(body.connectedTabs).toBe(0);
       expect(body.toolsCore.reachable).toBe(false);
+      expect((body as { personalitiesDirectory?: string }).personalitiesDirectory).toBe(personalities);
+
+      // The built-in personalities are static data on the hub: they list with no tab.
+      const listed = (await client.callTool({ name: 'list_fleet_personalities', arguments: {} })) as { isError?: boolean; content: { text: string }[] };
+      expect(listed.isError).toBeFalsy();
+      const library = JSON.parse(listed.content[0].text) as { personalities: { name: string; store: string; description?: string }[] };
+      expect(library.personalities.filter((entry) => entry.store === 'built-in').map((entry) => entry.name)).toEqual([...BUILT_IN_FLEET_PERSONALITY_NAMES]);
+      expect(library.personalities.every((entry) => entry.description)).toBe(true);
 
       const missing = (await client.callTool({ name: 'get_scene', arguments: {} })) as { isError?: boolean; content: { text: string }[] };
       expect(missing.isError).toBe(true);

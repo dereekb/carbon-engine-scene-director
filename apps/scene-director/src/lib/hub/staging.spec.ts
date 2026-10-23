@@ -4,7 +4,9 @@ import path from 'node:path';
 import { applySceneOperations, defaultLocationRange, findTool, layoutFleetFormation, type MapCelestial, normalizeScene, type SceneDocument, SceneError, type SceneFleet, type SceneVector, tangentHeading, toLocationPlacement } from '@scene-director/scene';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { FleetCompositionFileStore } from '../store/composition-files';
+import { FleetPersonalityFileStore } from '../store/personality-files';
 import { FleetCompositions } from './fleet-compositions';
+import { FleetPersonalities } from './fleet-personalities';
 import { Locations } from './locations';
 import { MakeFakeMapData } from './map-data.testing';
 import type { SavedScenesPage } from './saved-scenes';
@@ -82,13 +84,14 @@ const FLEET_SCENE = {
 };
 
 let compositions: FleetCompositions;
+let personalities: FleetPersonalities;
 let located: SceneDocument;
 let cnap: MapCelestial;
 
 function MakeStaging(page: SavedScenesPage = NO_PAGE): { readonly staging: Staging; readonly calls: string[] } {
   const { shipData, calls } = MakeFakeShipData(ROUTES);
   const { mapData } = MakeFakeMapData();
-  return { staging: new Staging({ shipData, mapData, compositions, page }), calls };
+  return { staging: new Staging({ shipData, mapData, compositions, personalities, page }), calls };
 }
 
 async function Refused(action: Promise<unknown>): Promise<string> {
@@ -103,7 +106,8 @@ async function Refused(action: Promise<unknown>): Promise<string> {
 beforeAll(async () => {
   const { shipData } = MakeFakeShipData(ROUTES);
   const { mapData } = MakeFakeMapData();
-  compositions = new FleetCompositions({ files: new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-staging-'))), shipData, mapData, page: NO_PAGE });
+  personalities = new FleetPersonalities({ files: new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-staging-personalities-'))), shipData, mapData, page: NO_PAGE });
+  compositions = new FleetCompositions({ files: new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-staging-'))), shipData, mapData, personalities, page: NO_PAGE });
   const set = (await new Locations({ mapData, page: NO_PAGE }).SetLocation({ scene: { name: 'loc' }, celestial: CNAP, range: 30000 })) as { readonly scene: SceneDocument };
   located = set.scene;
   cnap = (await mapData.SystemCelestials(30000142)).find((celestial) => celestial.name === CNAP) as MapCelestial;
@@ -248,6 +252,48 @@ describe('stage_engagement', () => {
     const gap = red.lead.position[2] - blue.lead.position[2];
     expect(Math.abs(gap - (20000 + 250 + 80))).toBeLessThanOrEqual(2);
     expect(result['hulls'].length).toBeGreaterThan(2);
+  });
+
+  it("embeds each side's saved or inline personality in the same patch, and passes a built-in through", async () => {
+    await personalities.Save({ personality: { schema: 'cjs-fleet-personality/1', id: 'staged-base', extends: 'kiter', pilots: { reaction: 0.9 } } });
+    await personalities.Save({ personality: { schema: 'cjs-fleet-personality/1', id: 'staged-kiter', extends: 'staged-base', engage: 'on-sight' } });
+    const result = (await MakeStaging().staging.StageEngagement({
+      scene: { name: 'x' },
+      sides: [
+        { composition: 'tfis', personality: 'staged-kiter' },
+        { ships: [{ hull: 'Guardian', count: 2, pilot: { reaction: 0.2 } }], personality: { schema: 'cjs-fleet-personality/1', id: 'inline-sniper', extends: 'sniper' } }
+      ]
+    })) as Record<string, any>;
+    const [blue, red] = result['engagement'].sides;
+    expect(blue.personality).toEqual({ name: 'staged-kiter', from: 'disk', chain: ['staged-kiter', 'kiter', 'line'], embedded: ['staged-kiter'] });
+    expect(red.personality).toEqual({ name: 'inline-sniper', from: 'inline', chain: ['inline-sniper', 'sniper', 'line'], embedded: ['inline-sniper'] });
+    const scene = result['scene'] as SceneDocument;
+    // The saved chain is flattened: the scene's copy extends the built-in and carries its saved base's fields.
+    expect(scene.personalities?.['staged-kiter']).toEqual({ schema: 'cjs-fleet-personality/1', id: 'staged-kiter', extends: 'kiter', engage: 'on-sight', pilots: { reaction: 0.9 } });
+    expect(scene.fleets?.map((fleet) => [fleet.id, fleet.personality])).toEqual([
+      ['tfis', 'staged-kiter'],
+      ['red', 'inline-sniper']
+    ]);
+    expect(scene.ships.find((ship) => ship.id === 'red-fc')?.pilot).toEqual({ reaction: 0.2 });
+
+    const builtIn = (await MakeStaging().staging.StageEngagement({
+      scene: { name: 'x' },
+      sides: [
+        { composition: 'tfis', personality: 'Brawler' },
+        { ships: [{ hull: 'Guardian' }], fleet: false }
+      ]
+    })) as Record<string, any>;
+    expect(builtIn['engagement'].sides[0].personality).toEqual({ name: 'brawler', from: 'built-in', chain: ['brawler', 'line'] });
+    expect((builtIn['scene'] as SceneDocument).personalities).toBeUndefined();
+  });
+
+  it("gives add_ships' new fleet a personality and every ship the pilot", async () => {
+    const result = (await MakeStaging().staging.AddShips({ scene: { name: 'x' }, hull: 'Tempest Fleet Issue', count: 2, pilot: { command: 0.7 }, fleet: { new: true, id: 'pair', personality: { schema: 'cjs-fleet-personality/1', id: 'pair-style', extends: 'alpha' } } })) as Record<string, any>;
+    expect(result['personality']).toEqual({ name: 'pair-style', from: 'inline', chain: ['pair-style', 'alpha', 'line'], embedded: ['pair-style'] });
+    const scene = result['scene'] as SceneDocument;
+    expect(scene.fleets?.[0]).toMatchObject({ id: 'pair', personality: 'pair-style' });
+    expect(scene.ships.map((ship) => ship.pilot)).toEqual([{ command: 0.7 }, { command: 0.7 }]);
+    expect(await Refused(MakeStaging().staging.AddShips({ scene: { name: 'x' }, hull: 'Tempest Fleet Issue', fleet: { new: true, personality: 'nobody' } }))).toMatch(/fleet\.personality: no fleet personality "nobody"/u);
   });
 
   it('centres off a celestial, tangent to it', async () => {

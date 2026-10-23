@@ -36,6 +36,7 @@ import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
 import { ErrorMessage, ErrorProblems } from './lib/hub/tool-call';
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
 import { FleetCompositionFileStore } from './lib/store/composition-files';
+import { FleetPersonalityFileStore } from './lib/store/personality-files';
 import { SceneFileStore } from './lib/store/scene-files';
 
 /**
@@ -721,8 +722,9 @@ if (!status.reachable) {
 // Saved scene and fleet composition files go to throwaway directories, never the user's.
 const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-')));
 const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-fleets-')));
+const personalities = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-personalities-')));
 // The audio cache is shared with every hub on the machine (a copy of tools-core's banks, not a store).
-const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, audioCache: new AudioBankCache(), log: () => undefined }).Start();
+const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, personalities, audioCache: new AudioBankCache(), log: () => undefined }).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 // Autoplay lets the page turn audio on without a gesture, so the audio check sees the engine stems post.
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] });

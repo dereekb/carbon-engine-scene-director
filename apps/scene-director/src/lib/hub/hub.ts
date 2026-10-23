@@ -35,9 +35,11 @@ import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { findTool, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
+import { FleetPersonalityFileStore } from '../store/personality-files';
 import type { AudioBankCache } from './audio-cache';
 import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
+import { FleetPersonalities } from './fleet-personalities';
 import { Locations } from './locations';
 import { Staging } from './staging';
 import { ObjectData, type ObjectDataApi } from './object-data';
@@ -96,6 +98,10 @@ export interface HubOptions {
    * Saved fleet compositions on disk; the per-user default directory when omitted.
    */
   readonly compositions?: FleetCompositionFileStore;
+  /**
+   * Saved fleet personalities on disk; the per-user default directory when omitted.
+   */
+  readonly personalities?: FleetPersonalityFileStore;
   /**
    * Hull and prop mod values from tools-core's SDE; read from `toolsCore.url` when omitted.
    */
@@ -166,6 +172,7 @@ export class Hub implements ToolCaller {
   readonly viewerDirectory: Maybe<string>;
   readonly savedScenes: SavedScenes;
   readonly fleetCompositions: FleetCompositions;
+  readonly fleetPersonalities: FleetPersonalities;
   readonly shipData: ShipDataApi;
   readonly dogmaData: DogmaDataApi;
   readonly weaponData: WeaponDataApi;
@@ -183,7 +190,22 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, dogmaData, weaponData, mapData, objectData, audioCache = null, log = LogToStderr }: HubOptions = {}) {
+  constructor({
+    host = '127.0.0.1',
+    port = DEFAULT_PORT,
+    toolsCore = new ToolsCore(),
+    viewerDirectory = null,
+    scenes = new SceneFileStore(),
+    compositions = new FleetCompositionFileStore(),
+    personalities = new FleetPersonalityFileStore(),
+    shipData,
+    dogmaData,
+    weaponData,
+    mapData,
+    objectData,
+    audioCache = null,
+    log = LogToStderr
+  }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
@@ -200,9 +222,10 @@ export class Hub implements ToolCaller {
       Call: (name: string, args?: ToolArgs) => this.CallPage(name, args)
     };
     this.savedScenes = new SavedScenes({ files: scenes, page });
-    this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, mapData: this.mapData, page });
+    this.fleetPersonalities = new FleetPersonalities({ files: personalities, shipData: this.shipData, mapData: this.mapData, page });
+    this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, mapData: this.mapData, personalities: this.fleetPersonalities, page });
     this.locations = new Locations({ mapData: this.mapData, page });
-    this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, page });
+    this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, personalities: this.fleetPersonalities, page });
     this.objects = new ObjectTools({ objectData: this.objectData, shipData: this.shipData, mapData: this.mapData, page });
     this.log = log;
     this.audioCache = audioCache;
@@ -237,7 +260,7 @@ export class Hub implements ToolCaller {
       });
     });
     this.port = (server.address() as AddressInfo).port;
-    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory})`);
+    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory}, fleet personalities in ${this.fleetPersonalities.files.directory})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
     this.toolsCore.ResolveBuild().then(
       (build) => this.log(`EVE resource build ${build}`),
@@ -304,7 +327,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.fleetPersonalities.Call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'list_shots':
@@ -316,6 +339,7 @@ export class Hub implements ToolCaller {
           toolsCore: await this.toolsCore.Status(),
           scenesDirectory: this.savedScenes.files.directory,
           fleetsDirectory: this.fleetCompositions.files.directory,
+          personalitiesDirectory: this.fleetPersonalities.files.directory,
           hint: this.pages.length ? undefined : `Open ${this.url} in Chrome or Edge on this machine.`
         };
       case 'page_log': {

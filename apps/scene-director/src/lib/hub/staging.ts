@@ -1,8 +1,9 @@
 /**
  * The scene-building tools (`add_ships`, `stage_engagement`), answered by the hub. The hub resolves every name first:
  * hull names to SOF DNA and the EVE radius, compositions by name, and (through ScenePlaces) celestials of the scene's
- * location to scene points and the EVE radii of the fleet a ship joins. Then it forwards one pure `add_ships` / `stage_engagement` patch
- * operation to the viewer (or applies it to a passed `scene` with no tab), and reports the ids it created. `warpIn`
+ * location to scene points and the EVE radii of the fleet a ship joins, and a new fleet's `personality` (a saved or
+ * inline template is embedded through FleetPersonalities, in the same patch). Then it forwards one pure `add_ships` /
+ * `stage_engagement` patch operation to the viewer (or applies it to a passed `scene` with no tab), and reports the ids it created. `warpIn`
  * (add_ships, and each engagement side) rides on the operation; the page's `arrivals` reports come back in the result.
  */
 
@@ -27,6 +28,7 @@ import {
   type StagingShipLine
 } from '@scene-director/scene';
 import { type CompositionHullReport, type CompositionPropModReport, type FleetCompositions, requireFleetComposition, resolveCompositionHulls, resolveCompositionPropMods } from './fleet-compositions';
+import { type EmbeddedFleetPersonality, EmbeddedReport, type FleetPersonalities, PersonalityOperations } from './fleet-personalities';
 import type { MapDataApi } from './map-data';
 import type { SavedScenesPage } from './saved-scenes';
 import { HasWarpInFrom, IsRecord, ScenePlaces, ThrowProblems, Without } from './scene-places';
@@ -94,19 +96,25 @@ export interface StagingOptions {
    * Saved and built-in fleet compositions by name.
    */
   readonly compositions: Pick<FleetCompositions, 'get'>;
+  /**
+   * Embeds the saved or inline personality a new fleet takes.
+   */
+  readonly personalities: Pick<FleetPersonalities, 'Embed'>;
   readonly page: SavedScenesPage;
 }
 
-const LINE_FIELDS = ['hull', 'dna', 'radius', 'name', 'role', 'propMod', 'fit'] as const;
+const LINE_FIELDS = ['hull', 'dna', 'radius', 'name', 'role', 'propMod', 'fit', 'pilot'] as const;
 
 export class Staging {
   private readonly shipData: ShipDataApi;
   private readonly compositions: Pick<FleetCompositions, 'get'>;
+  private readonly personalities: Pick<FleetPersonalities, 'Embed'>;
   private readonly places: ScenePlaces;
 
-  constructor({ shipData, mapData, compositions, page }: StagingOptions) {
+  constructor({ shipData, mapData, compositions, personalities, page }: StagingOptions) {
     this.shipData = shipData;
     this.compositions = compositions;
+    this.personalities = personalities;
     this.places = new ScenePlaces({ shipData, mapData, page });
   }
 
@@ -149,11 +157,12 @@ export class Staging {
       if (args['near'] != null && args['position'] != null) operation['near'] = args['near'];
     }
     if (args['warpIn'] != null) operation['warpIn'] = joins ? args['warpIn'] : await this.places.ResolveWarpIn(args['warpIn'], before.scene);
-    if (fleet) operation['fleet'] = FillSquadRole(fleet, { role: (line['role'] as Maybe<SquadRole>) ?? null, isNew });
+    const embedded = isNew && fleet?.['personality'] != null ? await this.personalities.Embed(fleet['personality'], { scene: before.scene, where: 'fleet.personality' }) : null;
+    if (fleet) operation['fleet'] = FillSquadRole(embedded ? { ...fleet, personality: embedded.key } : fleet, { role: (line['role'] as Maybe<SquadRole>) ?? null, isNew });
     const radii = joins && typeof fleet?.['id'] === 'string' ? await this.places.ResolveRadii(FleetShipIds(before.scene, fleet['id']), before.scene) : null;
     if (radii) operation['radii'] = radii.radii;
 
-    const applied = await this.places.Apply(before, [operation]);
+    const applied = await this.places.Apply(before, [...PersonalityOperations([embedded]), operation]);
     const added = AddedShips(before.scene, applied.scene);
     const first = added[0];
     const template = normalizeFleetComposition({ input: toShipListComposition({ id: toIdSlug(String(args['prefix'] ?? shipLabel(line as unknown as StagingShipLine))), lines: [{ ...(line as unknown as StagingShipLine), count: Number(args['count'] ?? 1) }] }) }).composition;
@@ -163,10 +172,11 @@ export class Staging {
         lead: first ? { id: first.id, position: first.position, heading: first.rotation[0] } : null,
         ...(fleet ? { fleet: AddedFleetReport({ before: before.scene, after: applied.scene, added: added.map((ship) => ship.id), fleet, isNew }) } : {})
       },
+      ...(embedded ? { personality: EmbeddedReport(embedded) } : {}),
       hull: resolved.hulls[0],
       ...(template ? { template } : {}),
       ...applied.rest,
-      warnings: [...resolved.warnings, ...(radii?.warnings ?? []), ...applied.warnings]
+      warnings: [...resolved.warnings, ...(radii?.warnings ?? []), ...(embedded?.warnings ?? []), ...applied.warnings]
     };
   }
 
@@ -176,7 +186,8 @@ export class Staging {
     const hulls: (CompositionHullReport | StagingHullReport)[] = [];
     const propMods: CompositionPropModReport[] = [];
     const warnings: string[] = [];
-    const resolvedSides = sides ? await Promise.all(sides.map((side, index) => (IsRecord(side) ? this.ResolveSide(side, { index, hulls, propMods, warnings }) : side))) : args['sides'];
+    const embedded: Maybe<EmbeddedFleetPersonality>[] = [];
+    const resolvedSides = sides ? await Promise.all(sides.map((side, index) => (IsRecord(side) ? this.ResolveSide(side, { index, scene: before.scene, hulls, propMods, embedded, warnings }) : side))) : args['sides'];
 
     const operation: Record<string, unknown> = { op: 'stage_engagement', sides: resolvedSides };
     for (const key of ['range', 'center', 'heading']) if (args[key] != null) operation[key] = args[key];
@@ -190,7 +201,7 @@ export class Staging {
       operation['near'] = args['near'];
     }
 
-    const applied = await this.places.Apply(before, [operation]);
+    const applied = await this.places.Apply(before, [...PersonalityOperations(embedded), operation]);
     const added = AddedShips(before.scene, applied.scene);
     const newFleets = (applied.scene?.fleets ?? []).filter((fleet) => !(before.scene.fleets ?? []).some((old) => old.id === fleet.id));
     const teams = (sides ?? []).map((side, index) => (IsRecord(side) && typeof side['team'] === 'string' ? side['team'] : (ENGAGEMENT_TEAMS[index] ?? '')));
@@ -199,17 +210,24 @@ export class Staging {
         center,
         heading: normalizeHeading(Number(operation['heading'] ?? 0)),
         range: Number(args['range'] ?? DEFAULT_ENGAGEMENT_RANGE),
-        sides: teams.map((team) => {
+        sides: teams.map((team, index) => {
           const ships = added.filter((ship) => ship.team === team);
           const fleet = newFleets.find((candidate) => ships.some((ship) => ship.id === candidate.commander));
           const lead = ships.find((ship) => ship.id === fleet?.commander) ?? ships[0];
-          return { team, ...(fleet ? { fleet: fleet.id, commander: fleet.commander } : {}), ships: ships.map((ship) => ship.id), lead: lead ? { id: lead.id, position: lead.position, heading: lead.rotation[0] } : null };
+          const personality = embedded[index];
+          return {
+            team,
+            ...(fleet ? { fleet: fleet.id, commander: fleet.commander } : {}),
+            ...(personality ? { personality: EmbeddedReport(personality) } : {}),
+            ships: ships.map((ship) => ship.id),
+            lead: lead ? { id: lead.id, position: lead.position, heading: lead.rotation[0] } : null
+          };
         })
       },
       hulls,
       ...(propMods.length ? { propMods } : {}),
       ...applied.rest,
-      warnings: [...warnings, ...applied.warnings]
+      warnings: [...warnings, ...embedded.flatMap((personality) => personality?.warnings ?? []), ...applied.warnings]
     };
   }
 
@@ -250,17 +268,19 @@ export class Staging {
   }
 
   /**
-   * One engagement side with its composition or ship lines resolved.
+   * One engagement side with its composition or ship lines resolved, and its fleet's personality (the side's, else its
+   * composition's) readied for the scene.
    *
    * @param side - The side as given.
-   * @param context - Its index and where reports go.
+   * @param context - Its index, the scene, and where reports and the embedded personality go.
    * @returns The side for the operation.
    */
-  private async ResolveSide(side: Record<string, unknown>, context: { readonly index: number; readonly hulls: (CompositionHullReport | StagingHullReport)[]; readonly propMods: CompositionPropModReport[]; readonly warnings: string[] }): Promise<Record<string, unknown>> {
-    const { hulls, propMods, warnings } = context;
+  private async ResolveSide(side: Record<string, unknown>, context: ResolveSideContext): Promise<Record<string, unknown>> {
+    const { index, scene, hulls, propMods, embedded, warnings } = context;
     const resolved: Record<string, unknown> = { ...side };
+    let composition: Maybe<FleetComposition> = null;
     if (side['composition'] != null && side['ships'] == null) {
-      const composition = typeof side['composition'] === 'string' ? ((await this.compositions.get({ name: side['composition'] })) as { readonly composition: FleetComposition }).composition : requireFleetComposition(side['composition']);
+      composition = typeof side['composition'] === 'string' ? ((await this.compositions.get({ name: side['composition'] })) as { readonly composition: FleetComposition }).composition : requireFleetComposition(side['composition']);
       const [filled, mods] = await Promise.all([resolveCompositionHulls({ composition, shipData: this.shipData }), resolveCompositionPropMods({ composition, shipData: this.shipData })]);
       ThrowProblems(filled.problems);
       hulls.push(...filled.hulls);
@@ -275,8 +295,29 @@ export class Staging {
       warnings.push(...filled.warnings);
       resolved['ships'] = filled.lines;
     }
+    const personality = side['personality'] ?? composition?.personality ?? null;
+    if (personality != null && side['fleet'] !== false) {
+      const ready = await this.personalities.Embed(personality, { scene, where: `sides[${index}].personality` });
+      embedded[index] = ready;
+      resolved['personality'] = ready.key;
+    }
     return resolved;
   }
+}
+
+interface ResolveSideContext {
+  readonly index: number;
+  /**
+   * The document staged on, for the personality keys it holds.
+   */
+  readonly scene: SceneDocument;
+  readonly hulls: (CompositionHullReport | StagingHullReport)[];
+  readonly propMods: CompositionPropModReport[];
+  /**
+   * Receives each side's personality by index.
+   */
+  readonly embedded: Maybe<EmbeddedFleetPersonality>[];
+  readonly warnings: string[];
 }
 
 interface FillLineGroupContext {

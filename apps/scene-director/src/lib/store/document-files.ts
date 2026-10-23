@@ -1,6 +1,7 @@
 /**
  * Documents on disk: one JSON file per document in a single directory, so a document outlives the browser profile
- * and can be read, diffed or handed around as a plain file. Saved scenes and saved fleet compositions both use it.
+ * and can be read, diffed or handed around as a plain file. Saved scenes, fleet compositions and fleet personalities use
+ * it.
  *
  * A document's file is named from its name: lowercased, with every run of characters other than letters, digits,
  * "_" and "-" collapsed to "-" ("Duel at Jita" -> duel-at-jita.json). Nothing that can leave the directory survives
@@ -47,9 +48,9 @@ export interface DocumentFileKind<T> {
    */
   named(document: T, name: string): T;
   /**
-   * How many ships it holds, for listings.
+   * How many ships it holds, for listings; omitted for documents that hold no ships.
    */
-  ships(document: T): number;
+  ships?(document: T): number;
 }
 
 export interface DocumentFileSummary {
@@ -60,7 +61,10 @@ export interface DocumentFileSummary {
   readonly name: string;
   readonly file: string;
   readonly savedAt: string;
-  readonly ships: number;
+  /**
+   * How many ships it holds; absent for a kind without ships (fleet personalities).
+   */
+  readonly ships?: number;
 }
 
 export interface DocumentFile<T> extends DocumentFileSummary {
@@ -202,7 +206,7 @@ export class DocumentFileStore<T> {
       throw error;
     }
     const info = await stat(file);
-    return { name: key, file, savedAt: info.mtime.toISOString(), ships: this.kind.ships(document), document, warnings };
+    return { name: key, file, savedAt: info.mtime.toISOString(), ...this.ShipsOf(document), document, warnings };
   }
 
   /**
@@ -251,13 +255,17 @@ export class DocumentFileStore<T> {
     for (const entry of entries.filter((name) => name.endsWith(FILE_EXTENSION) && !name.startsWith('.')).sort()) {
       try {
         const read = await this.Read(entry.slice(0, -FILE_EXTENSION.length));
-        if (read) documents.push({ name: read.name, file: read.file, savedAt: read.savedAt, ships: read.ships });
+        if (read) documents.push({ name: read.name, file: read.file, savedAt: read.savedAt, ...(read.ships == null ? {} : { ships: read.ships }) });
       } catch (error) {
         unreadable.push({ file: this.FilePath(entry.slice(0, -FILE_EXTENSION.length)), error: ErrorMessage(error) });
       }
     }
     documents.sort((a, b) => b.savedAt.localeCompare(a.savedAt));
     return { directory: this.directory, documents, unreadable };
+  }
+
+  private ShipsOf(document: T): { readonly ships?: number } {
+    return this.kind.ships ? { ships: this.kind.ships(document) } : {};
   }
 
   private StemOf(name: unknown): string {
@@ -297,7 +305,7 @@ export class DocumentFileStore<T> {
     const info = await stat(file);
     const own = this.kind.nameOf(document);
     const name = this.MapsTo(own, stem) ? own : stem;
-    return { name, file, savedAt: info.mtime.toISOString(), ships: this.kind.ships(document), document, warnings };
+    return { name, file, savedAt: info.mtime.toISOString(), ...this.ShipsOf(document), document, warnings };
   }
 
   /**

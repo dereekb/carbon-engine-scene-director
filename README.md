@@ -146,6 +146,8 @@ connected tab.
 | `save_scene` / `list_scenes` / `open_scene` / `delete_scene` | hub | saved scenes: files on disk, or the page's IndexedDB |
 | `add_fleet_composition` | hub | adds a fleet composition (inline, saved, or the built-in `tfis`) at a position and heading |
 | `save_fleet_composition` / `list_fleet_compositions` / `get_fleet_composition` / `delete_fleet_composition` | hub | saved fleet compositions on disk, plus the read-only built-in examples |
+| `list_fleet_personalities` / `get_fleet_personality` / `save_fleet_personality` / `delete_fleet_personality` | hub | fleet personalities (FC playstyles): the built-ins and saved ones on disk |
+| `set_fleet_personality` | hub | gives a fleet a personality (built-in, saved or inline), or clears it |
 | `add_ships` | hub | N ships of an EVE type in a formation at a place, free, as a new fleet, or into a fleet's squad |
 | `stage_engagement` | hub | two sides facing each other at a range around a point or a celestial |
 | `search_objects` | hub | EVE types to place: stations, gates, structures, LCOs, wrecks, with their SOF DNA and radius |
@@ -207,6 +209,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Weapons: default guns, turret slots, charges, the weapon route, targets, firing, shots, impacts | [`sd-weapons`](.dbx-claude/refs/sd-weapons/REF.md) |
 | Combat: locks, hit chance, damage, kills, explosions | [`sd-combat`](.dbx-claude/refs/sd-combat/REF.md) |
 | Logi auto-repair: the `autoRepair` field, repair-target selection, `auto_repair` | [`sd-logi`](.dbx-claude/refs/sd-logi/REF.md) |
+| Fleet personalities: templates, the library, pilot traits, the FC brain | [`sd-personalities`](.dbx-claude/refs/sd-personalities/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

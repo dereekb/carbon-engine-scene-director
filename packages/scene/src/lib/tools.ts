@@ -18,6 +18,23 @@ import { CELESTIAL_KINDS, DEFAULT_STARGATE_LOCATION_RANGE, DEFAULT_STATION_LOCAT
 import { DEFAULT_ENGAGEMENT_RANGE, DEFAULT_NEAR_SHIP_RANGE, ENGAGEMENT_TEAMS, NEAR_DIRECTIONS, SHIP_FORMATION_ALIASES, SHIP_FORMATIONS } from './staging';
 import { DEFAULT_OBJECT_RADIUS, MAX_OBJECTS_PER_OPERATION, OBJECT_NEAREST_SHIPS } from './objects/object';
 import { BUILT_IN_FLEET_PERSONALITY_NAMES } from './personalities/examples';
+import { MAX_FLEET_REACH } from './personalities/normalize';
+import {
+  DEFAULT_FLEET_PERSONALITY,
+  FLEET_ENGAGE_RULES,
+  FLEET_PERSONALITY_SCHEMA,
+  FLEET_PROP_MOD_RULES,
+  FLEET_REACHES,
+  FLEET_STANCES,
+  FLEET_SUCCESSION_STEPS,
+  FLEET_TARGET_PREFERENCES,
+  FLEET_TARGET_ROLES,
+  FLEET_TARGET_SWITCHES,
+  MAX_FLEET_BACKUPS,
+  MAX_FLEET_HANDOVER,
+  MAX_FLEET_TARGET_QUEUE,
+  MIN_FLEET_HANDOVER
+} from './personalities/personality';
 import { formatSceneDistance, LARGE_SCENE_DISTANCE, MAX_SCENE_DISTANCE } from './extent';
 import { MODULE_CATEGORIES } from './fitting/categories';
 import { MODULE_SWITCH_STATES } from './fitting/switch';
@@ -82,10 +99,26 @@ const FLEET_COMPOSITION_FORMAT = String.raw`Fleet composition (${FLEET_COMPOSITI
   ],
   "fits": { "tfi": "[Tempest Fleet Issue, Fleet TFI]\n<EFT text>" }
 }
-A ship line is { "hull": "<EVE type name or type id>", "count"?: 1, "dna"?: "<SOF DNA>", "radius"?: <the hull's EVE radius>, "name"?, "propMod"?, "fit"?: "<key of fits>", "pilot"?: { "command"?, "reaction"? } }; the commander is a line without count. A top-level "personality"?: "<built-in name>" becomes the fleet's personality. role is ${SQUAD_ROLES.join('|')}.
+A ship line is { "hull": "<EVE type name or type id>", "count"?: 1, "dna"?: "<SOF DNA>", "radius"?: <the hull's EVE radius>, "name"?, "propMod"?, "fit"?: "<key of fits>", "pilot"?: { "command"?, "reaction"? } }; the commander is a line without count. A top-level "personality"?: "<built-in or saved personality name>" becomes the fleet's personality (the tools embed a saved one in the scene). role is ${SQUAD_ROLES.join('|')}.
 anchor is { "on"?: "${COMPOSITION_ANCHOR_FC}" | "${COMPOSITION_ANCHOR_LEAD}" | "<squad id>", "range"?: <metres, surface to surface> }. Defaults: squads keep ${DEFAULT_ANCHOR_UP_RANGE} m on the FC; logi default to "${COMPOSITION_ANCHOR_LEAD}": their first ship keeps ${DEFAULT_ANCHOR_RANGES.logi} m on the FC and the rest anchor up on it at ${DEFAULT_ANCHOR_UP_RANGE} m; "on" a squad id anchors on that squad's first ship.
 Ships are placed at rest in formation: each at its anchor range on shells trailing the FC's heading, at least ${FORMATION_SPACING} x (r1 + r2) + ${FORMATION_GAP} m apart on EVE radii (${DEFAULT_FORMATION_RADIUS} m when unknown), all facing the heading. Ids: fleet "<id>" (numbered "<id>-2", ... when taken), ships "<fleet>-fc" and "<fleet>-<squad>-<nn>". At most ${MAX_FLEET_SHIPS} ships with the FC.
 A line's propMod (a module name, a type id, "${PROP_MOD_MODULE_MWD}" / "${PROP_MOD_MODULE_AB}" or "${PROP_MOD_MODULE_NONE}") becomes each of its ships' propMod; without one a line with a fit takes the fit's microwarpdrive or afterburner ("${PROP_MOD_MODULE_NONE}" when it fits neither), else the hull-sized microwarpdrive. Each line ship carries its fit: the scene keeps the text once in its fits under "<composition id>/<fit key>" (a second fleet of the composition reuses it; other text under that key gets "<fleet id>/<fit key>").`;
+
+const choices = (values: readonly string[]): string => values.map((value) => `"${value}"`).join('|');
+
+const FLEET_PERSONALITY_FORMAT = `Fleet personality (${FLEET_PERSONALITY_SCHEMA}): an FC's playstyle a fleet runs its fight by. Every field is optional but id; an unset one takes the template's base (extends: a built-in or a saved name; default "${DEFAULT_FLEET_PERSONALITY}", which sets them all).
+{ "schema": "${FLEET_PERSONALITY_SCHEMA}", "id": "my-brawler", "extends": "brawler", "name": "My brawler", "description": "<when to pick it>",
+  "command": { "ability": 0-1 | [lo, hi] (the FC's and backups' command ability: 1 decides at once, 0 up to 10 s late), "backups": 0-${MAX_FLEET_BACKUPS} (FC-capable members besides the FC), "succession": [${choices(FLEET_SUCCESSION_STEPS)}] (who takes over when the FC dies, steps tried in order), "handover": ${MIN_FLEET_HANDOVER}-${MAX_FLEET_HANDOVER} (seconds: the longest handover, for a successor of ability 0) },
+  "pilots": { "reaction": 0-1 | [lo, hi] (how fast members answer fleet orders: 1 at once, 0 up to 10 s late) },
+  "engage": ${choices(FLEET_ENGAGE_RULES)} (open fire at the first hostile in lock range, once a target is in reach, or only once shot),
+  "targeting": { "priority": [${choices(FLEET_TARGET_ROLES)}] (call order by role; fc is the enemy FC; unlisted roles rank last), "prefer": ${choices(FLEET_TARGET_PREFERENCES)} (within a tier), "reach": ${choices(FLEET_REACHES)} | <metres, at most ${MAX_FLEET_REACH}> (how far out it calls), "queue": 0-${MAX_FLEET_TARGET_QUEUE} (targets queued behind the primary), "switch": ${choices(FLEET_TARGET_SWITCHES)} (leave the primary only once it dies, or also for a higher tier in reach), "freeFire": true|false (members without a call shoot the nearest hostile they reach) },
+  "movement": { "stance": ${choices(FLEET_STANCES)}, "range": ${choices(FLEET_REACHES)} | <metres> (what the stance keeps on its focus), "propMods": ${choices(FLEET_PROP_MOD_RULES)} } }
+An ability or reaction [lo, hi] is a seeded draw per pilot; a ship's pilot { command?, reaction? } overrides it.`;
+
+const PERSONALITY_ARGUMENT = {
+  type: ['string', 'object'],
+  description: `A built-in (${BUILT_IN_FLEET_PERSONALITY_NAMES.join(', ')}) or saved personality name, or an inline ${FLEET_PERSONALITY_SCHEMA} template; a saved or inline one is embedded in the scene's personalities.`
+};
 
 const OBJECT_LINE_PROPERTIES = {
   type: { type: ['string', 'integer'], description: 'An EVE type name ("Astrahus", "Ruined Stargate", "Minmatar Frigate Wreck") or type id.' },
@@ -326,7 +359,7 @@ Fleet edits re-plan the following ships at once (a squad set to its own anchor a
   {
     name: 'add_fleet_composition',
     where: 'hub',
-    description: `Adds a fleet composition to the viewer's live scene: its ships in formation around the FC at position, or near { ship | object | celestial, range?, direction? } (as add_ships, range off the FC's surface; default heading the near ship's or object's), facing heading (yaw degrees, 0 faces +Z, 90 faces +X) or facing (a point or { celestial }), plus its fleet, with ids free in the scene. Give position or near, not both. Give the composition inline or the name of a saved one or a built-in example ("tfis", the TFIs armor doctrine, 44 ships). Hull names without dna or radius are resolved through tools-core's EVE data (needs its SDE). ${WARP_IN_TEXT} Pass scene to add to that document instead of the viewer's, with no tab: the result is returned, not shown (load_scene or save_scene it). Returns added (fleet, commander, ships), hulls (each hull's dna and radius and where they came from), and the patch_scene result. Remove it again with patch_scene remove_fleet "withShips": true; frame_camera on "<fleet>-fc" looks at it.
+    description: `Adds a fleet composition to the viewer's live scene: its ships in formation around the FC at position, or near { ship | object | celestial, range?, direction? } (as add_ships, range off the FC's surface; default heading the near ship's or object's), facing heading (yaw degrees, 0 faces +Z, 90 faces +X) or facing (a point or { celestial }), plus its fleet, with ids free in the scene. Give position or near, not both. Give the composition inline or the name of a saved one or a built-in example ("tfis", the TFIs armor doctrine, 44 ships). Hull names without dna or radius are resolved through tools-core's EVE data (needs its SDE). personality (a built-in or saved name, or an inline template) is the fleet's, over the composition's; list_fleet_personalities shows them. ${WARP_IN_TEXT} Pass scene to add to that document instead of the viewer's, with no tab: the result is returned, not shown (load_scene or save_scene it). Returns added (fleet, commander, ships), personality (name, from, chain, embedded), hulls (each hull's dna and radius and where they came from), and the patch_scene result. Remove it again with patch_scene remove_fleet "withShips": true; frame_camera on "<fleet>-fc" looks at it.
 ${FLEET_COMPOSITION_FORMAT}`,
     inputSchema: {
       type: 'object',
@@ -345,6 +378,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
         },
         fleet: { type: 'string', description: "The fleet id. Default the composition's id, numbered when taken." },
         team: { type: 'string', description: 'The team every added ship is on.' },
+        personality: { ...PERSONALITY_ARGUMENT, description: `The fleet's personality, over the composition's. ${PERSONALITY_ARGUMENT.description}` },
         warpIn: WARP_IN_ARGUMENT,
         scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
       }
@@ -380,6 +414,50 @@ ${FLEET_COMPOSITION_FORMAT}`,
     inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
   },
   {
+    name: 'list_fleet_personalities',
+    where: 'hub',
+    description: `Lists fleet personalities, the FC playstyles a fleet runs its fight by: the saved ones (store "disk", newest first), then the read-only built-ins (store "built-in": ${BUILT_IN_FLEET_PERSONALITY_NAMES.join(', ')}), each with its title, what it extends and a description saying when to pick it. Pick one per fleet with set_fleet_personality, or personality on add_fleet_composition, stage_engagement sides and add_ships' new fleet.`,
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'get_fleet_personality',
+    where: 'hub',
+    description: 'Returns a built-in or saved fleet personality by name (case does not matter): personality as written, and resolved (every field, its extends chain merged down to line, with chain).',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+  },
+  {
+    name: 'save_fleet_personality',
+    where: 'hub',
+    description: `Saves a fleet personality as a JSON file in the hub's personalities directory under name (default its id), which becomes its id: the key a scene embeds it under and a fleet picks it by. Built-in names are read-only (extend one instead), and its extends must name a built-in or a saved personality (save a base first). Names that differ only in case are the same personality. Returns the resolved template.
+${FLEET_PERSONALITY_FORMAT}`,
+    inputSchema: {
+      type: 'object',
+      properties: { personality: { type: 'object', description: `A ${FLEET_PERSONALITY_SCHEMA} template.` }, name: { type: 'string', description: 'Its id: 1-64 letters, digits, "_", "-" or ".". Default the template\'s id.' } },
+      required: ['personality']
+    }
+  },
+  {
+    name: 'delete_fleet_personality',
+    where: 'hub',
+    description: 'Deletes a saved fleet personality by name. Built-ins are read-only; saved personalities extending it are named in the note. A scene keeps its embedded copy.',
+    inputSchema: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+  },
+  {
+    name: 'set_fleet_personality',
+    where: 'hub',
+    description: `Gives a fleet in the viewer's live scene a personality, or clears it with null. personality is a built-in or saved name, an inline ${FLEET_PERSONALITY_SCHEMA} template, or a key of the scene's personalities. A saved or inline template is embedded in the scene's personalities (flattened over the saved templates it extends; a saved one refreshes the scene's copy), in the same patch as the fleet's update_fleet. The fleet stores it; the page does not run personalities yet. Pass scene to edit that document instead (no tab). Returns fleet, personality (name, from: built-in, disk, scene or inline, chain, embedded) and the patch_scene result.
+${FLEET_PERSONALITY_FORMAT}`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        fleet: { type: 'string', description: 'The fleet id.' },
+        personality: { type: ['string', 'object', 'null'], description: `${PERSONALITY_ARGUMENT.description} null clears it.` },
+        scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to edit instead of the viewer's (no tab needed; returned, not shown).` }
+      },
+      required: ['fleet', 'personality']
+    }
+  },
+  {
     name: 'add_ships',
     where: 'hub',
     description: `Adds ships of one EVE type to the viewer's live scene in one call: count ships of hull (an EVE type name or id, resolved to SOF DNA and the hull's EVE radius through tools-core), in a formation at a place, facing a heading or a target, on a team, optionally as a new fleet or into a fleet's squad. A shortcut for a one-line fleet template: the result's template is that ${FLEET_COMPOSITION_SCHEMA} composition, ready for save_fleet_composition, add_fleet_composition and stage_engagement.
@@ -389,7 +467,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
 - spacing: metres between neighbours, centre to centre (default ${FORMATION_SPACING} × two radii + ${FORMATION_GAP} m).
 - The first ship (the lead) sits at the place: position [x, y, z], or near { ship | object | celestial, range?, direction? }. range is metres off its surface (default ${DEFAULT_NEAR_SHIP_RANGE} off a ship or object; off a celestial of the scene's location as set_location's defaults). direction is from it: ${NEAR_DIRECTIONS.join(', ')} or [x, y, z]; ahead, behind, left, right, above and below follow the ship's or object's own heading. Default: ahead off a ship or object, sun off a celestial. Ships are placed off a ship's document placement, not where it has flown since. Placements past ${formatSceneDistance(LARGE_SCENE_DISTANCE)} from the origin warn; past ${formatSceneDistance(MAX_SCENE_DISTANCE)} they are refused.
 - heading is yaw degrees (0 faces +Z, 90 faces +X; default the near reference's heading, else 0), or facing (a point, a ship or object id, or { celestial }).
-- fleet: { new: true, id?, name?, squad?: { id?, role?, anchor? } } makes a new fleet (the first ship is the FC, the rest one squad; the role defaults from the hull's EVE group: logistics are logi, interdictors and interceptors tackle, recons and EAFs ewar, command ships boost, carriers support, the rest dps). { id, squad: "<squad id>" } joins a squad. { id, squad: { id?, role?, anchor? }, wing? } makes a new squad (in the fleet's last wing by default). Fleet members are placed at their formation slots around the FC instead of a formation; joining a squad can move members of later squads, a new squad moves nobody.
+- fleet: { new: true, id?, name?, personality?, squad?: { id?, role?, anchor? } } makes a new fleet (personality: a built-in or saved name, or an inline template) (the first ship is the FC, the rest one squad; the role defaults from the hull's EVE group: logistics are logi, interdictors and interceptors tackle, recons and EAFs ewar, command ships boost, carriers support, the rest dps). { id, squad: "<squad id>" } joins a squad. { id, squad: { id?, role?, anchor? }, wing? } makes a new squad (in the fleet's last wing by default). Fleet members are placed at their formation slots around the FC instead of a formation; joining a squad can move members of later squads, a new squad moves nobody.
 - Ids are "<prefix>-01", "-02", ... after the highest number already used (prefix: the hull name; "<fleet>-<squad>" when joining). stats, propMod, fit and team go on every ship.
 - fit is EFT text every ship carries (the hull defaults to its header's); the scene keeps it once in its fits, under "<prefix>/<fit name slug>" (or "<fleet id>/..." for a new fleet), and the template carries it in its fits.
 - ${WARP_IN_TEXT} Ships joining a fleet land at their live formation slots around the FC, along its heading (from is refused for them).
@@ -435,7 +513,8 @@ ${FLEET_COMPOSITION_FORMAT}`,
         stats: { type: 'object', description: "Hull stat overrides for every ship (as a scene ship's stats)." },
         propMod: { description: "Every ship's prop mod: a module, or { module?, active? } (as a scene ship's propMod)." },
         fit: { type: 'string', description: 'EFT fit text for every ship ("[Hull, Fit name]\n..."); hull defaults to its header\'s.' },
-        fleet: { type: 'object', description: 'A new fleet { new: true, ... }, a squad to join { id, squad: "<id>" }, or a new squad { id, squad: { ... }, wing? }.' },
+        pilot: { type: 'object', description: "Every ship's pilot traits: { command?, reaction? }, each 0-1, higher is better." },
+        fleet: { type: 'object', description: 'A new fleet { new: true, personality?, ... }, a squad to join { id, squad: "<id>" }, or a new squad { id, squad: { ... }, wing? }.' },
         warpIn: WARP_IN_ARGUMENT,
         scene: { type: 'object', description: `A ${SCENE_SCHEMA} document to add to instead of the viewer's (no tab needed; returned, not shown).` }
       }
@@ -445,7 +524,7 @@ ${FLEET_COMPOSITION_FORMAT}`,
     name: 'stage_engagement',
     where: 'hub',
     description: `Stages a fight in the viewer's live scene in one call: two sides facing each other range metres apart (between their front lines; default ${DEFAULT_ENGAGEMENT_RANGE}), centred on center [x, y, z] (default [0, 0, 0]) or near { ship | object | celestial, range?, direction? } (as add_ships), each on its own team (default "${ENGAGEMENT_TEAMS[0]}" and "${ENGAGEMENT_TEAMS[1]}").
-- A side is a composition (a saved or built-in name such as "tfis", or an inline ${FLEET_COMPOSITION_SCHEMA}), or ships: [{ hull, count?, role?, name?, propMod?, fit?, dna?, radius? }] (fit: EFT text for the line's ships; hull defaults to its header's). A ship list is a fleet (fleet id: the side's fleet, else the team; the first ship is the FC; each line a squad, its role from the hull's EVE group unless given); with fleet: false it is free ships in a formation (formation, spacing and prefix as add_ships; ids "<team>-01", ...).
+- A side is a composition (a saved or built-in name such as "tfis", or an inline ${FLEET_COMPOSITION_SCHEMA}), or ships: [{ hull, count?, role?, name?, propMod?, fit?, pilot?, dna?, radius? }] (fit: EFT text for the line's ships; hull defaults to its header's). A ship list is a fleet (fleet id: the side's fleet, else the team; the first ship is the FC; each line a squad, its role from the hull's EVE group unless given); with fleet: false it is free ships in a formation (formation, spacing and prefix as add_ships; ids "<team>-01", ...). A fleet side's personality (a built-in or saved name, or an inline template) is its fleet's, over its composition's: { composition: "tfis", personality: "brawler" }.
 - heading is the yaw side A faces; side B faces back. Default 0, or across the line from the near ship, object or celestial, so both sides stand beside it.
 - A side's warpIn (true or { stagger?, together? }, as add_fleet_composition's; no from) lands it from warp along its own heading, onto the other side: reinforcements dropping on a fleet. The result's arrivals reports it.
 - Hull and composition names resolve through tools-core. Pass scene to stage on that document with no tab.
@@ -461,10 +540,11 @@ ${FLEET_COMPOSITION_FORMAT}`,
             type: 'object',
             properties: {
               composition: { type: ['string', 'object'], description: `A saved or built-in composition name, or an inline ${FLEET_COMPOSITION_SCHEMA}.` },
-              ships: { type: 'array', items: { type: 'object' }, description: 'Ship lines { hull, count?, role?, name?, propMod?, fit? (EFT text), dna?, radius? }.' },
+              ships: { type: 'array', items: { type: 'object' }, description: 'Ship lines { hull, count?, role?, name?, propMod?, fit? (EFT text), pilot?, dna?, radius? }.' },
               team: { type: 'string' },
               fleet: { type: ['string', 'boolean'], description: 'The fleet id, or false for free ships (ship lists only).' },
               name: { type: 'string', description: 'The fleet name.' },
+              personality: { ...PERSONALITY_ARGUMENT, description: `The side's fleet personality, over its composition's; not for free ships. ${PERSONALITY_ARGUMENT.description}` },
               formation: { type: 'string', enum: [...SHIP_FORMATIONS, ...Object.keys(SHIP_FORMATION_ALIASES)] },
               spacing: { type: 'number' },
               prefix: { type: 'string' },

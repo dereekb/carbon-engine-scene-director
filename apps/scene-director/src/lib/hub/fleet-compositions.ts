@@ -5,8 +5,9 @@
  *
  * add_fleet_composition fills each ship line's missing `dna` and `radius` from tools-core's EVE data, resolves `near`
  * (off a ship, object or celestial, on the commander's radius) and `warpIn.from: { celestial }` through ScenePlaces,
- * then forwards one `add_fleet_composition` patch operation to the viewer (or applies it to a passed `scene` with no
- * tab): the operation itself is pure and looks nothing up.
+ * and the fleet's `personality` (the tool's, else the composition's: a saved or inline template is embedded through
+ * FleetPersonalities), then forwards one `add_fleet_composition` patch operation to the viewer (or applies it to a
+ * passed `scene` with no tab): the operation itself is pure and looks nothing up.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -28,6 +29,7 @@ import {
   toFleetAnchors
 } from '@scene-director/scene';
 import { FleetCompositionError, type FleetCompositionFileStore } from '../store/composition-files';
+import { BuiltInPersonalityName, EmbeddedReport, type FleetPersonalities, PersonalityOperations } from './fleet-personalities';
 import type { MapDataApi } from './map-data';
 import type { SavedScenesPage } from './saved-scenes';
 import { HasWarpInFrom, IsRecord, ScenePlaces } from './scene-places';
@@ -41,6 +43,10 @@ export interface FleetCompositionsOptions {
    * The map data, for `near` and `warpIn.from` off a celestial of the scene's location.
    */
   readonly mapData: MapDataApi;
+  /**
+   * Embeds the saved or inline personality a fleet takes.
+   */
+  readonly personalities: Pick<FleetPersonalities, 'Embed'>;
   readonly page: SavedScenesPage;
 }
 
@@ -269,12 +275,14 @@ function addedFleet(scene: Maybe<Pick<SceneDocument, 'fleets'>>): Maybe<AddedFle
 export class FleetCompositions {
   readonly files: FleetCompositionFileStore;
   private readonly shipData: ShipDataApi;
+  private readonly personalities: Pick<FleetPersonalities, 'Embed'>;
   private readonly places: ScenePlaces;
   private examples: Maybe<Example[]> = null;
 
-  constructor({ files, shipData, mapData, page }: FleetCompositionsOptions) {
+  constructor({ files, shipData, mapData, personalities, page }: FleetCompositionsOptions) {
     this.files = files;
     this.shipData = shipData;
+    this.personalities = personalities;
     this.places = new ScenePlaces({ shipData, mapData, page });
   }
 
@@ -302,9 +310,12 @@ export class FleetCompositions {
     const [resolved, propMods] = await Promise.all([resolveCompositionHulls({ composition, shipData: this.shipData }), resolveCompositionPropMods({ composition, shipData: this.shipData })]);
     if (resolved.problems.length) throw new FleetCompositionError(resolved.problems);
     const from = IsRecord(args['warpIn']) ? args['warpIn']['from'] : null;
-    const before = await this.places.Before(args, { read: args['near'] != null || IsRecord(args['facing']) || IsRecord(from) });
+    const personality = args['personality'] ?? composition.personality ?? null;
+    const before = await this.places.Before(args, { read: args['near'] != null || IsRecord(args['facing']) || IsRecord(from) || (personality != null && !BuiltInPersonalityName(personality)) });
+    const embedded = personality == null ? null : await this.personalities.Embed(personality, { scene: before.scene, where: 'personality' });
     const operation: Record<string, unknown> = { op: 'add_fleet_composition', composition: resolved.composition };
     for (const key of ['position', 'heading', 'fleet', 'team']) if (args[key] != null) operation[key] = args[key];
+    if (embedded) operation['personality'] = embedded.key;
     if (args['facing'] != null) operation['facing'] = await this.places.ResolveFacing(args['facing'], before.scene);
     if (args['near'] != null) {
       const place = await this.places.ResolvePlace(args['near'], { before: before.scene, leadRadius: resolved.composition.commander.radius ?? 0 });
@@ -313,8 +324,15 @@ export class FleetCompositions {
     }
     if (args['warpIn'] != null) operation['warpIn'] = await this.places.ResolveWarpIn(args['warpIn'], before.scene);
 
-    const applied = await this.places.Apply(before, [operation]);
-    return { added: addedFleet(applied.scene), hulls: resolved.hulls, propMods: propMods.propMods, ...applied.rest, warnings: [...resolved.warnings, ...propMods.warnings, ...applied.warnings] };
+    const applied = await this.places.Apply(before, [...PersonalityOperations([embedded]), operation]);
+    return {
+      added: addedFleet(applied.scene),
+      ...(embedded ? { personality: EmbeddedReport(embedded) } : {}),
+      hulls: resolved.hulls,
+      propMods: propMods.propMods,
+      ...applied.rest,
+      warnings: [...resolved.warnings, ...propMods.warnings, ...(embedded?.warnings ?? []), ...applied.warnings]
+    };
   }
 
   async save(args: ToolArgs): Promise<object> {

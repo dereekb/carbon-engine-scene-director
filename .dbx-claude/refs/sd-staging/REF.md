@@ -98,8 +98,9 @@ of overlap; mixed lists use the largest radius.
 Free ships and joins: `<prefix>-<nn>` after the highest number already used with the prefix (≥ 2 digits). Prefix =
 `prefix`, else the name/hull slug (`tempest-fleet-issue`), or `<fleet>-<squad>` when joining. Names `<name or hull> <n>`.
 `type` = canonical SDE name; `team`, `stats`, `propMod`, `pilot` go on every ship (`add_ships { pilot }`, a ship
-line's `pilot`); `fleet: { new: true, personality? }` and a fleet side's `personality` set the new fleet's
-personality (a free side refuses one). A line's `fit` (EFT text; the hull defaults to
+line's `pilot`; the hub forwards `add_ships`' `pilot`); `fleet: { new: true, personality? }` and a fleet side's
+`personality` (else its composition's) set the new fleet's personality (a free side refuses one): a built-in or saved
+name, or an inline template, which the hub embeds in the same patch (`sd-personalities`). A line's `fit` (EFT text; the hull defaults to
 its header's) goes on every ship too, kept once in the scene's `fits`: `<fleet id>/<fit name slug>` for a new fleet or a
 fleet side, `<id prefix>/<fit name slug>` for free ships and joins; the returned `template` carries it in its `fits`
 (`sd-fittings`). New fleets take composition ids. **Ship ids

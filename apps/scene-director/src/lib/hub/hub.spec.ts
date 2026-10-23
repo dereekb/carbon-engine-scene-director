@@ -9,6 +9,7 @@ import { ToContent } from '../mcp/server';
 import { Hub, type HubOptions } from './hub';
 import { applySceneOperations, createEmptyScene } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
+import { FleetPersonalityFileStore } from '../store/personality-files';
 import { SceneFileStore } from '../store/scene-files';
 import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
@@ -56,11 +57,12 @@ type Handler = (args: Record<string, unknown>) => unknown;
 
 let hub: Hub;
 
-/** A hub on a free port whose saved scene and fleet composition files go to fresh temp directories. */
+/** A hub on a free port whose saved scene, fleet composition and fleet personality files go to fresh temp directories. */
 async function StartHub(options: Partial<HubOptions> = {}): Promise<Hub> {
   const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-hub-')));
   const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-fleets-')));
-  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, compositions, log: () => undefined, ...options }).Start();
+  const personalities = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-personalities-')));
+  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, compositions, personalities, log: () => undefined, ...options }).Start();
 }
 
 beforeAll(async () => {
@@ -553,6 +555,34 @@ describe('fleet compositions', () => {
 
   it('add_fleet_composition with no tab and no scene says to open the viewer or pass scene', async () => {
     await expect(hub.Call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0] })).rejects.toThrow(/No viewer tab is connected\. Open http.*Or pass "scene"/su);
+  });
+
+  it('set_fleet_personality embeds a saved personality and sets the fleet in one patch_scene to the tab', async () => {
+    const live = applySceneOperations(createEmptyScene(), [{ op: 'add_ships', dna: 'ac3_t2:carthum:amarr', count: 2, fleet: { new: true, id: 'g' } }]).scene;
+    const patches: Record<string, unknown>[] = [];
+    const page = await ConnectPage(
+      {
+        get_scene: () => live,
+        patch_scene: (args) => {
+          patches.push(args);
+          return applySceneOperations(live, args['operations']);
+        }
+      },
+      hub
+    );
+    try {
+      const status = (await hub.Call('viewer_status')) as { personalitiesDirectory: string };
+      expect(status.personalitiesDirectory).toBe(hub.fleetPersonalities.files.directory);
+      await hub.Call('save_fleet_personality', { personality: { schema: 'cjs-fleet-personality/1', id: 'hub-kiter', extends: 'kiter' } });
+      const result = (await hub.Call('set_fleet_personality', { fleet: 'g', personality: 'hub-kiter' })) as { personality: object; scene: { fleets: { personality?: string }[] } };
+      expect(patches.map((patch) => (patch['operations'] as { op: string }[]).map((operation) => operation.op))).toEqual([['set_personalities', 'update_fleet']]);
+      expect(result.personality).toEqual({ name: 'hub-kiter', from: 'disk', chain: ['hub-kiter', 'kiter', 'line'], embedded: ['hub-kiter'] });
+      expect(result.scene.fleets[0].personality).toBe('hub-kiter');
+      expect(((await hub.Call('get_fleet_personality', { name: 'hub-kiter' })) as { store: string }).store).toBe('disk');
+      expect(((await hub.Call('delete_fleet_personality', { name: 'hub-kiter' })) as { deleted: boolean }).deleted).toBe(true);
+    } finally {
+      page.close();
+    }
   });
 });
 
