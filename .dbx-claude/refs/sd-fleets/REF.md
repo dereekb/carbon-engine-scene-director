@@ -3,7 +3,8 @@
 > EVE fleet structure in the document (FC, wings, squads with a role and an anchor) and how the page flies it. Fetch
 > before touching `packages/scene/src/lib/fleets/`, the viewer's `following.ts` / `steering.ts`, `DestinyWorld.Steer`,
 > or `Director.FormationRadius`. Sub-docs (`{ ref: "sd-fleets", doc: "<key>" }`): **`orders`** (`order_fleet`: fleet,
-> wing and squad orders, groups apart, fleet warp in formation, break-off / regroup, pilot delay) and
+> wing and squad orders, groups apart, fleet warp in formation, break-off / regroup, pilot delay),
+> **`targets`** (called targets: each group's primary and target queue, the `targets` order, who takes which call) and
 > **`compositions`** (the `cjs-fleet/1` fleet composition, its expansion, saved compositions and the TFIs example).
 > Adding ships into fleets from the staging tools is `sd-staging`.
 
@@ -19,6 +20,8 @@
 | `fleets/formation.ts` | the at-rest formation: `layoutFleetFormation`, `toFleetFormationSlots`, `toFleetGroupOffsets`, `FORMATION_SPACING` 1.5, `FORMATION_GAP` 100, `DEFAULT_FORMATION_RADIUS` 500 |
 | `fleets/following.ts` | follow plans (`toFleetFollowPlans`; `toFleetGroupFollowPlans` for a group apart), `FOLLOW_TOLERANCE*` |
 | `fleets/orders.ts` | the `order_fleet` request, who may give it, the group's leader, the document ops, `toPilotDelays` (sub-doc `orders`) |
+| `fleets/targets.ts` | called targets: the `targets` field, the `targets` order, removal pruning, `toFleetGroupCalls` / `toShipCallPlans` (sub-doc `targets`) |
+| `fleets/group.ts` | `FleetGroup`, `toFleetGroupKey`, `describeFleetGroup` (shared by `orders.ts` and `targets.ts`; `orders.ts` re-exports them) |
 | `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
 | `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
 | `apps/viewer/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
@@ -27,7 +30,7 @@
 
 ## The model
 
-`fleets: [{ id, name?, commander, wings: [{ id, name?, commander?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? } }] }] }]`
+`fleets: [{ id, name?, commander, targets?, wings: [{ id, name?, commander?, targets?, squads: [{ id, name?, role, commander?, members, anchor?: { ship?, range? }, home?: { ship?, range? }, targets? }] }] }]`
 
 - `role` is required: `dps`, `logi`, `tackle`, `ewar`, `boost`, `support` (case-insensitive). `wings` / `squads` /
   `members` default `[]`; empty is valid. `fleets: []` = no fleets.
@@ -38,6 +41,7 @@
 - **`team` is independent of fleets** (team = side/hostility; fleet = who commands it and where it flies).
 - `home` is written only by `order_fleet` break-off: the anchor `regroup` restores. **It is not an anchor**:
   `toFleetAnchors` ignores it; it is validated and repaired like one (sub-doc `orders`).
+- `targets` is the group's called targets (ship or object ids in kill order; sub-doc `targets`). Memberships ignore it.
 
 Example: three TFIs keep 1 km on the FC; the logi squad anchors on its own lead, guardian-1, which holds 30 km off the
 FC while guardian-2 anchors up on it at 1 km.
@@ -164,6 +168,15 @@ rows by live state: offline, online, activating, active, stopping, reactivating;
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
 A fleet that lost ships (`sd-combat`) lists only its live members and adds `destroyed` (their ids) and `actingFor` (the
 dead FC its commander stands in for); a fleet with nobody alive is not listed.
+
+## Called targets (sub-doc `targets`)
+
+Each fleet, wing and squad may call targets: a `targets` list in kill order whose first live entry is its primary.
+`order_fleet { order: { type: "targets", primary | queue | set | drop | next | clear } }` edits it (the order's
+authority: the FC for the fleet, a wing commander their wing, a squad commander their squad); removing a called ship or
+object prunes it; a kill never edits it. Each member takes the nearest call in its chain (squad, wing, fleet; the FC the
+fleet's only, logi their own squad's only). Status: the document and the order are in (T1); members locking and
+shooting the call is T2.
 
 ## Arriving fleets (`warpIn`)
 

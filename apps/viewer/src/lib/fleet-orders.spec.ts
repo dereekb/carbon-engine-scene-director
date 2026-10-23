@@ -307,6 +307,21 @@ describe('FleetOrders', () => {
     expect(rig.Command('fleet', 'f').last?.order).toEqual({ type: 'anchor', range: 2000 });
   });
 
+  it("records a targets order, at its given tick, and leaves the group's following alone", () => {
+    const rig = new Rig();
+    const before = MEMBERS.map((id) => rig.world.Following(id));
+    const called = rig.Order({ fleet: 'f', squad: 'dps', order: { type: 'targets', set: ['l1', 'l2'] } });
+    expect(called).toMatchObject({ by: 'd1', leader: 'd1', order: { type: 'targets', set: ['l1', 'l2'] }, ships: ['d1', 'd2', 'd3'] });
+    expect(rig.scene.fleets![0].wings[0].squads[0].targets).toEqual(['l1', 'l2']);
+    expect(MEMBERS.map((id) => rig.world.Following(id))).toEqual(before);
+    expect(rig.Command('squad', 'dps')).toMatchObject({ state: 'idle', last: { order: { type: 'targets' }, by: 'd1', tick: called.tick } });
+
+    const cleared = rig.orders.Fly(rig.orders.Resolve(normalizeFleetOrderRequest({ fleet: 'f', squad: 'dps', delay: 1, order: { type: 'targets', clear: true } })), { tick: called.tick - 5 });
+    expect(cleared.tick).toBe(called.tick - 5);
+    expect(Object.keys(cleared.delays ?? {})).toEqual(['d1', 'd2', 'd3']);
+    expect(rig.Command('squad', 'dps').last).toMatchObject({ order: { type: 'targets', clear: true }, tick: called.tick - 5 });
+  });
+
   it('refuses a wing or squad move or a warp on an unplanned fleet, and Reset forgets every record', () => {
     const rig = new Rig();
     const waiting = new FleetFollowing({ world: rig.world, scene: () => rig.scene, radiusOf: (id) => (id === 'l2' ? null : (FLIGHTS.get(id)?.radius ?? null)) });

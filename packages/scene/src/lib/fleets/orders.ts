@@ -1,8 +1,8 @@
 /**
  * Fleet orders: what the order_fleet tool takes (one plain object, which a timeline beat will embed unchanged), who
  * may give it (EVE's rule: the FC orders the fleet, a wing commander only their wing, a squad commander only their
- * squad), which ship the group flies on (its leader), and the document ops its anchor, break-off and regroup orders
- * compile to. The page flies the rest (the viewer's FleetOrders).
+ * squad), which ship the group flies on (its leader), and the document ops its anchor, break-off, regroup and targets
+ * orders compile to. The page flies the rest (the viewer's FleetOrders and FleetTargets).
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -10,7 +10,12 @@ import { ID_PATTERN, isPlainObject, type JsonObject } from '../json';
 import { MAX_ORDER_RANGE, normalizeShipOrder, SHIP_ORDER_TYPES, type ShipOrder, shipOrderTarget } from '../orders';
 import { type SceneDocument, SceneError } from '../scene';
 import { DEFAULT_ANCHOR_RANGES, type SceneFleet, type SceneSquad, type SceneSquadAnchor, type SceneWing } from './fleet';
+import { describeFleetGroup, type FleetGroup } from './group';
 import { readFleetSelection, selectFleetShips } from './selection';
+import { type FleetTargetOperationsOptions, type FleetTargetsOrder, fleetTargetsOrderCalls, readFleetTargetsOrder, toFleetTargetOperations } from './targets';
+
+export { describeFleetGroup, toFleetGroupKey } from './group';
+export type { FleetGroup, FleetGroupKind } from './group';
 
 /**
  * The orders that edit the document's anchors rather than fly a ship.
@@ -20,10 +25,11 @@ export const FLEET_STRUCTURE_ORDER_TYPES = ['anchor', 'break-off', 'regroup'] as
 export type FleetStructureOrderType = (typeof FLEET_STRUCTURE_ORDER_TYPES)[number];
 
 /**
- * What a fleet, wing or squad can be ordered: order_ship's movement orders and warp, then the document orders. Written
- * out rather than spread from SHIP_ORDER_TYPES: `../orders` and this module import each other through `../scene`.
+ * What a fleet, wing or squad can be ordered: order_ship's movement orders and warp, then the document orders (the
+ * anchor orders, then the called targets). Written out rather than spread from SHIP_ORDER_TYPES: `../orders` and this
+ * module import each other through `../scene`.
  */
-export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup'] as const;
+export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets'] as const;
 
 export type FleetOrderType = (typeof FLEET_ORDER_TYPES)[number];
 
@@ -74,9 +80,14 @@ export interface FleetRegroupOrder {
 export type FleetStructureOrder = FleetAnchorOrder | FleetBreakOffOrder | FleetRegroupOrder;
 
 /**
+ * A fleet document order: an anchor order, or the group's called targets (fleets/targets.ts).
+ */
+export type FleetDocumentOrder = FleetStructureOrder | FleetTargetsOrder;
+
+/**
  * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, or a document order.
  */
-export type FleetOrder = ShipOrder | FleetStructureOrder;
+export type FleetOrder = ShipOrder | FleetDocumentOrder;
 
 /**
  * What order_fleet takes: one plain object, which a timeline beat will embed unchanged.
@@ -125,6 +136,27 @@ const ID_MESSAGE = 'must be an id (1-64 letters, digits, "_", "-" or ".")';
  */
 export function isFleetStructureOrder(order: FleetOrder): order is FleetStructureOrder {
   return STRUCTURE_TYPES.has(order.type);
+}
+
+/**
+ * Whether a fleet order is a targets order (the group's called targets).
+ *
+ * @param order - A normalized fleet order.
+ * @returns True for targets.
+ */
+export function isFleetTargetsOrder(order: FleetOrder): order is FleetTargetsOrder {
+  return order.type === 'targets';
+}
+
+/**
+ * Whether a fleet order edits the document (anchor, break-off, regroup, targets) rather than flying a ship: the page
+ * runs it through the edit queue.
+ *
+ * @param order - A normalized fleet order.
+ * @returns True for the structure and targets orders.
+ */
+export function isFleetDocumentOrder(order: FleetOrder): order is FleetDocumentOrder {
+  return isFleetStructureOrder(order) || isFleetTargetsOrder(order);
 }
 
 /**
@@ -183,6 +215,7 @@ function readFleetOrder(input: unknown, context: ReadOrderContext, problems: str
   else if (typeof type !== 'string' || !(FLEET_ORDER_TYPES as readonly string[]).includes(type)) problems.push(`${where}.type must be one of ${FLEET_ORDER_TYPES.join(', ')}`);
   // Read at call time, not at load: see FLEET_ORDER_TYPES.
   else if ((SHIP_ORDER_TYPES as readonly string[]).includes(type)) order = readShipOrder(input, context, problems);
+  else if (type === 'targets') order = readFleetTargetsOrder(input, context, problems);
   else order = readStructureOrder(input, type as FleetStructureOrderType, context, problems);
   return order;
 }
@@ -235,20 +268,6 @@ function readStructureOrder(input: JsonObject, type: FleetStructureOrderType, co
   return problems.length > before ? null : order;
 }
 
-export type FleetGroupKind = 'fleet' | 'wing' | 'squad';
-
-/**
- * A fleet, or one wing or squad of it.
- */
-export interface FleetGroup {
-  readonly fleet: string;
-  readonly kind: FleetGroupKind;
-  /**
-   * The fleet's, wing's or squad's id.
-   */
-  readonly id: string;
-}
-
 /**
  * The group a request selects.
  *
@@ -260,26 +279,6 @@ export function toFleetGroup(request: Pick<FleetOrderRequest, 'fleet' | 'wing' |
   if (request.squad) group = { fleet: request.fleet, kind: 'squad', id: request.squad };
   else if (request.wing) group = { fleet: request.fleet, kind: 'wing', id: request.wing };
   return group;
-}
-
-/**
- * A group's key in the page's records.
- *
- * @param group - The group.
- * @returns `"tfis"`, `"tfis/wing/mainline"` or `"tfis/squad/logi"`.
- */
-export function toFleetGroupKey(group: FleetGroup): string {
-  return group.kind === 'fleet' ? group.fleet : `${group.fleet}/${group.kind}/${group.id}`;
-}
-
-/**
- * The group as messages name it.
- *
- * @param group - The group.
- * @returns E.g. `squad "logi" of fleet "tfis"`.
- */
-export function describeFleetGroup(group: FleetGroup): string {
-  return group.kind === 'fleet' ? `fleet "${group.fleet}"` : `${group.kind} "${group.id}" of fleet "${group.fleet}"`;
 }
 
 /**
@@ -337,7 +336,8 @@ function placeOf(scene: Pick<SceneDocument, 'fleets'>, group: FleetGroup): Maybe
  * - The leader: the FC for a fleet. For a squad, its commander, else the issuer when it is in the squad, else its lead
  *   (the member it anchors on), else its first member. For a wing, its commander, else the issuer when it is in the
  *   wing, else the leader of its first squad with ships. Never the FC.
- * - A movement or warp order may not target one of the group's own ships.
+ * - A movement or warp order may not target one of the group's own ships, nor may a targets order call one (it may
+ *   drop one: membership can change after a call).
  *
  * @param scene - The normalized document.
  * @param request - A normalized request.
@@ -375,8 +375,13 @@ export function resolveFleetOrderRequest(scene: Pick<SceneDocument, 'ships' | 'f
   else if (group.kind === 'wing' && wing) leader = wingLeader({ wing, fc, issuer: inGroup.has(issuer) ? issuer : null, inGroup });
 
   const order = request.order;
-  const target = isFleetStructureOrder(order) ? null : shipOrderTarget(order);
+  const target = isFleetDocumentOrder(order) ? null : shipOrderTarget(order);
   if (target && inGroup.has(target)) throw new SceneError([`${where}.order.target: ${describeFleetGroup(group)} cannot target one of its own ships ("${target}")`]);
+  if (isFleetTargetsOrder(order)) {
+    const own = new Set(selected.ships);
+    const called = fleetTargetsOrderCalls(order).filter((id) => own.has(id));
+    if (called.length) throw new SceneError(called.map((id) => `${where}.order: ${describeFleetGroup(group)} cannot call one of its own ships ("${id}")`));
+  }
 
   return { request, group, ships, leader, issuer, commanders };
 }
@@ -435,20 +440,25 @@ function squadsOfGroup(fleet: SceneFleet, group: FleetGroup): SceneSquad[] {
  * - `regroup`: for every squad of the group with a home, `update_squad` restoring the home (`null` for `{}`) and
  *   clearing it.
  *
+ * - `targets`: one update_fleet, update_wing or update_squad setting the group's called targets, or none when the list
+ *   is unchanged (toFleetTargetOperations; `options.statusOf` gives `next` the live primary).
+ *
  * Break-off then regroup gives the document's fleets back exactly.
  *
  * @param scene - The normalized document the request was resolved against.
  * @param resolved - The resolved order.
+ * @param options - The page's live target status, for a targets order's `next`.
  * @returns The ops, for applySceneOperations.
  * @throws {SceneError} For an anchor on a group with no squads, a break-off of a wing or fleet, or a break-off ship
- *   that is not a member of the squad.
+ *   that is not a member of the squad; for a targets order, see toFleetTargetOperations.
  */
-export function toFleetOrderOperations(scene: Pick<SceneDocument, 'fleets'>, resolved: ResolvedFleetOrder): JsonObject[] {
+export function toFleetOrderOperations(scene: Pick<SceneDocument, 'ships' | 'fleets'>, resolved: ResolvedFleetOrder, options: FleetTargetOperationsOptions = {}): JsonObject[] {
   const { group, request } = resolved;
   const order = request.order;
   const fleet = scene.fleets?.find((candidate) => candidate.id === group.fleet);
   const where = 'order_fleet';
   let operations: JsonObject[] = [];
+  if (fleet && isFleetTargetsOrder(order)) return toFleetTargetOperations(scene, group, order, options);
   if (!fleet || !isFleetStructureOrder(order)) return operations;
 
   const squads = squadsOfGroup(fleet, group);

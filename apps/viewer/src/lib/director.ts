@@ -89,7 +89,8 @@ import {
   createEmptyScene,
   diffScenes,
   fitTextOf,
-  isFleetStructureOrder,
+  isFleetDocumentOrder,
+  type CalledTargetStatus,
   normalizeFleetOrderRequest,
   toFleetOrderOperations,
   toPilotDelays,
@@ -923,8 +924,9 @@ export class Director {
 
   /**
    * Orders a fleet, wing or squad (order_fleet): resolved against the document, given by a ship commanding the group.
-   * Moves and warps fly at once (live, not saved); anchor, break-off and regroup edit the document's anchors through
-   * the edit queue, as patch_scene does, then run their live half (regroup's rejoins and warps back).
+   * Moves and warps fly at once (live, not saved); anchor, break-off and regroup edit the document's anchors, and
+   * targets the group's called targets, through the edit queue, as patch_scene does, then run their live half
+   * (regroup's rejoins and warps back; every document order records `command.last` at the tick it was given).
    *
    * @param input - The order_fleet arguments: fleet, wing or squad, by, order.
    * @returns What the order did; document orders add their operations and the patch result (its ship reports under
@@ -938,14 +940,16 @@ export class Director {
     const named = record ? this.NamedTarget({ order: record['order'], from: fc, where: 'order_fleet.order' }) : { order: undefined };
     const request = normalizeFleetOrderRequest(named.resolved ? { ...record, order: named.order } : input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
     const resolved = named.resolved ? { resolved: named.resolved } : {};
-    if (!isFleetStructureOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
+    if (!isFleetDocumentOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
-      // Resolved against the document current at its turn in the queue.
+      // Resolved against the document current at its turn in the queue; the tick is captured before the edit, which
+      // is asynchronous while the world ticks on.
       const resolved = this.orders.Resolve(request);
-      const operations = toFleetOrderOperations(this.Current(), resolved);
+      const tick = this.world.tick;
+      const operations = toFleetOrderOperations(this.Current(), resolved, { statusOf: (id) => this.CalledTargetStatus(id) });
       const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
       const { ships: builds, ...rest } = patch ?? {};
-      const result: FleetOrderResult = this.orders.Fly(resolved);
+      const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
       return { ...result, operations, ...(patch ? { ...rest, builds } : {}) };
     });
   }
@@ -2623,6 +2627,22 @@ export class Director {
    */
   private IsDead(id: string): boolean {
     return this.deaths.has(id);
+  }
+
+  /**
+   * A called target's live status (fleets/targets.ts), the first that applies: destroyed (either death mode), missing
+   * (no Destiny ball: not built yet, or gone), warping (a ship in warp), else live. An object is live once built.
+   *
+   * @param id - A ship or object id.
+   * @returns Its status.
+   */
+  private CalledTargetStatus(id: string): CalledTargetStatus {
+    const kind = this.targets.KindOf(id);
+    let status: CalledTargetStatus = 'live';
+    if (this.combat.IsDestroyed(id) || this.IsDead(id)) status = 'destroyed';
+    else if (!kind) status = 'missing';
+    else if (kind === 'ship' && this.world.InWarp(id)) status = 'warping';
+    return status;
   }
 
   /**

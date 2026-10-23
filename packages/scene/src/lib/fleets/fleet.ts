@@ -75,6 +75,11 @@ export interface SceneSquad {
    * defaults). Not part of the anchor rules (toFleetAnchors ignores it); order_fleet regroup restores it and clears it.
    */
   home?: SceneSquadAnchor;
+  /**
+   * The group's called targets: ship or authored-object ids in kill order (fleets/targets.ts). The first live entry is
+   * its primary, the live entries after it its queue. Omitted when it calls none.
+   */
+  targets?: string[];
 }
 
 export interface SceneWing {
@@ -87,6 +92,11 @@ export interface SceneWing {
    * A ship of this fleet that sits in one of this wing's squads or in none, and commands no other wing.
    */
   commander?: string;
+  /**
+   * The group's called targets: ship or authored-object ids in kill order (fleets/targets.ts). The first live entry is
+   * its primary, the live entries after it its queue. Omitted when it calls none.
+   */
+  targets?: string[];
   squads: SceneSquad[];
 }
 
@@ -101,5 +111,10 @@ export interface SceneFleet {
    * fleet's squads, or in none (EVE's FC slot).
    */
   commander: string;
+  /**
+   * The group's called targets: ship or authored-object ids in kill order (fleets/targets.ts). The first live entry is
+   * its primary, the live entries after it its queue. Omitted when it calls none.
+   */
+  targets?: string[];
   wings: SceneWing[];
 }

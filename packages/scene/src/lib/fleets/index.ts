@@ -7,3 +7,4 @@ export * from './following';
 export * from './live';
 export * from './selection';
 export * from './orders';
+export * from './targets';

@@ -27,6 +27,7 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/break-off/u);
       expect(orderFleet).toMatch(/regroup/u);
       expect(orderFleet).toMatch(/by is the ship giving the order/u);
+      expect(orderFleet).toMatch(/"targets"/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/stage_engagement/u);

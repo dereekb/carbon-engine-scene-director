@@ -142,22 +142,25 @@ export class FleetOrders {
   }
 
   /**
-   * The live half of an order, after any document edit it made has applied: moves, warps and regroups fly; anchor and
-   * break-off only record the order.
+   * The live half of an order, after any document edit it made has applied: moves, warps and regroups fly; anchor,
+   * break-off and targets only record the order (the director's FleetTargets runs a call).
    *
    * @param resolved - The resolved order.
+   * @param options - `tick`: when the order was given, for its record and delays, if not now (a document order
+   *   captures it before its asynchronous edit).
    * @returns What it did.
    * @throws {Error} When the leader refuses the order, or a wing or squad move or a warp finds the fleet unplanned.
    */
-  Fly(resolved: ResolvedFleetOrder): FleetOrderResult {
+  Fly(resolved: ResolvedFleetOrder, options: { readonly tick?: number } = {}): FleetOrderResult {
     const { request, group } = resolved;
     const order = request.order;
     const key = toFleetGroupKey(group);
-    const delays = toPilotDelays({ key, tick: this.world.tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer });
+    const tick = options.tick ?? this.world.tick;
+    const delays = toPilotDelays({ key, tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer });
     let result: FleetOrderResult;
     if (order.type === 'warp') result = this.Warp(resolved, order, delays);
     else if (order.type === 'regroup') result = this.Regroup(resolved, delays);
-    else if (order.type === 'anchor' || order.type === 'break-off') result = this.Result(resolved, { ships: resolved.ships });
+    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
     else result = this.Move(resolved, order, delays);
     if (request.delay && order.type !== 'anchor' && order.type !== 'break-off') result = { ...result, delays: Object.fromEntries(delays) };
     this.last.set(key, { order, by: resolved.issuer, tick: result.tick });

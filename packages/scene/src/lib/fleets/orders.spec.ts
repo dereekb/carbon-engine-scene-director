@@ -4,7 +4,9 @@ import { SHIP_ORDER_TYPES } from '../orders';
 import { applySceneOperations, normalizeScene, type SceneDocument } from '../scene';
 import { catchSceneError, makeFleetScene, TFI_FLEET_SCENE } from './fleets.spec-helper';
 import { toFleetMemberships } from './membership';
-import { DEFAULT_BREAK_OFF_RANGE, FLEET_ORDER_TYPES, FLEET_STRUCTURE_ORDER_TYPES, MAX_FLEET_ORDER_DELAY, normalizeFleetOrderRequest, toPilotDelays, resolveFleetOrderRequest, toFleetGroupKey, toFleetOrderOperations } from './orders';
+import { CELESTIAL_TARGET_REFUSAL } from '../weapons/target';
+import { DEFAULT_BREAK_OFF_RANGE, FLEET_ORDER_TYPES, FLEET_STRUCTURE_ORDER_TYPES, isFleetDocumentOrder, isFleetStructureOrder, MAX_FLEET_ORDER_DELAY, normalizeFleetOrderRequest, toPilotDelays, resolveFleetOrderRequest, toFleetGroupKey, toFleetOrderOperations } from './orders';
+import { FLEET_TARGETS_ACTIONS, MAX_CALLED_TARGETS } from './targets';
 
 /**
  * Two wings: w1 (commander wc1) with a dps squad the FC sits in (commander a1) and a logi squad on its lead l1 at 5 km;
@@ -51,7 +53,7 @@ const WARP = { type: 'warp', point: [0, 0, 400000] } as const;
 
 describe('normalizeFleetOrderRequest', () => {
   it('lists the ship orders, then the document orders', () => {
-    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES]);
+    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets']);
   });
 
   it('round-trips every order type with its defaults filled', () => {
@@ -270,5 +272,88 @@ describe('pilot delays', () => {
       expect(new Set(delays).size, `tick ${tick}: ${delays.join(', ')}`).toBeGreaterThanOrEqual(4);
       expect(Math.max(...delays) - Math.min(...delays), `tick ${tick}: ${delays.join(', ')}`).toBeGreaterThanOrEqual(4);
     }
+  });
+});
+
+describe('targets orders', () => {
+  const TARGETS = (order: object) => ({ type: 'targets', ...order });
+  const CALLED = (): SceneDocument => applySceneOperations(TWO_WINGS(), [{ op: 'update_squad', fleet: 'f', squad: 'dps', set: { targets: ['b1', 'b2', 'l1'] } }]).scene;
+  const opsOf = (order: object, options: Parameters<typeof toFleetOrderOperations>[2] = {}, selection: object = { squad: 'dps' }, scene: SceneDocument = CALLED()) => toFleetOrderOperations(scene, resolve({ fleet: 'f', ...selection, order: TARGETS(order) }, scene), options);
+  const listOf = (order: object, options: Parameters<typeof toFleetOrderOperations>[2] = {}) => {
+    const operations = opsOf(order, options);
+    return operations.length ? (operations[0]['set'] as { targets: unknown }).targets : 'unchanged';
+  };
+
+  it('reads exactly one action: primary, queue, set, drop, next or clear', () => {
+    expect(normalize({ fleet: 'f', order: TARGETS({ primary: 'gfc' }) }).order).toEqual({ type: 'targets', primary: 'gfc' });
+    expect(normalize({ fleet: 'f', order: TARGETS({ queue: ['gfc', 'b1', 'gfc'] }) }).order).toEqual({ type: 'targets', queue: ['gfc', 'b1'] });
+    expect(normalize({ fleet: 'f', order: TARGETS({ set: [] }) }).order).toEqual({ type: 'targets', set: [] });
+    expect(normalize({ fleet: 'f', order: TARGETS({ drop: ['b1'] }) }).order).toEqual({ type: 'targets', drop: ['b1'] });
+    expect(normalize({ fleet: 'f', order: TARGETS({ next: true }) }).order).toEqual({ type: 'targets', next: true });
+    expect(normalize({ fleet: 'f', delay: 0.5, order: TARGETS({ clear: true }) })).toEqual({ fleet: 'f', delay: 0.5, order: { type: 'targets', clear: true } });
+    expect(normalizeFleetOrderRequest({ fleet: 'f', order: TARGETS({ primary: 'astra' }) }, { ships: SHIPS, objects: new Set(['astra']) }).order).toEqual({ type: 'targets', primary: 'astra' });
+
+    expect(problemsOf({ fleet: 'f', order: TARGETS({}) })).toEqual([`order_fleet.order needs exactly one of ${FLEET_TARGETS_ACTIONS.join(', ')}`]);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ primary: 'gfc', clear: true }) })).toEqual([`order_fleet.order needs exactly one of ${FLEET_TARGETS_ACTIONS.join(', ')} (got primary, clear)`]);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ clear: true, x: 1 }) })).toEqual(['order_fleet.order.x is not a targets order field']);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ next: false }) })).toEqual(['order_fleet.order.next must be true']);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ primary: 'celestial:60003760' }) })).toEqual([`order_fleet.order.primary "celestial:60003760": ${CELESTIAL_TARGET_REFUSAL}`]);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ primary: 'nobody' }) })).toEqual(['order_fleet.order.primary "nobody" is not a ship or object in the scene']);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ queue: ['gfc', 'nobody'] }) })).toEqual(['order_fleet.order.queue[1] "nobody" is not a ship or object in the scene']);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ queue: [] }) })).toEqual(['order_fleet.order.queue must be a non-empty array of ship or object ids']);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ set: ['gfc', 'gfc'] }) })).toEqual(['order_fleet.order.set[1] "gfc" is named more than once']);
+    expect(problemsOf({ fleet: 'f', order: TARGETS({ drop: 'gfc' }) })).toEqual(['order_fleet.order.drop must be a non-empty array of ship or object ids']);
+  });
+
+  it('is a document order, not a structure order', () => {
+    const order = normalize({ fleet: 'f', order: TARGETS({ clear: true }) }).order;
+    expect(isFleetDocumentOrder(order)).toBe(true);
+    expect(isFleetStructureOrder(order)).toBe(false);
+    expect(isFleetDocumentOrder(normalize({ fleet: 'f', order: { type: 'regroup' } }).order)).toBe(true);
+    expect(isFleetDocumentOrder(normalize({ fleet: 'f', order: STOP }).order)).toBe(false);
+  });
+
+  it("is given by the group's commanders, and may not call one of its own ships", () => {
+    expect(resolve({ fleet: 'f', squad: 'dps', order: TARGETS({ primary: 'b1' }) })).toMatchObject({ issuer: 'a1', ships: ['a1', 'a2', 'a3'] });
+    expect(resolveProblems({ fleet: 'f', by: 'wc1', order: TARGETS({ clear: true }) })[0]).toMatch(/^order_fleet: ship "wc1" has no command over fleet "f"/u);
+    expect(resolveProblems({ fleet: 'f', squad: 'dps', order: TARGETS({ primary: 'a2' }) })).toEqual(['order_fleet.order: squad "dps" of fleet "f" cannot call one of its own ships ("a2")']);
+    expect(resolveProblems({ fleet: 'f', squad: 'dps', order: TARGETS({ set: ['b1', 'fc', 'a3'] }) })).toEqual(['order_fleet.order: squad "dps" of fleet "f" cannot call one of its own ships ("fc")', 'order_fleet.order: squad "dps" of fleet "f" cannot call one of its own ships ("a3")']);
+    expect(resolveProblems({ fleet: 'f', order: TARGETS({ queue: ['gfc', 'l2'] }) })).toEqual(['order_fleet.order: fleet "f" cannot call one of its own ships ("l2")']);
+    expect(resolve({ fleet: 'f', squad: 'dps', order: TARGETS({ drop: ['a2'] }) }).group).toEqual({ fleet: 'f', kind: 'squad', id: 'dps' });
+  });
+
+  it("compiles each action to the group's new list", () => {
+    expect(opsOf({ primary: 'l1' })).toEqual([{ op: 'update_squad', fleet: 'f', squad: 'dps', set: { targets: ['l1', 'b1', 'b2'] } }]);
+    expect(listOf({ primary: 'gfc' })).toEqual(['gfc', 'b1', 'b2', 'l1']);
+    expect(listOf({ primary: 'b1' })).toBe('unchanged');
+    expect(listOf({ queue: ['l2', 'b1', 'gfc'] })).toEqual(['b1', 'b2', 'l1', 'l2', 'gfc']);
+    expect(listOf({ queue: ['b2'] })).toBe('unchanged');
+    expect(listOf({ set: ['gfc'] })).toEqual(['gfc']);
+    expect(listOf({ set: [] })).toBeNull();
+    expect(listOf({ drop: ['b2', 'b1'] })).toEqual(['l1']);
+    expect(listOf({ clear: true })).toBeNull();
+    expect(opsOf({ clear: true }, {}, { squad: 'tackle' })).toEqual([]);
+    expect(opsOf({ primary: 'gfc' }, {}, {})).toEqual([{ op: 'update_fleet', fleet: 'f', set: { targets: ['gfc'] } }]);
+    expect(opsOf({ set: ['b1', 'gfc'] }, {}, { wing: 'w1' })).toEqual([{ op: 'update_wing', fleet: 'f', wing: 'w1', set: { targets: ['b1', 'gfc'] } }]);
+
+    const applied = applySceneOperations(CALLED(), opsOf({ primary: 'gfc' })).scene;
+    expect(applied.fleets?.[0].wings[0].squads[0].targets).toEqual(['gfc', 'b1', 'b2', 'l1']);
+  });
+
+  it('moves next past the live primary (every entry live without a status), else past the first entry', () => {
+    expect(listOf({ next: true })).toEqual(['b2', 'l1']);
+    expect(listOf({ next: true }, { statusOf: (id) => (id === 'b1' ? 'destroyed' : 'live') })).toEqual(['b1', 'l1']);
+    expect(listOf({ next: true }, { statusOf: () => 'destroyed' })).toEqual(['b2', 'l1']);
+    const single = applySceneOperations(TWO_WINGS(), [{ op: 'update_squad', fleet: 'f', squad: 'dps', set: { targets: ['gfc'] } }]).scene;
+    expect(opsOf({ next: true }, {}, { squad: 'dps' }, single)).toEqual([{ op: 'update_squad', fleet: 'f', squad: 'dps', set: { targets: null } }]);
+  });
+
+  it('refuses a drop of an uncalled id, next on an empty list and a list past the fleet size', () => {
+    expect(catchSceneError(() => opsOf({ drop: ['gfc', 'b1'] })).problems).toEqual(['order_fleet.order.drop: squad "dps" of fleet "f" does not call "gfc"']);
+    expect(catchSceneError(() => opsOf({ next: true }, {}, { squad: 'tackle' })).problems).toEqual(['order_fleet.order.next: squad "tackle" of fleet "f" calls no targets']);
+    const full = structuredClone(CALLED());
+    const dps = full.fleets?.[0].wings[0].squads[0];
+    if (dps) dps.targets = Array.from({ length: MAX_CALLED_TARGETS }, (_, index) => `x${index}`);
+    expect(catchSceneError(() => opsOf({ queue: ['gfc'] }, {}, { squad: 'dps' }, full)).problems).toEqual([`order_fleet.order: squad "dps" of fleet "f" would call ${MAX_CALLED_TARGETS + 1} targets; at most ${MAX_CALLED_TARGETS} (EVE's fleet size)`]);
   });
 });

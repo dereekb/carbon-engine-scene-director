@@ -2,6 +2,7 @@ import type { Maybe } from '@dereekb/util';
 import { DNA_PATTERN, isPlainObject, type JsonObject, readId, readNumber, readShipType, readString, readVector, reportUnknownKeys } from '../json';
 import { largeSceneWarning } from '../extent';
 import type { FleetOperationContext } from '../fleets/operations';
+import { removeCalledTarget } from '../fleets/targets';
 import type { SceneVector } from '../scene';
 import { readStagingDraft, type StagingDraft, stagingTakenIds } from '../staging/draft';
 import { readFacing, readStagingNear, readStagingPrefix, readStagingRadii, resolveStagingNear, stagingNearReference, type StagingReadContext } from '../staging/add-ships';
@@ -36,7 +37,8 @@ const UPDATE_OBJECT_CLEARABLE = ['type', 'name', 'radius'] as const;
  *   { op: "update_object", id, set: { dna?, type?, name?, position?, rotation?, radius? } }   null clears type, name
  *                                       and radius
  *   { op: "move_object", id, position? | near?, heading? | facing? | rotation? }   what is not given is kept
- *   { op: "remove_object", id }   also clears camera.target when it named the object
+ *   { op: "remove_object", id }   also clears camera.target when it named the object, and takes it off every fleet's,
+ *                                  wing's and squad's called targets
  *
  * @param operation - The operation, with its "op".
  * @param context - The draft and where problems and warnings go.
@@ -81,6 +83,7 @@ export function applyObjectOperation(operation: JsonObject, context: FleetOperat
         objects.splice(index, 1);
         const camera = draft['camera'];
         if (isPlainObject(camera) && camera['target'] === operation['id']) camera['target'] = null;
+        removeCalledTarget(String(operation['id']), context);
       }
       break;
     }

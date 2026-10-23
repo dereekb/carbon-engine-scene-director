@@ -1,6 +1,6 @@
 import type { Maybe } from '@dereekb/util';
 import { DNA_PATTERN, ID_PATTERN, isPlainObject, type JsonObject, readNumber, readShipType, readString, readVector, reportUnknownKeys, sameJson } from './json';
-import { FLEET_OPERATIONS, type FleetOperationContext, applyFleetOperation, normalizeFleets, removeShipFromFleets, type SceneFleet, toFleetMemberships } from './fleets';
+import { FLEET_OPERATIONS, type FleetOperationContext, applyFleetOperation, normalizeFleets, removeCalledTarget, removeShipFromFleets, type SceneFleet, toFleetMemberships } from './fleets';
 import { type HullStatOverrides, normalizeHullStatOverrides } from './stats';
 import { applyFleetCompositionOperation, FLEET_COMPOSITION_OPERATIONS } from './compositions/operation';
 import { normalizeSceneLocation, type SceneLocation } from './location/location';
@@ -296,7 +296,7 @@ export function normalizeScene(input: unknown): NormalizedScene {
   if (target != null && !ids.has(target) && !objects.ids.has(target)) {
     problems.push(`camera.target "${target}" is not a ship or object id`);
   }
-  const fleets = normalizeFleets({ input: input['fleets'], shipIds: ids });
+  const fleets = normalizeFleets({ input: input['fleets'], shipIds: ids, targetIds: new Set([...ids, ...objects.ids]) });
   problems.push(...fleets.problems);
   warnings.push(...fleets.warnings);
   if (fleets.fleets) scene.fleets = fleets.fleets;
@@ -326,17 +326,20 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot? } }
  *                                       each key replaces the ship's value (stats and propMod as a whole); null clears
  *                                       type, stats, propMod, fit and pilot
- *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused)
+ *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused) and off
+ *                                       every fleet's, wing's and squad's called targets, with a warning
  *   { op: "set_camera", camera }            merged into the current camera
  *   { op: "set_environment", environment }  merged into the current environment
  *   { op: "rename", name }
  *   { op: "set_location", location }   replaces the scene's location (system id, origin, anchor); the set_location tool
  *                                       resolves names. Ships stay where they are in the scene
  *   { op: "clear_location" }               removes it; a no-op without one
- *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander? } }
+ *   { op: "add_fleet", fleet }   { op: "update_fleet", fleet, set: { name?, commander?, targets? } }
  *   { op: "remove_fleet", fleet, withShips? }   withShips: true also removes every ship holding a position in it
- *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander? } }   { op: "remove_wing", fleet, wing }
- *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor? } }
+ *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander?, targets? } }   { op: "remove_wing", fleet, wing }
+ *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor?, targets? } }
+ *                                       targets: the group's called targets (ship or object ids in kill order; null
+ *                                       clears), which order_fleet's targets order compiles to (fleets/targets.ts)
  *   { op: "remove_squad", fleet, squad }
  *   { op: "move_to_squad", ships, fleet, squad }   { op: "remove_from_fleet", ships }
  *   { op: "set_anchor", fleet, squad, anchor: { ship?, range? } }   merged; null resets ship to the FC and range to the role default
@@ -428,6 +431,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
         next.ships.splice(index, 1);
         if (next.camera['target'] === operation['id']) next.camera['target'] = null;
         removeShipFromFleets(String(operation['id']), context);
+        removeCalledTarget(String(operation['id']), context);
       }
       break;
     }

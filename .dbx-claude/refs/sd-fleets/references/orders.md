@@ -18,8 +18,10 @@ unchanged and runs it through `Director.OrderFleet`.
   refused with a pointer to `order_ship`. **The FC is never part of a wing or squad order** (it heads the whole fleet);
   a squad whose only member is the FC is refused.
 - **Orders**: `order_ship`'s movement orders (`direction`, `goto`, `approach`, `keep-at-range`, `orbit`, `stop`) and
-  `warp`; the document orders `anchor`, `break-off`, `regroup`. `rejoin` is refused ("use regroup").
-- **Targets** must be outside the group (the FC is a fine target for a squad). A target that is no id is tried as a
+  `warp`; the document orders `anchor`, `break-off`, `regroup` and `targets` (the group's called targets: sub-doc
+  `targets`). `rejoin` is refused ("use regroup").
+- **Targets** must be outside the group (the FC is a fine target for a squad); a `targets` order may not call one of
+  the group's ships either. A target that is no id is tried as a
   name first (`Director.NamedTarget`, `sd-locations` "Order targets by name"), measured from the fleet's FC; the result
   adds `resolved`.
 
@@ -96,6 +98,7 @@ follow-the-FC). An FC giving a wing or squad warp does not warp itself.
 | `anchor { ship?, range? }` | fleet / wing / squad | one `set_anchor` per squad of the group, keys given only (`null` resets) |
 | `break-off { ship?, range = 30000 }` | one squad | `update_squad set { anchor: { ship: lead, range }, home? }`; lead = `ship` (a member, not the FC), else commander, else current lead, else first member; `home` = the old anchor (`{}` for defaults) only when the squad has none yet |
 | `regroup` | fleet / wing / squad | per squad with a `home`: `update_squad set { anchor: home (null for {}), home: null }` |
+| `targets { primary \| queue \| set \| drop \| next \| clear }` | fleet / wing / squad | one `update_fleet` / `update_wing` / `update_squad set { targets: list \| null }`, none when unchanged (`toFleetTargetOperations`, sub-doc `targets`); routed by `isFleetDocumentOrder`, its `command.last` stamped with the tick captured before the edit (`Fly(resolved, { tick })`) |
 
 - **`squad.home` is break-off's undo record, not an anchor**: `toFleetAnchors` ignores it (so following and
   `diffScenes.regrouped` do too), `normalizeFleets` validates it like an anchor (keeping `{}`), and `repairAfter`

@@ -1,6 +1,7 @@
 import type { Maybe } from '@dereekb/util';
 import type { SceneArrivalCollector } from '../arrivals/arrival';
 import { isPlainObject, type JsonObject } from '../json';
+import { removeCalledTarget } from './targets';
 
 /**
  * The patch operations that edit fleets. Each runs on an unvalidated draft (an earlier operation in the same
@@ -113,7 +114,8 @@ function addFleet(operation: JsonObject, context: FleetOperationContext): void {
 }
 
 /**
- * Removes a fleet; with `withShips: true` also every ship holding a position in it (clearing a camera target on one).
+ * Removes a fleet; with `withShips: true` also every ship holding a position in it (clearing a camera target on one,
+ * and taking each off every other group's called targets).
  *
  * @param operation - The remove_fleet operation.
  * @param edit - The fleet and the context.
@@ -132,6 +134,7 @@ function removeFleet(operation: JsonObject, edit: FleetEdit): void {
     if (Array.isArray(list)) context.draft['ships'] = list.filter((ship) => !(isPlainObject(ship) && ships.has(ship['id'] as string)));
     const camera = context.draft['camera'];
     if (isPlainObject(camera) && ships.has(camera['target'] as string)) camera['target'] = null;
+    for (const ship of ships) removeCalledTarget(ship, context);
   }
 }
 

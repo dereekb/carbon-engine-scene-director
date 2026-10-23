@@ -2,10 +2,11 @@ import type { Maybe } from '@dereekb/util';
 import { isPlainObject, readId, readList, readOptionalString, readString, reportUnknownKeys } from '../json';
 import { type SceneFleet, type SceneSquad, type SceneSquadAnchor, type SceneWing, SQUAD_ROLES, type SquadRole } from './fleet';
 import { toFleetAnchors } from './membership';
+import { readCalledTargets } from './targets';
 
-const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'wings']);
-const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'squads']);
-const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home']);
+const FLEET_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'wings']);
+const WING_KEYS = new Set<string>(['id', 'name', 'commander', 'targets', 'squads']);
+const SQUAD_KEYS = new Set<string>(['id', 'name', 'role', 'commander', 'members', 'anchor', 'home', 'targets']);
 const ANCHOR_KEYS = new Set<string>(['ship', 'range']);
 
 export interface NormalizeFleetsInput {
@@ -14,6 +15,11 @@ export interface NormalizeFleetsInput {
    * The scene's ship ids, which every fleet reference must name.
    */
   readonly shipIds: ReadonlySet<string>;
+  /**
+   * The scene's ship and object ids, which every called target must name. Unchecked when absent: add_ships normalizes
+   * one fleet against ship ids only.
+   */
+  readonly targetIds?: ReadonlySet<string>;
 }
 
 export interface NormalizedFleets {
@@ -28,6 +34,10 @@ export interface NormalizedFleets {
 interface Report {
   readonly problems: string[];
   readonly warnings: string[];
+  /**
+   * NormalizeFleetsInput.targetIds.
+   */
+  readonly targetIds?: ReadonlySet<string>;
 }
 
 /**
@@ -59,14 +69,15 @@ interface Claims {
  * - a ship holds positions (FC, wing commander, squad member) in at most one fleet, and sits in at most one squad;
  * - a wing commander sits in one of its own wing's squads or in none, and commands one wing; a squad commander is
  *   one of its squad's members;
- * - anchors are ships of the same fleet, and every anchor chain ends at the fleet commander.
+ * - anchors are ships of the same fleet, and every anchor chain ends at the fleet commander;
+ * - called targets (`targets`, fleets/targets.ts) name ships or objects (against targetIds when given), none twice.
  *
  * @param config - The candidate fleets and the scene's ship ids.
  * @returns The normalized fleets with every problem and warning found.
  */
 export function normalizeFleets(config: NormalizeFleetsInput): NormalizedFleets {
-  const { input, shipIds } = config;
-  const report: Report = { problems: [], warnings: [] };
+  const { input, shipIds, targetIds } = config;
+  const report: Report = { problems: [], warnings: [], targetIds };
   const fleets: SceneFleet[] = [];
 
   if (input != null && !Array.isArray(input)) report.problems.push('fleets must be an array');
@@ -95,7 +106,9 @@ function normalizeFleet(input: unknown, where: string, report: Report): Maybe<Sc
   reportUnknownKeys(input, FLEET_KEYS, where, report.warnings);
   const id = readId(input['id'], `${where}.id`, report.problems);
   const name = readOptionalString(input['name'], `${where}.name`, report.problems);
-  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander: readString(input['commander'], `${where}.commander`, report.problems), wings: [] };
+  const commander = readString(input['commander'], `${where}.commander`, report.problems);
+  const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
+  const fleet: SceneFleet = { id, ...(name ? { name } : {}), commander, ...(targets ? { targets } : {}), wings: [] };
 
   const wingIds = new Set<string>();
   const squadIds = new Set<string>();
@@ -123,7 +136,8 @@ function normalizeWing(input: unknown, where: string, report: Report): Maybe<Sce
   const id = readId(input['id'], `${where}.id`, report.problems);
   const name = readOptionalString(input['name'], `${where}.name`, report.problems);
   const commander = readOptionalString(input['commander'], `${where}.commander`, report.problems);
-  const wing: SceneWing = { id, ...(name ? { name } : {}), ...(commander ? { commander } : {}), squads: [] };
+  const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
+  const wing: SceneWing = { id, ...(name ? { name } : {}), ...(commander ? { commander } : {}), ...(targets ? { targets } : {}), squads: [] };
   for (const [index, candidate] of readList(input['squads'], `${where}.squads`, report.problems).entries()) {
     const squad = normalizeSquad(candidate, `${where}.squads[${index}]`, report);
     if (squad) wing.squads.push(squad);
@@ -144,7 +158,8 @@ function normalizeSquad(input: unknown, where: string, report: Report): Maybe<Sc
   const members = readList(input['members'], `${where}.members`, report.problems).map((member, index) => readString(member, `${where}.members[${index}]`, report.problems));
   const anchor = normalizeAnchor(input['anchor'], `${where}.anchor`, report);
   const home = normalizeAnchor(input['home'], `${where}.home`, report, { keepEmpty: true });
-  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}) };
+  const targets = readCalledTargets(input['targets'], { where: `${where}.targets`, problems: report.problems, targetIds: report.targetIds });
+  return { id, ...(name ? { name } : {}), role, ...(commander ? { commander } : {}), members, ...(anchor ? { anchor } : {}), ...(home ? { home } : {}), ...(targets ? { targets } : {}) };
 }
 
 interface NormalizeAnchorOptions {
