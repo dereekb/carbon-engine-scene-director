@@ -53,4 +53,23 @@ describe('toLiveFleetScene', () => {
     expect(view.changes.get('tfi')).toMatchObject({ dropped: true, destroyed: ['fc', 'guardian-1', 'tfi-1', 'tfi-2', 'tfi-3', 'guardian-2'] });
     expect(view.warnings).toEqual([]);
   });
+
+  it("splices live calls over the document's lists, [] calling nothing, before the dead leave", () => {
+    const scene = applySceneOperations(base(), [{ op: 'update_fleet', fleet: 'tfi', set: { targets: ['tfi-1'] } }]).scene;
+    const calls = new Map<string, readonly string[]>([
+      ['tfi', []],
+      ['tfi/squad/logi', ['x', 'y']],
+      ['tfi/squad/gone', ['z']]
+    ]);
+    const view = toLiveFleetScene(scene, new Set(), { calls });
+    expect(view.scene.fleets?.[0].targets).toBeUndefined();
+    expect(squadOf(view.scene, 'logi')?.targets).toEqual(['x', 'y']);
+    expect(view.changes.size).toBe(0);
+    expect(scene.fleets?.[0].targets).toEqual(['tfi-1']);
+    expect(squadOf(scene, 'logi')?.targets).toBeUndefined();
+
+    const dead = toLiveFleetScene(scene, new Set(['guardian-1']), { calls });
+    expect(squadOf(dead.scene, 'logi')).toMatchObject({ members: ['guardian-2'], targets: ['x', 'y'] });
+    expect(toLiveFleetScene(scene, new Set(), { calls: new Map() }).scene).toBe(scene);
+  });
 });

@@ -493,7 +493,9 @@ export class FleetFollowing {
     const radii = holders.map((id) => this.radiusOf(id));
     if (!fc || radii.some((radius) => radius == null)) return null;
     const radius = new Map(holders.map((id, index) => [id, radii[index] ?? 0]));
-    return { key: JSON.stringify([fleet, fc.position, fc.rotation[0], radii]), fleet, origin: fc.position, heading: fc.rotation[0], radiusOf: (id) => radius.get(id) ?? 0 };
+    // Called targets do not move anyone: a live call must not re-run the layout.
+    const shape = JSON.stringify(fleet, (key, value: unknown) => (key === 'targets' ? undefined : value));
+    return { key: JSON.stringify([shape, fc.position, fc.rotation[0], radii]), fleet, origin: fc.position, heading: fc.rotation[0], radiusOf: (id) => radius.get(id) ?? 0 };
   }
 
   /**

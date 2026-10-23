@@ -1847,7 +1847,10 @@ try {
     const audio = heard.audio;
     const played = audio?.state === 'on';
     // Their media may be Wwise PTADPCM: once learned undecodable they are recorded and not sent.
-    Expect([outburst, impact].every((entry) => entry.played === played || entry.undecodable === true), `outburst and impact with audio ${audio?.state}: ${Show([outburst, impact])}`);
+    Expect(
+      [outburst, impact].every((entry) => entry.played === played || entry.undecodable === true),
+      `outburst and impact with audio ${audio?.state}: ${Show([outburst, impact])}`
+    );
     Expect(beyond(heard) === beyond(before), `audio game objects beyond the page's emitters went ${beyond(before)} -> ${beyond(heard)} with the launchers firing: ${Show(audio)}`);
     const undecodable = (audio?.undecodable ?? []).filter((event) => /^missile_/u.test(event));
     const outcome = played ? 'played' : 'audio ' + String(audio?.state) + ', recorded unplayed';
@@ -1939,14 +1942,16 @@ try {
     const firstOnR2 = Math.min(...shooters.flatMap((id) => (ShipIn(switched, id).combat?.lastHits ?? []).filter((row) => row.target === 'r2').map((row) => row.tick)));
     const slowest = Math.max(...shooters.flatMap((id) => ShipGuns(switched, id).map((gun) => gun.cycleTime ?? 0)));
     Expect(firstOnR2 - killTick <= Math.ceil(slowest) + 2, `the first shot on r2 at tick ${firstOnR2}, ${firstOnR2 - killTick} ticks after the kill (slowest cycle ${slowest} s)`);
+    // The call is live: get_state shows the list, kill and all; the document never had one.
+    Expect(Show(CalledOf(switched)?.targets) === '["r1","r2"]', `the live list after the kill: ${Show(CalledOf(switched)?.targets)}`);
     const doc = await call<{ fleets?: { targets?: string[] }[] }>('get_scene');
-    Expect(Show(doc.fleets?.[0]?.targets) === '["r1","r2"]', `the document's list after the kill: ${Show(doc.fleets?.[0]?.targets)}`);
+    Expect(doc.fleets?.[0]?.targets === undefined, `the document's list: ${Show(doc.fleets?.[0]?.targets)}`);
     await WaitFor('r2 dies', 90, (polled) => (ShipIn(polled, 'r2').destroyed ? null : Show(ShipIn(polled, 'r2').defense)));
     const settled = await WaitFor('the call ends and the guns settle', 15, (polled) => {
       const firing = shooters.flatMap((id) => ShipGuns(polled, id).filter((gun) => gun.state === 'active' || gun.state === 'stopping'));
       return CalledOf(polled)?.called?.primary === null && OnCall(polled, shooters, null) && !firing.length ? null : Show({ called: CalledOf(polled)?.called, targets: Targets(polled, shooters), firing: firing.length });
     });
-    return `bfc, p1, p2 on r1 (called), g1 logi, p1 pre-locked r2 at tick ${called.simulation.tick}; r1 killed at tick ${killTick}, first shot on r2 at ${firstOnR2} (+${firstOnR2 - killTick}, slowest cycle ${slowest} s); the document keeps ${Show(doc.fleets?.[0]?.targets)}; r2 dead, primary null, guns settled at tick ${settled.simulation.tick}`;
+    return `bfc, p1, p2 on r1 (called), g1 logi, p1 pre-locked r2 at tick ${called.simulation.tick}; r1 killed at tick ${killTick}, first shot on r2 at ${firstOnR2} (+${firstOnR2 - killTick}, slowest cycle ${slowest} s); the live list keeps ${Show(CalledOf(switched)?.targets)}, the document none; r2 dead, primary null, guns settled at tick ${settled.simulation.tick}`;
   });
 
   await Check("own targets win over the called targets, and a squad's call beats the fleet's", async () => {
@@ -2031,8 +2036,8 @@ try {
     return `held at ${before} shots for 5 s; delay 1: switch ticks ${Show(Object.fromEntries(switchedAt))} (order at ${order.tick}, delays ${Show(delays)}); stood down, then next re-armed onto r1 (${shotsOf(rearmed)} shots)`;
   });
 
-  await Check("removing a called target advances the document's queue; a load keeps the call; bad calls are refused", async () => {
-    const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000]), Rifter('r3', [4000, 0, -2000])];
+  await Check("removing a called target advances the document's queue and the live lists; a load keeps the call; bad calls are refused", async () => {
+    const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000]), Rifter('r3', [4000, 0, -2000]), Rifter('r4', [5000, 0, 2000])];
     const fleets = [{ id: 'b', commander: 'bfc', targets: ['r1', 'r2'], wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['p1', 'p2'] }] }] }];
     const members = ['bfc', 'p1', 'p2'];
     await LoadCombatScene(ships, { death: 'flag' }, { fleets });
@@ -2059,7 +2064,15 @@ try {
     await call('order_fleet', { fleet: 'b', order: { type: 'targets', clear: true } });
     const empty = await Refusal({ fleet: 'b', order: { type: 'targets', next: true } });
     Expect(/calls no targets/u.test(empty), empty);
-    return `loaded call fired on r1; remove_ship r1 warned "${removed.warnings.find((warning) => /no longer calls/u.test(warning))}", list ${Show(doc.fleets?.[0]?.targets)}, members on r2; refused: ${Show({ ...refusals, dead, empty })}`;
+    // A live-only call is pruned on removal, and the emptied live list shadows the document's ["r2"].
+    await call('order_fleet', { fleet: 'b', order: { type: 'targets', set: ['r4'] } });
+    await WaitFor('the members take the live call on r4', 10, (polled) => (OnCall(polled, members, 'r4') ? null : Targets(polled, members)));
+    const pruned = await call<{ warnings: string[] }>('patch_scene', { operations: [{ op: 'remove_ship', id: 'r4' }] });
+    Expect(pruned.warnings.filter((warning) => /fleet "b" no longer calls "r4" \(it was removed\)/u.test(warning)).length === 1, Show(pruned.warnings));
+    const shadowed = await WaitFor('the emptied live list calls nothing', 5, (polled) => (CalledOf(polled)?.targets === undefined && OnCall(polled, members, null) ? null : Show({ targets: CalledOf(polled)?.targets, ships: Targets(polled, members) })));
+    const kept = await call<{ fleets?: { targets?: string[] }[] }>('get_scene');
+    Expect(Show(kept.fleets?.[0]?.targets) === '["r2"]', Show(kept.fleets?.[0]));
+    return `loaded call fired on r1; remove_ship r1 warned "${removed.warnings.find((warning) => /no longer calls/u.test(warning))}", list ${Show(doc.fleets?.[0]?.targets)}, members on r2; refused: ${Show({ ...refusals, dead, empty })}; a live call on r4 pruned at its removal ("${pruned.warnings.find((warning) => /r4/u.test(warning))}"), nobody called at tick ${shadowed.simulation.tick}, the document still ${Show(kept.fleets?.[0]?.targets)}`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

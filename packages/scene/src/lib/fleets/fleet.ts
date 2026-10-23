@@ -78,8 +78,9 @@ export interface SceneSquad {
    */
   home?: SceneSquadAnchor;
   /**
-   * The group's called targets: ship or authored-object ids in kill order (fleets/targets.ts). The first live entry is
-   * its primary, the live entries after it its queue. Omitted when it calls none.
+   * The group's opening called targets: ship or authored-object ids in kill order (fleets/targets.ts), the call a load
+   * starts with; order_fleet's targets order then calls live. The first live entry is its primary, the live entries
+   * after it its queue. Omitted when it calls none.
    */
   targets?: string[];
   /**
@@ -99,8 +100,9 @@ export interface SceneWing {
    */
   commander?: string;
   /**
-   * The group's called targets: ship or authored-object ids in kill order (fleets/targets.ts). The first live entry is
-   * its primary, the live entries after it its queue. Omitted when it calls none.
+   * The group's opening called targets: ship or authored-object ids in kill order (fleets/targets.ts), the call a load
+   * starts with; order_fleet's targets order then calls live. The first live entry is its primary, the live entries
+   * after it its queue. Omitted when it calls none.
    */
   targets?: string[];
   /**
@@ -122,8 +124,9 @@ export interface SceneFleet {
    */
   commander: string;
   /**
-   * The group's called targets: ship or authored-object ids in kill order (fleets/targets.ts). The first live entry is
-   * its primary, the live entries after it its queue. Omitted when it calls none.
+   * The group's opening called targets: ship or authored-object ids in kill order (fleets/targets.ts), the call a load
+   * starts with; order_fleet's targets order then calls live. The first live entry is its primary, the live entries
+   * after it its queue. Omitted when it calls none.
    */
   targets?: string[];
   /**

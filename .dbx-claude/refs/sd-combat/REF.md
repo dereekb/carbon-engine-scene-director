@@ -160,7 +160,7 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 
 | File | Holds |
 |---|---|
-| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone)` → `{ scene, changes, warnings }`: `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); spec'd |
+| `fleets/live.ts` (scene) | `toLiveFleetScene(scene, gone, overlay?)` → `{ scene, changes, warnings }` (`overlay.calls`: the live call book spliced in first): `LiveFleetView`, `LiveFleetChange` (`actingFor`, `destroyed`, `dropped`); spec'd |
 | `viewer/destiny.ts` | `Destroy(id)` / `IsDestroyed(id)`, the `destroyed` refusals, prop mod cause `destroyed` (`destiny-destroy.spec.ts`) |
 | `viewer/explosion-plan.ts` | `ExplosionFileFacts`, `ExplosionFiles`, `ExplosionSchedule` / `ExplosionTimes`, `ExplosionRemoveTick`, `EXPLOSION_LINGER_MARGIN_SECONDS` (2); node-tested |
 | `viewer/explosions.ts` | `ShipExplosions` (runtime, renderer only): `Start`, `Frame`, `Report`, `Remove`, `Clear`, `Roots`, `Errors` |
@@ -200,8 +200,9 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 The document with the destroyed taken out of their fleets by the same fleet ops a removal runs: a dead FC first hands
 the fleet (`update_fleet`) to the first live wing commander in wing order, else the first live squad commander, else
 the first live member; then `removeShipFromFleets` per dead ship, so squads anchored on it fall back down the chain
-with remove_ship's warnings; a fleet with nobody alive is dropped. Never written. `Director.LiveFleets()` memoizes it by
-(document, destroyed set) and feeds `FleetFollowing`, `FleetOrders`, get_state's memberships and fleets (`actingFor`,
+with remove_ship's warnings; a fleet with nobody alive is dropped. The page's live calls (`FleetCommanders`, the
+`overlay` argument, `sd-fleets` doc `targets`) replace their groups' document lists first. Never written.
+`Director.LiveFleets()` memoizes it by (document, destroyed set, call book `version`) and feeds `FleetTargets`, `FleetFollowing`, `FleetOrders`, get_state's memberships and fleets (`actingFor`,
 `destroyed`; a dropped fleet is not listed). An untouched scene is the same object.
 
 ## The explosion, drawn (`explosions.ts`)
@@ -438,7 +439,8 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 
 Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies, kills, destroyed,
 spools), the `ModuleCycle` activation counters, `Director.engagements`, `FleetTargets` (own marks, called targets,
-holds, responses, the last calls and primaries: `sd-fleets` doc `targets`), and `Director.deaths` (kill, explosion
+holds, responses, the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders`
+(group key → list), and `Director.deaths` (kill, explosion
 choice, start, hidden, `removeTick`, gone), `DestinyWorld`'s missile entries and balls, and `MissileFlights` (the
 drawn missiles replay from the flights). The RNG is the document's seed, so a re-simulation rolls the same; explosions
 re-trigger from their kills' times. Missiles add no randomness.

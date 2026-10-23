@@ -90,13 +90,17 @@ import {
   diffScenes,
   fitTextOf,
   isFleetDocumentOrder,
+  isFleetTargetsOrder,
   type CalledTargetStatus,
   calledTargetsOf,
   describeFleetGroup,
+  fleetGroupShips,
   type FleetGroup,
+  type FleetOrderRequest,
   type FleetTargetsOrder,
   type ResolvedFleetOrder,
   toFleetGroupKey,
+  toFleetTargetList,
   normalizeFleetOrderRequest,
   toFleetOrderOperations,
   toPilotDelays,
@@ -200,6 +204,7 @@ import {
   type ShipModuleRowState
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
+import { FleetCommanders } from './fleet-commanders';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { type CalledPrimaryChange, type FleetGroupCalledReport, FleetTargets, type ShipCallReport, type ShipTargetSource } from './fleet-targets';
 import { FleetFollowing, type ShipFollowingReport } from './following';
@@ -485,7 +490,7 @@ export interface CeaseFireResult {
  */
 export interface FleetTargetsOrderResult {
   /**
-   * The group's called targets after the order, as the document writes them.
+   * The group's live called targets after the order.
    */
   readonly targets: string[];
   /**
@@ -742,6 +747,11 @@ export class Director {
    * The fleet targeting lever: who follows which called primary, own-target marks, holds and pilot responses.
    */
   readonly fleetTargets: FleetTargets;
+  /**
+   * The live call book order_fleet's targets order edits (fleet-commanders.ts); the live fleet view splices it over the
+   * document.
+   */
+  private readonly commanders = new FleetCommanders();
   private readonly killListeners = new Set<KillListener>();
   private readonly primaryListeners = new Set<PrimaryListener>();
   /**
@@ -762,9 +772,9 @@ export class Director {
    */
   private readonly warpEffects: Maybe<WarpEffects>;
   /**
-   * The live fleet view (toLiveFleetScene), memoized by document and destroyed set.
+   * The live fleet view (toLiveFleetScene), memoized by document, destroyed set and call book version.
    */
-  private liveFleets: Maybe<{ readonly scene: SceneDocument; readonly gone: string; readonly view: LiveFleetView<SceneDocument> }> = null;
+  private liveFleets: Maybe<{ readonly scene: SceneDocument; readonly gone: string; readonly calls: number; readonly view: LiveFleetView<SceneDocument> }> = null;
   /**
    * The shield fraction each ship's impact overlay was last synced at by the recharge.
    */
@@ -846,7 +856,13 @@ export class Director {
       onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
-    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
+    this.objects = new SceneObjects({
+      engine,
+      retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
+      onChange: () => this.onChange(),
+      onBuilt: (id) => this.ObjectBuilt(id),
+      detachAudio: (build) => this.audio.Detached(build)
+    });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -1057,14 +1073,14 @@ export class Director {
   }
 
   /**
-   * Orders a fleet, wing or squad (order_fleet): resolved against the document, given by a ship commanding the group.
-   * Moves and warps fly at once (live, not saved); anchor, break-off and regroup edit the document's anchors, and
-   * targets the group's called targets, through the edit queue, as patch_scene does, then run their live half
-   * (regroup's rejoins and warps back; every document order records `command.last` at the tick it was given).
+   * Orders a fleet, wing or squad (order_fleet): resolved against the live fleets, given by a ship commanding the
+   * group. Moves, warps and targets act at once (live, not saved: targets edit the live call book, CallTargets); anchor,
+   * break-off and regroup edit the document's anchors through the edit queue, as patch_scene does, then run their live
+   * half (regroup's rejoins and warps back; every document order records `command.last` at the tick it was given).
    *
    * @param input - The order_fleet arguments: fleet, wing or squad, by, order.
-   * @returns What the order did; document orders add their operations and the patch result (its ship reports under
-   *   `builds`, so `ships` stays the ordered ships).
+   * @returns What the order did; targets add the call (CallTargets), document orders their operations and the patch
+   *   result (its ship reports under `builds`, so `ships` stays the ordered ships).
    * @throws {SceneError} When the request is invalid, names an unknown group, or comes from a ship without command of it.
    * @throws {Error} When the leader refuses the order, or the fleet is not planned yet for a wing or squad move or a warp.
    */
@@ -1074,25 +1090,47 @@ export class Director {
     const named = record ? this.NamedTarget({ order: record['order'], from: fc, where: 'order_fleet.order' }) : { order: undefined };
     const request = normalizeFleetOrderRequest(named.resolved ? { ...record, order: named.order } : input, { ships: new Set((this.scene?.ships ?? []).map((doc) => doc.id)), objects: this.TargetIds() });
     const resolved = named.resolved ? { resolved: named.resolved } : {};
+    if (isFleetTargetsOrder(request.order)) return Promise.resolve({ ...this.CallTargets(request), ...resolved });
     if (!isFleetDocumentOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
       // Resolved against the document current at its turn in the queue; the tick is captured before the edit, which
       // is asynchronous while the world ticks on.
       const resolved = this.orders.Resolve(request);
       const tick = this.world.tick;
-      const targetsOrder = request.order.type === 'targets' ? request.order : null;
-      const warnings = targetsOrder ? this.CallWarnings(resolved, targetsOrder) : [];
-      const operations = toFleetOrderOperations(this.Current(), resolved, { statusOf: (id) => this.CalledTargetStatus(id) });
-      // Each pilot but the giver takes the new call after its response time; the order re-arms the group's holds.
-      if (targetsOrder) this.fleetTargets.Respond(resolved.ships, toPilotDelays({ key: toFleetGroupKey(resolved.group), tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer }), tick);
-      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown; readonly warnings?: string[] }) : null;
-      // An unchanged list still re-arms and reports.
-      if (targetsOrder) this.SyncFleetTargets();
+      const operations = toFleetOrderOperations(this.Current(), resolved);
+      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
       const { ships: builds, ...rest } = patch ?? {};
       const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
-      const called = targetsOrder ? this.CallResult(resolved) : {};
-      return { ...result, operations, ...(patch ? { ...rest, builds } : {}), ...called, ...(targetsOrder && (warnings.length || patch?.warnings?.length) ? { warnings: [...warnings, ...(patch?.warnings ?? [])] } : {}) };
+      return { ...result, operations, ...(patch ? { ...rest, builds } : {}) };
     });
+  }
+
+  /**
+   * order_fleet's targets order, live and synchronous: resolved on the live fleets, checked (CallWarnings), the group's
+   * live list edited (toFleetTargetList into the call book), each pilot but the giver answering after its response
+   * time, the members synced, then `command.last` recorded. Never saved: the document's calls open the fight on a load.
+   *
+   * @param request - The normalized order_fleet request, its order a targets order.
+   * @param options - `boundary`: called at that tick boundary, so the boundary's own SyncFleetTargets starts the locks.
+   * @returns order_fleet's fields plus the call (CallResult) and any warnings.
+   * @throws {SceneError} When the request names an unknown group or a giver without command of it, the primary was
+   *   destroyed, or the list refuses the order (a drop of an uncalled id, next on an empty list, too many targets).
+   */
+  private CallTargets(request: FleetOrderRequest, options: { readonly boundary?: number } = {}): object {
+    const order = request.order as FleetTargetsOrder;
+    const resolved = this.orders.Resolve(request);
+    const tick = this.world.tick;
+    const warnings = this.CallWarnings(resolved, order);
+    const scene = this.LiveFleets()?.scene ?? this.Current();
+    const statusOf = (id: string): CalledTargetStatus => this.CalledTargetStatus(id);
+    const targets = toFleetTargetList(calledTargetsOf(scene, resolved.group), resolved.group, order, { statusOf, own: fleetGroupShips(scene, resolved.group) });
+    this.commanders.SetCall(resolved.group, targets);
+    // Each pilot but the giver takes the new call after its response time; the order re-arms the group's holds.
+    this.fleetTargets.Respond(resolved.ships, toPilotDelays({ key: toFleetGroupKey(resolved.group), tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer }), tick);
+    // An unchanged list still re-arms and reports. At a boundary its own sync starts the locks at the boundary.
+    if (options.boundary == null) this.SyncFleetTargets();
+    const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
+    return { ...result, ...this.CallResult(resolved), ...(warnings.length ? { warnings } : {}) };
   }
 
   /**
@@ -1140,7 +1178,7 @@ export class Director {
       const reason = this.IsDead(id) ? 'it was destroyed' : this.fleetTargets.SkipReason(id, group, tick);
       if (reason) skipped.push({ id, reason });
     }
-    return { targets: calledTargetsOf(this.Current(), group), primary: called?.primary ?? null, queue: called?.queue ?? [], ships, skipped };
+    return { targets: calledTargetsOf(this.LiveFleets()?.scene ?? this.Current(), group), primary: called?.primary ?? null, queue: called?.queue ?? [], ships, skipped };
   }
 
   /**
@@ -1882,6 +1920,9 @@ export class Director {
 
     const previous = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
     const diff = diffScenes(this.scene, scene);
+    // A load opens with the document's calls; a patch keeps the live calls it leaves standing, pruned.
+    const callWarnings = restart || !this.scene ? [] : this.commanders.AfterEdit(this.scene, scene);
+    if (restart) this.commanders.Clear();
     // A load revives the destroyed: they retire here and rebuild as retried ships. A patch keeps them dead.
     if (restart) this.Revive();
     for (const doc of diff.removed) {
@@ -2036,7 +2077,7 @@ export class Director {
     this.onChange();
     return {
       scene,
-      warnings,
+      warnings: [...new Set([...warnings, ...callWarnings])],
       ships: scene.ships.map((doc) => this.ShipReport(doc.id)),
       ...(scene.objects?.length || diff.objects.removed.length ? { objects: (scene.objects ?? []).map((doc) => this.ObjectReport(doc.id)) } : {}),
       ...(arrivalKeys.length ? { arrivals: this.arrivals.Report(arrivalKeys) } : {}),
@@ -2965,7 +3006,10 @@ export class Director {
     for (const module of resolved?.modules ?? []) {
       const charge = module.charge?.typeID;
       if (module.weapon !== 'launcher' || module.typeID == null || charge == null) continue;
-      void this.missileGraphics.Lookup(charge, module.typeID).then((answer) => (answer.missile ? this.missileFiles.Load(answer.missile) : null)).catch(() => undefined);
+      void this.missileGraphics
+        .Lookup(charge, module.typeID)
+        .then((answer) => (answer.missile ? this.missileFiles.Load(answer.missile) : null))
+        .catch(() => undefined);
     }
     const mounts = TurretMountsOf(resolved, (typeID) => this.weapons.Cached(typeID)?.weapon ?? null);
     // Shared with the sets: each file loads once, and a failure is the mount's to report.
@@ -3139,7 +3183,8 @@ export class Director {
   }
 
   /**
-   * The document as its fleets fly: the destroyed taken out of their fleets (toLiveFleetScene), memoized.
+   * The document as its fleets fly: the live calls over the document's, the destroyed taken out of their fleets
+   * (toLiveFleetScene), memoized.
    *
    * @returns The view, null without a scene.
    */
@@ -3147,7 +3192,10 @@ export class Director {
     const scene = this.scene;
     if (!scene) return null;
     const gone = [...this.deaths.keys()].sort().join('|');
-    if (this.liveFleets?.scene !== scene || this.liveFleets.gone !== gone) this.liveFleets = { scene, gone, view: toLiveFleetScene(scene, new Set(this.deaths.keys())) };
+    const calls = this.commanders.version;
+    if (this.liveFleets?.scene !== scene || this.liveFleets.gone !== gone || this.liveFleets.calls !== calls) {
+      this.liveFleets = { scene, gone, calls, view: toLiveFleetScene(scene, new Set(this.deaths.keys()), this.commanders.Overlay()) };
+    }
     return this.liveFleets.view;
   }
 

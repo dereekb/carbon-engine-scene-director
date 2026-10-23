@@ -338,8 +338,8 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "remove_fleet", fleet, withShips? }   withShips: true also removes every ship holding a position in it
  *   { op: "add_wing", fleet, wing }   { op: "update_wing", fleet, wing, set: { name?, commander?, targets? } }   { op: "remove_wing", fleet, wing }
  *   { op: "add_squad", fleet, wing, squad }   { op: "update_squad", fleet, squad, set: { name?, role?, commander?, anchor?, targets? } }
- *                                       targets: the group's called targets (ship or object ids in kill order; null
- *                                       clears), which order_fleet's targets order compiles to (fleets/targets.ts)
+ *                                       targets: the group's opening called targets (ship or object ids in kill
+ *                                       order; null clears); order_fleet's targets order calls live (fleets/targets.ts)
  *   { op: "remove_squad", fleet, squad }
  *   { op: "move_to_squad", ships, fleet, squad }   { op: "remove_from_fleet", ships }
  *   { op: "set_anchor", fleet, squad, anchor: { ship?, range? } }   merged; null resets ship to the FC and range to the role default

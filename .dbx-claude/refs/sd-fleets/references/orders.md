@@ -98,14 +98,14 @@ follow-the-FC). An FC giving a wing or squad warp does not warp itself.
 | `anchor { ship?, range? }` | fleet / wing / squad | one `set_anchor` per squad of the group, keys given only (`null` resets) |
 | `break-off { ship?, range = 30000 }` | one squad | `update_squad set { anchor: { ship: lead, range }, home? }`; lead = `ship` (a member, not the FC), else commander, else current lead, else first member; `home` = the old anchor (`{}` for defaults) only when the squad has none yet |
 | `regroup` | fleet / wing / squad | per squad with a `home`: `update_squad set { anchor: home (null for {}), home: null }` |
-| `targets { primary \| queue \| set \| drop \| next \| clear }` | fleet / wing / squad | one `update_fleet` / `update_wing` / `update_squad set { targets: list \| null }`, none when unchanged (`toFleetTargetOperations`, sub-doc `targets`); routed by `isFleetDocumentOrder`, its `command.last` stamped with the tick captured before the edit (`Fly(resolved, { tick })`) |
+| `targets { primary \| queue \| set \| drop \| next \| clear }` | fleet / wing / squad | **live, not a document edit**: the group's live list in the call book (`toFleetTargetList` → `FleetCommanders.SetCall`, sub-doc `targets`), routed by `isFleetTargetsOrder` before the edit queue and answered synchronously. `toFleetTargetOperations` still compiles the same order to one `update_fleet` / `update_wing` / `update_squad set { targets }` for a timeline beat that cues it as a patch |
 
 - **`squad.home` is break-off's undo record, not an anchor**: `toFleetAnchors` ignores it (so following and
   `diffScenes.regrouped` do too), `normalizeFleets` validates it like an anchor (keeping `{}`), and `repairAfter`
   repairs it like an anchor ("…now regroups onto …"). Break-off then regroup restores the fleets exactly.
 - Why a record: the TFIs logi squad sits on its own lead at 30 km **by design**, so "broken off" cannot be read from the
   anchor.
-- Document orders run through the director's edit queue (`Serialize` + `Apply`, like `patch_scene`; the hub gives
+- Document orders (anchor, break-off, regroup) run through the director's edit queue (`Serialize` + `Apply`, like `patch_scene`; the hub gives
   `order_fleet` the 600 s `SLOW_TOOLS` deadline), then their live half. The result carries `operations` and the patch
   result with its per-ship build reports under `builds`, so `ships` always means the ordered ships.
 - **`regroup`'s live half**: every ship of the group apart or detached rejoins its fleet formation, and those 150 km or

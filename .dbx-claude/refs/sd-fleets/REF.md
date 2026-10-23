@@ -21,9 +21,10 @@
 | `fleets/formation.ts` | the at-rest formation: `layoutFleetFormation`, `toFleetFormationSlots`, `toFleetGroupOffsets`, `FORMATION_SPACING` 1.5, `FORMATION_GAP` 100, `DEFAULT_FORMATION_RADIUS` 500 |
 | `fleets/following.ts` | follow plans (`toFleetFollowPlans`; `toFleetGroupFollowPlans` for a group apart), `FOLLOW_TOLERANCE*` |
 | `fleets/orders.ts` | the `order_fleet` request, who may give it, the group's leader, the document ops, `toPilotDelays` (sub-doc `orders`) |
-| `fleets/targets.ts` | called targets: the `targets` field, the `targets` order, removal pruning, `toFleetGroupCalls` / `toShipCallPlans` (sub-doc `targets`) |
+| `fleets/targets.ts` | called targets: the `targets` field (the opening calls), the `targets` order (`toFleetTargetList`), removal pruning, `toFleetGroupCalls` / `toShipCallPlans` (sub-doc `targets`) |
 | `fleets/group.ts` | `FleetGroup`, `toFleetGroupKey`, `describeFleetGroup` (shared by `orders.ts` and `targets.ts`; `orders.ts` re-exports them) |
 | `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
+| `apps/viewer/src/lib/fleet-commanders.ts` | `FleetCommanders`: the live call book order_fleet's targets order edits, spliced over the document by `toLiveFleetScene` (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-targets.ts` | `FleetTargets`: the targeting lever: members lock, pre-lock and shoot their groups' called primaries (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
 | `apps/viewer/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
@@ -43,7 +44,8 @@
 - **`team` is independent of fleets** (team = side/hostility; fleet = who commands it and where it flies).
 - `home` is written only by `order_fleet` break-off: the anchor `regroup` restores. **It is not an anchor**:
   `toFleetAnchors` ignores it; it is validated and repaired like one (sub-doc `orders`).
-- `targets` is the group's called targets (ship or object ids in kill order; sub-doc `targets`). Memberships ignore it.
+- `targets` is the group's **opening** called targets (ship or object ids in kill order; sub-doc `targets`): a load
+  starts with them, order_fleet then calls live and never writes them. Memberships ignore it.
 - `autoRepair` (`{ on?, policy? }`) is the group's logi auto-repair, resolved key by key from the nearest group (squad,
   wing, fleet; default on for logi squads): `sd-logi`. Memberships ignore it.
 
@@ -170,7 +172,7 @@ its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop`
 "Warp-in"), `propMods` counts, `modules` (every member's fitted module
 rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
-Called targets (sub-doc `targets`): a fleet, wing or squad that calls reports `targets` and `called` (`primary`,
+Called targets (sub-doc `targets`): a fleet, wing or squad that calls reports `targets` (its live list) and `called` (`primary`,
 `queue`, `skipped` with why, `following`); a member reports `target.source` (`own` | `called`) and `call` (`state`:
 following, holding, stood-down, own-target, responding, in-warp, no-primary or logi; `group`, `primary`, `respondsIn`).
 A fleet that lost ships (`sd-combat`) lists only its live members and adds `destroyed` (their ids) and `actingFor` (the
@@ -178,10 +180,11 @@ dead FC its commander stands in for); a fleet with nobody alive is not listed.
 
 ## Called targets (sub-doc `targets`)
 
-Each fleet, wing and squad may call targets: a `targets` list in kill order whose first live entry is its primary.
-`order_fleet { order: { type: "targets", primary | queue | set | drop | next | clear } }` edits it (the order's
-authority: the FC for the fleet, a wing commander their wing, a squad commander their squad); removing a called ship or
-object prunes it; a kill never edits it. Each member takes the nearest call in its chain (squad, wing, fleet; the FC the
+Each fleet, wing and squad may call targets: a list in kill order whose first live entry is its primary. The document's
+`targets` are the opening calls a load starts with; `order_fleet { order: { type: "targets", primary | queue | set |
+drop | next | clear } }` edits the group's **live** list at once, never the document (the page's call book,
+`FleetCommanders`; the order's authority: the FC for the fleet, a wing commander their wing, a squad commander their
+squad); removing a called ship or object prunes it from both; a kill never edits either. Each member takes the nearest call in its chain (squad, wing, fleet; the FC the
 fleet's only, logi their own squad's only): every member without its own target locks it, pre-locks the next two and
 fires, moving on at the boundary after the primary dies, warps off or is removed. Own targets (set_target, engage,
 switch_modules) win; cease_fire holds (unlock stands down) until the group calls again. Status: delivered (real-GPU

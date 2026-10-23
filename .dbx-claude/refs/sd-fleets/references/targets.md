@@ -38,14 +38,34 @@ call, own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary
 - **Kills never touch the list** (kills are live state, `sd-combat`): the live view skips a destroyed target, so the
   next becomes primary, and a load revives the call from its first entry.
 - **`diffScenes`**: a `targets` edit flags `fleets` (it is part of the fleet JSON), never `regrouped` (memberships
-  ignore it). `FleetFollowing`'s layout memo keys on the fleet JSON, so it re-runs `toFleetFollowPlans` once: pure, the
-  same plans, no re-follow.
+  ignore it). `FleetFollowing`'s layout memo keys on the fleet JSON **without** `targets`, so neither a document edit
+  nor a live call re-runs `toFleetFollowPlans`.
+
+## Live calls: the document opens, the page calls (`FleetCommanders`)
+
+The document's `targets` are the **opening calls** a load starts with. `order_fleet`'s targets order never writes the
+document: it edits a live call book, synchronously, as moves and warps fly at once (the old route, `Serialize` → async
+`Apply` → IndexedDB, landed at tick T+1 or later, unusable for a per-tick FC brain). A reload replays the same fight.
+
+- **`FleetCommanders`** (`apps/viewer/src/lib/fleet-commanders.ts`, node-tested): group key → list. `SetCall(group,
+  list)`, `CallOf(group)`, `AfterEdit(before, after)`, `Overlay()`, `version` (bumped on every change), `Clear()`.
+  `[]` **shadows** the document's list: the group calls nothing.
+- **The overlay**: `toLiveFleetScene(scene, gone, { calls })` splices each live list over its group's document list
+  (before the dead leave), so `FleetTargets`, `FleetFollowing`, `FleetOrders` and get_state read live calls with no
+  change of their own. Its early out (same object back) holds only with no deaths and no live calls.
+  `Director.LiveFleets()` memoizes on (document, destroyed set, `version`).
+- **A load** clears the book (`Apply` restart). **A patch** (`AfterEdit`): a group gone, or whose document list the
+  patch edited beyond pruning a removed id (`update_squad set { targets }`), drops its live call (the document's new
+  list stands); ids no longer in the scene leave the live lists with remove_ship's warning (`fleet "b": squad "s" no
+  longer calls "r4" (it was removed)`), merged into the patch's warnings without repeats. An emptied live list stays
+  `[]`: the document's pruned list does not come back.
+- **Saving** (`save_scene`) writes the document: the opening calls, not the live ones.
 
 ## The order: `order_fleet { order: { type: "targets", … } }`
 
 Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`):
 
-| Action | The group's list becomes (`toFleetTargetOperations`) |
+| Action | The group's list becomes (`toFleetTargetList`) |
 |---|---|
 | `primary: "<id>"` | that id first (moved up if already called), the rest in their order behind it |
 | `queue: ["<id>", …]` | the list, then the given ids not yet called, in order (repeats dropped) |
@@ -61,22 +81,26 @@ Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`):
   wing, a squad commander for their squad. A `primary`, `queue` or `set` id among the group's ships (`selectFleetShips`,
   the FC included where it sits) is refused: `order_fleet.order: squad "dps" of fleet "blue" cannot call one of its own
   ships ("blue-dps-01")`. `drop` may name one (to take it off after a membership change).
-- **Compile**: one `update_fleet` / `update_wing` / `update_squad` with `set: { targets: list | null }`, or none when the
-  list is unchanged. `next` uses `statusOf` (the page's live status) to find the live primary; without it every entry
-  counts as live. A result past 256 is a problem.
+- **The list** (`toFleetTargetList(current, group, order, { own?, statusOf? })`, pure): the table above. `next` uses
+  `statusOf` (the page's live status) to find the live primary, skipping `own` (the group's ships); without it every
+  entry counts as live. A result past 256 is a problem. **Compile** (`toFleetTargetOperations`, which wraps it, for a
+  timeline beat that cues the order as a patch): one `update_fleet` / `update_wing` / `update_squad` with `set: {
+  targets: list | null }`, or none when the list is unchanged.
 - **Types**: `FLEET_ORDER_TYPES` ends with `targets`; `FleetOrder = ShipOrder | FleetDocumentOrder`
-  (`FleetStructureOrder | FleetTargetsOrder`). `isFleetDocumentOrder` (structure or targets) is what
-  `Director.OrderFleet` routes on; `isFleetStructureOrder` stays anchors-only. Imports run one way: `orders.ts` →
+  (`FleetStructureOrder | FleetTargetsOrder`). `Director.OrderFleet` routes `isFleetTargetsOrder` first (live), then
+  `isFleetDocumentOrder` (the structure orders, through the edit queue); `isFleetStructureOrder` stays anchors-only. Imports run one way: `orders.ts` →
   `targets.ts`; both take `FleetGroup` from `group.ts` (orders.ts re-exports it).
-- **The page** (`Director.OrderFleet`): resolves, captures `tick`, compiles with `statusOf:
-  Director.CalledTargetStatus`, applies through the edit queue, then `FleetOrders.Fly(resolved, { tick })` records
-  `command.last` (and `delays` with a `delay`) at the captured tick. `command.state` stays movement-based.
+- **The page** (`Director.CallTargets(request, { boundary? })`, synchronous): resolves on the live fleets, captures
+  `tick`, `CallWarnings`, `toFleetTargetList` on the live list with `statusOf: Director.CalledTargetStatus` →
+  `FleetCommanders.SetCall`, then `FleetOrders.Fly(resolved, { tick })` records `command.last` (and `delays` with a
+  `delay`). `command.state` stays movement-based. `boundary` (for a caller at a tick boundary, the FC brain) skips the
+  call's own `SyncFleetTargets()` so the boundary's sync starts the locks at the boundary.
 - **`Director.CalledTargetStatus(id)`**, the first that applies: `destroyed` (`combat.IsDestroyed` or `IsDead`: both
   death modes), `missing` (`targets.KindOf` null: no ball), `warping` (a ship `InWarp`, or `Arriving`: parked
   off-grid to warp in), else `live`. Objects are live once built.
 - Why `order_fleet` and not a new tool: a target call is a commander's fleet command in EVE, and order_fleet already has
-  the group selection, `by` authority, pilot `delay`, the edit queue, `command.last` and the one-plain-object request a
-  timeline beat embeds unchanged.
+  the group selection, `by` authority, pilot `delay`, `command.last` and the one-plain-object request a timeline beat
+  embeds unchanged.
 
 ## Who takes which call (`toFleetGroupCalls`, `toShipCallPlans`)
 
@@ -150,17 +174,19 @@ Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ targe
 - **`Engagements(boundary)`**: the engaged ships, then `fleetTargets.Armed()` not engaged on their own, with
   `DEFAULT_ENGAGE_MODULES` (`["turret", "launcher"]`, `ArmWeapons`): turrets and launchers back online switch active
   at the called target.
-- **`Apply`**: `Clear()` in the restart branch, `Forget` for removed ships, `SyncFleetTargets()` after
+- **`Apply`**: `Clear()` (FleetTargets and the call book) in the restart branch, else `FleetCommanders.AfterEdit` before
+  anything reads the live view; `Forget` for removed ships, `SyncFleetTargets()` after
   `following.Reconcile` and before the store write (tool results see it; ball-less ships are skipped by `CanTarget`).
   **`Destroy`** → `Forget`.
-- **`OrderFleet`** (targets): resolve → `CallWarnings` (a destroyed `primary` refused: `order_fleet.order.primary:
+- **`OrderFleet`** (targets → `CallTargets`, synchronous, no edit queue): resolve on the live fleets → `CallWarnings` (a destroyed `primary` refused: `order_fleet.order.primary:
   target "r3" was destroyed`; a destroyed `queue` / `set` id warned `"…" was destroyed: it is skipped until a load`; a
-  target on the giver's team warned) → compile (refusals before any side effect) → `Respond(resolved.ships,
-  toPilotDelays(...), tick)` → `Apply` when there are ops → `SyncFleetTargets()` (a no-op call still re-arms and
-  reports) → `Fly(resolved, { tick })` → result: order_fleet's fields plus `targets` (the list after), `primary`,
+  target on the giver's team warned) → `toFleetTargetList` (refusals before any side effect) → `SetCall` →
+  `Respond(resolved.ships, toPilotDelays(...), tick)` → `SyncFleetTargets()` (a no-op call still re-arms and reports;
+  skipped at a `boundary`) → `Fly(resolved, { tick })` → result: order_fleet's fields plus `targets` (the live list
+  after; no `operations`, no patch fields), `primary`,
   `queue`, `ships: [{ id, target, source?, respondsIn?, lock? }]`, `skipped: [{ id, reason }]` (own target, logi, in
   warp, holding, stood down, responding, following a nearer group's call; nothing when the group has no live primary),
-  `warnings?` (the live checks plus the patch's).
+  `warnings?` (the live checks).
 - **`SetTarget`**: a non-null target → `Own`. Null on a ship whose target is called → skipped: `it has no own target: it
   follows fleet "b"'s call on "r1" (cease_fire holds its fire; order_fleet targets drop or clear ends the call)`. Null
   on an own target clears it, then `SyncFleetTargets()`; the row becomes `{ target: <the call>, source: "called" }`.
@@ -184,6 +210,11 @@ Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ targe
   `called: { primary, queue, skipped?: [{ id, why }], following }` (`following`: members on this group's primary).
 
 ## verify-page evidence (2026-10-23, tools-core SDE 3646012, headless: everything but drawing)
+
+Recorded before calls went live (2026-10-23 S1 of the fleet-personalities plan). The checks now read the live list from
+get_state (`targets` on the fleet) and assert the document untouched (`get_scene` has no `targets` after a live call);
+the removal check adds a live-only call on `r4` that `remove_ship r4` prunes with one warning, its emptied list
+shadowing the document's `["r2"]`. Not yet re-run against tools-core (this Mac has none): run `--only called` on dbxpc.
 
 The four checks (`--only called`) pass:
 

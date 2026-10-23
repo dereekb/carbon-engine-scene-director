@@ -7,7 +7,7 @@
  *   takes its group's call again.
  * - cease_fire holds a member (Hold "hold": it keeps the call and its locks, but is not armed) or stands it down
  *   ("stand-down": no called target). Both lift on engage (Rearm), a targets order to a group it takes calls from
- *   (Respond), a change to such a group's called targets in the document (Sync), or a load (Clear).
+ *   (Respond), a change to such a group's live called targets (Sync), or a load (Clear).
  * - A targets order's pilot delay (Respond) keeps what each member shoots until its response tick.
  *
  * Sync works out the target each member should have and returns the changes; the director applies them through its

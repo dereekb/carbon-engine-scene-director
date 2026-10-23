@@ -1,5 +1,6 @@
 import type { JsonObject } from '../json';
 import type { SceneFleet } from './fleet';
+import { toFleetGroupKey } from './group';
 import { applyFleetOperation, type FleetOperationContext, removeShipFromFleets } from './operations';
 
 /**
@@ -36,6 +37,38 @@ export interface LiveFleetView<S> {
 }
 
 /**
+ * The page's live fleet state the live view splices over the document.
+ */
+export interface LiveFleetOverlay {
+  /**
+   * The live called targets by group key (toFleetGroupKey): each replaces its group's document list, `[]` calling
+   * nothing. A key whose group the document no longer holds is ignored.
+   */
+  readonly calls?: ReadonlyMap<string, readonly string[]>;
+}
+
+/**
+ * Splices live calls over a draft's fleets, wings and squads.
+ *
+ * @param fleets - The draft's fleets.
+ * @param calls - The live calls by group key.
+ */
+function spliceCalls(fleets: SceneFleet[], calls: ReadonlyMap<string, readonly string[]>): void {
+  const splice = (holder: { targets?: string[] }, key: string): void => {
+    const targets = calls.get(key);
+    if (targets?.length) holder.targets = [...targets];
+    else if (targets) delete holder.targets;
+  };
+  for (const fleet of fleets) {
+    splice(fleet, toFleetGroupKey({ fleet: fleet.id, kind: 'fleet', id: fleet.id }));
+    for (const wing of fleet.wings) {
+      splice(wing, toFleetGroupKey({ fleet: fleet.id, kind: 'wing', id: wing.id }));
+      for (const squad of wing.squads) splice(squad, toFleetGroupKey({ fleet: fleet.id, kind: 'squad', id: squad.id }));
+    }
+  }
+}
+
+/**
  * The ships of a fleet in fleet order: wing commanders in wing order, then squad commanders, then members (wing,
  * squad, member order), the fleet commander first.
  *
@@ -54,18 +87,22 @@ function fleetOrder(fleet: SceneFleet): string[] {
  * The fleets as they fly once some ships are gone (destroyed): each gone ship leaves its fleet through the same
  * fleet ops a removal runs, so squads anchored on it fall back down the chain as remove_ship does. A gone fleet
  * commander first hands the fleet (update_fleet) to the first live wing commander in wing order, else the first live
- * squad commander, else the first live member. A fleet with nobody alive is dropped. Never written to the document.
+ * squad commander, else the first live member. A fleet with nobody alive is dropped. The overlay's live calls replace
+ * their groups' document lists first. Never written to the document.
  *
  * @param scene - The document.
  * @param gone - The destroyed ships.
+ * @param overlay - The page's live fleet state (its live calls).
  * @returns The live document, what changed per fleet and the repairs' warnings.
  */
-export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(scene: S, gone: ReadonlySet<string>): LiveFleetView<S> {
+export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(scene: S, gone: ReadonlySet<string>, overlay: LiveFleetOverlay = {}): LiveFleetView<S> {
   const fleets = scene.fleets ?? [];
   const touched = fleets.filter((fleet) => fleetOrder(fleet).some((ship) => gone.has(ship)));
-  if (!touched.length) return { scene, changes: new Map(), warnings: [] };
+  if (!touched.length && !overlay.calls?.size) return { scene, changes: new Map(), warnings: [] };
 
-  const draft: JsonObject = { fleets: structuredClone(fleets) as unknown as JsonObject[] };
+  const cloned = structuredClone(fleets);
+  if (overlay.calls?.size) spliceCalls(cloned, overlay.calls);
+  const draft: JsonObject = { fleets: cloned as unknown as JsonObject[] };
   const context: FleetOperationContext = { draft, where: 'live fleets', problems: [], warnings: [] };
   const changes = new Map<string, LiveFleetChange>();
   const dropped = new Set<string>();

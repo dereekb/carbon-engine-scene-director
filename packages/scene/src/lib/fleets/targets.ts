@@ -1,10 +1,11 @@
 /**
- * Called targets: what a fleet, wing or squad shoots at, the way an EVE FC calls it. Each group's `targets` list in the
- * document holds ship or authored-object ids in kill order: its first live entry is the group's primary, and the live
- * entries after it are its queue.
+ * Called targets: what a fleet, wing or squad shoots at, the way an EVE FC calls it. Each group's `targets` list holds
+ * ship or authored-object ids in kill order: its first live entry is the group's primary, and the live entries after it
+ * are its queue. The document's lists are the opening calls a load starts with; the page keeps the live calls.
  *
- * - order_fleet's targets order edits the list: toFleetTargetOperations compiles it to update_fleet, update_wing or
- *   update_squad, so a timeline beat can cue it as the order or as the patch.
+ * - order_fleet's targets order edits the page's live list (toFleetTargetList), at once and never saved, so a reload
+ *   replays the same fight. toFleetTargetOperations compiles the same order to update_fleet, update_wing or
+ *   update_squad, for a timeline beat that cues it as a patch.
  * - Removing a called ship or object prunes it from every list (removeCalledTarget). A kill never touches the list:
  *   kills are live state, so the live view skips a destroyed target, the next becomes primary, and a load revives the
  *   call.
@@ -477,9 +478,15 @@ export interface FleetTargetOperationsOptions {
   readonly statusOf?: CalledTargetStatusOf;
 }
 
+export interface FleetTargetListOptions extends FleetTargetOperationsOptions {
+  /**
+   * The group's own ships, which `next` never takes for the live primary (fleetGroupShips).
+   */
+  readonly own?: ReadonlySet<string>;
+}
+
 /**
- * The patch op a targets order compiles to: one update_fleet, update_wing or update_squad with `set: { targets }`
- * (null when the list empties), or none when the list is unchanged.
+ * A group's called list after a targets order: the page's live call book and toFleetTargetOperations both run it.
  *
  * - `primary`: that id first (moved up when already called), the rest in their order behind it.
  * - `queue`: the list, then the given ids it does not call yet, in order.
@@ -488,16 +495,15 @@ export interface FleetTargetOperationsOptions {
  * - `next`: the list without its live primary (with none live, without its first entry); an empty list is a problem.
  * - `clear`: empty.
  *
- * @param scene - The document the order was resolved against.
- * @param group - The order's group.
+ * @param current - The group's list before the order.
+ * @param group - The order's group, for messages.
  * @param order - The targets order.
- * @param options - The page's live status, for `next`.
- * @returns The ops, for applySceneOperations.
+ * @param options - The page's live status and the group's own ships, for `next`.
+ * @returns The list after the order.
  * @throws {SceneError} For a drop of an uncalled id, next on an empty list, or a list past MAX_CALLED_TARGETS.
  */
-export function toFleetTargetOperations(scene: Pick<SceneDocument, 'ships' | 'fleets'>, group: FleetGroup, order: FleetTargetsOrder, options: FleetTargetOperationsOptions = {}): JsonObject[] {
+export function toFleetTargetList(current: readonly string[], group: FleetGroup, order: FleetTargetsOrder, options: FleetTargetListOptions = {}): string[] {
   const where = 'order_fleet.order';
-  const current = calledTargetsOf(scene, group);
   let next: string[] = [];
   if (order.primary != null) {
     next = [order.primary, ...current.filter((id) => id !== order.primary)];
@@ -512,10 +518,28 @@ export function toFleetTargetOperations(scene: Pick<SceneDocument, 'ships' | 'fl
     next = current.filter((id) => !dropped.has(id));
   } else if (order.next) {
     if (!current.length) throw new SceneError([`${where}.next: ${describeFleetGroup(group)} calls no targets`]);
-    const passed = toCalledTargets(current, { statusOf: options.statusOf, own: fleetGroupShips(scene, group) }).primary ?? current[0];
+    const passed = toCalledTargets(current, { statusOf: options.statusOf, own: options.own }).primary ?? current[0];
     next = current.filter((id) => id !== passed);
   }
   if (next.length > MAX_CALLED_TARGETS) throw new SceneError([`${where}: ${describeFleetGroup(group)} would call ${next.length} targets; at most ${MAX_CALLED_TARGETS} (EVE's fleet size)`]);
+  return next;
+}
+
+/**
+ * The patch op a targets order compiles to: one update_fleet, update_wing or update_squad with `set: { targets }`
+ * (null when the list empties), or none when the list is unchanged. The list is toFleetTargetList's. A timeline beat may
+ * cue it as a patch; order_fleet edits the page's live calls instead.
+ *
+ * @param scene - The document the order was resolved against.
+ * @param group - The order's group.
+ * @param order - The targets order.
+ * @param options - The page's live status, for `next`.
+ * @returns The ops, for applySceneOperations.
+ * @throws {SceneError} For a drop of an uncalled id, next on an empty list, or a list past MAX_CALLED_TARGETS.
+ */
+export function toFleetTargetOperations(scene: Pick<SceneDocument, 'ships' | 'fleets'>, group: FleetGroup, order: FleetTargetsOrder, options: FleetTargetOperationsOptions = {}): JsonObject[] {
+  const current = calledTargetsOf(scene, group);
+  const next = toFleetTargetList(current, group, order, { statusOf: options.statusOf, own: fleetGroupShips(scene, group) });
   const unchanged = next.length === current.length && next.every((id, index) => id === current[index]);
   return unchanged ? [] : [toTargetsOperation(group, next)];
 }

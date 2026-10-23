@@ -3,7 +3,7 @@ import { applySceneOperations, diffScenes, normalizeScene, type SceneDocument } 
 import { CELESTIAL_TARGET_REFUSAL } from '../weapons/target';
 import { catchSceneError, TFI } from './fleets.spec-helper';
 import { normalizeFleets } from './normalize';
-import { type CalledTargetStatus, calledTargetsOf, MAX_CALLED_TARGETS, toCalledTargets, toFleetGroupCalls, toShipCallPlans } from './targets';
+import { type CalledTargetStatus, calledTargetsOf, MAX_CALLED_TARGETS, toCalledTargets, toFleetGroupCalls, toFleetTargetList, toShipCallPlans } from './targets';
 
 const RED = ['r1', 'r2', 'r3', 'r4'];
 const BLUE = ['fc', 'wc1', 'a1', 'a2', 'a3', 'l1', 'l2', 'b1', 'b2', 'gfc'];
@@ -217,5 +217,32 @@ describe('toShipCallPlans', () => {
     expect(plans.has('r1')).toBe(false);
     expect(plans.get('gfc')).toMatchObject({ called: false, primary: null });
     expect(plansOf({ g: ['r1'] }).get('gfc')).toMatchObject({ primary: 'r1' });
+  });
+});
+
+describe('toFleetTargetList', () => {
+  const SQUAD = { fleet: 'f', kind: 'squad', id: 'dps' } as const;
+  const listOf = (order: object, current: readonly string[] = ['b1', 'b2', 'l1'], options: Parameters<typeof toFleetTargetList>[3] = {}) => toFleetTargetList(current, SQUAD, { type: 'targets', ...order }, options);
+
+  it("gives each action's list from the current one, an empty list for clear", () => {
+    expect(listOf({ primary: 'l1' })).toEqual(['l1', 'b1', 'b2']);
+    expect(listOf({ queue: ['l2', 'b1'] })).toEqual(['b1', 'b2', 'l1', 'l2']);
+    expect(listOf({ set: ['gfc'] })).toEqual(['gfc']);
+    expect(listOf({ drop: ['b2'] })).toEqual(['b1', 'l1']);
+    expect(listOf({ clear: true })).toEqual([]);
+    expect(listOf({ primary: 'gfc' }, [])).toEqual(['gfc']);
+  });
+
+  it("moves next past the live primary, never one of the group's own ships", () => {
+    expect(listOf({ next: true })).toEqual(['b2', 'l1']);
+    expect(listOf({ next: true }, ['a2', 'b1', 'b2'], { own: new Set(['a2']) })).toEqual(['a2', 'b2']);
+    expect(listOf({ next: true }, ['b1', 'b2'], { statusOf: (id) => (id === 'b1' ? 'destroyed' : 'live') })).toEqual(['b1']);
+  });
+
+  it('refuses as the patch does', () => {
+    expect(catchSceneError(() => listOf({ drop: ['gfc'] })).problems).toEqual(['order_fleet.order.drop: squad "dps" of fleet "f" does not call "gfc"']);
+    expect(catchSceneError(() => listOf({ next: true }, [])).problems).toEqual(['order_fleet.order.next: squad "dps" of fleet "f" calls no targets']);
+    const full = Array.from({ length: MAX_CALLED_TARGETS }, (_, index) => `x${index}`);
+    expect(catchSceneError(() => listOf({ queue: ['gfc'] }, full)).problems).toHaveLength(1);
   });
 });

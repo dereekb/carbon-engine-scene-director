@@ -1,8 +1,9 @@
 import type { Maybe } from '@dereekb/util';
-import { applySceneOperations, diffScenes, layoutFleetFormation, normalizeFleetOrderRequest, normalizeScene, toFleetOrderOperations, type FleetGroupKind, type SceneDocument, type SceneFleet, type SceneVector } from '@scene-director/scene';
+import { applySceneOperations, calledTargetsOf, diffScenes, isFleetTargetsOrder, layoutFleetFormation, normalizeFleetOrderRequest, normalizeScene, toFleetOrderOperations, toFleetTargetList, toLiveFleetScene, type FleetGroupKind, type SceneDocument, type SceneFleet, type SceneVector } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { CLOCK_EPOCH_TICKS, TICKS_PER_SECOND } from './clock';
 import { DestinyWorld } from './destiny';
+import { FleetCommanders } from './fleet-commanders';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { FleetFollowing } from './following';
@@ -43,14 +44,17 @@ function MakeScene(): SceneDocument {
 }
 
 /**
- * A world, its FleetFollowing and FleetOrders, driven as the director drives them, in 1 s frames (one tick a call).
+ * A world, its FleetFollowing and FleetOrders over the live calls, driven as the director drives them, in 1 s frames
+ * (one tick a call).
  */
 class Rig {
   scene: SceneDocument = MakeScene();
   readonly world = new DestinyWorld();
-  readonly following = new FleetFollowing({ world: this.world, scene: () => this.scene, radiusOf: (id) => FLIGHTS.get(id)?.radius ?? null });
-  readonly orders = new FleetOrders({ world: this.world, following: this.following, scene: () => this.scene });
+  readonly commanders = new FleetCommanders();
+  readonly following = new FleetFollowing({ world: this.world, scene: () => this.Live(), radiusOf: (id) => FLIGHTS.get(id)?.radius ?? null });
+  readonly orders = new FleetOrders({ world: this.world, following: this.following, scene: () => this.Live() });
   now = CLOCK_EPOCH_TICKS;
+  private live: Maybe<{ readonly scene: SceneDocument; readonly version: number; readonly view: SceneDocument }> = null;
 
   constructor() {
     for (const doc of this.scene.ships) this.world.AddShip(doc, FLIGHTS.get(doc.id)!);
@@ -59,12 +63,27 @@ class Rig {
   }
 
   /**
-   * order_fleet as Director.OrderFleet runs it: resolve, apply the document ops, then fly.
+   * The document as the fleets fly it: the live calls over it (Director.LiveFleets), memoized.
+   */
+  Live(): SceneDocument {
+    const { version } = this.commanders;
+    if (this.live?.scene !== this.scene || this.live.version !== version) this.live = { scene: this.scene, version, view: toLiveFleetScene(this.scene, new Set(), this.commanders.Overlay()).scene };
+    return this.live.view;
+  }
+
+  /**
+   * order_fleet as Director.OrderFleet runs it: resolve; a targets order edits the live call book, a document order
+   * applies its ops; then fly.
    */
   Order(request: object): FleetOrderResult {
-    const resolved = this.orders.Resolve(normalizeFleetOrderRequest(request, { ships: new Set(this.scene.ships.map((doc) => doc.id)), objects: new Set(this.world.ObjectIds()) }));
-    const operations = toFleetOrderOperations(this.scene, resolved);
-    if (operations.length) this.Edit(operations);
+    const normalized = normalizeFleetOrderRequest(request, { ships: new Set(this.scene.ships.map((doc) => doc.id)), objects: new Set(this.world.ObjectIds()) });
+    const resolved = this.orders.Resolve(normalized);
+    if (isFleetTargetsOrder(normalized.order)) {
+      this.commanders.SetCall(resolved.group, toFleetTargetList(calledTargetsOf(this.Live(), resolved.group), resolved.group, normalized.order));
+    } else {
+      const operations = toFleetOrderOperations(this.scene, resolved);
+      if (operations.length) this.Edit(operations);
+    }
     return this.orders.Fly(resolved);
   }
 
@@ -307,12 +326,15 @@ describe('FleetOrders', () => {
     expect(rig.Command('fleet', 'f').last?.order).toEqual({ type: 'anchor', range: 2000 });
   });
 
-  it("records a targets order, at its given tick, and leaves the group's following alone", () => {
+  it("calls live, leaving the document and the group's following alone, and records the order at its given tick", () => {
     const rig = new Rig();
     const before = MEMBERS.map((id) => rig.world.Following(id));
+    const document = rig.scene;
     const called = rig.Order({ fleet: 'f', squad: 'dps', order: { type: 'targets', set: ['l1', 'l2'] } });
     expect(called).toMatchObject({ by: 'd1', leader: 'd1', order: { type: 'targets', set: ['l1', 'l2'] }, ships: ['d1', 'd2', 'd3'] });
-    expect(rig.scene.fleets![0].wings[0].squads[0].targets).toEqual(['l1', 'l2']);
+    expect(rig.scene).toBe(document);
+    expect(rig.scene.fleets![0].wings[0].squads[0].targets).toBeUndefined();
+    expect(rig.Live().fleets![0].wings[0].squads[0].targets).toEqual(['l1', 'l2']);
     expect(MEMBERS.map((id) => rig.world.Following(id))).toEqual(before);
     expect(rig.Command('squad', 'dps')).toMatchObject({ state: 'idle', last: { order: { type: 'targets' }, by: 'd1', tick: called.tick } });
 
