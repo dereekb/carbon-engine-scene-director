@@ -11,12 +11,12 @@ describe('normalizeModuleSwitch', () => {
 
   it('requires selectors, a known state and exactly one of ships and fleet', () => {
     expect(catchSceneError(() => normalizeModuleSwitch({ ships: ['a'], modules: [], state: 'on' })).problems).toEqual([
-      'switch.modules must be a non-empty array of module selectors: a module key ("mid-2"), a category ("hardener", "remote-armor-repairer", "prop", ...), "all" or a module name',
+      'switch.modules must be a non-empty array of module selectors: a module key ("mid-2"), a category ("hardener", "remote-armor-repairer", "prop", ...), "turret", "launcher", "all" or a module name',
       'switch.state must be one of active, online, offline'
     ]);
     expect(catchSceneError(() => normalizeModuleSwitch({ modules: ['all', 3], state: 'active', target: '' })).problems).toEqual([
-      'switch.modules must be a non-empty array of module selectors: a module key ("mid-2"), a category ("hardener", "remote-armor-repairer", "prop", ...), "all" or a module name',
-      'switch.target must be a ship id',
+      'switch.modules must be a non-empty array of module selectors: a module key ("mid-2"), a category ("hardener", "remote-armor-repairer", "prop", ...), "turret", "launcher", "all" or a module name',
+      'switch.target must be a ship id (or, for turrets, an object id)',
       'switch needs exactly one of ships (ship ids) and fleet (a fleet id, optionally with wing or squad)'
     ]);
     expect(catchSceneError(() => normalizeModuleSwitch({ ships: ['a'], modules: ['all'], state: 'active', delay: 2 })).problems).toEqual(['switch.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to 10 s)']);

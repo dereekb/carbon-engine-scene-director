@@ -20,14 +20,17 @@ const BASE: ModuleActivation = {
   reactivationDelay: 0,
   maxGroupActive: 0,
   maxGroupOnline: 0,
-  flight: false
+  flight: false,
+  reach: Number.POSITIVE_INFINITY
 };
 
 function Spec(key: string, activation: Partial<ModuleActivation> = {}, extra: Partial<ShipModuleSpec> = {}): ShipModuleSpec {
   return { key, name: key, typeID: 1, offline: false, activation: { ...BASE, key, ...activation }, ...extra };
 }
 
-const REMOTE_REP: Partial<ModuleActivation> = { category: 'remote-armor-repairer', groupID: 325, targeted: true, warpSafe: false, cycleTime: 5, range: 6000, falloff: 3000, repair: { layer: 'armor', amount: 300, remote: true } };
+const REMOTE_REP: Partial<ModuleActivation> = { category: 'remote-armor-repairer', groupID: 325, targeted: true, warpSafe: false, cycleTime: 5, range: 6000, falloff: 3000, reach: 12_000, repair: { layer: 'armor', amount: 300, remote: true } };
+
+const TURRET: Partial<ModuleActivation> = { category: 'weapon', weapon: 'turret', groupID: 55, targeted: true, warpSafe: false, cycleTime: 2.5, range: 1000, falloff: 20_000 };
 
 /**
  * A world of points on a line: distances are |x_a - x_b|, no radii.
@@ -40,9 +43,10 @@ class FakePort implements ShipModulesPort {
     ['far', 50_000]
   ]);
   readonly warping = new Set<string>();
+  readonly objects = new Set<string>(['astrahus']);
 
   SurfaceDistance(a: string, b: string): Maybe<number> {
-    const [xa, xb] = [this.x.get(a), this.x.get(b)];
+    const [xa, xb] = [this.x.get(a), this.objects.has(b) ? 30_000 : this.x.get(b)];
     return xa == null || xb == null ? null : Math.abs(xa - xb);
   }
 
@@ -52,6 +56,10 @@ class FakePort implements ShipModulesPort {
 
   HasShip(id: string): boolean {
     return this.x.has(id);
+  }
+
+  HasObject(id: string): boolean {
+    return this.objects.has(id);
   }
 }
 
@@ -118,7 +126,7 @@ describe('ShipModules', () => {
     expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
     expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'far' })).toBe('it is running on "fc"; switch it online first');
     const events = modules.Boundary(0);
-    expect(modules.State('logi', 'high-0', 0)).toEqual({ state: 'active', cycle: { number: 1, endsIn: 5 }, target: 'fc', targetDistance: 9000, effectiveness: 0.5 });
+    expect(modules.State('logi', 'high-0', 0)).toEqual({ state: 'active', cycle: { number: 1, endsIn: 5 }, target: 'fc', targetDistance: 9000, effectiveness: 0.5, cycleTime: 5 });
     const ends = [...events];
     for (let tick = 1; tick <= 5; tick++) ends.push(...modules.Boundary(tick));
     expect(modules.RepairLandings(ends)).toEqual([{ ship: 'fc', layer: 'armor', amount: 150, from: 'logi', module: 'high-0' }]);
@@ -143,6 +151,48 @@ describe('ShipModules', () => {
     modules.Switch('logi', 'high-1', 'active', { boundary: 8, target: 'fc' });
     Run(modules, 8, 8);
     expect(Kinds(modules.Remove('fc', 9))).toEqual(['logi:high-1:off1@9 (its target is gone)']);
+  });
+
+  it('runs a turret on a ship or an object at any range, and refuses it without a target', () => {
+    const port = new FakePort();
+    const modules = new ShipModules(port);
+    modules.SetFit('logi', [Spec('high-0', TURRET), Spec('high-1', TURRET)], 0);
+    expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0 })).toBe('it needs a target: set_target or switch_modules target');
+    expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'nothing' })).toBe('no ship or object "nothing"');
+    expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'far' })).toBeNull();
+    expect(modules.Switch('logi', 'high-1', 'active', { boundary: 0, target: 'astrahus' })).toBeNull();
+    const events = modules.Boundary(0);
+    expect(events.filter((event) => event.kind === 'cycle').map((event) => [event.module, event.target, event.at, event.effectiveness])).toEqual([
+      ['high-0', 'far', 0, 0.5 ** ((49_000 / 20_000) ** 2)],
+      ['high-1', 'astrahus', 0, 0.5 ** ((29_000 / 20_000) ** 2)]
+    ]);
+    expect(modules.State('logi', 'high-1', 0)).toMatchObject({ state: 'active', target: 'astrahus', targetDistance: 30_000, cycleTime: 2.5 });
+    expect(Run(modules, 1, 5).filter((event) => event.startsWith('logi:high-0'))).toEqual(['logi:high-0:end1@3', 'logi:high-0:cycle2@3', 'logi:high-0:end2@5', 'logi:high-0:cycle3@5']);
+  });
+
+  it('retargets running turrets at their next cycle, stops them at their cycle end when the target clears, and at once when it goes', () => {
+    const port = new FakePort();
+    const modules = new ShipModules(port);
+    modules.SetFit('logi', [Spec('high-0', TURRET), Spec('mid-0', REMOTE_REP)], 0);
+    modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' });
+    modules.Switch('logi', 'mid-0', 'active', { boundary: 0, target: 'fc' });
+    modules.Boundary(0);
+    expect(Kinds(modules.Retarget('logi', 'far', 1))).toEqual([]);
+    expect(modules.State('logi', 'high-0', 1)).toMatchObject({ target: 'fc', nextTarget: 'far' });
+    expect(modules.State('logi', 'mid-0', 1)).toMatchObject({ target: 'fc' });
+    const cycled = [modules.Boundary(1), modules.Boundary(2), modules.Boundary(3)].flat().filter((event) => event.module === 'high-0');
+    expect(cycled.map((event) => `${event.kind}${event.cycle}:${event.target}`)).toEqual(['end1:fc', 'cycle2:far']);
+    expect(modules.State('logi', 'high-0', 3)?.nextTarget).toBeUndefined();
+    expect(modules.Switch('logi', 'high-0', 'active', { boundary: 3, target: 'astrahus' })).toBeNull();
+    expect(modules.State('logi', 'high-0', 3)).toMatchObject({ target: 'far', nextTarget: 'astrahus' });
+    modules.Retarget('logi', null, 4);
+    expect(modules.State('logi', 'high-0', 4)).toMatchObject({ state: 'stopping', note: 'stopping: its target was cleared' });
+    expect(modules.State('logi', 'high-0', 4)?.nextTarget).toBeUndefined();
+    expect(Run(modules, 4, 5).filter((event) => event.startsWith('logi:high-0'))).toEqual(['logi:high-0:end2@5', 'logi:high-0:off2@5']);
+    modules.Switch('logi', 'high-0', 'active', { boundary: 6, target: 'astrahus' });
+    modules.Boundary(6);
+    port.objects.delete('astrahus');
+    expect(Kinds(modules.Remove('astrahus', 7))).toEqual(['logi:high-0:off1@7 (its target is gone)']);
   });
 
   it("stops a ship's modules that are not warp safe as it enters warp, and refuses activation in warp", () => {

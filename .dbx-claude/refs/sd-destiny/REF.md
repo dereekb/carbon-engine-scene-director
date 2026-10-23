@@ -150,7 +150,7 @@ ball for `get_state.objects`.
   `SetPhysics` inside the `OnBoundary` hook, before orders: the prop mod's timing.
 - **Module-layer helpers**: `OnBoundary(listener)` (called with the boundary's master tick; a throwing listener is
   logged and the rest run), `SurfaceDistance(a, b)` (ball to ball on the EVE radii, negative when overlapping; null
-  when either is gone) and `InWarp(id)` (proper warp). `CycleEnd` lives in `module-cycle.ts`; destiny.ts re-exports it.
+  when either is gone; either id may be an object, through `TargetEntry`, for a turret's target) and `InWarp(id)` (proper warp). `CycleEnd` lives in `module-cycle.ts`; destiny.ts re-exports it.
 - The world accepts a max velocity of 0. `RequireValidPhysics` refuses a warp speed it cannot convert.
 
 ## Real-GPU evidence (2026-10-22, Windows Chrome, NVIDIA)

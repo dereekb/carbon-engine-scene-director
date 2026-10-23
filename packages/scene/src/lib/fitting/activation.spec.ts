@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { falloffEffectiveness, moduleActivationOf, moduleReach } from './activation';
+import { falloffEffectiveness, LAUNCHER_REFUSAL, moduleActivationOf, moduleReach } from './activation';
 import { evaluateShipDogma } from './dogma';
 import { DOGMA_FIXTURE, fixtureTypeID, GUARDIAN_ID, REVELATION_ID, RIFTER_ID } from './fitting.spec-helper';
 
@@ -20,14 +20,27 @@ describe('moduleActivationOf', () => {
     expect(remote?.cycleTime).toBeGreaterThan(0);
   });
 
-  it('marks siege as changing the flight, notes target effects not modelled, and refuses weapons and passive modules', () => {
+  it('marks siege as changing the flight, notes target effects not modelled, and refuses passive modules', () => {
     const [siege] = activations(REVELATION_ID, 'Siege Module II');
     expect(siege).toMatchObject({ category: 'siege', flight: true, warpSafe: false, refusal: null });
-    const [web, scram, plate, gun] = activations(RIFTER_ID, 'Stasis Webifier II', 'Warp Scrambler II', '200mm Steel Plates II', '800mm Repeating Cannon II');
+    const [web, scram, plate] = activations(RIFTER_ID, 'Stasis Webifier II', 'Warp Scrambler II', '200mm Steel Plates II');
     expect(web).toMatchObject({ category: 'web', targeted: true, note: 'cycles without effect on its target yet' });
+    expect(web?.reach).toBe(moduleReach(web ?? { range: null, falloff: null }));
+    expect(web?.reach).toBeLessThan(Number.POSITIVE_INFINITY);
     expect(scram).toMatchObject({ category: 'scram', targeted: true, falloff: null });
     expect(plate?.refusal).toBe('it is passive: it is only online or offline');
-    expect(gun?.refusal).toBe('weapons are not modelled yet (the Turrets entry)');
+    expect(plate?.reach).toBe(Number.POSITIVE_INFINITY);
+  });
+
+  it('runs a turret on its target at any range, on its rate of fire, and refuses a launcher', () => {
+    const [gun, launcher] = activations(RIFTER_ID, '200mm AutoCannon II', 'Heavy Missile Launcher II');
+    expect(gun).toMatchObject({ category: 'weapon', weapon: 'turret', refusal: null, targeted: true, warpSafe: false, reach: Number.POSITIVE_INFINITY });
+    expect(gun?.note).toBeUndefined();
+    expect(gun?.range).toBeGreaterThan(0);
+    expect(gun?.falloff).toBeGreaterThan(0);
+    expect(gun?.cycleTime).toBeGreaterThan(0);
+    expect(gun?.cycleTime).toBeLessThan(5);
+    expect(launcher).toMatchObject({ category: 'weapon', weapon: 'launcher', refusal: LAUNCHER_REFUSAL });
   });
 });
 

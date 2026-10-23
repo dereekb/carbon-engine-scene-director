@@ -1734,6 +1734,15 @@ describe('DestinyWorld objects', () => {
     ExpectLockstep(world, 2);
   });
 
+  it('measures the surface distance from a ship to an object, either way round, as a turret target', () => {
+    const { world } = WithObject();
+    const distance = world.SurfaceDistance('rifter', 'astra');
+    expect(distance).not.toBeNull();
+    expect(Math.abs((distance ?? 0) - 30000)).toBeLessThan(50);
+    expect(world.SurfaceDistance('astra', 'rifter')).toBe(distance);
+    expect(world.SurfaceDistance('rifter', 'nothing')).toBeNull();
+  });
+
   it('refuses a ship id and a radius of 0', () => {
     const { world } = WithObject();
     expect(() => world.AddObject({ id: 'rifter', position: [0, 0, 0] }, 1000)).toThrow(/a ship holds that id/u);

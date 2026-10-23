@@ -24,6 +24,16 @@ describe('DamageModel', () => {
     expect(model.Report('fc')?.shield.hp).toBe(0);
   });
 
+  it('gives the remaining HP fractions the impact overlay shows', () => {
+    const model = new DamageModel();
+    expect(model.Fractions('fc')).toBeNull();
+    model.SetDefense('fc', Defense(1000));
+    expect(model.Fractions('fc')).toEqual({ shield: 1, armor: 1, structure: 1 });
+    model.Damage('fc', 'shield', 500);
+    model.Damage('fc', 'armor', 250);
+    expect(model.Fractions('fc')).toEqual({ shield: 0, armor: 0.75, structure: 1 });
+  });
+
   it('reports repairs and incoming remote reps, and forgets a removed ship', () => {
     const model = new DamageModel();
     model.SetDefense('fc', Defense(1000));

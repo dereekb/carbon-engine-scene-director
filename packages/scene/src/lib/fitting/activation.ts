@@ -5,7 +5,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { moduleCategoryOf, type ModuleCategory } from './categories';
+import { moduleCategoryOf, type ModuleCategory, weaponKindOf, type WeaponKind } from './categories';
 import type { DogmaShip } from './dogma';
 import type { DogmaBundle } from './dogma-bundle';
 import { moduleNumbersOf, type ModuleNumbers } from './defense';
@@ -42,6 +42,11 @@ export const EFFECTLESS_CATEGORIES: Readonly<Partial<Record<ModuleCategory, stri
 };
 
 /**
+ * Why a missile launcher cannot be activated yet.
+ */
+export const LAUNCHER_REFUSAL = 'missile launchers fire in the Missiles entry';
+
+/**
  * Seconds per cycle for an activatable module without a duration.
  */
 export const DEFAULT_MODULE_CYCLE_TIME = 10;
@@ -61,6 +66,15 @@ export interface ModuleActivation extends Omit<ModuleNumbers, 'cycleTime'> {
    * Its default effect is a target effect (category 2): it runs on another ship.
    */
   readonly targeted: boolean;
+  /**
+   * `turret` or `launcher` for a weapon (effects 42 / 40).
+   */
+  readonly weapon?: WeaponKind;
+  /**
+   * Metres it may run at: moduleReach for a targeted module, Infinity for a turret (EVE refuses no turret by range:
+   * shots beyond falloff miss) and for an untargeted module.
+   */
+  readonly reach: number;
   /**
    * Its default effect is warp safe: entering warp leaves it running.
    */
@@ -106,8 +120,9 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
   const { type } = module;
   const effect = type.defaultEffect == null ? null : bundle.effects[type.defaultEffect];
   const category = moduleCategoryOf(type.groupID, type.effects);
+  const weapon = weaponKindOf(type.effects);
   let refusal: Maybe<string> = null;
-  if (category === 'weapon') refusal = 'weapons are not modelled yet (the Turrets entry)';
+  if (weapon === 'launcher') refusal = LAUNCHER_REFUSAL;
   else if (UNACTIVATABLE_GROUPS[type.groupID]) refusal = UNACTIVATABLE_GROUPS[type.groupID];
   else if (!effect || (effect.category !== 1 && effect.category !== 2)) refusal = 'it is passive: it is only online or offline';
   const flight = Boolean(effect?.modifiers.some((modifier) => modifier.domain === 'shipID' && SHIP_FLIGHT_ATTRIBUTES.has(modifier.modifiedAttributeID)));
@@ -117,6 +132,8 @@ export function moduleActivationOf(ship: DogmaShip, bundle: DogmaBundle, key: st
     category,
     groupID: type.groupID,
     refusal,
+    ...(weapon ? { weapon } : {}),
+    reach: weapon === 'turret' || effect?.category !== 2 ? Number.POSITIVE_INFINITY : moduleReach(numbers),
     targeted: effect?.category === 2,
     warpSafe: effect?.warpSafe === true,
     cycleTime: numbers.cycleTime ?? DEFAULT_MODULE_CYCLE_TIME,

@@ -113,6 +113,23 @@ export class DamageModel {
   }
 
   /**
+   * A ship's remaining HP fractions, what the impact overlay shows (SetImpactDamageState).
+   *
+   * @param id - The ship id.
+   * @returns Shield, armor and structure current / max (1 for a layer without HP); null when the model does not track
+   * the ship.
+   */
+  Fractions(id: string): Maybe<Readonly<Record<DefenseLayerName, number>>> {
+    const ship = this.ships.get(id);
+    if (!ship) return null;
+    const fraction = (name: DefenseLayerName): number => {
+      const { hp, max } = ship.layers[name];
+      return max > 0 ? hp / max : 1;
+    };
+    return { shield: fraction('shield'), armor: fraction('armor'), structure: fraction('structure') };
+  }
+
+  /**
    * Takes HP off a layer (no resists: the caller applies them). Internal until Combat rules.
    *
    * @param id - The ship id.

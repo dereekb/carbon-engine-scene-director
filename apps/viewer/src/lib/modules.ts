@@ -5,9 +5,10 @@
  * - SetFit gives a ship its modules (their activation: moduleActivationOf); states carry over by (key, type id), and a
  *   running module that vanished stops at once (`refitted`). Modules beyond their group's maxGroupOnline start offline.
  * - Switch asks one module for a state now or after a pilot delay. Refused: activating a module that cannot run yet
- *   (weapons, MJDs, cloaks, cynos, bubbles, smartbombs, ECM bursts, passive modules), beyond maxGroupActive, in warp, a
- *   targeted module without a target ship, on itself, on a ship in warp, beyond its reach (optimal + 2 × falloff), or
- *   already running on another target.
+ *   (launchers, MJDs, cloaks, cynos, bubbles, smartbombs, ECM bursts, passive modules), beyond maxGroupActive, in warp,
+ *   a targeted module without a target ship, on itself, on a ship in warp, beyond its reach (`activation.reach`:
+ *   optimal + 2 × falloff; Infinity for turrets), or already running on another target. A turret's target may also be
+ *   an authored object, and a running turret given another target retargets at its next cycle (Retarget).
  * - Boundary advances every cycle at a tick boundary. A running targeted module whose target drifts out of reach stops
  *   at its cycle end; one whose target is removed (Remove) or enters warp (OnWarpEnter) stops at once. Entering warp
  *   stops a ship's own modules that are not warp safe, and its targeted ones, at once.
@@ -18,7 +19,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { falloffEffectiveness, moduleReach, type DefenseLayerName, type ModuleActivation } from '@scene-director/scene';
+import { falloffEffectiveness, type DefenseLayerName, type ModuleActivation } from '@scene-director/scene';
 import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleReport, type ModuleCycleRequest, type ModuleCycleState } from './module-cycle';
 
 /**
@@ -26,7 +27,7 @@ import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleRep
  */
 export interface ShipModulesPort {
   /**
-   * Metres, surface to surface on the EVE radii; null when either ship is gone.
+   * Metres, surface to surface on the EVE radii (`b` may be an object); null when either is gone.
    */
   SurfaceDistance(a: string, b: string): Maybe<number>;
   /**
@@ -34,6 +35,10 @@ export interface ShipModulesPort {
    */
   InWarp(id: string): boolean;
   HasShip(id: string): boolean;
+  /**
+   * Whether an authored object is in the world (a turret's target may be one).
+   */
+  HasObject(id: string): boolean;
   /**
    * Seconds per Destiny tick.
    */
@@ -86,8 +91,16 @@ export interface RepairLanding {
  */
 export interface ShipModuleLiveState extends ModuleCycleReport {
   readonly target?: string;
+  /**
+   * A running turret's next target: it retargets at its next cycle.
+   */
+  readonly nextTarget?: string;
   readonly targetDistance?: number;
   readonly effectiveness?: number;
+  /**
+   * While it runs: seconds per cycle (2 decimals), a gun's rate of fire.
+   */
+  readonly cycleTime?: number;
 }
 
 export interface SwitchModuleOptions {
@@ -103,6 +116,10 @@ interface ModuleEntry {
   spec: ShipModuleSpec;
   readonly cycle: ModuleCycle;
   target: Maybe<string>;
+  /**
+   * A running turret's next target, taken at its next cycle start; null stops it at its cycle end instead.
+   */
+  retarget?: string;
   effectiveness: Maybe<number>;
 }
 
@@ -188,13 +205,45 @@ export class ShipModules {
     }
     if (entry && refusal === null) {
       if (request === 'active' && entry.spec.activation.targeted) {
-        entry.target = options.target ?? entry.target;
+        const aim = options.target ?? entry.retarget ?? entry.target;
+        if (IsTurret(entry) && entry.cycle.running && entry.target && aim && aim !== entry.target) entry.retarget = aim;
+        else entry.target = aim;
+        if (entry.retarget === entry.target) delete entry.retarget;
         entry.effectiveness = this.Effectiveness(id, entry);
       }
       entry.cycle.Request(request, { boundary: options.boundary, delay: options.delay });
-      if (!entry.cycle.engaged && !entry.cycle.running && entry.spec.activation.targeted) entry.target = null;
+      if (!entry.cycle.engaged && !entry.cycle.running && entry.spec.activation.targeted) this.Untarget(entry);
     }
     return refusal;
+  }
+
+  /**
+   * A ship's target changed: its running and starting turrets follow it. A running turret takes a new target at its
+   * next cycle start; a starting one at once; null stops them at their cycle end.
+   *
+   * @param id - The ship id.
+   * @param target - The new target (a ship or object), or null.
+   * @param boundary - The master tick now.
+   * @returns The `off` events of turrets that could not start on it.
+   */
+  Retarget(id: string, target: Maybe<string>, boundary: number): ShipModuleEvent[] {
+    const events: ShipModuleEvent[] = [];
+    for (const [key, entry] of this.ships.get(id) ?? []) {
+      if (!IsTurret(entry) || (!entry.cycle.running && !entry.cycle.engaged)) continue;
+      if (target == null) {
+        delete entry.retarget;
+        if (entry.cycle.running) entry.cycle.StopAtCycleEnd(boundary, 'its target was cleared');
+        else events.push(...this.Events(id, key, entry, entry.cycle.StopNow(boundary, 'its target was cleared')));
+      } else if (entry.cycle.running && entry.target && entry.target !== target) {
+        entry.retarget = target;
+      } else {
+        delete entry.retarget;
+        entry.target = target;
+        entry.effectiveness = this.Effectiveness(id, entry);
+      }
+      if (!entry.cycle.engaged && !entry.cycle.running) this.Untarget(entry);
+    }
+    return events;
   }
 
   /**
@@ -208,18 +257,28 @@ export class ShipModules {
     for (const [id, modules] of this.ships) {
       for (const [key, entry] of modules) {
         if (entry.spec.activation.targeted && entry.target && (entry.cycle.running || entry.cycle.state === 'activating')) {
-          const gone = !this.port.HasShip(entry.target) || this.port.InWarp(entry.target);
+          const gone = !this.Targetable(entry, entry.target) || this.port.InWarp(entry.target);
           const distance = gone ? null : this.port.SurfaceDistance(id, entry.target);
           if (gone || distance == null) {
             events.push(...this.Events(id, key, entry, entry.cycle.StopNow(boundary, 'its target is gone')));
-          } else if (distance > moduleReach(entry.spec.activation)) {
+          } else if (distance > entry.spec.activation.reach) {
             if (entry.cycle.state === 'activating') events.push(...this.Events(id, key, entry, entry.cycle.StopNow(boundary, 'its target is out of range')));
             else entry.cycle.StopAtCycleEnd(boundary, 'its target is out of range');
           }
           entry.effectiveness = this.Effectiveness(id, entry);
         }
-        events.push(...this.Events(id, key, entry, entry.cycle.Boundary(boundary)));
-        if (!entry.cycle.running && !entry.cycle.engaged) entry.target = null;
+        const cycled = entry.cycle.Boundary(boundary);
+        const next = entry.retarget === undefined ? -1 : cycled.findIndex((event) => event.kind === 'cycle');
+        if (next < 0) {
+          events.push(...this.Events(id, key, entry, cycled));
+        } else {
+          events.push(...this.Events(id, key, entry, cycled.slice(0, next)));
+          entry.target = entry.retarget;
+          delete entry.retarget;
+          entry.effectiveness = this.Effectiveness(id, entry);
+          events.push(...this.Events(id, key, entry, cycled.slice(next)));
+        }
+        if (!entry.cycle.running && !entry.cycle.engaged) this.Untarget(entry);
       }
     }
     return events;
@@ -258,8 +317,10 @@ export class ShipModules {
     return {
       ...report,
       ...(entry.target ? { target: entry.target } : {}),
+      ...(entry.retarget ? { nextTarget: entry.retarget } : {}),
       ...(distance == null ? {} : { targetDistance: Math.round(distance) }),
       ...(entry.effectiveness == null ? {} : { effectiveness: Math.round(entry.effectiveness * 1000) / 1000 }),
+      ...(entry.cycle.running ? { cycleTime: Math.round(entry.spec.activation.cycleTime * 100) / 100 } : {}),
       ...(!report.note && entry.spec.activation.note && entry.cycle.running ? { note: entry.spec.activation.note } : {})
     };
   }
@@ -342,14 +403,15 @@ export class ShipModules {
     } else if (this.port.InWarp(id)) {
       refusal = `ship "${id}" is in warp`;
     } else if (activation.targeted) {
-      const aim = target ?? (running ? entry.target : null);
+      const turret = IsTurret(entry);
+      const aim = target ?? (running ? (entry.retarget ?? entry.target) : null);
       const distance = aim ? this.port.SurfaceDistance(id, aim) : null;
-      const reach = moduleReach(activation);
-      if (!aim) refusal = 'it needs a target: a ship id';
+      const { reach } = activation;
+      if (!aim) refusal = turret ? 'it needs a target: set_target or switch_modules target' : 'it needs a target: a ship id';
       else if (aim === id) refusal = 'it cannot target its own ship';
-      else if (!this.port.HasShip(aim)) refusal = `no ship "${aim}" (a targeted module runs on a ship, not an object)`;
+      else if (!this.Targetable(entry, aim)) refusal = turret ? `no ship or object "${aim}"` : `no ship "${aim}" (a targeted module runs on a ship, not an object)`;
       else if (this.port.InWarp(aim)) refusal = `its target "${aim}" is in warp`;
-      else if (running && entry.target && entry.target !== aim) refusal = `it is running on "${entry.target}"; switch it online first`;
+      else if (!turret && running && entry.target && entry.target !== aim) refusal = `it is running on "${entry.target}"; switch it online first`;
       else if (distance == null || distance > reach) refusal = `"${aim}" is out of range: ${Math.round(distance ?? 0)} m, it reaches ${Math.round(reach)} m`;
     }
     if (refusal === null && !running && activation.maxGroupActive > 0) {
@@ -367,6 +429,18 @@ export class ShipModules {
     return online >= maxGroupOnline ? `at most ${maxGroupOnline} of its group may be online` : null;
   }
 
+  /**
+   * Whether a module may run on a target: a ship, or for a turret an authored object too.
+   */
+  private Targetable(entry: ModuleEntry, target: string): boolean {
+    return this.port.HasShip(target) || (IsTurret(entry) && this.port.HasObject(target));
+  }
+
+  private Untarget(entry: ModuleEntry): void {
+    entry.target = null;
+    delete entry.retarget;
+  }
+
   private Effectiveness(id: string, entry: ModuleEntry): Maybe<number> {
     const distance = entry.target ? this.port.SurfaceDistance(id, entry.target) : null;
     return distance == null ? null : falloffEffectiveness({ distance, range: entry.spec.activation.range, falloff: entry.spec.activation.falloff });
@@ -376,9 +450,10 @@ export class ShipModules {
     const events: ShipModuleEvent[] = [];
     for (const [id, modules] of this.ships) {
       for (const [key, entry] of modules) {
+        if (entry.retarget === target) delete entry.retarget;
         if (entry.target !== target) continue;
         events.push(...this.Events(id, key, entry, entry.cycle.StopNow(boundary, why)));
-        entry.target = null;
+        this.Untarget(entry);
       }
     }
     return events;
@@ -393,6 +468,13 @@ export class ShipModules {
     const tick = this.port.tickSeconds;
     return { cycleTicks: spec.activation.cycleTime / tick, reactivationTicks: spec.activation.reactivationDelay / tick };
   }
+}
+
+/**
+ * Whether a module is a turret: it fires at its ship's target, a ship or an object, at any range.
+ */
+function IsTurret(entry: ModuleEntry): boolean {
+  return entry.spec.activation.weapon === 'turret';
 }
 
 /**

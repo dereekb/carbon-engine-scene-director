@@ -25,6 +25,8 @@ import {
   fittingTypeIDs,
   MAX_FIT_LENGTH,
   mergeDogmaBundles,
+  type ModuleNumbers,
+  moduleNumbersOf,
   parseEftFit,
   readEftPropMod,
   selectFittedModules,
@@ -112,13 +114,31 @@ export interface ShipStatsAnswer {
 export interface FitSummary {
   readonly name: string;
   readonly hull: string;
-  readonly modules: readonly { readonly key: string; readonly name: string; readonly typeID: Maybe<number>; readonly slot: string; readonly category: string; readonly offline?: true; readonly charge?: string; readonly prop?: true }[];
+  /**
+   * The fitted modules. `cycleTime` (s, 2 decimals: a gun's rate of fire), `range` and `falloff` (m) are the
+   * evaluated module's (of `withActive` when given), each omitted when the module has none.
+   */
+  readonly modules: readonly FitSummaryModule[];
   readonly drones: readonly { readonly name: string; readonly quantity: number }[];
   /**
    * Names tools-core does not know; their lines play no part.
    */
   readonly unknown: readonly string[];
   readonly warnings: readonly string[];
+}
+
+export interface FitSummaryModule {
+  readonly key: string;
+  readonly name: string;
+  readonly typeID: Maybe<number>;
+  readonly slot: string;
+  readonly category: string;
+  readonly offline?: true;
+  readonly charge?: string;
+  readonly prop?: true;
+  readonly cycleTime?: number;
+  readonly range?: number;
+  readonly falloff?: number;
 }
 
 /**
@@ -255,6 +275,23 @@ interface AnswerFittedInput {
   readonly trace: boolean;
 }
 
+function FitModuleRow(module: FittedModule, numbers: Maybe<ModuleNumbers>): FitSummaryModule {
+  const { cycleTime, range, falloff } = numbers ?? {};
+  return {
+    key: module.key,
+    name: module.name,
+    typeID: module.typeID,
+    slot: module.slot,
+    category: module.category,
+    ...(module.offline ? { offline: true as const } : {}),
+    ...(module.charge ? { charge: module.charge.name } : {}),
+    ...(module.prop ? { prop: true as const } : {}),
+    ...(cycleTime ? { cycleTime: Math.round(cycleTime * 100) / 100 } : {}),
+    ...(range ? { range: Math.round(range) } : {}),
+    ...(falloff ? { falloff: Math.round(falloff) } : {})
+  };
+}
+
 function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
   const { hull, overrides, pilot, propMod, propModNote, fitted, propModule, active, trace } = input;
   const { fitting, bundle } = fitted;
@@ -291,7 +328,7 @@ function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
     fit: {
       name: fitting.name,
       hull: fitting.hull,
-      modules: fitting.modules.map((module) => ({ key: module.key, name: module.name, typeID: module.typeID, slot: module.slot, category: module.category, ...(module.offline ? { offline: true as const } : {}), ...(module.charge ? { charge: module.charge.name } : {}), ...(module.prop ? { prop: true as const } : {}) })),
+      modules: fitting.modules.map((module) => FitModuleRow(module, moduleNumbersOf(traced, bundle, module.key))),
       drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),
       unknown: fitting.unknown,
       warnings: fitting.warnings

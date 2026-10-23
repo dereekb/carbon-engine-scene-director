@@ -48,6 +48,21 @@ describe('ModuleCycle', () => {
     expect(Run(cycle, 16, 23)).toEqual(['end3@23', 'cycle4@23']);
   });
 
+  it('carries the exact, fractional tick each cycle starts and ends at', () => {
+    const cycle = new ModuleCycle('online', { cycleTicks: 7.5, reactivationTicks: 0 });
+    cycle.Request('active', { boundary: 3 });
+    const events: ModuleCycleEvent[] = [];
+    for (let tick = 3; tick <= 18; tick++) events.push(...cycle.Boundary(tick));
+    expect(events.map((event) => [`${event.kind}${event.cycle}@${event.tick}`, event.at])).toEqual([
+      ['on1@3', undefined],
+      ['cycle1@3', 3],
+      ['end1@11', 10.5],
+      ['cycle2@11', 10.5],
+      ['end2@18', 18],
+      ['cycle3@18', 18]
+    ]);
+  });
+
   it('waits out the reactivation delay, queueing an activation until it is ready', () => {
     const cycle = new ModuleCycle('online', { cycleTicks: 5, reactivationTicks: 30 });
     cycle.Request('active', { boundary: 0 });

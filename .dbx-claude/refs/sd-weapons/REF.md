@@ -8,8 +8,8 @@
 (`~/.claude/plans/turrets-on-every-ship-mount-from-the-parsed-fit-target-fire-on-the-weapon-cycle.md`) lands in four
 slices. **W1 is in**: the runtime-free half in `packages/scene` (default weapons, turret slots, charges, the weapon
 graphic) and the hub's `/weapon` route. **W2 is in**: the page's default fit, cargo charges, `WeaponLookup` and
-mounting (`ShipTurrets`). Still to come: W3 `set_target` and firing on the weapon cycle with impacts and the `Director.OnShot` hook, W4 turret
-sounds. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
+mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weapon cycle through `switch_modules`, the
+`Director.OnShot` hook, the cycle-exact draw and impacts. Still to come: W4 turret sounds. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
 ## Files
@@ -27,7 +27,11 @@ sounds. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 | `apps/viewer/src/lib/weapon-lookup.ts` | `WeaponLookup`: the page's `/weapon` lookups (node-tested) |
 | `apps/viewer/src/lib/turret-plan.ts` | `TurretMountsOf`, `TurretMountsKey`, `HighIndexOf`, `TurretFiles`, `TurretFileFacts`, the mount report types (node-tested) |
 | `apps/viewer/src/lib/turrets.ts` | `ShipTurrets` (runtime): mount, remount, the animated-hull rebind, report |
-| `apps/viewer/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `DriveTurrets` |
+| `weapons/target.ts` | `normalizeTargetCommand` (`set_target`), `CELESTIAL_TARGET_REFUSAL` |
+| `weapons/shots.ts` | `WeaponShot` (the Combat rules hook's event), `ShotTargetKind` |
+| `apps/viewer/src/lib/targets.ts` | `ShipTargets`: each ship's target, cleared on removal, warp and load (node-tested) |
+| `apps/viewer/src/lib/shots.ts` | `WeaponShotsOf`, `ShotQueue`: shots from cycle events, the cycle-exact draw time, counts, settle (node-tested) |
+| `apps/viewer/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `SetTarget`, `OnShot`, `SyncImpactState`, `DriveTurrets` |
 
 ## Default weapons (`defaultWeaponsOf`)
 
@@ -136,6 +140,91 @@ Apocalypse, Tornado, Revelation and Caracal (`add_ships` by hull name), then the
 - **Cost** (fleet view, 72 ships at ~12 km, 241 sets): frozen LOD 17.1 fps with turrets vs 21.3 without; `?turretlod=on`
   10.6 vs 26.8 (every set at LOD 1, 504 turret models drawn): the runtime's LOD is the slower one here, so frozen high
   detail stays the default (follow-up: turret LOD for large fleets).
+
+## Targets and firing (W3)
+
+**A ship's target** (`ShipTargets`, `Director.targets`) is live state, never in the document: a ship or an authored
+object (a document object with a Destiny ball). `celestial:<id>` is refused (`normalizeTargetCommand` and
+`switch_modules`; follow-up). Cleared: on load; when the target ship or object is removed ("its target is gone"); when
+either ship enters warp (EVE breaks the lock). No lock, no hostility check, no pilot delay (Combat rules / the Fleet
+targeting lever).
+
+- **`set_target { ships | fleet [, wing | squad], target | null }`** (page tool, `Director.SetTarget`): an unknown
+  target is a SceneError; skipped with a reason: the target ship itself, a ship in warp, a target in warp. Returns
+  `{ tick, target, ships: [{ id, target, previous?, turrets, retargeted }], skipped }` (`retargeted`: its running turrets
+  that follow the change).
+- **Activation**: `moduleActivationOf` lets turrets (`weapon: 'turret'`) run: targeted, `reach` Infinity (EVE refuses
+  no turret by range: shots past falloff miss, Combat rules), rate of fire = the dogma `speed` with skills. Launchers
+  keep `LAUNCHER_REFUSAL` ("missile launchers fire in the Missiles entry"). Selectors `turret` / `launcher`.
+- **`switch_modules` on turrets**: a given `target` becomes the ship's target first (as `set_target`, and it may be an
+  object); without one, the ship's target; neither: "it needs a target: set_target or switch_modules target". Other
+  targeted modules still need an explicit ship target. Every existing rule holds (no activation in warp, a stop at
+  once when the target goes or warps, a stop on entering warp, reactivation delay, group limits, pilot delay).
+- **Retarget** (`ShipModules.Retarget`, from `SetShipTarget`): a running turret takes a new target at its next cycle
+  start (row `nextTarget` until then; the cycle `end` event keeps the old target, the `cycle` event carries the new);
+  a starting one at once; null stops it at its cycle end ("its target was cleared").
+
+### Shots: the Combat rules hook and the cadence
+
+- Every turret `cycle` event with a target becomes a `WeaponShot` (`WeaponShotsOf`): `{ ship, module, typeID, name,
+  charge?, target, targetKind, cycle, tick, at, distance, effectiveness, missed? }`; `at` is the cycle's exact
+  fractional master tick (`ModuleCycle` events carry it), `effectiveness` the falloff half of EVE's hit chance.
+- **`Director.OnShot(listener)`** returns an unsubscribe. Listeners run at the boundary, in registration order (a
+  throwing one is logged), before the shot draws: Combat rules sets `missed`, applies damage, calls `SyncImpactState`.
+  This entry registers none: every shot draws as a hit.
+- **Drawing** (`ShotQueue`): a shot draws at scene clock T(boundary) + (at + 1 − tick) ticks, so a 1.8 s gun fires every
+  1.8 s on screen and every draw follows its boundary event. Dropped at draw time when its shooter or target is gone,
+  either is in warp, or its set is not mounted. Otherwise `ShipTurrets.Fire`: `SetTargetObject` on the shot's own
+  target (a queued shot of an old target still draws there), `SetShotMissed(missed)`, `EnterStateFiring()`.
+- **Settle**: after a turret's `off`, its set returns to TARGETING (or IDLE without a target) once its queued shots
+  drew and its last burst ran (`fx.GetFiringDuration()` after the draw).
+- The queue, the counts and `OnShot` run without a renderer too (headless shot counts; W4's sounds).
+
+### The turret state machine (`ShipTurrets`)
+
+- `Aim(id, target)`: the ship's sets `SetTargetObject(<drawn target>)` + `EnterStateTargeting()`; null:
+  `target.SetTargetable(null)` + `EnterStateIdle()` (`SetTargetObject(null)` does nothing). Sets mid-burst keep FIRING.
+- `Frame()` (each frame, `DriveTurrets`): re-aims a set whose target's drawn object changed (a rebuilt hull, a target
+  that finished building, a fresh remount). The aim survives a rebuild (`Remove` keeps it; `Aim(id, null)` forgets it).
+- `Fire` / `Settle` above; `MountOf` reports `aim: idle | targeting | firing`; `Report` adds `targeting`, `firing` and
+  `bursts`.
+
+### Impacts
+
+`Director.SyncImpactState(id)` calls the drawn hull's or object's `SetImpactDamageState(shield, armor, hull)` with the
+damage model's remaining fractions (`DamageModel.Fractions`; (1, 1, 1) without one): at full HP, shield impacts. It
+runs after a ship's build, an object's build and repairs landing; Combat rules calls it after damage. The impacts
+themselves are the runtime's (the firing effect calls the target's `CreateImpact`); a miss skips them.
+
+### Real-GPU evidence: firing (2026-10-23, Windows Chrome, RTX 40 series, SDE 3632936)
+
+Own hub on 5521; screenshots `w3-*.jpeg` in `.scratch/turrets-gpu/` on dbxpc. `stage_engagement` at 6 km: red Rifter
+× 3, Ferox × 2, Megathron; blue Punisher × 3, Tornado, Apocalypse, Revelation (all default guns); then a TFIs-fit TFI
+and a Caracal, `set_target` per fleet on the other's FC, `switch_modules { modules: ['turret'], state: 'active' }` per
+fleet, a Punisher ordered to orbit the TFI at 2 km with the TFI on it.
+
+- **Every family draws**: autocannon muzzle flashes (Rifter), 800mm tracers with impact flares (TFI), 250mm rail
+  tracers (Ferox), blaster bolts (Megathron), small and Mega pulse beams, the Revelation's Dual Giga Pulse beam; the
+  TFI's tracers keep landing on the Punisher orbiting it. Shield impacts glow on the hit hulls (a Megathron under another's blasters).
+- **Numbers**: 16 ships, 84 sets, 0 failed; 79 firing (the Caracal's 5 launchers stay out: "it fits no module matching
+  it" for `turret`); 7,527 bursts by the end; 57-60 fps with verify-page and the test suites running on the same box;
+  `gpuErrors` 0; no page warnings; `audio.gameObjects` 1 (the listener), unchanged by the firing.
+- **An Astrahus** (`add_objects` 8 km off the red FC: its 45 km SDE ball radius, `sofRadius` 21.9 km, so the drawn hull
+  is ~30 km off): the red fleet's sets aim and fire on its damage locators (end points on its near face), but no hit
+  shows on it. Its `impactOverlay` has no shield mesh (`mesh` null, `shieldIsEllipsoid` false) where a ship's has one,
+  so full-shield hits likely have nothing to draw on (follow-up).
+
+### get_state and tools
+
+- Per ship: `target: { id, kind: ship | object, distance } | null`, `shots` (since the load, omitted at 0); weapon rows
+  `cycleTime` (s, while running), `nextTarget`, `mount.aim`; `renderer.turrets` `targeting`, `firing`, `bursts`.
+- `ship_stats` fit rows carry `cycleTime`, `range` and `falloff` (`moduleNumbersOf` on the evaluated ship).
+- verify-page (headless, 2026-10-23): "set_target aims and switch_modules fires turrets on their cycle" (a default
+  Rifter's three guns: `cycleTime` equals ship_stats', shots over 12 s ≈ 3 × elapsed / cycleTime, none after the
+  stop; the scene gives the ship `type: 'Rifter'` and its `mf4_t1` DNA: a DNA-only ship flies the lowest type id on its
+  hull, and the `mf1_t1` the older checks use is the Slasher's, with other traits), "weapons follow a new target and stop when it is cleared", "a removed or warping target clears and stops the
+  guns", "turrets fire at an object" (an Astrahus; a celestial refused), "launchers are refused" (a Caracal's
+  defaults), "turrets are not refused by range" (150 km, effectiveness 0).
 
 ## Charges (`loadCargoCharges`)
 

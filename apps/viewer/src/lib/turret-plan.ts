@@ -55,8 +55,15 @@ export interface TurretMountReport {
    * Turret models drawn (one per lettered locator), once mounted.
    */
   readonly models?: number;
+  /**
+   * A mounted set's aim: `idle` (no target, or its target not drawn), `targeting` or `firing` (a burst drawn since its
+   * weapon last settled).
+   */
+  readonly aim?: TurretAim;
   readonly error?: string;
 }
+
+export type TurretAim = 'idle' | 'targeting' | 'firing';
 
 const HIGH_KEY = /^high-(\d+)$/u;
 

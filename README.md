@@ -21,7 +21,9 @@ What works today:
   traits: fitted ships fly by them, `get_state` reports them, `ship_stats` evaluates
   any fit, and activation plays the client's module effects and sounds.
 - **Weapons**: every ship mounts its fit's turrets on its hull's hardpoints, or default
-  guns for its hull and race (with a charge) when it has no fit.
+  guns for its hull and race (with a charge) when it has no fit; `set_target` points
+  them at a ship or object, and they fire once per weapon cycle with the game's
+  firing effects and impacts.
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.
@@ -40,7 +42,7 @@ What works today:
   letterbox and a clean HUD, directed by Claude over MCP: hardpoint listing,
   shots, sequences and a named shot library.
 
-Combat and timelines come in later phases; the
+Damage, explosions and timelines come in later phases; the
 document's `orders` and `timeline` fields stay reserved until then.
 
 ```text
@@ -140,7 +142,8 @@ connected tab.
 | `get_state` | page | everything live: renderer, ships' motion, orders, warps, boosters, prop mods, fleets and their formation, audio, location and its targets, objects |
 | `order_ship` | page | a live movement order on a point, ship, object or `celestial:<id>`, or `rejoin` for a fleet member |
 | `switch_prop_mods` | page | prop mods on or off, live, for ships, a fleet, a wing or a squad |
-| `switch_modules` | page | fitted modules active, online or offline on EVE's timing (hardeners, reps, remote reps on a target, siege, ...) |
+| `switch_modules` | page | fitted modules active, online or offline on EVE's timing (hardeners, reps, remote reps on a target, siege, guns firing at the ship's target, ...) |
+| `set_target` | page | gives ships, a fleet, a wing or a squad a ship or object to aim and fire their turrets at (null clears it) |
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
@@ -188,7 +191,7 @@ behavior, the rules, the files and the gotchas of one area:
 | The cinematic camera: hardpoints, shots, moves, waypoints, letterbox | [`sd-cinema`](.dbx-claude/refs/sd-cinema/REF.md) |
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
 | Fittings: EFT fits on ships, the parser, fit keys | [`sd-fittings`](.dbx-claude/refs/sd-fittings/REF.md) |
-| Weapons: default guns, turret slots, charges, the weapon route | [`sd-weapons`](.dbx-claude/refs/sd-weapons/REF.md) |
+| Weapons: default guns, turret slots, charges, the weapon route, targets, firing, shots, impacts | [`sd-weapons`](.dbx-claude/refs/sd-weapons/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

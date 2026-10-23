@@ -311,18 +311,22 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   `offline` stops a running module at its cycle end and then takes it offline; the rest go offline at the next boundary.
   A pilot `delay` (`toPilotDelays`, key `modules|fleet|wing|squad`) queues the switch to its tick (`respondsIn`).
 - **Events**: `on`, `cycle` (cycle n starts), `end` (cycle n ends), `off` (with `why` when it stopped on its own). A
-  cycle boundary between ticks fires at the first tick boundary at or after it. Online / offline transitions fire no
+  cycle boundary between ticks fires at the first tick boundary at or after it; `cycle` and `end` carry `at`, the exact
+  fractional master tick (cycle n starts at since + (n − 1) × cycleTicks), which the turret shots draw on (`sd-weapons`). Online / offline transitions fire no
   event: the director compares the live states instead (below).
 - **What runs** (`moduleActivationOf`, from the ship evaluated with its live states, so skills, hull bonuses and triage
   apply): category 1 and 2 default effects activate; cycle = the default effect's duration (10 s when it has none).
-  Refused: weapons (the Turrets entry), MJD 1189, MJFG 1533, cloaks 330, cynos 658, bubbles 899, smartbombs 72, ECM
+  Turrets run (`weapon: 'turret'`, `sd-weapons`); refused: launchers (`LAUNCHER_REFUSAL`, the Missiles entry), MJD 1189, MJFG 1533, cloaks 330, cynos 658, bubbles 899, smartbombs 72, ECM
   bursts 80, passive modules. Webs, scrams, points, neuts, nos, EWAR and cap transmitters cycle on their target without
   effect yet; command bursts and cap boosters cycle without effect (`note`).
 - **Group limits**: activation beyond the evaluated `maxGroupActive` (763) is refused; modules beyond `maxGroupOnline`
   (978) start offline with a note, and onlining one is refused.
 - **Targeted modules** (default effect category 2) need `target`: another ship in the scene, no lock. Distance is
-  surface to surface on the EVE radii (`DestinyWorld.SurfaceDistance`). Refused beyond `moduleReach` (optimal + 2 ×
-  falloff), on its own ship, on a ship in warp, or while running on another target. `effectiveness` =
+  surface to surface on the EVE radii (`DestinyWorld.SurfaceDistance`). Refused beyond `activation.reach`
+  (`moduleReach`: optimal + 2 × falloff; Infinity for turrets and untargeted modules), on its own ship, on a ship in
+  warp, or while running on another target. **Turrets** differ (`sd-weapons`): their target is the ship's
+  (`set_target`), may be an authored object (port `HasObject`), and a running one given another target retargets at
+  its next cycle (`ShipModules.Retarget`) instead of being refused. `effectiveness` =
   `0.5^((max(0, d − optimal) / falloff)²)` scales repairs. A running one whose target drifts out of reach stops at its
   cycle end (`its target is out of range`); target removed or in warp: it stops at once (`its target is gone` /
   `entered warp`).
@@ -342,6 +346,8 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   (key, type id), a running module that vanished stops (`refitted`) and the flight is recomputed once. `ModuleEvents`
   (each boundary, warp, removal) re-flies every fitted ship whose live-states key differs from the one it flies, then
   lands the repairs. Cost: a key per fitted ship per tick; the evaluations are memoized by fit and states.
+- **Selectors** (`selectFittedModules`): a key, a category, a weapon kind (`turret`, `launcher`), `all`, or a name.
+  A running module's row carries `cycleTime` (s, 2 decimals); a running turret's `nextTarget` until it retargets.
 - **Result**: `{ tick, state, ships: [{ id, modules: [{ module, name, state, at?, stopsIn?, activatesIn?, respondsIn?,
   target?, effectiveness? }] }], skipped: [{ id, module?, reason }] }`. Skipped: a ship without a resolved fit, a
   selector matching none of a ship's modules (`module` = the selector), every refusal (`module` = the key). A `target`

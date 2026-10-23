@@ -364,6 +364,10 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly boundingSphereRadius: number;
     display: boolean;
     StartControllers(): void;
+    /**
+     * Arms the impact overlay with the remaining shield, armor and hull fractions; no impacts draw before a call.
+     */
+    SetImpactDamageState(shield: number, armor: number, hull: number, doCreateArmorImpacts?: boolean): void;
   }
 
   /**

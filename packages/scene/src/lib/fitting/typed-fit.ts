@@ -209,7 +209,7 @@ export interface SelectFittedModulesResult {
 
 /**
  * The fitted modules a list of selectors names. A selector is a module key (`mid-2`), a category keyword
- * (`hardener`, MODULE_CATEGORIES), `all`, or a module's exact name in any case.
+ * (`hardener`, MODULE_CATEGORIES), a weapon kind (`turret`, `launcher`), `all`, or a module's exact name in any case.
  *
  * @param fitting - The typed fit (its modules).
  * @param selectors - The selectors.
@@ -220,7 +220,7 @@ export function selectFittedModules(fitting: Pick<ShipFitting, 'modules'>, selec
   const unmatched: string[] = [];
   for (const selector of selectors) {
     const word = selector.trim().toLowerCase();
-    const matches = fitting.modules.filter((module) => word === ALL_MODULES_SELECTOR || module.key === word || module.category === word || module.name.toLowerCase() === word);
+    const matches = fitting.modules.filter((module) => word === ALL_MODULES_SELECTOR || module.key === word || module.category === word || module.weapon === word || module.name.toLowerCase() === word);
     if (!matches.length) unmatched.push(selector);
     for (const module of matches) picked.add(module);
   }

@@ -147,6 +147,13 @@ describe('ship_stats with a fit', () => {
       ['high-0', 'remote-armor-repairer', false, false]
     ]);
     expect(answer.fit?.unknown).toEqual(['Not A Module']);
+    const row = (key: string) => answer.fit?.modules.find((module) => module.key === key);
+    expect(row('high-0')).toMatchObject({ cycleTime: expect.any(Number), range: expect.any(Number), falloff: expect.any(Number) });
+    expect(row('high-0')?.range).toBeGreaterThan(1000);
+    expect(row('mid-0')).toMatchObject({ cycleTime: 7.5 });
+    expect(row('mid-0')?.range).toBeUndefined();
+    expect(row('low-1')?.falloff).toBeUndefined();
+    expect(row('mid-1')?.cycleTime).toBeUndefined();
     expect(answer.stats.math).toBe('dogma');
     expect(answer.stats.propModActive).toBe(false);
     expect(answer.stats.defense?.armor.resonances.em).toBeLessThan(0.5);

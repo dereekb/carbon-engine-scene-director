@@ -102,6 +102,8 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly propMod?: Maybe<ShipPropModState>;
   readonly fit?: Maybe<ShipFitState>;
   readonly fitNote?: string;
+  readonly target?: Maybe<{ readonly id: string; readonly kind: 'ship' | 'object'; readonly distance: Maybe<number> }>;
+  readonly shots?: number;
   readonly defense?: Maybe<ShipDefenseState>;
   readonly capacitor?: Maybe<ShipCapacitorState>;
 }
@@ -130,7 +132,9 @@ interface ShipModuleRowState {
   readonly cycle?: { readonly number: number; readonly endsIn: number };
   readonly stopsIn?: number;
   readonly target?: string;
+  readonly nextTarget?: string;
   readonly effectiveness?: number;
+  readonly cycleTime?: number;
   readonly charge?: string;
   readonly mount?: { readonly locator?: string; readonly state: string; readonly models?: number; readonly error?: string };
   readonly prop?: true;
@@ -143,8 +147,18 @@ interface ShipModuleRowState {
 interface SwitchModulesResult {
   readonly tick: number;
   readonly state: string;
-  readonly ships: { readonly id: string; readonly modules: { readonly module: string; readonly name: string; readonly state: string; readonly at?: number; readonly stopsIn?: number; readonly target?: string; readonly effectiveness?: number }[] }[];
+  readonly ships: { readonly id: string; readonly modules: { readonly module: string; readonly name: string; readonly state: string; readonly at?: number; readonly stopsIn?: number; readonly target?: string; readonly nextTarget?: string; readonly effectiveness?: number; readonly cycleTime?: number }[] }[];
   readonly skipped: { readonly id: string; readonly module?: string; readonly reason: string }[];
+}
+
+/**
+ * set_target's answer (the viewer's director.ts SetTargetResult).
+ */
+interface SetTargetResult {
+  readonly tick: number;
+  readonly target: Maybe<string>;
+  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly turrets: number; readonly retargeted: number }[];
+  readonly skipped: { readonly id: string; readonly reason: string }[];
 }
 
 type DamageResists = Readonly<Record<'em' | 'thermal' | 'kinetic' | 'explosive', number>>;
@@ -1116,6 +1130,144 @@ try {
     const rifter = ShipIn(state, 'rifter').physics;
     for (const key of ['mass', 'agility', 'maxVelocity', 'alignTime', 'signatureRadius'] as const) Expect(rifter && Close(rifter[key], answer.stats[key]), `${key}: page ${rifter?.[key]}, ship_stats ${answer.stats[key]}`);
     return `rifter 3 x 200mm AutoCannon II (EMP S), punisher 4 x Small Focused Pulse Laser II (Multifrequency S), both on dogma with a mid-0 prop row; the rifter flies ship_stats' ${rifter?.maxVelocity} m/s`;
+  });
+
+  // Turrets: a default-gunned Rifter with Punishers at 5 km, 6 km and 150 km, a Caracal (default launchers) and,
+  // per check, an Astrahus. Each check loads the scene itself, so --only runs any one.
+  const TURRET_GUN = '200mm AutoCannon II';
+  const TURRET_SCENE = {
+    name: 'verify-turrets',
+    ships: [
+      // The type pins ship_stats' Rifter: a DNA-only ship flies the lowest type id on its hull (mf1_t1 is the Slasher).
+      { id: 'rifter', dna: 'mf4_t1:minmatarbase:minmatar', type: 'Rifter', position: [0, 0, 0] },
+      { id: 'punisher', dna: 'af1_t1:amarrbase:amarr', type: 'Punisher', position: [5000, 0, 0] },
+      { id: 'punisher-2', dna: 'af1_t1:amarrbase:amarr', type: 'Punisher', position: [0, 0, -6000] },
+      { id: 'far', dna: 'af1_t1:amarrbase:amarr', type: 'Punisher', position: [150000, 0, 0] }
+    ]
+  };
+  const Guns = (state: ViewerState, id = 'rifter'): ShipModuleRowState[] => ShipIn(state, id).fit?.modules.filter((module) => module.name === TURRET_GUN) ?? [];
+  const Shots = (state: ViewerState, id = 'rifter'): number => ShipIn(state, id).shots ?? 0;
+  let turretGunTime = Number.NaN;
+  const LoadTurretScene = async (caracal = false): Promise<ViewerState> => {
+    const fit = ['[Rifter, Guns]', '[Empty Low slot]', '', '[Empty Med slot]', '', ...Array.from({ length: 3 }, () => `${TURRET_GUN}, EMP S`)].join('\n');
+    const stats = await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter', fit }).catch(SkipWithoutSde);
+    turretGunTime = stats.fit?.modules.find((module) => module.key === 'high-0')?.cycleTime ?? Number.NaN;
+    Expect(turretGunTime > 0, `ship_stats has no cycleTime for high-0: ${JSON.stringify(stats.fit?.modules)}`);
+    await call('load_scene', { scene: TURRET_SCENE });
+    if (caracal) await call<AddShipsResult>('add_ships', { hull: 'Caracal', count: 1, near: { ship: 'rifter', range: 4000 } });
+    const ids = [...TURRET_SCENE.ships.map((ship) => ship.id), ...(caracal ? ['caracal-01'] : [])];
+    return WaitFor('the turret scene resolves its default fits', 60, (polled) => {
+      const pending = ids.map((id) => ShipIn(polled, id)).find((ship) => ship.fit?.math !== 'dogma');
+      return pending ? `${pending.id}: ${JSON.stringify(pending.fit?.note ?? pending.fitNote ?? pending.fit)}` : null;
+    });
+  };
+  const GunsRun = (target: string, seconds = 10): Promise<ViewerState> =>
+    WaitFor(`the guns run on ${target}`, seconds, (polled) => {
+      const guns = Guns(polled);
+      return guns.length === 3 && guns.every((gun) => gun.state === 'active' && gun.target === target && !gun.nextTarget) ? null : JSON.stringify(guns);
+    });
+  const GunsStopped = (why: RegExp, seconds = 10): Promise<ViewerState> =>
+    WaitFor(`the guns stop (${why.source})`, seconds, (polled) => {
+      const guns = Guns(polled);
+      return guns.every((gun) => (gun.state === 'online' || gun.state === 'reactivating') && why.test(gun.note ?? '')) ? null : JSON.stringify(guns);
+    });
+
+  await Check('set_target aims and switch_modules fires turrets on their cycle', async () => {
+    await LoadTurretScene();
+    const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
+    Expect(JSON.stringify(set.ships) === JSON.stringify([{ id: 'rifter', target: 'punisher', turrets: 3, retargeted: 0 }]) && !set.skipped.length, JSON.stringify(set));
+    const target = ShipIn(await call<ViewerState>('get_state'), 'rifter').target;
+    Expect(target?.id === 'punisher' && target.kind === 'ship' && (target.distance ?? 0) > 4000 && (target.distance ?? 0) < 5000, JSON.stringify(target));
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
+    const switched = on.ships[0]?.modules ?? [];
+    Expect(switched.map((module) => module.module).join() === 'high-0,high-1,high-2' && switched.every((module) => module.state === 'activating' && module.target === 'punisher') && !on.skipped.length, JSON.stringify(on));
+    const first = await GunsRun('punisher');
+    for (const gun of Guns(first)) Expect(Math.abs((gun.cycleTime ?? 0) - turretGunTime) <= 0.01, `cycleTime ${gun.cycleTime}, ship_stats ${turretGunTime}`);
+    const [shots0, t0] = [Shots(first), first.simulation.seconds];
+    const later = await WaitFor('12 s of fire', 30, (polled) => (polled.simulation.seconds >= t0 + 12 ? null : `${polled.simulation.seconds} s`));
+    const [fired, elapsed] = [Shots(later) - shots0, later.simulation.seconds - t0];
+    const expected = (3 * elapsed) / turretGunTime;
+    Expect(Math.abs(fired - expected) <= 4, `${fired} shots in ${elapsed} s, expected about ${expected.toFixed(1)}`);
+    const off = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'online' });
+    Expect(
+      off.ships[0]?.modules.every((module) => module.state === 'stopping' || module.state === 'online'),
+      JSON.stringify(off)
+    );
+    const stopped = await GunsStopped(/.*/u);
+    const after = Shots(stopped);
+    const idle = await WaitFor('3 s with the guns stopped', 15, (polled) => (polled.simulation.seconds >= stopped.simulation.seconds + 3 ? null : `${polled.simulation.seconds} s`));
+    Expect(Shots(idle) === after, `shots ${after} -> ${Shots(idle)} after the stop`);
+    return `3 x ${TURRET_GUN} at ${turretGunTime} s a cycle (ship_stats' number): ${fired} shots in ${elapsed.toFixed(1)} s (expected ${expected.toFixed(1)}), none after the stop`;
+  });
+
+  await Check('weapons follow a new target and stop when it is cleared', async () => {
+    await LoadTurretScene();
+    await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
+    await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
+    await GunsRun('punisher');
+    const moved = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher-2' });
+    Expect(moved.ships[0]?.previous === 'punisher' && moved.ships[0].retargeted === 3, JSON.stringify(moved));
+    const retargeted = await GunsRun('punisher-2', 6);
+    const cleared = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: null });
+    Expect(cleared.ships[0]?.target === null && cleared.ships[0].previous === 'punisher-2', JSON.stringify(cleared));
+    const stopped = await GunsStopped(/its target was cleared/u);
+    Expect(ShipIn(stopped, 'rifter').target === null, JSON.stringify(ShipIn(stopped, 'rifter').target));
+    return `retargeted onto punisher-2 at the next cycle (${Shots(retargeted)} shots by then), stopped at the cycle end once cleared`;
+  });
+
+  await Check('a removed or warping target clears and stops the guns', async () => {
+    await LoadTurretScene();
+    await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'punisher' });
+    await GunsRun('punisher');
+    await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'punisher' }] });
+    const gone = await GunsStopped(/its target is gone/u);
+    Expect(ShipIn(gone, 'rifter').target === null, JSON.stringify(ShipIn(gone, 'rifter').target));
+    await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'punisher-2' });
+    await GunsRun('punisher-2');
+    await call('order_ship', { id: 'punisher-2', order: { type: 'warp', point: [0, 0, -3000000] } });
+    const warped = await GunsStopped(/its target entered warp/u, 40);
+    Expect(ShipIn(warped, 'rifter').target === null, JSON.stringify(ShipIn(warped, 'rifter').target));
+    return 'removing the target stopped the guns at once; its warp broke the target and stopped them';
+  });
+
+  await Check('turrets fire at an object', async () => {
+    await LoadTurretScene();
+    await call<AddObjectsResult>('add_objects', { objects: [{ type: 'Astrahus', id: 'astra', near: { ship: 'rifter', range: 20000 } }] });
+    const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'astra' });
+    Expect(set.ships[0]?.target === 'astra', JSON.stringify(set));
+    const target = ShipIn(await call<ViewerState>('get_state'), 'rifter').target;
+    Expect(target?.kind === 'object' && Math.abs((target.distance ?? 0) - 20000) <= 100, JSON.stringify(target));
+    await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
+    const firing = await WaitFor('shots at the Astrahus', 10, (polled) => (Shots(polled) >= 3 && Guns(polled).every((gun) => gun.target === 'astra') ? null : JSON.stringify({ shots: Shots(polled), guns: Guns(polled) })));
+    const celestial = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'celestial:60003760' }).then(
+      () => 'accepted',
+      (error: unknown) => ErrorMessage(error)
+    );
+    Expect(/cannot be targeted yet/u.test(celestial), celestial);
+    return `${Shots(firing)} shots at the Astrahus ${target?.distance} m off (surface to surface); a celestial is refused`;
+  });
+
+  await Check('launchers are refused', async () => {
+    await LoadTurretScene(true);
+    const bare = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
+    Expect(bare.skipped.length === 3 && bare.skipped.every((skip) => skip.reason === 'it needs a target: set_target or switch_modules target'), JSON.stringify(bare.skipped));
+    const launchers = await call<SwitchModulesResult>('switch_modules', { ships: ['caracal-01'], modules: ['launcher'], state: 'active', target: 'punisher' });
+    Expect(!launchers.ships.length && launchers.skipped.length === 5 && launchers.skipped.every((skip) => skip.reason === 'missile launchers fire in the Missiles entry'), JSON.stringify(launchers));
+    return "the Caracal's 5 default launchers refused with the Missiles note; turrets without a target refused";
+  });
+
+  await Check('turrets are not refused by range', async () => {
+    await LoadTurretScene();
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'far' });
+    Expect(on.ships[0]?.modules.length === 3 && !on.skipped.length, JSON.stringify(on));
+    const running = await GunsRun('far');
+    const target = ShipIn(running, 'rifter').target;
+    Expect(target?.id === 'far' && (target.distance ?? 0) > 149000, JSON.stringify(target));
+    Expect(
+      Guns(running).every((gun) => (gun.effectiveness ?? 1) < 0.001),
+      JSON.stringify(Guns(running))
+    );
+    return `fires at ${target?.distance} m with effectiveness ${Guns(running)[0]?.effectiveness}`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

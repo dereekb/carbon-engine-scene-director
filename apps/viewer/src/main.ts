@@ -247,7 +247,7 @@ async function Start(): Promise<void> {
     presentation.Apply(liveDirector?.cinema.Presentation() ?? {});
     liveDirector?.DriveAudio(now);
     liveDirector?.DriveModuleEffects(now);
-    liveDirector?.DriveTurrets();
+    liveDirector?.DriveTurrets(now);
     engine?.Frame(timestamp, now);
     requestAnimationFrame(frame);
   };

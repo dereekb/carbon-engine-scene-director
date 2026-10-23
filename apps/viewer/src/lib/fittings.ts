@@ -700,8 +700,16 @@ export interface ShipModuleRowState {
   readonly readyIn?: number;
   readonly respondsIn?: number;
   readonly target?: string;
+  /**
+   * A running turret's next target (it retargets at its next cycle).
+   */
+  readonly nextTarget?: string;
   readonly targetDistance?: number;
   readonly effectiveness?: number;
+  /**
+   * While it runs: seconds per cycle, a gun's rate of fire.
+   */
+  readonly cycleTime?: number;
   /**
    * A weapon's turret set on the drawn hull (with a renderer).
    */

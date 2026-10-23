@@ -41,6 +41,11 @@ export interface ModuleCycleEvent {
    */
   readonly cycle: number;
   /**
+   * `cycle` and `end` events: the exact, fractional master tick that cycle starts or ends at (at most `tick`); a
+   * cycle n starts at since + (n - 1) × cycleTicks.
+   */
+  readonly at?: number;
+  /**
    * Why a module stopped on its own (warp, its target gone, refitted).
    */
   readonly why?: string;
@@ -203,7 +208,7 @@ export class ModuleCycle {
       this.since = boundary;
       this.cycles = 1;
       this.note = null;
-      events.push({ kind: 'on', tick: boundary, cycle: 1 }, { kind: 'cycle', tick: boundary, cycle: 1 });
+      events.push({ kind: 'on', tick: boundary, cycle: 1 }, { kind: 'cycle', tick: boundary, cycle: 1, at: boundary });
     } else if (this.running) {
       events.push(...this.Cycles(boundary));
     } else if (this.state === 'offline' && this.onlineNext) {
@@ -318,13 +323,13 @@ export class ModuleCycle {
     const cycle = Math.max(this.timing.cycleTicks, CYCLE_EPSILON);
     let end = Math.ceil(since + this.cycles * cycle - CYCLE_EPSILON);
     while (end <= boundary && this.running) {
-      events.push({ kind: 'end', tick: boundary, cycle: this.cycles });
+      events.push({ kind: 'end', tick: boundary, cycle: this.cycles, at: since + this.cycles * cycle });
       if (this.state === 'stopping' && (this.stopAt ?? end) <= end) {
         events.push({ kind: 'off', tick: boundary, cycle: this.cycles });
         this.Stopped(boundary);
       } else {
         this.cycles += 1;
-        events.push({ kind: 'cycle', tick: boundary, cycle: this.cycles });
+        events.push({ kind: 'cycle', tick: boundary, cycle: this.cycles, at: since + (this.cycles - 1) * cycle });
         end = Math.ceil(since + this.cycles * cycle - CYCLE_EPSILON);
       }
     }

@@ -4,7 +4,7 @@ import { tfisComposition } from '../compositions/compositions.spec-helper';
 import type { FitTypeAnswer } from './dogma-bundle';
 import { parseEftFit } from './eft';
 import { DOGMA_FIXTURE, fixtureAnswer, fixtureTypeID } from './fitting.spec-helper';
-import { eftTypeNames, fittingTypeIDs, type ShipFitting, toDogmaModules, typeEftFit } from './typed-fit';
+import { eftTypeNames, fittingTypeIDs, selectFittedModules, type ShipFitting, toDogmaModules, typeEftFit } from './typed-fit';
 
 const FITS = tfisComposition().fits ?? {};
 
@@ -61,6 +61,15 @@ describe('typeEftFit', () => {
     expect(typed('[Caracal, x]\nHeavy Missile Launcher II').modules[0]).toMatchObject({ category: 'weapon', weapon: 'launcher' });
     expect(typeEftFit(parseEftFit(FITS['tfi']), { answer: fixtureAnswer }).modules.some((module) => module.weapon)).toBe(false);
     expect(fittingTypeIDs(tfi)).toEqual(expect.arrayContaining(['Barrage L', 'Hail L', 'Republic Fleet EMP L'].map(fixtureTypeID)));
+  });
+
+  it('selects turrets and launchers by their kind', () => {
+    const tfi = typed(FITS['tfi']);
+    const turrets = selectFittedModules(tfi, ['turret']);
+    expect(turrets.modules.map((module) => module.key)).toEqual(['high-0', 'high-1', 'high-3', 'high-4', 'high-6', 'high-7']);
+    expect(turrets.unmatched).toEqual([]);
+    expect(selectFittedModules(tfi, ['Launcher']).modules.map((module) => module.weapon)).toEqual(tfi.modules.filter((module) => module.weapon === 'launcher').map(() => 'launcher'));
+    expect(selectFittedModules(typed('[Caracal, x]\nHeavy Missile Launcher II'), ['launcher', 'turret'])).toMatchObject({ modules: [{ weapon: 'launcher' }], unmatched: ['turret'] });
   });
 
   it("keeps the Damnation's lowercase /offline bursts offline and its cargo bursts out of the fit", () => {

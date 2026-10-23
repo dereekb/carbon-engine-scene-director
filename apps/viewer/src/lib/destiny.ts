@@ -1065,15 +1065,16 @@ export class DestinyWorld {
   }
 
   /**
-   * The surface-to-surface distance between two ships' balls, on their EVE radii (negative when they overlap).
+   * The surface-to-surface distance between two balls, on their EVE radii (negative when they overlap): ships, or an
+   * authored object for either (a turret's target).
    *
-   * @param a - One ship id.
+   * @param a - One ship or object id.
    * @param b - The other.
    * @returns Metres, or null when either has no ball.
    */
   SurfaceDistance(a: string, b: string): Maybe<number> {
-    const first = this.ships.get(a);
-    const second = this.ships.get(b);
+    const first = this.TargetEntry(a);
+    const second = this.TargetEntry(b);
     const ballA = first ? this.master.GetBall(first.ballId) : null;
     const ballB = second ? this.master.GetBall(second.ballId) : null;
     return ballA && ballB ? Math.hypot(ballA.x - ballB.x, ballA.y - ballB.y, ballA.z - ballB.z) - ballA.radius - ballB.radius : null;

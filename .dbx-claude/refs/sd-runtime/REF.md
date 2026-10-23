@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`. The full facade drags in the renderer and the `runtime-dist/`
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`. The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)
@@ -147,6 +147,16 @@ Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `Eve
 - **Paint**: `SetupTurretMaterial` (`ships.ts`) uses the shared SOF; a faction awaits its data.
 - **Retire**: `EveTurretSet` is in `SHIP_RESOURCE_TYPES`; the director takes a ship's sets off (`ShipTurrets.Remove`)
   before `RetireShips`.
+- **Aim**: `SetTargetObject(obj)` takes a built hull or SOF object and scales the firing effect to it; the ship's own
+  update slews the set every frame (no host call). `SetTargetObject(null)` does nothing: clear with
+  `set.target.SetTargetable(null)`, then `EnterStateIdle()`. `EnterStateTargeting()` from IDLE starts tracking.
+- **Fire**: one `EnterStateFiring()` is one burst from the set's turret best facing a damage locator, after a random
+  delay up to 0.6 s, drawn for the effect's `GetFiringDuration()` (1.5 s for the 425mm); the state then stays FIRING
+  until the page calls `EnterStateTargeting` / `EnterStateIdle` (`ShipTurrets.Settle`). `SetShotMissed(true)` just
+  before makes a miss (no impact, the end point past the target).
+- **The impact gate**: a target's `CreateImpact` draws through its SOF-built `impactOverlay` only once
+  `SetImpactDamageState(shield, armor, hull)` (remaining fractions) has been called (`Director.SyncImpactState`;
+  declared on `EveShip2` and `EveSpaceObject2`); without a call no impacts draw at all.
 
 ## Audio (`audio.ts`)
 
