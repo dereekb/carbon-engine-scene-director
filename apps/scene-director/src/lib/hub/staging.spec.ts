@@ -1,7 +1,7 @@
 import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { applySceneOperations, defaultLocationRange, findTool, layoutFleetFormation, type MapCelestial, normalizeScene, type SceneDocument, SceneError, type SceneFleet, type SceneVector, tangentHeading, toLocationPlacement } from '@scene-director/scene';
+import { applySceneOperations, defaultLocationRange, sceneAtTimelineTime, findTool, layoutFleetFormation, type MapCelestial, normalizeScene, type SceneDocument, SceneError, type SceneFleet, type SceneVector, tangentHeading, toLocationPlacement } from '@scene-director/scene';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { FleetPersonalityFileStore } from '../store/personality-files';
@@ -10,6 +10,7 @@ import { FleetPersonalities } from './fleet-personalities';
 import { Locations } from './locations';
 import { MakeFakeMapData } from './map-data.testing';
 import type { SavedScenesPage } from './saved-scenes';
+import { FakeAddCue, FakeGetScene } from './scene-page.testing';
 import { WARP_IN_DOCUMENT_WARNING } from './scene-places';
 import { MakeFakeShipData, SDE, SHIP_ROUTES, TFI_DNA } from './ship-data.testing';
 import { DefaultSquadRole, Staging } from './staging';
@@ -49,7 +50,8 @@ class FakePage implements SavedScenesPage {
   async Call(name: string, args: ToolArgs = {}): Promise<unknown> {
     this.calls.push({ name, args });
     let result: unknown = null;
-    if (name === 'get_scene') result = this.scene;
+    if (name === 'get_scene') result = FakeGetScene(this.scene, args);
+    else if (name === 'patch_scene' && args['at'] != null) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
     else if (name === 'patch_scene') {
       const { scene, warnings, arrivals } = applySceneOperations(this.scene, args['operations']);
       this.scene = scene;
@@ -220,6 +222,50 @@ describe('add_ships', () => {
     expect(joined['arrivals']).toEqual([{ group: 'tfi/dps', landing: 'formation', state: 'waiting' }]);
     expect(joined['warnings']).not.toContain(WARP_IN_DOCUMENT_WARNING);
     expect(await Refused(staging.AddShips({ hull: 'Tempest Fleet Issue', fleet: { id: 'tfi', squad: 'dps' }, warpIn: { from: { celestial: CNAP } } }))).toMatch(/warpIn\.from/u);
+  });
+});
+
+describe('at: a timeline cue', () => {
+  it('add_ships becomes one patch_scene cue with the resolved op and its adds; a later cue builds near a ship it adds', async () => {
+    const page = new FakePage(FLEET_SCENE);
+    const { staging } = MakeStaging(page);
+    const result = (await staging.AddShips({ hull: 'Guardian', count: 2, fleet: { new: true, id: 'red' }, team: 'red', position: [0, 0, 20000], warpIn: true, at: 5 })) as Record<string, any>;
+    expect(page.calls.find((call) => call.name === 'get_scene')?.args).toEqual({ at: 5 });
+    expect(page.scene.ships).toHaveLength(6);
+    const cue = page.scene.timeline?.cues[0] as Record<string, any>;
+    expect(result['cue']).toEqual(cue);
+    expect(cue).toMatchObject({ id: 'cue-1', at: 5, name: 'add_ships 2 Guardian', adds: { fleets: ['red'] } });
+    expect(cue['adds'].ships).toHaveLength(2);
+    expect(cue['patch_scene'].operations).toEqual([{ op: 'add_ships', hull: 'Guardian', dna: GUARDIAN_DNA, radius: 80, count: 2, team: 'red', position: [0, 0, 20000], warpIn: true, fleet: { new: true, id: 'red', squad: { role: 'logi' } } }]);
+    expect(result['added']).toBeUndefined();
+    expect(result['template']).toBeDefined();
+
+    const fc = sceneAtTimelineTime(page.scene, 5, applySceneOperations).fleets?.find((fleet) => fleet.id === 'red')?.commander as string;
+    expect(await Refused(staging.AddShips({ hull: 'Tempest Fleet Issue', near: { ship: fc }, at: 4 }))).toMatch(new RegExp(`near.ship: no ship "${fc}"`, 'u'));
+    const later = (await staging.AddShips({ hull: 'Tempest Fleet Issue', near: { ship: fc, range: 5000 }, at: 8, cue: 'escort' })) as Record<string, any>;
+    expect(later['cue']).toMatchObject({ id: 'escort', at: 8 });
+    expect(later['cue'].patch_scene.operations[0].position[2]).toBeGreaterThan(20000);
+    expect(page.scene.timeline?.cues.map((candidate) => candidate.id)).toEqual(['cue-1', 'escort']);
+  });
+
+  it('stage_engagement cues on a passed scene, refused when the op fails on the scene as it will be then', async () => {
+    const result = (await MakeStaging().staging.StageEngagement({
+      scene: FLEET_SCENE,
+      sides: [
+        { ships: [{ hull: 'Rifter', count: 2 }], team: 'red' },
+        { ships: [{ hull: 'Rifter', count: 2 }], team: 'blue' }
+      ],
+      center: [0, 0, 80000],
+      at: 30,
+      cue: 'brawl'
+    })) as Record<string, any>;
+    expect(result['loaded']).toBe(false);
+    expect(result['scene'].ships).toHaveLength(6);
+    expect(result['cue']).toMatchObject({ id: 'brawl', at: 30, name: 'stage_engagement red vs blue' });
+    expect([...result['cue'].adds.fleets].sort()).toEqual(['blue', 'red']);
+    expect(result['cue'].patch_scene.operations[0].sides[0].ships[0]).toMatchObject({ hull: 'Rifter', dna: 'mf4_t1:minmatarbase:minmatar', radius: 31 });
+    expect(result['engagement']).toMatchObject({ center: [0, 0, 80000], teams: ['red', 'blue'] });
+    expect(await Refused(MakeStaging().staging.StageEngagement({ scene: FLEET_SCENE, sides: [{ ships: [{ hull: 'Rifter' }], fleet: 'tfi' }, { ships: [{ hull: 'Rifter' }] }], at: 30 }))).toMatch(/tfi/u);
   });
 });
 

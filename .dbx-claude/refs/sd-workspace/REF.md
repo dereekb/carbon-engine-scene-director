@@ -22,7 +22,9 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
   to the **newest** connected tab (so a running verify-page takes them from the user's tab).
 - **Hub tools that edit the scene** (`set_location`, `add_fleet_composition`, `add_ships`, `stage_engagement`) resolve
   names against tools-core first, then forward **one pure patch op** to the tab, or apply it to a passed `scene`
-  (no tab; result returned with `loaded: false`).
+  (no tab; result returned with `loaded: false`). They read the tab's document as `get_scene { live: true }` (the live
+  scene, a timeline's adds included); given `at`, as `get_scene { at }` (the authored document projected to that
+  timeline time), and their op becomes a `patch_scene` cue instead (`sd-staging`, `sd-timeline` "Authoring").
 - **One hub per port.** `scene-director mcp` starts the hub or, when 5520 is taken, joins it through `RemoteHub`
   (`hub/remote-hub.ts`, same `Call` surface as `Hub`; `hub/tool-call.ts`). A joined hub keeps the owner's scenes and
   fleets directories.

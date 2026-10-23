@@ -20,6 +20,17 @@
   split from the rest of the result), `ResolveRadii`, `ResolvePlace` (`near` off a ship, object or celestial → the
   lead's point, the implied heading, the reference point), `ResolveFacing` (`{ celestial }` → a point) and
   `ResolveWarpIn` (`warpIn.from: { celestial }` → a point). `staging.spec.ts` guards the extraction.
+- **`at` (a timeline cue, `sd-timeline` "Authoring")**: `Before` reads `at` / `cue` (`ReadCueTarget`) and builds on
+  the document **as it will be then**: the tab's `get_scene { at: ceil(at) }`, or `sceneAtTimelineTime` of a passed
+  `scene`. Everything resolves as without `at` (hull names, compositions, celestials, radii, and `near` a ship an
+  earlier cue adds, off its document placement). `Apply(before, ops, { name })` then goes to `CueApply`: a dry run of
+  the ops on that document (its problems throw, its warnings are kept, since the timeline's projection drops a patch's
+  own warnings), then one `add_cue` `{ id?, at, name: "<tool> <what>", patch_scene: { operations } }`, forwarded as
+  `patch_scene { operations, at, cue, name }` (the page's `AddCue`) or applied to the passed document. Nothing is added
+  now: the tools return the page's `{ cue, state, timeline }` (with a passed scene `{ cue, scene, loaded: false }`), their
+  resolution reports (`hull`, `hulls`, `propMods`, `types`, `template`, `engagement`) and warnings, never `added`.
+  Specs: `staging.spec.ts`, `fleet-compositions.spec.ts`, `objects.spec.ts` (`scene-page.testing.ts` answers
+  `get_scene { at }` and `patch_scene { at }` for their fake tabs).
 
 | File | Role |
 |---|---|

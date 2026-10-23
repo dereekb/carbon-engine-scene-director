@@ -7,7 +7,8 @@
  * (off a ship, object or celestial, on the commander's radius) and `warpIn.from: { celestial }` through ScenePlaces,
  * and the fleet's `personality` (the tool's, else the composition's: a saved or inline template is embedded through
  * FleetPersonalities), then forwards one `add_fleet_composition` patch operation to the viewer (or applies it to a
- * passed `scene` with no tab): the operation itself is pure and looks nothing up.
+ * passed `scene` with no tab): the operation itself is pure and looks nothing up. With `at` it resolves against the
+ * scene as it will be then and the operation becomes a patch_scene timeline cue (ScenePlaces).
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -324,9 +325,10 @@ export class FleetCompositions {
     }
     if (args['warpIn'] != null) operation['warpIn'] = await this.places.ResolveWarpIn(args['warpIn'], before.scene);
 
-    const applied = await this.places.Apply(before, [...PersonalityOperations([embedded]), operation]);
+    const applied = await this.places.Apply(before, [...PersonalityOperations([embedded]), operation], { name: `add_fleet_composition ${String(args['fleet'] ?? resolved.composition.id)}` });
     return {
-      added: addedFleet(applied.scene),
+      // A cue adds nothing now: its ids are the cue's adds.
+      ...(before.cue ? {} : { added: addedFleet(applied.scene) }),
       ...(embedded ? { personality: EmbeddedReport(embedded) } : {}),
       hulls: resolved.hulls,
       propMods: propMods.propMods,

@@ -189,6 +189,8 @@ import {
   toAutoRepairOperations,
   resolveAutoRepair,
   TIMELINE_OPERATION_NAMES,
+  TIMELINE_ACTION_NAMES,
+  type TimelineActionName,
   cueActionOf,
   sceneAtTimelineTime,
   timelinePatchScenes,
@@ -1202,7 +1204,7 @@ export class Director {
    * Tool handlers by name, for the hub link.
    */
   Handlers(): Record<string, ToolHandler> {
-    return {
+    const handlers: Record<string, ToolHandler> = {
       load_scene: ({ scene, timeline }) => this.Load(scene, { paused: TimelineStartPaused(timeline) }),
       get_scene: (args) => this.GetScene(args),
       patch_scene: ({ operations }) => this.Edit(operations),
@@ -1228,6 +1230,12 @@ export class Director {
       stop_shot: (args) => this.StopShot(args),
       resume_shot: () => this.ResumeShot()
     };
+    // A lever given at becomes a timeline cue instead of running now.
+    for (const action of TIMELINE_ACTION_NAMES) {
+      const run = handlers[action];
+      handlers[action] = (args) => (args['at'] != null || args['cue'] != null ? this.AddCue(action, args) : run(args));
+    }
+    return handlers;
   }
 
   /**
@@ -2245,6 +2253,35 @@ export class Director {
     const report = this.TimelineReport();
     const loaded = load ? { load: { warnings: load['warnings'], changes: load['changes'] } } : {};
     return report ? { ...report, ...loaded } : { state: 'idle', note: 'the scene has no timeline or ship orders', ...loaded };
+  }
+
+  /**
+   * A lever tool given `at` (and `cue`, its id): instead of running now, the call becomes the timeline cue `{ id?, at,
+   * [action]: its arguments }`, added to the authored timeline through the edit queue (patch_scene's `name` names the
+   * cue). The player takes it as any timeline edit: behind a playing timeline it is `missed` until a restart.
+   *
+   * @returns The cue as stored, its state, get_state's timeline report, and the warnings naming the cue (plus a missed
+   *   cue's and a stopped timeline's).
+   * @throws {SceneError} When the cue does not check out against the scene as it will be at its time.
+   */
+  private AddCue(action: TimelineActionName, args: Record<string, unknown>): Promise<object> {
+    const { at, cue: id, ...rest } = args;
+    if (at == null) throw new Error('cue (the cue id) goes with at (seconds of timeline time)');
+    if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) throw new Error('at must be seconds of timeline time, at least 0');
+    if (id != null && typeof id !== 'string') throw new Error('cue must be a cue id');
+    const name = action === 'patch_scene' && typeof rest['name'] === 'string' ? rest['name'] : null;
+    const cue = { ...(id != null ? { id } : {}), at, ...(name ? { name } : {}), [action]: action === 'patch_scene' ? { operations: rest['operations'] } : rest };
+    return this.Serialize(async () => {
+      const known = new Set((this.authored?.timeline?.cues ?? []).map((candidate) => candidate.id));
+      const patch = (await this.EditNow([{ op: 'add_cue', cue }])) as { readonly warnings?: string[] };
+      const added = (this.authored?.timeline?.cues ?? []).find((candidate) => (id != null ? candidate.id === id : !known.has(candidate.id))) ?? null;
+      const record = added ? [...(this.timeline.Report()?.list ?? [])].reverse().find((entry) => entry.id === added.id) : null;
+      const summary = this.timeline.Summary();
+      const warnings = added ? (patch.warnings ?? []).filter((warning) => warning.includes(`"${added.id}"`)) : (patch.warnings ?? []);
+      if (added && record?.state === 'missed') warnings.push(`cue "${added.id}" at ${added.at} s is behind the timeline (${summary?.time ?? 0} s played): it is missed, and plays from the next restart (timeline restart)`);
+      if (summary?.state === 'stopped') warnings.push('the timeline is stopped: timeline play starts it (t = 0 at the next tick, from the scene as it is now); timeline restart replays it from the placements');
+      return { cue: added, state: record?.state ?? null, timeline: this.TimelineSummary(), warnings };
+    });
   }
 
   /**

@@ -5,6 +5,7 @@ import { MakeFakeMapData } from './map-data.testing';
 import { ASTRAHUS_DNA, MakeFakeObjectData, OBJECT_ROUTES, RESOURCES, RUINED_GATE_DNA, TITAN_WRECK_DNA, WRECK_DNA } from './object-data.testing';
 import { ObjectTools } from './objects';
 import type { SavedScenesPage } from './saved-scenes';
+import { FakeAddCue, FakeGetScene } from './scene-page.testing';
 import { type Answer, MakeFakeShipData, SDE, SHIP_ROUTES, TFI_DNA } from './ship-data.testing';
 import { ToolError, type ToolArgs } from './tool-call';
 
@@ -42,7 +43,8 @@ class FakePage implements SavedScenesPage {
   async Call(name: string, args: ToolArgs = {}): Promise<unknown> {
     this.calls.push({ name, args });
     let result: unknown = null;
-    if (name === 'get_scene') result = this.scene;
+    if (name === 'get_scene') result = FakeGetScene(this.scene, args);
+    else if (name === 'patch_scene' && args['at'] != null) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
     else if (name === 'patch_scene') {
       const { scene, warnings } = applySceneOperations(this.scene, args['operations']);
       this.scene = scene;
@@ -90,6 +92,20 @@ describe('add_objects', () => {
       { type: 'astrahus', typeID: 35832, name: 'Astrahus', group: 'Citadel', category: 'Structure', dna: ASTRAHUS_DNA, radius: 45000, dnaFrom: 'sde', radiusFrom: 'sde' },
       { type: 'Minmatar Frigate Wreck', typeID: 26550, name: 'Minmatar Frigate Wreck', group: 'Wreck', category: 'Celestial', dna: WRECK_DNA, radius: 70, dnaFrom: 'sde', radiusFrom: 'sof', sdeRadius: 14 }
     ]);
+  });
+
+  it('with at becomes one patch_scene cue holding the resolved lines and their adds, adding nothing now', async () => {
+    const page = new FakePage(TFI_SCENE);
+    const result = (await MakeTools(page).AddObjects({ type: 'astrahus', id: 'astra', near: { ship: 'tfi', range: 30000 }, at: 12 })) as Record<string, any>;
+    expect(page.calls.map((call) => call.name)).toEqual(['get_scene', 'patch_scene']);
+    expect(page.calls[0].args).toEqual({ at: 12 });
+    expect(page.scene.objects ?? []).toEqual([]);
+    const cue = page.scene.timeline?.cues[0] as Record<string, any>;
+    expect(result['cue']).toEqual(cue);
+    expect(cue).toMatchObject({ id: 'cue-1', at: 12, name: 'add_objects astrahus', adds: { objects: ['astra'] } });
+    expect(cue['patch_scene'].operations).toEqual([{ op: 'add_objects', type: 'Astrahus', id: 'astra', near: { ship: 'tfi', range: 30000 }, dna: ASTRAHUS_DNA, radius: 45000, radii: { tfi: 250 } }]);
+    expect(result['added']).toBeUndefined();
+    expect(result['types'][0]).toMatchObject({ name: 'Astrahus', dnaFrom: 'sde' });
   });
 
   it("spaces, places and orbits titan wrecks on their model's radius, not the SDE's 14 m", async () => {

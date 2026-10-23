@@ -5,6 +5,8 @@
  * inline template is embedded through FleetPersonalities, in the same patch). Then it forwards one pure `add_ships` /
  * `stage_engagement` patch operation to the viewer (or applies it to a passed `scene` with no tab), and reports the ids it created. `warpIn`
  * (add_ships, and each engagement side) rides on the operation; the page's `arrivals` reports come back in the result.
+ * With `at` the operation is resolved against the scene as it will be then and becomes a patch_scene timeline cue
+ * (ScenePlaces): the result is the cue and the resolution reports, nothing is added now.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -162,10 +164,15 @@ export class Staging {
     const radii = joins && typeof fleet?.['id'] === 'string' ? await this.places.ResolveRadii(FleetShipIds(before.scene, fleet['id']), before.scene) : null;
     if (radii) operation['radii'] = radii.radii;
 
-    const applied = await this.places.Apply(before, [...PersonalityOperations([embedded]), operation]);
+    const label = shipLabel(line as unknown as StagingShipLine);
+    const count = Number(args['count'] ?? 1);
+    const applied = await this.places.Apply(before, [...PersonalityOperations([embedded]), operation], { name: `add_ships ${count} ${label}` });
+    const template = normalizeFleetComposition({ input: toShipListComposition({ id: toIdSlug(String(args['prefix'] ?? label)), lines: [{ ...(line as unknown as StagingShipLine), count }] }) }).composition;
+    const warnings = [...resolved.warnings, ...(radii?.warnings ?? []), ...(embedded?.warnings ?? []), ...applied.warnings];
+    // A cue adds nothing now: its ids are the cue's adds.
+    if (before.cue) return { ...applied.rest, ...(embedded ? { personality: EmbeddedReport(embedded) } : {}), hull: resolved.hulls[0], ...(template ? { template } : {}), warnings };
     const added = AddedShips(before.scene, applied.scene);
     const first = added[0];
-    const template = normalizeFleetComposition({ input: toShipListComposition({ id: toIdSlug(String(args['prefix'] ?? shipLabel(line as unknown as StagingShipLine))), lines: [{ ...(line as unknown as StagingShipLine), count: Number(args['count'] ?? 1) }] }) }).composition;
     return {
       added: {
         ships: added.map((ship) => ship.id),
@@ -176,7 +183,7 @@ export class Staging {
       hull: resolved.hulls[0],
       ...(template ? { template } : {}),
       ...applied.rest,
-      warnings: [...resolved.warnings, ...(radii?.warnings ?? []), ...(embedded?.warnings ?? []), ...applied.warnings]
+      warnings
     };
   }
 
@@ -201,15 +208,17 @@ export class Staging {
       operation['near'] = args['near'];
     }
 
-    const applied = await this.places.Apply(before, [...PersonalityOperations(embedded), operation]);
+    const teams = (sides ?? []).map((side, index) => (IsRecord(side) && typeof side['team'] === 'string' ? side['team'] : (ENGAGEMENT_TEAMS[index] ?? '')));
+    const applied = await this.places.Apply(before, [...PersonalityOperations(embedded), operation], { name: `stage_engagement ${teams.join(' vs ')}` });
+    const placed = { center, heading: normalizeHeading(Number(operation['heading'] ?? 0)), range: Number(args['range'] ?? DEFAULT_ENGAGEMENT_RANGE) };
+    const allWarnings = [...warnings, ...embedded.flatMap((personality) => personality?.warnings ?? []), ...applied.warnings];
+    // A cue adds nothing now: its ids are the cue's adds.
+    if (before.cue) return { ...applied.rest, engagement: { ...placed, teams }, hulls, ...(propMods.length ? { propMods } : {}), warnings: allWarnings };
     const added = AddedShips(before.scene, applied.scene);
     const newFleets = (applied.scene?.fleets ?? []).filter((fleet) => !(before.scene.fleets ?? []).some((old) => old.id === fleet.id));
-    const teams = (sides ?? []).map((side, index) => (IsRecord(side) && typeof side['team'] === 'string' ? side['team'] : (ENGAGEMENT_TEAMS[index] ?? '')));
     return {
       engagement: {
-        center,
-        heading: normalizeHeading(Number(operation['heading'] ?? 0)),
-        range: Number(args['range'] ?? DEFAULT_ENGAGEMENT_RANGE),
+        ...placed,
         sides: teams.map((team, index) => {
           const ships = added.filter((ship) => ship.team === team);
           const fleet = newFleets.find((candidate) => ships.some((ship) => ship.id === candidate.commander));
@@ -227,7 +236,7 @@ export class Staging {
       hulls,
       ...(propMods.length ? { propMods } : {}),
       ...applied.rest,
-      warnings: [...warnings, ...embedded.flatMap((personality) => personality?.warnings ?? []), ...applied.warnings]
+      warnings: allWarnings
     };
   }
 

@@ -3,7 +3,8 @@
  * large collidable objects, wrecks) by type name or id, and `search_objects` finds types to place. The hub resolves
  * every name first (types to SOF DNA and a radius through ObjectData: the SDE's, or the model's where the SDE has none
  * or a wreck placeholder; celestials of the scene's location to scene
- * points and ship radii through ScenePlaces), then sends one pure `add_objects` op per line in one patch_scene.
+ * points and ship radii through ScenePlaces), then sends one pure `add_objects` op per line in one patch_scene. With `at`
+ * the ops are resolved against the scene as it will be then and become one patch_scene timeline cue.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -91,7 +92,9 @@ export class ObjectTools {
     }
     if (problems.length) throw new SceneError(problems);
 
-    const applied = await this.places.Apply(before, operations);
+    const applied = await this.places.Apply(before, operations, { name: `add_objects ${[...new Set(lines.map((line) => String(line['type'] ?? line['dna'])))].join(', ')}` });
+    // A cue adds nothing now: its ids are the cue's adds.
+    if (before.cue) return { ...applied.rest, types: [...reports.values()], warnings: [...warnings, ...applied.warnings] };
     const old = new Set((before.scene.objects ?? []).map((object) => object.id));
     const added = (applied.scene?.objects ?? []).filter((object) => !old.has(object.id));
     return {

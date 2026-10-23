@@ -6,9 +6,9 @@
 > `ShipScripts`. The plan this follows: `~/.claude/plans/scene-timeline-and-per-ship-orders-validated-played-on-the-scene-clock-reported.md`
 > (slices T1 document → T2 page player → T3 determinism → T4 `at` on the tools → T5 real-GPU look).
 
-**Status: T1 (the document), T2 (the page player) and T3 (determinism) have landed.** The page plays the script on
-Destiny ticks, reports it, and replays it the same. T4 (`at` on the lever tools) and T5 (the real-GPU scripted fight)
-follow.
+**Status: T1 (the document), T2 (the page player), T3 (determinism) and T4 (`at` on the tools) have landed.** The page
+plays the script on Destiny ticks, reports it, and replays it the same, and every lever tool authors a cue with `at`.
+T5 (the real-GPU scripted fight) follows.
 
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
@@ -86,7 +86,7 @@ The director is both ports.
 - **Cost (measured 2026-10-23)**: a 250-ship document (two `add_ships` fleets of 50 and 200) with 20 patch cues of 5
   ships each normalizes in **21 ms** (1 ms without the timeline), so the projection is not memoized.
 - `sceneAtTimelineTime(scene, seconds, apply)`: the document without its timeline plus every patch cue with
-  `cueDueSecond(at) ≤ seconds`. T4's hub tools resolve against it (`get_scene { at }`).
+  `cueDueSecond(at) ≤ seconds`. The hub tools given `at` resolve against it (`get_scene { at }`, "Authoring").
 
 ## Ship `orders`
 
@@ -200,6 +200,33 @@ target cue-added ships as names; the user sees the authored document's warnings,
   result), `ships` (every script), `liveEdits` (source, cue, tick, operation count, adds) and `held`; `restart` adds the
   load's `warnings` and `changes`. `play` on an idle scene throws "the scene has no timeline or ship orders".
 
+## Authoring with `at` (T4)
+
+Every cueable tool takes `at` (seconds, `AT_ARGUMENT`) and `cue` (its id, `CUE_ARGUMENT`): with `at` nothing runs now and
+the call becomes a cue. `packages/scene/src/lib/tools.ts` adds both, and the shared sentence (`CUE_TEXT`; the hub tools'
+`HUB_CUE_TEXT`), to every tool in `CUEABLE_TOOL_NAMES` = `TIMELINE_ACTION_NAMES` + `CUEABLE_HUB_TOOL_NAMES`
+(`cueable()` over `TOOL_LIST`); `patch_scene` also takes `name` (the cue's).
+
+- **Page levers** (`order_ship`, `order_fleet`, `switch_prop_mods`, `switch_modules`, `set_target`, `engage`,
+  `cease_fire`, `auto_repair`, `play_shot`, `play_sequence`, `stop_shot`, `patch_scene`): `Director.Handlers()` wraps
+  each `TIMELINE_ACTION_NAMES` handler; `at` or `cue` routes to `AddCue(action, args)`, which builds `{ id?: cue, at,
+  name? (patch_scene's), [action]: the rest }` (`patch_scene: { operations }`) and runs `EditNow([{ op: 'add_cue', cue }])`
+  in the edit queue. So it validates exactly as a document edit (against the scene as projected to the cue's time) and
+  the player takes it as any timeline edit. No lever is taken now (`Manual`): the cue takes it when it fires.
+- **The result**: `{ cue (as stored, `adds` derived), state (its record: pending, or missed), timeline (get_state's
+  summary), warnings }`. The warnings are the document's that name the cue (`"<id>"`: a name target, "may fail when it
+  fires", a re-pin), plus `cue "x" at 1 s is behind the timeline (4 s played): it is missed, and plays from the next
+  restart` while it plays, and `the timeline is stopped: timeline play starts it …; timeline restart replays it from
+  the placements` on a stopped one (a live scene's first cue).
+- **Hub tools** (`add_fleet_composition`, `add_ships`, `stage_engagement`, `add_objects`): resolve as without `at`, on
+  `get_scene { at: ceil(at) }`, then dry-run the ops and wrap them in one `add_cue` with `patch_scene` (`ScenePlaces`,
+  `sd-staging`), named `add_ships 2 Guardian`, `add_fleet_composition red`, `stage_engagement red vs blue`,
+  `add_objects Astrahus`. Same result plus their resolution reports; with a passed `scene` the cue goes into its
+  timeline (`loaded: false`).
+- **Not cueable**: `frame_camera` (follow-up), `set_location` (a patch cue can carry the raw op), `set_fleet_personality`
+  (a patch cue's `update_fleet set { personality }`), the saved-scene tools.
+- Claude computes `at` from get_state's `timeline.time`; there is no "in 30 s from now".
+
 ## Determinism (T3)
 
 One script on one tools-core replays the same: cue and step ticks relative to t = 0, landings, kills and final positions
@@ -256,6 +283,15 @@ The full verify-page after the Apply split (T2): 129 ok, 1 skip (headless audio)
 pre-T2 commit (d272abf), built in a temp worktree: "a moving FC dies …" (a race: when the FC dies while the wing
 commander still catches up, it slows by design; 1 run in 5 on HEAD, the same numbers) and "the warp-in shot anchors …"
 (flank-port is not refused for an arriving fleet). Both filed as follow-ups.
+
+T4 (2026-10-23, dbxpc): (l) `order_fleet` (`cue: "go"`, at 3), `switch_prop_mods` (at 4, id `cue-1`) and a pose
+`play_shot` (at 2) on an unscripted fleet scene returned pending cues and the stopped warning, changed nothing for
+2.5 s (no order, prop mod off, cinema idle; timeline `stopped`, 3 pending), then `timeline play` fired them at +2, +3,
++4, and an `order_ship` at 1 s added at 4 s came back `missed`. (m) (SDE) `add_fleet_composition` of an inline Rifter
+composition by hull name with `warpIn`, at 5: the cue's op had dna filled and adds `wr-fc`, `wr-s-01`, `wr-s-02`, fleet
+`wr`; nothing was added; it fired at +5 and `arrivals` reported group `wr`. (n) A paused load with a patch cue at 5:
+`get_scene { at: 4 }` lacked `rw-fc`, `{ at: 5 }` held it (no timeline); `add_ships` near `rw-fc` at 4 was refused (`no
+ship "rw-fc"`), at 8 cued two ships and fired at +8. (a)–(i) passed in the same run.
 
 T3 (2026-10-23, dbxpc, SDE): (j) 3 Punishers (fleet b) vs 3 Rifters, seed 7, death `explode`; cues engage at 1, a fleet
 approach with `delay: 0.5` at 2, a patch warp-in of 2 Rifters (inline composition) at 3, a targets call at 6, a fleet

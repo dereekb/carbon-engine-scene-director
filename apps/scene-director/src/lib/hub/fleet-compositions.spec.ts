@@ -10,6 +10,7 @@ import { FleetPersonalities } from './fleet-personalities';
 import { Locations } from './locations';
 import { MakeFakeMapData } from './map-data.testing';
 import type { SavedScenesPage } from './saved-scenes';
+import { FakeAddCue, FakeGetScene } from './scene-page.testing';
 import { WARP_IN_DOCUMENT_WARNING } from './scene-places';
 import { MakeFakeShipData, PROP_MOD_LISTING_ROUTE, TFI_DNA } from './ship-data.testing';
 import { ToolError, type ToolArgs } from './tool-call';
@@ -47,7 +48,8 @@ class FakePage implements SavedScenesPage {
 
   async Call(name: string, args: ToolArgs = {}): Promise<unknown> {
     let result: unknown = null;
-    if (name === 'get_scene') result = this.scene;
+    if (name === 'get_scene') result = FakeGetScene(this.scene, args);
+    else if (name === 'patch_scene' && args['at'] != null) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
     else if (name === 'patch_scene') {
       this.patches.push(args['operations'] as Record<string, unknown>[]);
       const { scene, warnings, arrivals } = applySceneOperations(this.scene, args['operations']);
@@ -236,6 +238,35 @@ describe('FleetCompositions', () => {
     const second = page.patches[1][0];
     expect(second['heading']).toBeUndefined();
     expect(second['warpIn']).toEqual({ from: [0, 0, -100000] });
+  });
+
+  it('with at becomes a patch_scene cue with dna filled and its adds, adding nothing now', async () => {
+    const files = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-')));
+    const page = new FakePage({ name: 'tab', ships: [{ id: 'anchor', dna: TFI_DNA }] });
+    const tab = MakeCompositions(page, files);
+    const composition = { id: 'red', commander: { hull: 'Rifter' }, wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', ships: [{ hull: 'Rifter', count: 2 }] }] }] };
+    const result = (await tab.call('add_fleet_composition', { composition, position: [0, 0, 25000], heading: 180, team: 'red', warpIn: true, at: 5, cue: 'red-lands' })) as Record<string, any>;
+    expect(page.patches).toEqual([]);
+    expect(page.scene.ships.map((ship) => ship.id)).toEqual(['anchor']);
+    const cue = page.scene.timeline?.cues[0] as Record<string, any>;
+    expect(result['cue']).toEqual(cue);
+    expect(cue).toMatchObject({ id: 'red-lands', at: 5, name: 'add_fleet_composition red', adds: { fleets: ['red'] } });
+    expect(cue['adds'].ships).toHaveLength(3);
+    const operation = cue['patch_scene'].operations[0];
+    expect(operation).toMatchObject({ op: 'add_fleet_composition', position: [0, 0, 25000], heading: 180, team: 'red', warpIn: true });
+    expect(operation.composition.commander).toMatchObject({ dna: 'mf4_t1:minmatarbase:minmatar', radius: 31 });
+    expect(result['added']).toBeUndefined();
+    expect(result['hulls'][0]).toMatchObject({ hull: 'Rifter', dnaFrom: 'sde' });
+  });
+
+  it('cues on a passed scene, and refuses a bad at or a cue without at', async () => {
+    const result = (await compositions.call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0], scene: { name: 'x' }, at: 3 })) as Record<string, any>;
+    expect(result['loaded']).toBe(false);
+    expect(result['scene'].ships).toEqual([]);
+    expect(result['scene'].timeline.cues).toEqual([result['cue']]);
+    expect(result['cue'].adds.ships).toHaveLength(44);
+    await expect(compositions.call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0], scene: { name: 'x' }, cue: 'late' })).rejects.toThrow(/cue \(the cue id\) goes with at/u);
+    await expect(compositions.call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0], scene: { name: 'x' }, at: -1 })).rejects.toThrow(/at must be seconds of timeline time/u);
   });
 
   it('refuses a warpIn.from celestial without a location', async () => {

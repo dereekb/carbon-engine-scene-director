@@ -35,6 +35,16 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/locks and shoots the primary/u);
       expect(client.getInstructions()).toMatch(/calls the group's primary and target queue/u);
       expect(client.getInstructions()).toMatch(/list_fleet_personalities/u);
+      expect(client.getInstructions()).toMatch(/an at \(seconds\) and the call becomes a cue instead of running now/u);
+      expect(tools.find((tool) => tool.name === 'timeline')?.inputSchema).toMatchObject({ properties: { action: { enum: ['status', 'play', 'pause', 'restart'] } } });
+      for (const name of ['order_fleet', 'add_fleet_composition']) {
+        const tool = tools.find((candidate) => candidate.name === name);
+        expect(tool?.inputSchema).toMatchObject({ properties: { at: { type: 'number' }, cue: { type: 'string' } } });
+        expect(tool?.description).toMatch(/With at \(seconds from play start/u);
+      }
+      expect(orderFleet).toMatch(/with at the same object becomes a timeline cue/u);
+      expect(tools.find((tool) => tool.name === 'add_fleet_composition')?.description).toMatch(/get_scene \{ at \}/u);
+      expect(tools.find((tool) => tool.name === 'get_state')?.inputSchema.properties).not.toHaveProperty('at');
       expect(tools.find((tool) => tool.name === 'stage_engagement')?.inputSchema).toMatchObject({ properties: { sides: { items: { properties: { personality: {} } } } } });
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);

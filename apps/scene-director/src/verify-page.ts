@@ -30,7 +30,8 @@ import {
   type ShipFleetMembership,
   type ShipScriptReport,
   type TimelineSummary,
-  type CueReport
+  type CueReport,
+  type SceneCue
 } from '@scene-director/scene';
 import { AudioBankCache } from './lib/hub/audio-cache';
 import { Hub } from './lib/hub/hub';
@@ -773,6 +774,15 @@ function YawGap(a: number, b: number): number {
  */
 function Delay(ms: number): Promise<void> {
   return new Promise((done) => setTimeout(done, ms));
+}
+
+/**
+ * A tool call given `at`: the cue it became.
+ */
+interface CueResult {
+  readonly cue: SceneCue & { readonly patch_scene?: { readonly operations: { readonly composition?: { readonly commander?: { readonly dna?: string } } }[] } };
+  readonly state: Maybe<string>;
+  readonly warnings: string[];
 }
 
 /**
@@ -4233,6 +4243,71 @@ try {
     const offsets = (run: ReplayRun) => Object.values(run.landings).map((tick) => tick - Math.min(...Object.values(run.landings)));
     Expect(Show(offsets(first)) === Show(offsets(second)), `landing offsets ${Show(offsets(first))} then ${Show(offsets(second))}`);
     return `started at ticks ${first.startedAt} and ${second.startedAt}: delays ${Show(first.delays)} both times, landing offsets ${Show(offsets(first))}`;
+  });
+
+  // T4: a lever tool given at becomes a cue instead of running now; hub tools resolve against get_scene { at }.
+  await Check('timeline: at on order_fleet, switch_prop_mods and play_shot makes cues that change nothing now and fire later', async () => {
+    await LoadTimeline({ ships: [Scripted('b1', [0, 0, 0]), Scripted('b2', [1000, 0, 0])], fleets: [{ id: 'b', commander: 'b1', wings: [{ id: 'b-w', squads: [{ id: 'b-s', role: 'dps', members: ['b2'] }] }] }] });
+    const go = await call<CueResult>('order_fleet', { fleet: 'b', order: { type: 'direction', direction: [0, 0, 1] }, at: 3, cue: 'go' });
+    const mwd = await call<CueResult>('switch_prop_mods', { fleet: 'b', active: true, at: 4 });
+    const shot = await call<CueResult>('play_shot', { pose: { eye: [0, 2000, -8000], look: { ship: 'b1' } }, at: 2, cue: 'shot' });
+    Expect(go.cue.id === 'go' && go.state === 'pending' && 'order_fleet' in go.cue && mwd.cue.id === 'cue-1' && shot.cue.id === 'shot', Show([go.cue, mwd.cue, shot.cue]));
+    Expect(
+      go.warnings.some((warning) => warning.startsWith('the timeline is stopped')),
+      Show(go.warnings)
+    );
+    await Delay(2500);
+    const now = await call<ViewerState>('get_state');
+    const propMod = (ShipIn(now, 'b1').propMod as Maybe<{ readonly state?: string }>)?.state;
+    Expect(ShipIn(now, 'b1').order?.type !== 'direction' && propMod !== 'active' && propMod !== 'activating' && (now.cinema as { readonly state?: string }).state === 'idle', `b1 ${Show(ShipIn(now, 'b1').order)} ${Show(ShipIn(now, 'b1').propMod)}; cinema ${Show(now.cinema)}`);
+    Expect(TimelineOf(now)?.state === 'stopped' && TimelineOf(now)?.cues.pending === 3, Show(TimelineOf(now)));
+    await TimelineTool({ action: 'play' });
+    await Done(30);
+    const report = await TimelineTool();
+    const fired = FiredAt(report);
+    Expect(fired['go'] === 3 && fired['cue-1'] === 4 && fired['shot'] === 2, Show(fired));
+    const late = await call<CueResult>('order_ship', { id: 'b2', order: { type: 'stop' }, at: 1 });
+    Expect(late.state === 'missed' && late.warnings.some((warning) => warning.includes('behind the timeline')), Show(late));
+    return `cues ${[go, mwd, shot].map((result) => result.cue.id).join(', ')} pending while stopped; fired at ${Show(fired)}; a cue at 1 s added at ${report.time} s: ${late.state}`;
+  });
+
+  await Check('timeline: add_fleet_composition with at stores the resolved warp-in as a cue that lands at its time', async () => {
+    await LoadTimeline({ ships: [Scripted('a', [0, 0, 0])] });
+    const composition = { id: 'wr', commander: { hull: 'Rifter' }, wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', ships: [{ hull: 'Rifter', count: 2 }] }] }] };
+    const added = await call<CueResult>('add_fleet_composition', { composition, position: [0, 0, 20000], heading: 180, team: 'red', warpIn: true, at: 5, cue: 'land' }).catch(SkipWithoutSde);
+    const operation = added.cue.patch_scene?.operations[0];
+    Expect(operation?.composition?.commander?.dna === 'mf4_t1:minmatarbase:minmatar' && added.cue.adds?.ships?.length === 3 && Show(added.cue.adds?.fleets) === '["wr"]', Show(added.cue));
+    Expect(!(await call<ViewerState>('get_state')).ships.some((ship) => ship.id.startsWith('wr-')), 'the fleet was added now');
+    await TimelineTool({ action: 'play' });
+    const arriving = await WaitFor('the cue lands the group', 30, (polled) => (((polled.arrivals ?? []) as unknown as { readonly group: string }[]).some((group) => group.group === 'wr') ? null : Show(TimelineOf(polled))));
+    const report = await TimelineTool();
+    Expect(FiredAt(report)['land'] === 5, Show(FiredAt(report)));
+    return `cue adds ${Show(added.cue.adds)}; fired at +5 with the group arriving (${((arriving.arrivals ?? []) as unknown as { readonly state: string }[]).map((group) => group.state).join(', ')})`;
+  });
+
+  await Check('timeline: get_scene { at } holds the ships a cue adds from its time on, and add_ships with at stages off them', async () => {
+    const rifter = { hull: 'Rifter', dna: 'mf4_t1:minmatarbase:minmatar', radius: 31 };
+    await LoadTimeline(
+      {
+        ships: [Scripted('a', [0, 0, 0])],
+        timeline: [{ id: 'reinforce', at: 5, patch_scene: { operations: [{ op: 'add_fleet_composition', composition: { id: 'rw', commander: rifter, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ ...rifter, count: 1 }] }] }] }, position: [0, 0, 9000], heading: 180, team: 'red' }] } }]
+      },
+      { timeline: 'pause' }
+    );
+    const before = await call<SceneDocument>('get_scene', { at: 4 });
+    const after = await call<SceneDocument>('get_scene', { at: 5 });
+    Expect(!before.ships.some((ship) => ship.id === 'rw-fc') && after.ships.some((ship) => ship.id === 'rw-fc') && after.timeline == null, `at 4: ${before.ships.map((ship) => ship.id).join(', ')}; at 5: ${after.ships.map((ship) => ship.id).join(', ')}`);
+    const escort = { dna: rifter.dna, radius: rifter.radius, stats: TIMELINE_STATS, count: 2, near: { ship: 'rw-fc', range: 3000 } };
+    const early = await call('add_ships', { ...escort, at: 4 }).then(() => null, ErrorMessage);
+    Expect(early != null && early.includes('no ship "rw-fc"'), `at 4: ${early}`);
+    const staged = await call<CueResult>('add_ships', { ...escort, at: 8, cue: 'escort' });
+    Expect(staged.state === 'pending' && staged.cue.adds?.ships?.length === 2, Show(staged));
+    await WaitTimeline('the timeline is ready', 60, (timeline) => (timeline?.state === 'ready' ? null : Show(timeline)));
+    await TimelineTool({ action: 'play' });
+    const landed = await WaitFor('the escort is added at 8 s', 30, (polled) => (polled.ships.length === 5 ? null : Show(TimelineOf(polled))));
+    const report = await TimelineTool();
+    Expect(FiredAt(report)['escort'] === 8, Show(FiredAt(report)));
+    return `rw-fc at 5 s, not 4 s; add_ships near it at 4 s refused, at 8 s cued and fired at +8 (${landed.ships.map((ship) => ship.id).join(', ')})`;
   });
 
   if (rendering) {
