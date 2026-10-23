@@ -11,7 +11,9 @@ fits are parsed and ride on scene ships, the hub resolves fit names and serves d
 computes a fitted ship's HP, resists, capacitor, targeting and flight numbers (`ship_stats` reports them for a `fit`),
 the page flies fitted ships by their fit and reports their modules, defense and capacitor in `get_state`,
 `switch_modules` runs the modules on EVE's timing into a page-side damage model, and running modules draw the client's
-effects and play its sounds (below). Research behind the design: the dbx-claude note
+effects and play its sounds (below). Since 2026-10-23 targeted modules also act on their targets: webs and painters,
+points and scrams (with the scram's MWD block), neuts, nos and cap transmitters ("Target effects", the plan
+`~/.claude/plans/targeted-module-effects-on-their-targets.md`). Research behind the design: the dbx-claude note
 `fitted-modules-dogma-and-module-effects-research`.
 
 ## Files
@@ -43,8 +45,10 @@ effects and play its sounds (below). Research behind the design: the dbx-claude 
 | `fitting/switch.ts` | `normalizeModuleSwitch` (the `switch_modules` arguments, a plain object a timeline beat can embed), `MODULE_SWITCH_STATES` |
 | `fitting/activation.ts` | `moduleActivationOf` (how a module activates: refusal, targeted, warp safe, cycle, reactivation, reach, repair, group limits, `flight`, `note`), `UNACTIVATABLE_GROUPS`, `EFFECTLESS_CATEGORIES`, `falloffEffectiveness`, `moduleReach` |
 | `apps/viewer/src/lib/module-cycle.ts` | `ModuleCycle` (one module's state machine), `CycleEnd` (moved from destiny.ts, which re-exports it) |
-| `apps/viewer/src/lib/modules.ts` | `ShipModules`: the activation layer over a world port (`SurfaceDistance`, `InWarp`, `HasShip`, `tickSeconds`) |
+| `apps/viewer/src/lib/modules.ts` | `ShipModules`: the activation layer over a world port (`SurfaceDistance`, `InWarp`, `HasShip`, `tickSeconds`); `Targeting(target)` / `TargetIndex()` (the running targeted modules on a ship, each with `applied`), `CapacitorLandings(events)` |
 | `apps/viewer/src/lib/damage.ts` | `DamageModel`: current / max HP per layer, resonances, repairs and incoming repairs |
+| `fitting/target-effects.ts` | `moduleTargetEffectOf` (what a module does to its target, from the shooter's evaluation), `incomingModifiersOf`, `scaleModifierAmount`, `incomingSourceLabel`, `warpScrambleNoteOf`, `microwarpdriveBlockNoteOf`, `TARGET_EFFECT_ATTRIBUTES`, `HIGH_SPEED_MANEUVERING` (3454); the evaluator's side is `dogma.ts`' `incoming`, `dogmaResistanceOf`, `applyIncomingModifiers` |
+| `apps/viewer/src/lib/capacitor.ts` | `CapacitorModel`: the live capacitor level of every fitted ship (`Set`, `Level`, `Drain`, `Give`, `Nos`, `Report`), recharged lazily on EVE's curve; node-tested |
 | `fitting/effects.ts` | `MODULE_EFFECTS` (the client effect per default dogma effect guid), `moduleEffectOf`, `moduleEffectSounds`, `nearestSoundDuration`, `MODULE_EFFECT_SOUND_DURATIONS` |
 | `apps/viewer/src/lib/module-fx.ts` | `ModuleFxCommands`: module events → `start` / `cycle` / `stop` effect commands keyed `<ship>\|<module>` (node-tested) |
 | `apps/viewer/src/lib/module-audio.ts` | `ModuleAudioPost`: a command → the hull-sized sound events and stops on the module's ship (node-tested) |
@@ -126,10 +130,13 @@ tools-core):
 - **`Bundle(ids)`**: `types/<id>?lang=en` (name, group, category, published, `raceID`, the `mass` / `radius` /
   `capacity` / `volume` columns) + `sde/typeDogma/<id>` (attribute values, effect ids, the `isDefault` effect); then every effect
   the types carry (`sde/dogmaEffects/<id>`: `effectCategoryID`, `guid`, `isWarpSafe`, `isOffensive`, `isAssistance`,
-  the duration / discharge / range / falloff / tracking attribute ids, `modifierInfo`); then the attributes those
-  modifiers and effects name, `FIXED_ATTRIBUTE_IDS`, and each record's `maxAttributeID` (`sde/dogmaAttributes/<id>`:
-  `stackable`, `highIsGood`, `defaultValue`). Attribute values a type has but no effect names get no record. 16
-  requests at a time; records are cached per hub.
+  the duration / discharge / range / falloff / tracking / `resistanceAttributeID` attribute ids, `modifierInfo`); then
+  the attributes those modifiers and effects name, `FIXED_ATTRIBUTE_IDS`, and each record's `maxAttributeID`
+  (`sde/dogmaAttributes/<id>`: `stackable`, `highIsGood`, `defaultValue`). Attribute values a type has but no effect
+  names get no record. `FIXED_ATTRIBUTE_IDS` carries the tackle, transfer and resistance attributes (97, 90, 104, 105,
+  1349, 1350, 1945, 2138, 2045, 2112-2116, 2135, 2253, 6463): webs and painters name their resistance only through a
+  module attribute value (`remoteResistanceID` 2138), which nothing else collects. 16 requests at a time; records are
+  cached per hub. `/ship-stats` hulls carry `warpScrambleStatus` (104, as `rigSize`) for the table path.
 - **`Skills()`**: `sde/groups?field=categoryID&value=16` (25 groups) → `sde/types?field=groupID&value=<g>` → the
   published ones → `Bundle`. Build 3632936: 512 skills, 726 effects, 686 attributes, ~440 KB.
 - The page never sends a whole fit to the hub (the HTTP layer is GET-only and Node's 16 KB header limit rules out EFT
@@ -137,21 +144,24 @@ tools-core):
 
 ### The fixture (`fitting/fixtures/dogma-3632936.json`)
 
-The merge of `/dogma/types` for 14 hulls (587 Rifter, 17732 TFI, 11987 Guardian, 19720 Revelation, 22474 Damnation,
-37604 Apostle, and for the default weapons 597 Punisher, 16227 Ferox, 641 Megathron, 642 Apocalypse, 621 Caracal, 4310
-Tornado, 47270 Vedmak, 54732 Stormbringer), the 13 `BAKED_PROP_MODS`, 24 modules (plates, membranes, DC II, extender,
-hardeners, local / remote / ancillary reps and paste, booster, scram, point, web, cap transmitter, siege, triage,
-suppressor, rig, neut, a turret), the default weapons' 23 turrets, 3 launchers and their charges, and the TFI's and
-Revelation's cargo charges (`sd-weapons`), with `/dogma/skills`: 612 types, 854 effects, 773 attributes, 545 KB. Every
-type record carries its `raceID` when it has one (2026-10-23). Specs read it from disk (`readFileSync`), the hub's
-through `DogmaFixture()`. **Re-capture when CCP rebalances** (and re-check the stats parity spec, C3, and the weapon
-records, `sd-weapons`):
+The merge of `/dogma/types` for 16 hulls (587 Rifter, 17732 TFI, 11987 Guardian, 19720 Revelation, 22474 Damnation,
+37604 Apostle, 17740 Vindicator, 17920 Bhaalgorn, and for the default weapons 597 Punisher, 16227 Ferox, 641 Megathron,
+642 Apocalypse, 621 Caracal, 4310 Tornado, 47270 Vedmak, 54732 Stormbringer), the 13 `BAKED_PROP_MODS`, 28 modules
+(plates, membranes, DC II, extender, hardeners, local / remote / ancillary reps and paste, booster, scram, point, webs
+(Stasis Webifier II, Federation Navy Stasis Webifier), cap transmitter, siege, triage, suppressor, rig, neut, Heavy
+Energy Nosferatu II, Target Painter II, Warp Core Stabilizer II, a turret), the default weapons' 23 turrets, 3
+launchers and their charges, and the TFI's and Revelation's cargo charges (`sd-weapons`), with `/dogma/skills`: 618
+types, 869 effects, 782 attributes, ~567 KB (re-captured 2026-10-23 with effects' `resistanceAttributeID`). Every type
+record carries its `raceID` when it has one. Specs read it from disk (`readFileSync`), the hub's through
+`DogmaFixture()`. **Re-capture when CCP rebalances** (and re-check the stats parity spec, C3, and the weapon records,
+`sd-weapons`):
 
 ```sh
 node bin/scene-director.js serve --port 5521 --scenes /tmp/sd/scenes --fleets /tmp/sd/fleets &   # tools-core on 5510
 IDS=587,17732,11987,19720,22474,37604,438,440,12058,12076,12068,12084,41239,41253,5945,5975,35662,35660,41238,20347,11269,2048,3831,2281,13992,1183,3540,33103,28668,10850,448,3244,527,26914,3608,16487,4292,4294,4409,31900,25894,12271,2929
 IDS=$IDS,597,16227,641,642,621,4310,47270,54732,2889,2913,37306,3041,3520,3057,37298,3074,3082,3090,37303,3178,3146,3186,37302,47914,47918,47922,52915,54742,54748,54753,2404,2410,19739
 IDS=$IDS,185,193,201,17668,246,254,262,17686,222,230,238,17648,47924,47928,47932,52916,54784,54786,54783,12775,12779,21894,41332,41330
+IDS=$IDS,17559,12263,19806,11640,17740,17920
 curl -s "http://127.0.0.1:5521/dogma/types?ids=$IDS" -o types.json && curl -s http://127.0.0.1:5521/dogma/skills -o skills.json
 # merge: { sdeBuild, types, effects, attributes } = union of both, keys sorted numerically, compact JSON
 ```
@@ -204,8 +214,9 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   `moduleBonusAfterburner` when active add `massAddition` (modAdd) and maxVelocity postPercent `speedFactor ×
   speedBoostFactor / mass` (the mass with the addition; never penalized), and the MWD adds signatureRadius postPercent
   `signatureRadiusBonus` (penalized). `adaptiveArmorHardener` when active preMuls the armor resonances by its own (a
-  static profile). Every other code effect (reps, webs, neuts, cap boosters) changes no ship attribute: read its numbers
-  with `moduleAttribute` / `moduleNumbersOf`.
+  static profile). Every other code effect (reps, webs, neuts, cap boosters) changes no attribute of its own ship: read
+  its numbers with `moduleAttribute` / `moduleNumbersOf`. What webs, painters, points and scrams do to their target
+  enters the target's evaluation as `incoming` ("Target effects").
 - **Trace** steps: `{ source, effect, operation, amount, penalty?, from, to }`; sources are `ship`, `<module name>
   (<key>)` or `<skill> <level>` (`Navigation V`).
 - Cost: ~2 ms per TFI evaluation (every skill runs). Re-evaluate only when module states, the fit or lookups change;
@@ -217,7 +228,9 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   total `ehp`, `shieldRecharge` (s). `shipTargetingOf`: maxTargetRange, scanResolution, maxLockedTargets.
 - `shipCapacitorOf(ship, bundle, activeKeys)`: capacity, rechargeTime (s), `peakRecharge` = 2.5 × capacity ÷
   rechargeTime, `drain` = Σ capacitorNeed ÷ cycle of the active modules, `stable` with `stableAt` (the fraction where
-  `10·C/τ·(√c − c)` meets the drain) or `lastsFor` (s, stepped at 0.1 s). Numbers only: no live level, nothing stops.
+  `10·C/τ·(√c − c)` meets the drain) or `lastsFor` (s, stepped at 0.1 s), and `energyWarfareResistance` (2045) /
+  `remoteCapacitorImpedance` (6463), 1 when the hull lacks them. Numbers only: the live level is the page's
+  `CapacitorModel` ("Target effects"), and nothing stops when it runs dry.
 - `moduleNumbersOf`: the default effect's duration (cycle, s), discharge (capacitor need), range and falloff; `repair`
   by group (local / remote shield, armor, hull), an ancillary armor repairer × `chargedArmorDamageMultiplier` while it
   has paste; `reactivationDelay` (s). `localRepairRates`: HP/s of the active local repairers.
@@ -249,8 +262,10 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   adds the dogma steps behind the flight, HP, resonance and capacitor attributes. Without an SDE (or without
   DogmaData) the hull flies with the fit's prop mod (`readEftPropMod`, baked numbers when tools-core is down) and a
   `fitNote`. The `GET /ship-stats` route takes no fit (query length).
-- **Not modelled**: implants and boosters, command burst buffs, heat, drones, fitting resources and slot counts, a live
-  capacitor, the effects of targeted modules on their targets, server tick rounding.
+- **Not modelled**: implants and boosters, command burst buffs, heat, drones, fitting resources and slot counts, the
+  ship's own capacitor use, modules stopping when it runs dry, cap boosters (the L3 follow-up
+  `live-capacitor-for-fitted-ships`; the live level only takes capacitor warfare: "Target effects"), server tick
+  rounding.
 
 ## The page: fitted ships fly by their fit (`fittings.ts`)
 
@@ -261,7 +276,8 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   failure would have kept for the whole session), then cached as unavailable. Failures are forgotten on every load /
   open (`ForgetFailures`). `Prepare({ text, typeIDs })` runs a fit's names, then its types and the skills; it never
   rejects. `ShipStats` memoizes `computeShipStats` per bundle and input, so the 44 TFIs ships evaluate their 13 fits once
-  per bundle (~2 ms each).
+  per bundle (~2 ms each); an input with incoming target effects skips the memo (per-cycle falloff values would pile
+  up in it).
 - **`ResolveShipFitting({ doc, scene, lookup, hullTypeID, hullNote, propMod, fallback })`** is synchronous over the
   caches and returns `{ text, key, default?, fitting, modules, dogma, pending, note, typeIDs }` (null without a fit or a
   fallback). `fallback: { text, key }` is the fit of a ship without one: the director's default weapons fit
@@ -317,8 +333,11 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
 - **What runs** (`moduleActivationOf`, from the ship evaluated with its live states, so skills, hull bonuses and triage
   apply): category 1 and 2 default effects activate; cycle = the default effect's duration (10 s when it has none).
   Turrets run (`weapon: 'turret'`, `sd-weapons`); refused: launchers (`LAUNCHER_REFUSAL`, the Missiles entry), MJD 1189, MJFG 1533, cloaks 330, cynos 658, bubbles 899, smartbombs 72, ECM
-  bursts 80, passive modules. Webs, scrams, points, neuts, nos, EWAR and cap transmitters cycle on their target without
-  effect yet; command bursts and cap boosters cycle without effect (`note`).
+  bursts 80, passive modules. Webs, painters, points, scrams, neuts, nos and cap transmitters act on their target
+  (`activation.targetEffect`, "Target effects"). Without effect, with a `note`: sensor dampeners and ECM (`locks are not
+  modelled yet`), weapon disruptors (`weapons are not modelled yet`), cap boosters (`cap boosters do not refill the live
+  capacitor yet`), command bursts; any other targeted module with neither `repair` nor `targetEffect` notes `cycles
+  without effect on its target yet`.
 - **Group limits**: activation beyond the evaluated `maxGroupActive` (763) is refused; modules beyond `maxGroupOnline`
   (978) start offline with a note, and onlining one is refused.
 - **Targeted modules** (default effect category 2) need `target`: another ship in the scene, no lock. Distance is
@@ -327,9 +346,11 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   warp, or while running on another target. **Turrets** differ (`sd-weapons`): their target is the ship's
   (`set_target`), may be an authored object (port `HasObject`), and a running one given another target retargets at
   its next cycle (`ShipModules.Retarget`) instead of being refused. `effectiveness` =
-  `0.5^((max(0, d − optimal) / falloff)²)` scales repairs. A running one whose target drifts out of reach stops at its
-  cycle end (`its target is out of range`); target removed or in warp: it stops at once (`its target is gone` /
-  `entered warp`).
+  `0.5^((max(0, d − optimal) / falloff)²)` scales repairs and target effects. A running one whose target drifts out of
+  reach stops at its cycle end (`its target is out of range`); target removed or in warp: it stops at once (`its
+  target is gone` / `entered warp`). Each running targeted module keeps `applied`, its effectiveness at its latest
+  cycle start (`on` carries cycle 1); a stopping one keeps its cycle's effect until `off`. `Targeting(target)` /
+  `TargetIndex()` list the running targeted modules on a ship (turrets excluded) with `applied`.
 - **Warp**: entering proper warp (`OnWarp` enter) stops at once every running module that is not warp safe and every
   targeted one, plus every module targeting the ship. The prop mod already did this in DestinyWorld.
 - **The prop mod** stays DestinyWorld's: `switch_modules` on the `prop: true` module calls `PropModRefusal` /
@@ -344,8 +365,10 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   and siege / triage physics follow the running modules. `SetFlight` → `SyncModules`: `ShipModuleSpecsOf` (every resolved
   module but the prop mod, evaluated with live states) goes to `SetFit` when its JSON changed; states carry over by
   (key, type id), a running module that vanished stops (`refitted`) and the flight is recomputed once. `ModuleEvents`
-  (each boundary, warp, removal) re-flies every fitted ship whose live-states key differs from the one it flies, then
-  lands the repairs. Cost: a key per fitted ship per tick; the evaluations are memoized by fit and states.
+  (each boundary, warp, removal) re-flies every scene ship whose `FlownKey` (live states + the incoming target effects
+  and their `applied`) differs from the one it flies, then lands the repairs and capacitor transfers. Cost: a key per
+  ship per tick (one `TargetIndex()` pass); the evaluations are memoized by fit and states, and bypass the memo only
+  with incoming modifiers.
 - **Selectors** (`selectFittedModules`): a key, a category, a weapon kind (`turret`, `launcher`), `all`, or a name.
   A running module's row carries `cycleTime` (s, 2 decimals); a running turret's `nextTarget` until it retargets.
 - **Result**: `{ tick, state, ships: [{ id, modules: [{ module, name, state, at?, stopsIn?, activatesIn?, respondsIn?,
@@ -373,6 +396,96 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   target and stop when it is removed" (two Large Remote Armor Repairer II on a TFI 3 km off: refused without a target,
   then `incoming` on the TFI, stopped with `its target is gone` on `remove_ship`). The Guardian's Large RAR II reaches
   57.6 km optimal + 16.8 km falloff in this build (14.4 km base, +300 % Amarr Cruiser V).
+
+## Target effects (webs, painters, points, scrams, capacitor warfare)
+
+Running targeted modules change the ship they run on, from the SDE's numbers (build 3632936, checked against
+tools-core 2026-10-22; max skills):
+
+| Module (fixture type) | Default effect | On the target | Numbers |
+|---|---|---|---|
+| Stasis Webifier II (527), Federation Navy Stasis Webifier (17559) | 6426 `remoteWebifierFalloff`, code effect | `maxVelocity` (37) postPercent `speedFactor` (20), penalized; resistance 2115 | −60 %, 10 / 14 km, no falloff; a Vindicator's −90 % (`shipBonusMB` 10 %/lvl) |
+| Target Painter II (19806) | 6425 `remoteTargetPaintFalloff`, code effect | `signatureRadius` (552) postPercent `signatureRadiusBonus` (554), penalized; resistance 2114 | +37.5 % with Signature Focusing V (30 % base); 36 km + 90 km falloff |
+| Warp Disruptor II (3244) | 39 `warpDisrupt` | SDE `ItemModifier targetID`: 104 modAdd 105 | +1; 24 km |
+| Warp Scrambler II (448) | 5934 `warpScrambleBlockMWDWithNPCEffect` | 104 modAdd 105; `LocationRequiredSkillModifier targetID` 1349 on skill 3454 (MWDs) = the MWD block; the NPC postAssign (1470) skipped | +2; 9 km |
+| Heavy Energy Neutralizer II (12271) | 6187 `energyNeutralizerFalloff`, resistance 2045 | drains `energyNeutralizerAmount` (97) | 600 GJ / 24 s; a Bhaalgorn's 1050 |
+| Heavy Energy Nosferatu II (12263) | 6197 `energyNosferatuFalloff`, resistance 2045 | moves `powerTransferAmount` (90) to the shooter | 120 GJ / 10 s; a Bhaalgorn's 210 with `override` |
+| Remote capacitor transmitters (16487) | 6184 `shipModuleRemoteCapacitorTransmitter`, resistance 6463 | gives 90 | 311 GJ / 5 s (Large Inductive Compact); a Guardian's Large RCT II 351 |
+
+- **Source** (`moduleTargetEffectOf(ship, bundle, key)`, on the shooter evaluated with its live states, so skills and
+  hull bonuses apply; `moduleActivationOf` carries it as `targetEffect`): only a category-2 default effect. Each SDE
+  `ItemModifier` on domain `targetID` / `target` becomes a `TargetModifier` (amount = the module's evaluated modifying
+  attribute); assigns (−1, 7) are skipped; the scram's skill-3454 `activationBlocked` modifier sets
+  `blocksMicrowarpdrive`. Code effects by name, as Pyfa: webs, painters, neuts, nos (`override` when the module's
+  evaluated `nosOverride` 1945 > 0: the Blood Raider hulls' effect 5854), transmitters. Null for remote reps (they have
+  `repair`), damps, disruptors and ECM.
+- **Scaling**: × the module's `applied` effectiveness (falloff at its latest cycle start, kept for the cycle; a stopping
+  one keeps its cycle's effect until `off`). Additive and percent amounts × e, multipliers `1 + (m − 1) × e`
+  (`scaleModifierAmount`). × the target's resistance: the effect's `resistanceAttributeID`, else the module's
+  `remoteResistanceID` (2138), read on the target's evaluation (Titans 0.2 web / damp, supercarriers 0.5); a hull
+  without it and a bundle without its record give 1, never 0 (`dogmaResistanceOf`).
+- **Dogma path**: `evaluateShipDogma({ incoming })` adds each as a synthetic category-7 source on the ship, so stacking
+  treats it as a module: a web shares the negative postPercent maxVelocity chain with the ship's own penalized
+  modules. Trace steps name `<ship>: <module name> (<key>)`. (The Large Trimark Armor Pump's drawback is agility, not
+  velocity: the chain spec uses synthetic modules.)
+- **Table path**: `computeShipStats({ incoming })` applies 37 and 552 after the prop mod step through
+  `applyIncomingModifiers` (non-stackable, `applied` steps), and 104 modAdd / modSub onto `hull.warpScrambleStatus ??
+  0`. Table ships resist nothing. Parity: one web on a bare TFI, Guardian and Rifter gives the same max velocity on
+  both paths.
+- **`ShipStats.warpScrambleStatus`** (104, "if greater than zero the ship cannot warp"): the hull's 0 (−2 on a
+  Venture), a running Warp Core Stabilizer II −2 (effect 8121 makes it an active module), siege and triage +100 (852
+  `siegeModeWarpStatus`), plus each point and scram.
+- **The flight**: `ResolveFlight({ incoming })` gives it to both computes, so a running MWD's numbers are webbed too.
+  `FitLookup.ShipStats` bypasses its memo with incoming; a ship re-flies only when its `FlownKey` changes. The
+  director builds incoming from `Targeting(id)`; with incoming it also resolves the flight without it
+  (`unaffectedFlights`, a memo hit) for `speedFactor` / `signatureFactor`. Destiny sees new numbers through
+  `SetPhysics` only (`sd-destiny`); align time is unchanged, as in EVE.
+- **Tackle**: `FlyFlight` calls `DestinyWorld.SetTackle(id, TackleOf(...))` after `SetPhysics`: `warp` =
+  `warpScrambleNoteOf` when the status is above 0; `propMod` = `microwarpdriveBlockNoteOf` of the running
+  `blocksMicrowarpdrive` modules on a ship flying an MWD. DestinyWorld enforces them (`sd-destiny` "Tackle"):
+  warps refused and cancelled, a scrammed MWD off at once and kept off. Afterburners are unaffected.
+- **Capacitor warfare** (`CapacitorModel`): every dogma-path ship has a live level (`SetFlight` → `Set` from
+  `flight.capacitor`, else `Remove`; full at first, a new evaluation keeps the fraction; `Remove` / `Clear` beside the
+  damage model's). `ModuleOutputs` lands `CapacitorLandings(events)` after the repairs: at each `cycle` event (cycle 1
+  with `on`) of a module with `targetEffect.capacitor`, amount × the event's effectiveness × the target's 2045 (neut,
+  nos) or 6463 (transmitter). A neut drains at most the level, a transmitter gives at most capacity − level, a nos
+  drains only while the target holds more than the shooter and never below the shooter's level (absolute GJ, EVE's
+  rule since Odyssey 1.1) unless `override`; the shooter gains it up to its capacity. Recharge in between:
+  `√c(t) = 1 + (√c0 − 1)·e^(−5t/τ)`, the closed form of `10·C/τ·(√c − c)`, exact for any step. A ship with no live
+  capacitor (a fit-less table-path ship: no weapon hardpoints, no EVE type) takes nothing. Unfitted ships with an SDE
+  hull fly their default weapons fit (`sd-weapons`), so they have one.
+- **get_state**: per ship `targeted`, null when nothing runs on it and it can warp: `{ by: [{ from, module, name,
+  category, effectiveness, amount?, cycleTime, moved?, note? }], speedFactor?, signatureFactor?, warpScrambleStatus,
+  canWarp, warpNote?, mwdBlocked? }`. `by` lists every running targeted module on it, remote reps included, turrets not
+  (they are `set_target`'s); `amount` is per cycle before falloff (a web's percent, a point's strength, GJ, HP);
+  `moved` the GJ its latest cycle start moved; `note` `no live capacitor (no fit)` for capacitor warfare on a ship
+  without one. `speedFactor` / `signatureFactor`: with the effects over without (absent when 1; `physics` already
+  includes them). `capacitor` gains `level` (GJ, 1 decimal) and `fraction` (3 decimals) on a live capacitor, and
+  `energyWarfareResistance` / `remoteCapacitorImpedance` when not 1.
+- **Not modelled**: the ship's own capacitor use, modules stopping when it runs dry, cap boosters (L3 follow-up
+  `live-capacitor-for-fitted-ships`); damps, weapon disruptors and ECM (no locks or weapons yet: follow-up); siege,
+  triage and bastion immunity to offensive modules and assistance (follow-up); resistances on table-path ships; MJD and
+  bubble tackle (those modules are refused); target effects in `ship_stats`.
+- **verify-page** (2026-10-23, SDE 3632936, scene `verify-tackle`): "webs slow their target and points pin it" (a
+  Rifter's Stasis Webifier II: a bare TFI 162.5 → 65 m/s and a default-fit Rifter 456.25 → 182.5 m/s, `speedFactor`
+  0.4, each back when it stops; its Warp Disruptor II: status 1, `order_ship` warp refused `ship "tfi" cannot warp:
+  warp scramble status 1 (tackle: Warp Disruptor II (mid-2) +1): above 0 it cannot warp`, accepted after `online` and
+  the 5 s cycle end); "a scram switches its target's MWD off and keeps it off" (the default-fit Rifter's 5MN
+  Microwarpdrive II `off: a warp scrambler blocks its microwarpdrive (tackle: Warp Scrambler II (mid-1))` within a
+  tick; `switch_prop_mods` and `switch_modules` prop refused; still off after the scram, then switched on); "neuts
+  drain and transmitters refill a fitted target's capacitor" (a Guardian's Heavy Energy Neutralizer II moved 600 GJ,
+  the TFI 6875 → 6278.4 GJ; its Large Remote Capacitor Transmitter II gave 351 then 238.7 GJ, capped at 6875; a neut on
+  a Minmatar Shuttle, no weapon hardpoints so no fit, notes `no live capacitor (no fit)`). The full run: 91 ok, 1 skip
+  (no renderer), none failed.
+- **Use case** (2026-10-23, own hub on 5521, headless tab): `stage_engagement { sides: [{ composition: "tfis" }, {
+  ships: [{ hull: "Ferox", count: 10 }] }], range: 5000 }`. The TFIs ewar squad is 3 Bhaalgorns (one Federation Navy
+  Stasis Webifier each, −60 %) and 2 Vindicators (two each, −90 %), all in reach of `red-fc` without an approach.
+  `switch_modules { fleet: "tfis", squad: "ewar", modules: ["web"] }`: `red-fc` (a default-fit Ferox) 181.25 → 1.311
+  m/s, `speedFactor` 0.007 (= 4 × −90 % and 3 × −60 %, stacking-penalized). The fleet's `point` selector runs 21
+  Warp Disruptor IIs (the FC and both dps squads; the Devoters' M-36 bubbles do not match `point`): `warpScrambleStatus`
+  21, `canWarp` false; `order_ship red-fc warp` and `order_fleet red warp` refused `ship "red-fc" cannot warp: warp
+  scramble status 21 (tfis-fc: Warp Disruptor II (mid-4) +1, ...)`; an untackled Ferox warped off. The note lists
+  every source (~1.6 KB for 21 points).
 
 ## Module effects and sounds (C6)
 

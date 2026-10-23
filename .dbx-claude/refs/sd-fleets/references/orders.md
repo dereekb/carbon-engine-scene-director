@@ -51,12 +51,15 @@ unchanged and runs it through `Director.OrderFleet`.
 
 `FleetOrders.Warp`:
 
-1. Refusals: `OrderRefusal(leader, warp)`, and the fleet must be planned (`formation.ready`).
+1. Refusals: `OrderRefusal(leader, warp)` (so a tackled leader refuses the warp: `ship "fc" cannot warp: <warp>`,
+   `sd-destiny` "Tackle"), and the fleet must be planned (`formation.ready`).
 2. Predict the leader's landing (`LandingPoint`, both EVE radii for a ship target) and the frame
    `WarpFrame(leaderPos, landing)`; each ship's predicted slot is `FramePoint(landing, frame, offset)`.
-3. Skip (reported in `skipped`): a ship in proper warp (it keeps its own warp, untouched), max velocity 0, or a slot
-   under 150 km away (it flies there: **Destiny's `WarpTo` turns anything within 100 km into a `GotoPoint`**, and EVE
-   refuses warps under 150 km).
+3. Skip (reported in `skipped`): a ship in proper warp (it keeps its own warp, untouched), a tackled one (`cannot
+   warp: <warp>`, from `world.Tackle(id)`), max velocity 0, or a slot under 150 km away (it flies there: **Destiny's
+   `WarpTo` turns anything within 100 km into a `GotoPoint`**, and EVE refuses warps under 150 km). A tackled member
+   is still regrouped (step 4), so it holds while the leader warps and then flies to its slot. The regroup warps
+   (`regroup` of a group apart beyond 150 km) skip tackled members the same way.
 4. Every ship not in warp is regrouped (`FleetFollowing.Regroup`), then the leader is ordered. A wing or squad then
    breaks away on its leader. Each warper gets `world.WarpInFormation(id, { leader, offset, delay })`.
 

@@ -39,9 +39,13 @@ default 0; no `speed`: a warp always aligns at full speed). Code: `DestinyWorld`
 
 ## Refusals and edits
 
-- Refused: a landing under 150 km away (EVE's minimum; use `goto`), a ship with max velocity 0, a warp to a ship in
-  warp.
-- While aligning, any order cancels the warp (a new warp replaces it).
+- Refused: a warp-scrambled ship (`ship "x" cannot warp: warp scramble status 1 (...): above 0 it cannot warp`, checked
+  first: `sd-destiny` "Tackle"), a landing under 150 km away (EVE's minimum; use `goto`), a ship with max velocity 0, a
+  warp to a ship in warp. A pending or delayed warp found tackled at its boundary is dropped (`dropped: the warp order
+  (...)`).
+- While aligning, any order cancels the warp (a new warp replaces it), and so does a point or scram landing: the ship
+  flies on along its warp heading as a `direction` order (`warp cancelled: ...`); a formation-warp member drops its
+  formation warp and follows again. In proper warp nothing can tackle it.
 - Removing the target of an applied warp leaves the warp flying; a pending warp to it stops the ship.
 - A new position or rotation ends a warp at once, at rest at the placement.
 - Entering warp switches a running prop mod off (`note` `off: entered warp`); it stays off after landing.

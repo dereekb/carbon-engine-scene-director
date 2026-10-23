@@ -107,6 +107,20 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly shots?: number;
   readonly defense?: Maybe<ShipDefenseState>;
   readonly capacitor?: Maybe<ShipCapacitorState>;
+  readonly targeted?: Maybe<ShipTargetedState>;
+}
+
+/**
+ * get_state's `targeted` (the viewer's director.ts ShipTargetedReport).
+ */
+interface ShipTargetedState {
+  readonly by: { readonly from: string; readonly module: string; readonly name: string; readonly category: string; readonly effectiveness: number; readonly amount?: number; readonly cycleTime: number; readonly moved?: number; readonly note?: string }[];
+  readonly speedFactor?: number;
+  readonly signatureFactor?: number;
+  readonly warpScrambleStatus: number;
+  readonly canWarp: boolean;
+  readonly warpNote?: string;
+  readonly mwdBlocked?: string;
 }
 
 /**
@@ -176,6 +190,11 @@ type ShipDefenseState = Readonly<Record<'shield' | 'armor' | 'structure', { read
 interface ShipCapacitorState {
   readonly capacity: number;
   readonly rechargeTime: number;
+  /**
+   * The live level in GJ (fitted ships on the dogma path).
+   */
+  readonly level?: number;
+  readonly fraction?: number;
 }
 
 interface ShipPropModState {
@@ -1407,6 +1426,150 @@ try {
       return rows.every((row) => row.state !== 'active' && row.state !== 'stopping' && !row.target && /target is gone/.test(row.note ?? '')) ? null : JSON.stringify(rows);
     });
     return `2 Large Remote Armor Repairer II on tfi (incoming ${JSON.stringify(incoming.map((repair) => repair.module))}); stopped with "its target is gone" on its removal`;
+  });
+
+  // Tackle: a Rifter with a web, a scram and a point at the origin; 3 km off it a Guardian with two neuts and a cap
+  // transmitter, a bare TFI (dogma path, live capacitor) and an unfitted Rifter (its default fit's 5MN MWD); 3 km off
+  // the Guardian a Minmatar Shuttle (no weapon hardpoints, so no default fit: the table path, no live capacitor).
+  const TACKLE_FIT = ['[Rifter, Verify Tackle]', 'Stasis Webifier II', 'Warp Scrambler II', 'Warp Disruptor II'].join('\n');
+  const NEUT_FIT = ['[Guardian, Verify Neut]', 'Heavy Energy Neutralizer II', 'Heavy Energy Neutralizer II', 'Large Remote Capacitor Transmitter II'].join('\n');
+  const TFI_HOME: SceneVector = [3000, 0, 0];
+  const tackleScene = {
+    name: 'verify-tackle',
+    ships: [
+      { id: 'tackle', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', fit: TACKLE_FIT, position: [0, 0, 0] },
+      { id: 'neut', dna: GUARDIAN_DNA, type: 'Guardian', fit: NEUT_FIT, position: [0, 0, 3000] },
+      { id: 'tfi', dna: TFI_DNA, type: 'Tempest Fleet Issue', fit: '[Tempest Fleet Issue, Bare]', position: TFI_HOME },
+      { id: 'free', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', position: [-3000, 0, 0] },
+      { id: 'shuttle', dna: 'ms1_t1:minmatarbase:minmatar', type: 'Minmatar Shuttle', position: [0, 3000, 3000] }
+    ]
+  };
+  const MaxVelocityOf = (state: ViewerState, id: string): number => ShipIn(state, id).physics?.maxVelocity ?? Number.NaN;
+  const KeysNamed = (state: ViewerState, id: string, name: string): string[] => (ShipIn(state, id).fit?.modules ?? []).filter((module) => module.name === name).map((module) => module.module);
+  let tackleLoaded = false;
+  // Each tackle check runs on its own (--only): the first one to run loads the scene.
+  const LoadTackleScene = async (): Promise<ViewerState> => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 587 }).catch(SkipWithoutSde);
+    if (!tackleLoaded) await call('load_scene', { scene: tackleScene });
+    tackleLoaded = true;
+    return WaitFor('the tackle scene fits resolve', 60, (polled) => {
+      const pending = ['tackle', 'neut', 'tfi', 'free'].map((id) => ShipIn(polled, id)).find((ship) => ship.fit?.math !== 'dogma' || ship.capacitor?.level == null || !ship.physics?.warpSpeed);
+      if (pending) return `${pending.id}: ${JSON.stringify(pending.fit?.note ?? pending.fitNote ?? pending.fit)}`;
+      const shuttle = ShipIn(polled, 'shuttle');
+      return shuttle.fit == null && /no weapon hardpoints/u.test(shuttle.fitNote ?? '') && !shuttle.capacitor ? null : `shuttle: ${JSON.stringify({ fit: shuttle.fit, fitNote: shuttle.fitNote, capacitor: shuttle.capacitor })}`;
+    });
+  };
+
+  await Check('webs slow their target and points pin it', async () => {
+    const before = await LoadTackleScene();
+    const base: Record<string, number> = { tfi: MaxVelocityOf(before, 'tfi'), free: MaxVelocityOf(before, 'free') };
+    const webbed: string[] = [];
+    for (const id of ['tfi', 'free']) {
+      const on = await call<SwitchModulesResult>('switch_modules', { ships: ['tackle'], modules: ['web'], state: 'active', target: id });
+      Expect(on.ships[0]?.modules[0]?.target === id && !on.skipped.length, JSON.stringify(on));
+      const slowed = await WaitFor(`the web slows ${id} to 40 %`, 10, (polled) => {
+        const ship = ShipIn(polled, id);
+        const wanted = 0.4 * base[id];
+        return Math.abs(MaxVelocityOf(polled, id) - wanted) <= 0.01 * wanted && ship.targeted?.speedFactor === 0.4 ? null : `maxVelocity ${ship.physics?.maxVelocity} (was ${base[id]}), targeted ${JSON.stringify(ship.targeted)}`;
+      });
+      webbed.push(`${id} ${base[id]} -> ${MaxVelocityOf(slowed, id)} m/s (speedFactor ${ShipIn(slowed, id).targeted?.speedFactor})`);
+      await call('switch_modules', { ships: ['tackle'], modules: ['web'], state: 'online' });
+      await WaitFor(`${id} gets its speed back once the web stops`, 10, (polled) => (Close(MaxVelocityOf(polled, id), base[id]) && ShipIn(polled, id).targeted == null ? null : `maxVelocity ${MaxVelocityOf(polled, id)}, targeted ${JSON.stringify(ShipIn(polled, id).targeted)}`));
+    }
+    const point = await call<SwitchModulesResult>('switch_modules', { ships: ['tackle'], modules: ['point'], state: 'active', target: 'tfi' });
+    Expect(point.ships[0]?.modules[0]?.target === 'tfi' && !point.skipped.length, JSON.stringify(point));
+    const pinned = await WaitFor('the point pins the TFI', 10, (polled) => {
+      const targeted = ShipIn(polled, 'tfi').targeted;
+      return targeted?.canWarp === false && targeted.warpScrambleStatus === 1 && /Warp Disruptor II/u.test(targeted.warpNote ?? '') ? null : JSON.stringify(targeted);
+    });
+    const far: SceneVector = [TFI_HOME[0], TFI_HOME[1], TFI_HOME[2] + 500000];
+    let refused = 'accepted';
+    try {
+      await call('order_ship', { id: 'tfi', order: { type: 'warp', point: far } });
+    } catch (error) {
+      refused = ErrorMessage(error);
+    }
+    Expect(/cannot warp/u.test(refused), `a warp while pointed: ${refused}`);
+    await call('switch_modules', { ships: ['tackle'], modules: ['point'], state: 'online' });
+    // Warp Disruptor II cycles 5 s: the point holds until its cycle end.
+    await WaitFor('the TFI can warp after the point stops', 10, (polled) => {
+      const targeted = ShipIn(polled, 'tfi').targeted;
+      return targeted == null || targeted.canWarp ? null : JSON.stringify(targeted);
+    });
+    await call('order_ship', { id: 'tfi', order: { type: 'warp', point: far } });
+    const aligning = await WaitFor('the TFI aligns to warp', 5, (polled) => (ShipIn(polled, 'tfi').order?.type === 'warp' ? null : JSON.stringify(ShipIn(polled, 'tfi').order)));
+    await call('order_ship', { id: 'tfi', order: { type: 'stop' } });
+    await call('patch_scene', { operations: [{ op: 'update_ship', id: 'tfi', set: { position: TFI_HOME } }] });
+    return `${webbed.join('; ')}; pointed: ${ShipIn(pinned, 'tfi').targeted?.warpNote}; refused "${refused}"; after the point's cycle end the warp was accepted (${ShipIn(aligning, 'tfi').warp?.phase ?? 'ordered'}), then placed back`;
+  });
+
+  await Check("a scram switches its target's MWD off and keeps it off", async () => {
+    await LoadTackleScene();
+    const on = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['free'], active: true });
+    Expect(on.ships[0]?.state === 'activating', JSON.stringify(on));
+    await WaitFor("free's MWD runs", 5, (polled) => (ShipIn(polled, 'free').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(polled, 'free').propMod)));
+    const scram = await call<SwitchModulesResult>('switch_modules', { ships: ['tackle'], modules: ['scram'], state: 'active', target: 'free' });
+    Expect(scram.ships[0]?.modules[0]?.target === 'free' && !scram.skipped.length, JSON.stringify(scram));
+    // The scram applies at the next 1 s boundary, and the MWD goes off on that boundary.
+    const blocked = await WaitFor('the scram switches the MWD off', 3, (polled) => {
+      const ship = ShipIn(polled, 'free');
+      return ship.propMod?.state === 'off' && /warp scrambler blocks its microwarpdrive/u.test(ship.propMod.note ?? '') && ship.targeted?.mwdBlocked && ship.targeted.canWarp === false ? null : JSON.stringify({ propMod: ship.propMod, targeted: ship.targeted });
+    });
+    const refused = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['free'], active: true });
+    Expect(!refused.ships.length && /cannot switch its prop mod on: a warp scrambler/u.test(refused.skipped[0]?.reason ?? ''), JSON.stringify(refused));
+    const row = await call<SwitchModulesResult>('switch_modules', { ships: ['free'], modules: ['prop'], state: 'active' });
+    Expect(!row.ships.length && /cannot switch its prop mod on/u.test(row.skipped[0]?.reason ?? ''), JSON.stringify(row));
+    await call('switch_modules', { ships: ['tackle'], modules: ['scram'], state: 'online' });
+    const released = await WaitFor('the scram stops at its cycle end', 10, (polled) => (ShipIn(polled, 'free').targeted == null ? null : JSON.stringify(ShipIn(polled, 'free').targeted)));
+    Expect(ShipIn(released, 'free').propMod?.state === 'off', `the MWD after the scram: ${JSON.stringify(ShipIn(released, 'free').propMod)}`);
+    const again = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['free'], active: true });
+    Expect(again.ships[0]?.state === 'activating', JSON.stringify(again));
+    await WaitFor("free's MWD runs again", 5, (polled) => (ShipIn(polled, 'free').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(polled, 'free').propMod)));
+    await call('switch_prop_mods', { ships: ['free'], active: false });
+    return `${ShipIn(blocked, 'free').propMod?.name} ${ShipIn(blocked, 'free').propMod?.note}; switch-on refused: ${refused.skipped[0]?.reason}; stayed off after the scram, then switched on`;
+  });
+
+  await Check("neuts drain and transmitters refill a fitted target's capacitor", async () => {
+    const before = await LoadTackleScene();
+    const full = ShipIn(before, 'tfi').capacitor;
+    if (!full || full.level == null) throw new Error(`tfi capacitor ${JSON.stringify(full)}`);
+    const start = full.level;
+    Expect(start >= full.capacity - 0.1, `tfi starts at ${start} of ${full.capacity} GJ`);
+    const [neutKey, spareNeutKey] = KeysNamed(before, 'neut', 'Heavy Energy Neutralizer II');
+    Expect(neutKey && spareNeutKey, JSON.stringify(ShipIn(before, 'neut').fit?.modules));
+    const neut = await call<SwitchModulesResult>('switch_modules', { ships: ['neut'], modules: [neutKey], state: 'active', target: 'tfi' });
+    Expect(neut.ships[0]?.modules[0]?.target === 'tfi' && !neut.skipped.length, JSON.stringify(neut));
+    const drained = await WaitFor('the neut drains the TFI at its first cycle', 5, (polled) => {
+      const ship = ShipIn(polled, 'tfi');
+      const row = ship.targeted?.by.find((entry) => entry.module === neutKey);
+      return row?.moved != null && (ship.capacitor?.level ?? Infinity) < start - 500 ? null : JSON.stringify({ capacitor: ship.capacitor, targeted: ship.targeted });
+    });
+    const neutRow = ShipIn(drained, 'tfi').targeted?.by.find((entry) => entry.module === neutKey);
+    const low = ShipIn(drained, 'tfi').capacitor?.level ?? Number.NaN;
+    Expect(neutRow?.moved != null && Math.abs(neutRow.moved - 600) <= 1 && start - low > 550 && start - low <= 600.1, `moved ${neutRow?.moved}, ${start} -> ${low} GJ`);
+    // The neut cycles 24 s: stopped now, it lands nothing more.
+    await call('switch_modules', { ships: ['neut'], modules: [neutKey], state: 'online' });
+    const transmitter = await call<SwitchModulesResult>('switch_modules', { ships: ['neut'], modules: ['remote-capacitor'], state: 'active', target: 'tfi' });
+    Expect(transmitter.ships[0]?.modules[0]?.target === 'tfi' && !transmitter.skipped.length, JSON.stringify(transmitter));
+    const given: number[] = [];
+    const topped = await WaitFor('the transmitter refills the TFI up to its capacity', 20, (polled) => {
+      const ship = ShipIn(polled, 'tfi');
+      const level = ship.capacitor?.level ?? Number.NaN;
+      Expect(level <= (ship.capacitor?.capacity ?? 0) + 0.1, `over capacity: ${JSON.stringify(ship.capacitor)}`);
+      const row = ship.targeted?.by.find((entry) => entry.category === 'remote-capacitor');
+      if (row?.moved != null && given.at(-1) !== row.moved) given.push(row.moved);
+      return row?.amount != null && given.some((moved) => moved < (row.amount ?? 0)) && level >= (ship.capacitor?.capacity ?? Infinity) - 0.1 ? null : JSON.stringify({ capacitor: ship.capacitor, row });
+    });
+    await call('switch_modules', { ships: ['neut'], modules: ['remote-capacitor'], state: 'online' });
+    const spare = await call<SwitchModulesResult>('switch_modules', { ships: ['neut'], modules: [spareNeutKey], state: 'active', target: 'shuttle' });
+    Expect(spare.ships[0]?.modules[0]?.target === 'shuttle' && !spare.skipped.length, JSON.stringify(spare));
+    const unfitted = await WaitFor('a neut on the shuttle notes it has no live capacitor', 5, (polled) => {
+      const row = ShipIn(polled, 'shuttle').targeted?.by.find((entry) => entry.module === spareNeutKey);
+      return row?.note === 'no live capacitor (no fit)' && row.moved == null ? null : JSON.stringify(ShipIn(polled, 'shuttle').targeted);
+    });
+    await call('switch_modules', { ships: ['neut'], modules: [spareNeutKey], state: 'online' });
+    const capacity = ShipIn(topped, 'tfi').capacitor?.capacity;
+    return `neut moved ${neutRow?.moved} GJ: ${start} -> ${low} of ${capacity} GJ; the transmitter gave ${given.join(', ')} GJ up to ${ShipIn(topped, 'tfi').capacitor?.level}; the shuttle: "${ShipIn(unfitted, 'shuttle').targeted?.by[0]?.note}"`;
   });
 
   await Check('add_fleet_composition drops the TFIs fleet in formation', async () => {
