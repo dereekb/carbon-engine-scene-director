@@ -216,7 +216,8 @@ export class ShipScripts {
   /**
    * Gives the step's order once its time came and the ship can take it.
    *
-   * @returns True when the step was given and completed at once (a rejoin), so the next step may run this tick.
+   * @returns True when the step was given and completed at once (a rejoin), or skipped (its target was destroyed), so
+   *   the next step may run this tick.
    */
   private Give(id: string, script: ShipScriptRecord, played: number): boolean {
     if (played < script.startAt) {
@@ -233,6 +234,11 @@ export class ShipScripts {
       return false;
     }
     const step = script.steps[script.step];
+    const target = (step as { readonly target?: unknown }).target;
+    if (typeof target === 'string' && !this.port.Alive(target)) {
+      script.note = `step ${script.step} (${DescribeStep(step)}) was skipped: its target was destroyed`;
+      return this.Next(script, played);
+    }
     const { after: _after, duration, ...order } = step;
     let given: object;
     try {
@@ -255,7 +261,7 @@ export class ShipScripts {
   }
 
   /**
-   * Checks a running step: interrupted, dropped, its duration over, or its order complete.
+   * Checks a running step: interrupted, dropped, its target destroyed, its duration over, or its order complete.
    *
    * @returns True when the step ended this tick and the next may start.
    */
@@ -265,6 +271,13 @@ export class ShipScripts {
     const step = script.steps[script.step];
     const flying = JSON.stringify(motion.pendingOrder ?? motion.order);
     if (flying !== script.given) {
+      // The world stopped it because its target was destroyed: in a scripted fight that is the expected end of an
+      // attack run, so the step ends there and the script goes on.
+      const target = (JSON.parse(script.given ?? '{}') as { readonly target?: unknown }).target;
+      if (typeof target === 'string' && motion.orderNote && !motion.pendingOrder && !this.port.Alive(target)) {
+        script.note = `step ${script.step} (${DescribeStep(step)}) ended: its target was destroyed`;
+        return this.Next(script, played);
+      }
       if (motion.orderNote && !motion.pendingOrder) {
         script.state = 'failed';
         script.note = `step ${script.step} (${DescribeStep(step)}) was dropped: ${motion.orderNote}`;

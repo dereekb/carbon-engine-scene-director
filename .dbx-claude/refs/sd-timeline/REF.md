@@ -2,13 +2,12 @@
 
 > A scene document carries a script: a top-level `timeline` of cues that each run one existing lever at a scene time,
 > and per-ship `orders` a ship flies in turn. Fetch before touching `packages/scene/src/lib/timeline/`, the document's
-> `timeline` or ship `orders`, the timeline patch ops, or (once they land) the page's `TimelinePlayer` /
-> `ShipScripts`. The plan this follows: `~/.claude/plans/scene-timeline-and-per-ship-orders-validated-played-on-the-scene-clock-reported.md`
+> `timeline` or ship `orders`, the timeline patch ops, or the page's `TimelinePlayer` / `ShipScripts`. The plan this follows: `~/.claude/plans/scene-timeline-and-per-ship-orders-validated-played-on-the-scene-clock-reported.md`
 > (slices T1 document → T2 page player → T3 determinism → T4 `at` on the tools → T5 real-GPU look).
 
-**Status: T1 (the document), T2 (the page player), T3 (determinism) and T4 (`at` on the tools) have landed.** The page
-plays the script on Destiny ticks, reports it, and replays it the same, and every lever tool authors a cue with `at`.
-T5 (the real-GPU scripted fight) follows.
+**Status: all five slices have landed** (T1 the document, T2 the page player, T3 determinism, T4 `at` on the tools, T5
+the real-GPU scripted fight). The page plays the script on Destiny ticks, reports it, and replays it the same, and every
+lever tool authors a cue with `at`.
 
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
@@ -169,6 +168,10 @@ The director is both ports.
   completion (`shipStepCompletion`; a warp completes on a landing of its own warp, not one it began with). States
   `waiting`, `arriving`, `flying`, `holding` (the last, never-ending order), `done`, `failed` (a refusal, or the world
   dropped the order: `orderNote`), `interrupted` (the ship flies another order), `destroyed`.
+- **A step's target destroyed** (since T5) is not a failure: in a scripted fight the target dying is the end of an
+  attack run. A running step the world stopped because its target died (`Alive(target)` false) ends there, note `step 0
+  (orbit red-fc) ended: its target was destroyed`, and the next step follows its `after`; a step whose turn comes with
+  its target already dead is skipped (`… was skipped: its target was destroyed`). Any other dropped order still fails.
 - **Camera cues** play with the `timeline` cinema driver from the boundary's scene time (`sd-cinema`); `stop_shot`
   cues stop only a timeline shot (else `skipped`); `timeline { camera: false }` releases a timeline shot and skips
   later camera cues (until the tab reloads).
@@ -298,3 +301,45 @@ approach with `delay: 0.5` at 2, a patch warp-in of 2 Rifters (inline compositio
 stop at 25; run to 55 s, `timeline restart`, run again: t = 0 at world ticks 2 and 58, cues at +1/+2/+3/+6/+25, landings
 `rw-fc` +12 and `rw-dps-01` +15, kills b1 +22 and r1 +46, and the 6 surviving ships' final positions equal in both runs.
 (k) the approach cue's delays `{ b1: 0, b2: 4, b3: 4 }` and the landing offsets `[0, 3]` were equal across both runs.
+
+## Real-GPU evidence (T5, 2026-10-23, dbxpc, Windows Chrome, NVIDIA Lovelace, `?audio=off`)
+
+The plan's scripted fight, authored with the tools on a private hub (temp stores). `set_location` 30 km off Jita IV -
+Moon 4 - Caldari Navy Assembly Plant (the station ~100 km beyond, along +Z); `add_ships` 6 Punishers (fleet `blue`, team
+blue, at the origin, heading 0). Then, all with `at`:
+
+- an inline 6-Rifter composition (`red`, team red, `near` blue-fc 25 km ahead, heading 180, `warpIn`) at 5;
+- `play_shot warp-in` on red at 5;
+- blue `switch_prop_mods` on and `order_fleet` approach red-fc at 15;
+- blue `targets set [red-fc, red-dps-01, red-dps-02]` and red `engage` blue-fc at 25;
+- `overlook-pull-out` at 26; blue prop mods off at 30; `hero` on blue-fc at 45;
+- and blue-dps-05's `orders` `[{ after: 20, orbit red-fc 2500, duration: 30 }, { stop }]` by `patch_scene update_ship`.
+
+Every call returned a pending cue with the stopped warning; then `timeline restart`.
+
+- **Every cue fired on its tick, none failed**: +5, +5, +15, +15, +25, +25, +26, +30, +45. The patch cue's live edit
+  added red's 6 ships, fleet, wing and squad. Red landed at +14, +14, +16, +17, +18 and +18.
+- **Kills**: blue-fc +32 (by red-dps-03), red-fc +40, red-dps-01 +47, red-dps-02 +51. Then blue's called list was
+  spent and red's target was dead, so the fight stopped there, as scripted.
+- **Replay**: three runs from `timeline restart` (one before the fix below) gave the same fire, landing and kill ticks,
+  and the same killers.
+- **The bug it found** (the "A step's target destroyed" rule above; `ship-scripts.spec.ts`):
+  - Blue's focus fire killed red-fc at +40, inside blue-dps-05's 30 s orbit.
+  - Destiny stopped the orbit (`stopped: target "red-fc" was destroyed`), so the script went `failed` and its `stop`
+    never ran.
+  - With the fix: the orbit ran +20 to +41, `stop` was given at +41, and the script was `done` at +55, once the Punisher
+    slowed under 1 m/s.
+- **fps** (a 1754 × 1248 device-pixel canvas): mean 39.4, min 22, over a 75 s run without screenshots; the min is at +6 and +7, while
+  red's hulls build. With 1–3 screenshots a second the mean was 35.8 and the min 1 (the first second after the restart
+  rebuilt the scene). `gpuErrors` 0, and no `page_log` errors in any run.
+- **Save mid-play**: `save_scene` at t 20 wrote 6 ships (blue only) and the 9 cues, blue-dps-05's orders intact: the
+  authored script, not its effects.
+- **Look** (the screenshots are in `.scratch/timeline-gpu/` on dbxpc):
+  - t 4: the user camera.
+  - From +5: the warp-in shot cut to 5 km short of red's landing, looking up the lane at the station's face. The
+    Rifters streak in with warp trails and land in formation, but at that range they are ~6 px in the 877 px wide
+    screenshot: the shot frames the group's 2 km spread.
+  - t 16: the shot still holds on red, so blue's MWD trails (on since +15, 6 ships, none skipped) are behind the camera.
+  - t 27: the overlook pull-out over the fight, with turret fire.
+  - t 46: the hero cue on blue-fc, destroyed at +32. It played on the wreck until the cinema released it ("its subject
+    was destroyed").

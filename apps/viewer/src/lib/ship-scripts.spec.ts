@@ -33,8 +33,11 @@ class FakePort implements ShipScriptsPort {
     return this.Ship(id).motion;
   }
 
+  /**
+   * As the director's: false only for a destroyed ship (a name or an object is alive).
+   */
   Alive(id: string): boolean {
-    return this.Ship(id).alive;
+    return this.ships.get(id)?.alive ?? true;
   }
 
   Arriving(id: string): boolean {
@@ -137,6 +140,36 @@ describe('ShipScripts', () => {
     expect(scripts.Report('a', 3)).not.toHaveProperty('note');
     Run(4, 4);
     expect(scripts.Report('a', 4)).toMatchObject({ state: 'done' });
+  });
+
+  it('ends a step whose target is destroyed and goes on; skips a later step at the dead target', () => {
+    const { port, scripts, ship, Run } = Setup([
+      { type: 'orbit', target: 'b', range: 2500, speed: 1, duration: 30 },
+      { type: 'approach', target: 'b', speed: 1, duration: 5 },
+      { after: 2, type: 'stop' }
+    ]);
+    const target = port.Add('b');
+    Run(0, 4);
+    expect(scripts.Report('a', 4)).toMatchObject({ state: 'flying', step: 0, endsIn: 26 });
+    target.alive = false;
+    ship.motion.order = { type: 'stop' };
+    ship.motion.orderNote = 'stopped: target "b" was destroyed';
+    Run(5, 5);
+    expect(scripts.Report('a', 5)).toMatchObject({ state: 'waiting', step: 2, startsIn: 2, note: 'step 1 (approach b) was skipped: its target was destroyed' });
+    Run(6, 8);
+    expect(port.given.map((given) => given.order.type)).toEqual(['orbit', 'stop']);
+    expect(scripts.Report('a', 8)).toMatchObject({ state: 'done' });
+
+    const ended = Setup([{ type: 'orbit', target: 'b', range: 2500, speed: 1, duration: 30 }, { type: 'stop' }]);
+    const other = ended.port.Add('b');
+    ended.Run(0, 0);
+    other.alive = false;
+    ended.ship.motion.order = { type: 'stop' };
+    ended.ship.motion.orderNote = 'stopped: target "b" was destroyed';
+    ended.Run(1, 1);
+    expect(ended.scripts.Report('a', 1)).toMatchObject({ state: 'flying', step: 1, order: 'stop', note: 'step 0 (orbit b) ended: its target was destroyed' });
+    ended.Run(2, 2);
+    expect(ended.scripts.Report('a', 2)).toMatchObject({ state: 'done' });
   });
 
   it('fails on a refusal and on a dropped order, and is interrupted by another order', () => {

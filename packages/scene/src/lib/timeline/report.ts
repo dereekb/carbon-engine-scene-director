@@ -28,7 +28,8 @@ export type CueState = (typeof CUE_STATES)[number];
 /**
  * A ship script's state: `waiting` (on a step's after, or in warp before its order), `arriving` (a warp-in not landed
  * yet), `flying` (a step's order runs), `holding` (its last, never-ending order flies on), `done`, `failed` (a refusal or
- * a dropped order), `interrupted` (another order took the ship), `destroyed`.
+ * a dropped order; a step whose target was destroyed ends instead, and the script goes on), `interrupted` (another
+ * order took the ship), `destroyed`.
  */
 export const SHIP_SCRIPT_STATES = ['waiting', 'arriving', 'flying', 'holding', 'done', 'failed', 'interrupted', 'destroyed'] as const;
 

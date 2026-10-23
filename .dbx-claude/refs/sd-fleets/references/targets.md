@@ -86,8 +86,8 @@ Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`):
 - **The list** (`toFleetTargetList(current, group, order, { own?, statusOf? })`, pure): the table above. `next` uses
   `statusOf` (the page's live status) to find the live primary, skipping `own` (the group's ships); without it every
   entry counts as live. A result past 256 is a problem. **Compile** (`toFleetTargetOperations`, which wraps it, for a
-  timeline beat that cues the order as a patch): one `update_fleet` / `update_wing` / `update_squad` with `set: {
-  targets: list | null }`, or none when the list is unchanged.
+  caller that wants the call as document ops; a timeline cue runs `targets` live, `sd-timeline`): one `update_fleet` /
+  `update_wing` / `update_squad` with `set: { targets: list | null }`, or none when the list is unchanged.
 - **Types**: `FLEET_ORDER_TYPES` ends with `targets`; `FleetOrder = ShipOrder | FleetDocumentOrder`
   (`FleetStructureOrder | FleetTargetsOrder`). `Director.OrderFleet` routes `isFleetTargetsOrder` first (live), then
   `isFleetDocumentOrder` (the structure orders, through the edit queue); `isFleetStructureOrder` stays anchors-only. Imports run one way: `orders.ts` →
@@ -101,8 +101,8 @@ Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`):
   death modes), `missing` (`targets.KindOf` null: no ball), `warping` (a ship `InWarp`, or `Arriving`: parked
   off-grid to warp in), else `live`. Objects are live once built.
 - Why `order_fleet` and not a new tool: a target call is a commander's fleet command in EVE, and order_fleet already has
-  the group selection, `by` authority, pilot `delay`, `command.last` and the one-plain-object request a timeline beat
-  embeds unchanged.
+  the group selection, `by` authority, pilot `delay`, `command.last` and the one-plain-object request an `order_fleet`
+  timeline cue embeds unchanged.
 
 ## Who takes which call (`toFleetGroupCalls`, `toShipCallPlans`)
 

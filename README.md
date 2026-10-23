@@ -60,9 +60,12 @@ What works today:
   and engagements, timed moves and waypoint fly-throughs over moving hulls, a
   letterbox and a clean HUD, directed by Claude over MCP: hardpoint listing,
   shots, sequences and a named shot library.
+- **Timeline**: a scene carries a script: cues at set times run any lever (ship
+  and fleet orders, called targets, prop mods, modules, engagements, camera shots,
+  warp-in adds) and ships fly their own order lists, played on Destiny ticks once
+  the scene is ready, reported in `get_state`, and replayed the same on a restart.
 
-The document's `timeline` and ship `orders` are validated and stored but not
-played yet; playing them, time control, movie mode and movie export come in later phases.
+Time control, movie mode and movie export come in later phases.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -172,6 +175,7 @@ connected tab.
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 | `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |
+| `timeline` | page | the scene's script: status (every cue and ship script), play, pause, restart; the lever tools and `add_ships`, `add_fleet_composition`, `stage_engagement`, `add_objects` take `at` to add a cue instead of acting now |
 
 Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/tools.ts`).
 
