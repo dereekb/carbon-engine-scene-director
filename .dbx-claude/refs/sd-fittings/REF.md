@@ -258,7 +258,11 @@ the accessors (`attribute`, `moduleAttribute`, `chargeAttribute`, `trace`) are l
   `Bundle([hull, ...fittingTypeIDs])` merged with `Skills()`, and answers `fit` (modules by key with slot, category,
   offline, charge, prop; drones; unknown; warnings), `stats` (modules online, prop mod off), `withPropMod` (the prop
   module active, unless fitted offline) and `propMod` (its numbers). `active` (selectors; an unmatched one is an
-  error, offline or unknown ones are left off with `activeNote`) adds `withActive: { modules, stats }`. `trace: true`
+  error, offline or unknown ones are left off with `activeNote`) adds `withActive: { modules, stats }`. Turret rows add their combat numbers
+  (`turretCombatNumbersOf`: `damage` per shot by type, `volley`, `dps`, `tracking`, `signatureResolution`, a vorton's
+  `explosion`, a disintegrator's `spool`), and `stats` / `withPropMod` / `withActive.stats` add `weapons`
+  (`shipWeaponsOf`: turrets, volley, paper DPS and DPS by type) when the fit has guns; empty guns first load a fitting
+  cargo charge (`loadCargoCharges`, as the page does). Numbers and rules: `sd-combat`. `trace: true`
   adds the dogma steps behind the flight, HP, resonance and capacitor attributes. Without an SDE (or without
   DogmaData) the hull flies with the fit's prop mod (`readEftPropMod`, baked numbers when tools-core is down) and a
   `fitNote`. The `GET /ship-stats` route takes no fit (query length).

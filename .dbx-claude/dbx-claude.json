@@ -620,6 +620,51 @@
             ]
           }
         ]
+      },
+      {
+        "name": "sd-combat",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "lock",
+              "locks",
+              "locked",
+              "lock time",
+              "hit chance",
+              "GetAccuracy",
+              "damage",
+              "DPS",
+              "wrecking",
+              "kill",
+              "kills",
+              "destroyed",
+              "explosion",
+              "explode",
+              "engage",
+              "cease_fire",
+              "set_combat"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/combat/",
+              "apps/viewer/src/lib/combat",
+              "apps/viewer/src/lib/locks",
+              "apps/viewer/src/lib/explosion",
+              "packages/scene/src/lib/fleets/live"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__engage",
+              "mcp__scene-director__cease_fire",
+              "mcp__scene-director__set_target"
+            ]
+          }
+        ]
       }
     ]
   }

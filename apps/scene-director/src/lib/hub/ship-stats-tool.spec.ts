@@ -167,6 +167,29 @@ describe('ship_stats with a fit', () => {
     expect(answer.trace).toBeUndefined();
   });
 
+  it("gives a default-fit Rifter's turrets their damage, volley, DPS and tracking, and the stats their sum", async () => {
+    const { shipData } = MakeFakeShipData();
+    const fit = '[Rifter, Default weapons]\n[Empty Low slot]\n\n[Empty Med slot]\n\n200mm AutoCannon II, EMP S\n200mm AutoCannon II, EMP S\n200mm AutoCannon II, EMP S';
+    const answer = await AnswerShipStats(shipData, { fit }, MakeFakeDogmaData());
+    const gun = answer.fit?.modules.find((module) => module.key === 'high-0');
+    expect(gun).toMatchObject({ charge: 'EMP S', cycleTime: 1.69, range: 750, falloff: 9675, damage: { em: 49.31, thermal: 0, kinetic: 5.48, explosive: 10.96 }, volley: 65.75, dps: 38.96, tracking: 393.75, signatureResolution: 40000 });
+    expect(gun?.spool).toBeUndefined();
+    expect(answer.stats.weapons?.turrets).toBe(3);
+    expect(answer.stats.weapons?.volley).toBeCloseTo(197.245, 3);
+    expect(answer.stats.weapons?.dps).toBeCloseTo(116.886, 3);
+    expect(answer.stats.weapons?.damage.em).toBeCloseTo(87.6645, 4);
+    expect(answer.stats.targeting).toMatchObject({ scanResolution: 825, maxTargetRange: 28_125, maxLockedTargets: 4 });
+  });
+
+  it('loads empty guns from cargo, as the page does', async () => {
+    const { shipData } = MakeFakeShipData();
+    const fit = ['[Tempest Fleet Issue, Cargo guns]', '[Empty Low slot]', '', '[Empty Med slot]', '', '800mm Repeating Cannon II', '', '', 'Barrage L x100'].join('\n');
+    const answer = await AnswerShipStats(shipData, { fit, type: 17732 }, MakeFakeDogmaData());
+    const gun = answer.fit?.modules.find((module) => module.name === '800mm Repeating Cannon II');
+    expect(gun?.charge).toBe('Barrage L');
+    expect(gun?.volley).toBeGreaterThan(0);
+  });
+
   it('runs the active modules by key, category or name, leaves offline ones off, and traces on request', async () => {
     const { shipData } = MakeFakeShipData();
     const dogmaData = MakeFakeDogmaData();

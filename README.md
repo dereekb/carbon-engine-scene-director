@@ -194,6 +194,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Ship stats, the pilot, prop mods, engine sound | [`sd-ship-stats`](.dbx-claude/refs/sd-ship-stats/REF.md) |
 | Fittings: EFT fits on ships, the parser, fit keys | [`sd-fittings`](.dbx-claude/refs/sd-fittings/REF.md) |
 | Weapons: default guns, turret slots, charges, the weapon route, targets, firing, shots, impacts | [`sd-weapons`](.dbx-claude/refs/sd-weapons/REF.md) |
+| Combat: locks, hit chance, damage, kills, explosions | [`sd-combat`](.dbx-claude/refs/sd-combat/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

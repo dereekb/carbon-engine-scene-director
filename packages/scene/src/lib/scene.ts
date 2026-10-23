@@ -11,6 +11,7 @@ import { applyObjectOperation, OBJECT_OPERATIONS } from './objects/operations';
 import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneObjectsDiff } from './objects/object';
 import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
+import { applyCombatOperation, COMBAT_OPERATIONS, normalizeSceneCombat, type SceneCombat } from './combat/document';
 import { fitTextOf, normalizeSceneFits, normalizeShipFit } from './fitting/fit';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
@@ -134,6 +135,11 @@ export interface SceneDocument {
    */
   fits?: Record<string, string>;
   /**
+   * Combat settings: the seed every shot's roll is keyed by and what a ship does at 0 structure (see
+   * combat/document.ts). Omitted when empty: seed 1, death "explode".
+   */
+  combat?: SceneCombat;
+  /**
    * Reserved for the timeline phase: stored, not played yet.
    */
   timeline?: unknown;
@@ -182,6 +188,10 @@ export interface SceneDiff {
    * What changed in the objects.
    */
   readonly objects: SceneObjectsDiff;
+  /**
+   * Whether the combat settings changed: the seed takes effect for later shots, the death mode for later deaths.
+   */
+  readonly combat: boolean;
 }
 
 /**
@@ -195,7 +205,7 @@ type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; enviro
 const RESERVED_SCENE_KEYS = ['timeline'] as const;
 const RESERVED_SHIP_KEYS = ['orders', 'pilot'] as const;
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', ...RESERVED_SCENE_KEYS]);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', 'combat', ...RESERVED_SCENE_KEYS]);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', ...RESERVED_SHIP_KEYS]);
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -287,6 +297,10 @@ export function normalizeScene(input: unknown): NormalizedScene {
   if (fleets.fleets) scene.fleets = fleets.fleets;
   if (objects.objects) scene.objects = objects.objects;
   if (fits.fits) scene.fits = fits.fits;
+  const combat = normalizeSceneCombat(input['combat']);
+  problems.push(...combat.problems);
+  warnings.push(...combat.warnings);
+  if (combat.combat) scene.combat = combat.combat;
   for (const key of RESERVED_SCENE_KEYS) {
     if (input[key] === undefined) continue;
     scene[key] = structuredClone(input[key]);
@@ -342,6 +356,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "update_object", id, set }   { op: "move_object", id, position? | near?, heading? | facing? | rotation? }
  *   { op: "remove_object", id }   static objects (see objects/operations.ts); add_objects needs dna, which the
  *                                       add_objects tool resolves from a type
+ *   { op: "set_combat", seed?: n | null, death?: "explode" | "flag" | null }
+ *                                       merged into the document's combat; null resets a field (see
+ *                                       combat/document.ts)
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -423,6 +440,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (STAGING_OPERATIONS.has(String(operation['op']))) applyStagingOperation(operation, context);
       else if (OBJECT_OPERATIONS.has(String(operation['op']))) applyObjectOperation(operation, context);
       else if (FIT_OPERATIONS.has(String(operation['op']))) applyFitOperation(operation, context);
+      else if (COMBAT_OPERATIONS.has(String(operation['op']))) applyCombatOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
@@ -451,7 +469,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     fleets: !sameJson(before?.fleets ?? [], after.fleets ?? []),
     regrouped: [],
     location: !sameJson(before?.location ?? null, after.location ?? null),
-    objects: diffSceneObjects(before?.objects ?? [], after.objects ?? [])
+    objects: diffSceneObjects(before?.objects ?? [], after.objects ?? []),
+    combat: !sameJson(before?.combat ?? null, after.combat ?? null)
   };
   const membershipsBefore = toFleetMemberships(before ?? {});
   const membershipsAfter = toFleetMemberships(after);

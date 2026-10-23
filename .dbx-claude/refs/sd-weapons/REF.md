@@ -167,6 +167,9 @@ targeting lever).
 
 ### Shots: the Combat rules hook and the cadence
 
+> What the hook feeds (locks, the hit roll, damage, kills): `sd-combat`. Its runtime-free rules (hit chance, damage
+> roll, layered damage, lock time, the keyed RNG, each turret's combat numbers) are in `packages/scene/src/lib/combat/`.
+
 - Every turret `cycle` event with a target becomes a `WeaponShot` (`WeaponShotsOf`): `{ ship, module, typeID, name,
   charge?, target, targetKind, cycle, tick, at, distance, effectiveness, missed? }`; `at` is the cycle's exact
   fractional master tick (`ModuleCycle` events carry it), `effectiveness` the falloff half of EVE's hit chance.

@@ -26,7 +26,9 @@
   hostility; independent of fleets), `position`, `rotation`, `type?`, `stats?`, `propMod?`, `fit?` (EFT text or a key
   of `fits`: `sd-fittings`), `pilot?` (reserved: stored, unused), `orders?` (reserved: stored, not played).
 - Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?`, `objects?`, `fits?` (EFT text by key;
-  omitted when empty), `location?`, `timeline?` (reserved).
+  omitted when empty), `combat?` (`{ seed?, death? }`: the seed every shot's roll is keyed by, an integer 0 … 2³² − 1,
+  default 1; `death` `"explode"` (default) or `"flag"`; omitted when empty; `combat/document.ts`, `sd-combat`),
+  `location?`, `timeline?` (reserved).
 - Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
   `position`, `rotation`, `radius?` (the radius order ranges use: add_objects fills the type's SDE radius, or its SOF
   bounding radius where the SDE has none or gives a wreck its 14 m placeholder; without one the page takes the SOF
@@ -55,6 +57,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | prop mods | `set_prop_mods` | `prop-mods/operation.ts` (`sd-ship-stats`) |
 | staging | `add_ships`, `stage_engagement` | `staging/operation.ts` (`sd-staging`) |
 | fits | `set_fits { fits: { key: text \| null } }` (merged; `null` deletes a key no ship uses) | `fitting/operation.ts` (`sd-fittings`) |
+| combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 
 **`applySceneOperations` stays synchronous and pure: it runs in the page.** Anything that needs tools-core (hull names,
@@ -81,9 +84,10 @@ branch of `applyOperation` in `scene.ts`.
 | `objects` (`SceneObjectsDiff`: `added` / `removed` / `rebuilt` / `moved` / `resized`) | `SceneObjects.Apply` builds, retires or re-places the models; `DestinyWorld` adds, re-adds (moved, resized, rebuilt) or `RemoveObject`s the static ball, which halts ships flying at it (`sd-destiny`) |
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
+| `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |
 
 `load_scene` / `open_scene` restart every ship at rest at its document placement; a patch touches only what it changes.
-Live state (orders, prop mod switches, camera follow from `frame_camera`) is **never written to the document**, so a
+Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP and kills) is **never written to the document**, so a
 save or reload starts from the document's placements.
 
 ## Camera

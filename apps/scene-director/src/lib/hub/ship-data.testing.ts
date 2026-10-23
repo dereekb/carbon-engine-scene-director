@@ -66,7 +66,7 @@ function PropModRoutes(config: { readonly typeID: number; readonly name: string;
 export const TFI_DNA = 'mb2_t1:minmatarnavy:minmatar';
 
 /**
- * TFI 17732, Guardian 11987, Revelation 19720, five prop mods and the group 46 listing, as tools-core serves them.
+ * TFI 17732, Guardian 11987, Revelation 19720, Rifter 587, five prop mods and the group 46 listing, as tools-core serves them.
  */
 export const SHIP_ROUTES: Record<string, Answer> = {
   '/eve/latest/build': { json: { build: '3632940', builds: { resources: '3632940', sde: SDE } } },
@@ -87,6 +87,8 @@ export const SHIP_ROUTES: Record<string, Answer> = {
   ...Hull({ typeID: 17732, name: 'Tempest Fleet Issue', group: 'Battleship', mass: 103_300_000, radius: 250, base: { maxVelocity: 130, agility: 0.115, warpSpeedMultiplier: 3, signatureRadius: 350 }, dogma: { 1547: 3 } }),
   ...Hull({ typeID: 11987, name: 'Guardian', group: 'Logistics', mass: 11_980_000, radius: 80, base: { maxVelocity: 209, agility: 0.61, warpSpeedMultiplier: 4, signatureRadius: 70 }, dogma: { 1547: 2 } }),
   ...Hull({ typeID: 19720, name: 'Revelation', group: 'Dreadnought', mass: 1_290_000_000, radius: 1700, base: { maxVelocity: 75, agility: 0.044, warpSpeedMultiplier: 1.5, signatureRadius: 11_100 }, dogma: { 1547: 4, 853: 1, 874: 1 } }),
+  [`/eve/${SDE}/dna/resolve?name=Rifter`]: { json: { typeID: '587', graphicID: '46', skinID: null, dna: 'mf4_t1:minmatarbase:minmatar' } },
+  ...Hull({ typeID: 587, name: 'Rifter', group: 'Frigate', mass: 1_067_000, radius: 31, base: { maxVelocity: 365, agility: 3.2, warpSpeedMultiplier: 5, signatureRadius: 35 }, dogma: { 1547: 1 } }),
   ...Hull({ typeID: 32880, name: 'Venture', group: 'Frigate', mass: 1_200_000, radius: 41, base: { maxVelocity: 335, agility: 3.6, warpSpeedMultiplier: 5, signatureRadius: 40 }, dogma: { 1547: 1, 104: -2 } }),
   ...Hull({ typeID: 90000, name: 'Odd Tempest', group: 'Battleship', mass: 1, radius: 1, base: { maxVelocity: 1, agility: 1, signatureRadius: 1 }, dogma: {} }),
   ...Hull({ typeID: 35833, name: 'Astrahus', group: 'Citadel', mass: 1e10, radius: 1, base: { maxVelocity: 0, signatureRadius: 1 }, dogma: {} }),

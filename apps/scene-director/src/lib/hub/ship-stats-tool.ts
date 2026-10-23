@@ -6,7 +6,9 @@
  *
  * With a `fit` (EFT text) the hub resolves its names and the dogma bundle (DogmaData) and
  * the numbers come from the dogma evaluator: HP, resists, capacitor and targeting too, the
- * fit's prop mod as `withPropMod`, and the `active` modules running as `withActive`.
+ * fit's prop mod as `withPropMod`, and the `active` modules running as `withActive`. Turret rows carry their combat
+ * numbers (damage per shot by type, volley, DPS, tracking) and the stats their sum (`weapons`), from the same
+ * turretCombatNumbersOf the page runs; empty guns load a fitting charge from cargo, as on the page.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -16,13 +18,16 @@ import {
   DEFENSE_ATTRIBUTES,
   type DogmaBundle,
   type DogmaModuleState,
+  type DogmaShip,
   type DogmaTraceStep,
+  type DamageVector,
   dogmaShipStats,
   eftTypeNames,
   evaluateShipDogma,
   type FittedModule,
   type FitTypeAnswer,
   fittingTypeIDs,
+  loadCargoCharges,
   MAX_FIT_LENGTH,
   mergeDogmaBundles,
   type ModuleNumbers,
@@ -46,7 +51,11 @@ import {
   type PropModStats,
   readPropModKind,
   SceneError,
-  type ShipStats
+  type ShipStats,
+  type ShipWeapons,
+  shipWeaponsOf,
+  type TurretCombatNumbers,
+  turretCombatNumbersOf
 } from '@scene-director/scene';
 import { type DogmaDataApi, MapLimited } from './dogma-data';
 import { type ResolvedHull, type ResolvedPropMod, ShipDataError, type ShipDataApi } from './ship-data';
@@ -83,11 +92,11 @@ export interface ShipStatsAnswer {
   /**
    * As flown by the pilot, with no prop mod running.
    */
-  readonly stats: ShipStats;
+  readonly stats: FittedShipStats;
   /**
    * As flown by the pilot with the prop mod running.
    */
-  readonly withPropMod?: ShipStats;
+  readonly withPropMod?: FittedShipStats;
   /**
    * The typed fit, when one was given and its names resolved.
    */
@@ -99,7 +108,7 @@ export interface ShipStatsAnswer {
   /**
    * The fit with the `active` modules running.
    */
-  readonly withActive?: { readonly modules: readonly string[]; readonly stats: ShipStats };
+  readonly withActive?: { readonly modules: readonly string[]; readonly stats: FittedShipStats };
   /**
    * `active` modules that were left off (fitted /OFFLINE).
    */
@@ -111,12 +120,19 @@ export interface ShipStatsAnswer {
   readonly trace?: Readonly<Record<string, readonly DogmaTraceStep[]>>;
 }
 
+/**
+ * Ship stats, with a fit's turrets summed (`weapons`: count, volley, paper DPS and DPS by type) when it fits any.
+ */
+export type FittedShipStats = ShipStats & { readonly weapons?: ShipWeapons };
+
 export interface FitSummary {
   readonly name: string;
   readonly hull: string;
   /**
    * The fitted modules. `cycleTime` (s, 2 decimals: a gun's rate of fire), `range` and `falloff` (m) are the
-   * evaluated module's (of `withActive` when given), each omitted when the module has none.
+   * evaluated module's (of `withActive` when given), each omitted when the module has none. Turrets add `damage` (per
+   * shot by type, before quality), `volley`, `dps`, `tracking` and `signatureResolution`, and a vorton's `explosion`
+   * or a disintegrator's `spool`.
    */
   readonly modules: readonly FitSummaryModule[];
   readonly drones: readonly { readonly name: string; readonly quantity: number }[];
@@ -139,6 +155,13 @@ export interface FitSummaryModule {
   readonly cycleTime?: number;
   readonly range?: number;
   readonly falloff?: number;
+  readonly damage?: DamageVector;
+  readonly volley?: number;
+  readonly dps?: number;
+  readonly tracking?: number;
+  readonly signatureResolution?: number;
+  readonly explosion?: TurretCombatNumbers['explosion'];
+  readonly spool?: TurretCombatNumbers['spool'];
 }
 
 /**
@@ -260,7 +283,8 @@ async function ResolveFit(dogmaData: DogmaDataApi, input: { readonly text: strin
   const answer = (name: string): Maybe<FitTypeAnswer> => answers.get(name) ?? null;
   const ids = fittingTypeIDs(typeEftFit(parsed, { answer }));
   const bundle = mergeDogmaBundles(await dogmaData.Bundle([input.hullTypeID, ...ids]), await dogmaData.Skills());
-  return { fitting: typeEftFit(parsed, { answer, bundle }), bundle };
+  const fitting = typeEftFit(parsed, { answer, bundle });
+  return { fitting: { ...fitting, modules: loadCargoCharges(fitting.modules, fitting.charges, bundle) }, bundle };
 }
 
 interface AnswerFittedInput {
@@ -275,7 +299,12 @@ interface AnswerFittedInput {
   readonly trace: boolean;
 }
 
-function FitModuleRow(module: FittedModule, numbers: Maybe<ModuleNumbers>): FitSummaryModule {
+function Round(value: number, digits: number): number {
+  const scale = 10 ** digits;
+  return Math.round(value * scale) / scale;
+}
+
+function FitModuleRow(module: FittedModule, numbers: Maybe<ModuleNumbers>, combat: Maybe<TurretCombatNumbers>): FitSummaryModule {
   const { cycleTime, range, falloff } = numbers ?? {};
   return {
     key: module.key,
@@ -288,8 +317,24 @@ function FitModuleRow(module: FittedModule, numbers: Maybe<ModuleNumbers>): FitS
     ...(module.prop ? { prop: true as const } : {}),
     ...(cycleTime ? { cycleTime: Math.round(cycleTime * 100) / 100 } : {}),
     ...(range ? { range: Math.round(range) } : {}),
-    ...(falloff ? { falloff: Math.round(falloff) } : {})
+    ...(falloff ? { falloff: Math.round(falloff) } : {}),
+    ...(combat
+      ? {
+          damage: { em: Round(combat.damage.em, 2), thermal: Round(combat.damage.thermal, 2), kinetic: Round(combat.damage.kinetic, 2), explosive: Round(combat.damage.explosive, 2) },
+          volley: Round(combat.volley, 2),
+          dps: Round(combat.dps, 2),
+          ...(combat.tracking == null ? {} : { tracking: Round(combat.tracking, 4) }),
+          ...(combat.signatureResolution == null ? {} : { signatureResolution: combat.signatureResolution }),
+          ...(combat.explosion ? { explosion: combat.explosion } : {}),
+          ...(combat.spool ? { spool: combat.spool } : {})
+        }
+      : {})
   };
+}
+
+function WithWeapons(stats: ShipStats, ship: DogmaShip, bundle: DogmaBundle): FittedShipStats {
+  const weapons = shipWeaponsOf(ship, bundle);
+  return weapons.turrets ? { ...stats, weapons } : stats;
 }
 
 function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
@@ -298,13 +343,13 @@ function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
   const evaluate = (running: ReadonlySet<FittedModule>) => {
     try {
       const ship = evaluateShipDogma({ bundle, hullTypeID: hull.typeID, overrides, pilot, modules: toDogmaModules(fitting, (module, fallback): DogmaModuleState => (fallback === 'online' && running.has(module) ? 'active' : fallback)) });
-      return { ship, stats: dogmaShipStats({ ship, bundle, overrides, propModKey: propModule?.key }) };
+      return { ship, stats: WithWeapons(dogmaShipStats({ ship, bundle, overrides, propModKey: propModule?.key }), ship, bundle) };
     } catch (error) {
       throw new ToolError(ErrorMessage(error));
     }
   };
   const bare = evaluate(new Set());
-  let withActive: Maybe<{ readonly modules: FittedModule[]; readonly stats: ShipStats; readonly ship: ReturnType<typeof evaluate>['ship'] }> = null;
+  let withActive: Maybe<{ readonly modules: FittedModule[]; readonly stats: FittedShipStats; readonly ship: ReturnType<typeof evaluate>['ship'] }> = null;
   let activeNote: Maybe<string> = null;
   if (active) {
     const selected = selectFittedModules(fitting, active);
@@ -328,7 +373,7 @@ function AnswerFitted(input: AnswerFittedInput): ShipStatsAnswer {
     fit: {
       name: fitting.name,
       hull: fitting.hull,
-      modules: fitting.modules.map((module) => FitModuleRow(module, moduleNumbersOf(traced, bundle, module.key))),
+      modules: fitting.modules.map((module) => FitModuleRow(module, moduleNumbersOf(traced, bundle, module.key), turretCombatNumbersOf(traced, bundle, module.key))),
       drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),
       unknown: fitting.unknown,
       warnings: fitting.warnings
