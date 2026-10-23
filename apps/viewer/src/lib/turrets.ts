@@ -66,6 +66,20 @@ export interface TurretsReport {
 }
 
 /**
+ * One drawn burst (Fire).
+ */
+export interface TurretBurst {
+  /**
+   * Seconds the burst draws (the firing effect's duration).
+   */
+  readonly duration: number;
+  /**
+   * Seconds until it starts: the set's random firing delay, when its effect and its sounds begin.
+   */
+  readonly delay: number;
+}
+
+/**
  * What a turret may aim at: a built hull or object.
  */
 export type TurretTargetObject = EveShip2 | EveSpaceObject2;
@@ -188,9 +202,10 @@ export class ShipTurrets {
    * @param key - The weapon module's key.
    * @param target - The shot's target id.
    * @param missed - The shot misses: no impact, the end point past the target.
-   * @returns Seconds the burst draws, or null when the set is not mounted or the target is not drawn.
+   * @returns The burst: seconds it draws, and seconds until it starts (the set's random firing delay, up to 0.6 s);
+   *   null when the set is not mounted or the target is not drawn.
    */
-  Fire(id: string, key: string, target: string, missed: boolean): Maybe<number> {
+  Fire(id: string, key: string, target: string, missed: boolean): Maybe<TurretBurst> {
     const item = this.ships.get(id)?.mounts.get(key);
     const object = this.drawnTarget(target);
     const set = item?.set;
@@ -203,7 +218,7 @@ export class ShipTurrets {
     set.EnterStateFiring();
     item.firing = true;
     this.bursts++;
-    return set.firingEffect?.GetFiringDuration() ?? 0;
+    return { duration: set.firingEffect?.GetFiringDuration() ?? 0, delay: set.randomFiringDelay || 0 };
   }
 
   /**
@@ -267,13 +282,6 @@ export class ShipTurrets {
    */
   ResetBursts(): void {
     this.bursts = 0;
-  }
-
-  /**
-   * Forgets failed turret files, so the next mount reads them again (every load / open).
-   */
-  ForgetFailures(): void {
-    this.files.ForgetFailures();
   }
 
   private async Mount(entry: ShipEntry, ship: EveShip2): Promise<void> {

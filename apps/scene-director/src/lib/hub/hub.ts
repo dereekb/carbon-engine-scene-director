@@ -7,8 +7,8 @@
  * or EVE name), /fit/type?name=&hull= (a fit line's EVE type and slot), /dogma/types?ids= (a DogmaBundle of up to 200
  * types) and /dogma/skills (every published skill's), /weapon?type= (a weapon's graphic: its .black, slot collection and
  * SOF faction), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
- * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range),
- * /health, and the viewer files.
+ * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range;
+ * with an audio cache, ranged reads come from local copies of the banks: audio-cache.ts), /health, and the viewer files.
  *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
@@ -30,10 +30,12 @@ import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type Serv
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 import { findTool, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
+import type { AudioBankCache } from './audio-cache';
 import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
 import { Locations } from './locations';
@@ -117,6 +119,11 @@ export interface HubOptions {
    */
   readonly objectData?: ObjectDataApi;
   /**
+   * Serves ranged audio reads from local copies of tools-core's banks (audio-cache.ts); without one every read is
+   * proxied to tools-core.
+   */
+  readonly audioCache?: Maybe<AudioBankCache>;
+  /**
    * Diagnostics sink; stderr by default, never stdout (MCP owns stdout).
    */
   readonly log?: (line: string) => void;
@@ -168,6 +175,7 @@ export class Hub implements ToolCaller {
   readonly objectData: ObjectDataApi;
   readonly objects: ObjectTools;
   private readonly log: (line: string) => void;
+  private readonly audioCache: Maybe<AudioBankCache>;
   private readonly pages: WebSocket[] = [];
   private readonly pending = new Map<number, PendingCall>();
   private readonly pageLog: PageLogEntry[] = [];
@@ -175,7 +183,7 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, dogmaData, weaponData, mapData, objectData, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, dogmaData, weaponData, mapData, objectData, audioCache = null, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
@@ -197,6 +205,7 @@ export class Hub implements ToolCaller {
     this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, page });
     this.objects = new ObjectTools({ objectData: this.objectData, shipData: this.shipData, mapData: this.mapData, page });
     this.log = log;
+    this.audioCache = audioCache;
   }
 
   get url(): string {
@@ -403,7 +412,7 @@ export class Hub implements ToolCaller {
       await this.StreamProxy({ source: () => this.toolsCore.AudioLibraryUrl(), request, response });
     } else if (pathname.startsWith('/audio/path/')) {
       const resPath = pathname.slice('/audio/path/'.length);
-      await this.StreamProxy({ source: () => this.toolsCore.AudioPathUrl(resPath), request, response });
+      if (!(await this.ServeCachedAudio(resPath, request, response))) await this.StreamProxy({ source: () => this.toolsCore.AudioPathUrl(resPath), request, response });
     } else if (pathname === '/map/system') {
       await this.ServeMapSystem(url, response);
     } else if (pathname === '/health') {
@@ -507,9 +516,23 @@ export class Hub implements ToolCaller {
   }
 
   /**
+   * A ranged audio read from the audio cache's local copy of the file (audio-cache.ts).
+   *
+   * @returns Whether it answered; false without a cache, a Range, a tools-core URL or a local copy (proxy it).
+   */
+  private async ServeCachedAudio(resPath: string, request: IncomingMessage, response: ServerResponse): Promise<boolean> {
+    const range = request.headers.range;
+    const cache = this.audioCache;
+    if (!cache || typeof range !== 'string') return false;
+    const url = await this.toolsCore.AudioPathUrl(resPath).catch(() => null);
+    return url ? cache.Serve({ url, range, response }) : false;
+  }
+
+  /**
    * A streaming proxy for tools-core's audio: forwards Range and If-None-Match, and answers tools-core's status
    * (200, 206, 304, 404, 416) with its content headers; an unreachable tools-core is a 502. The resource proxy
-   * buffers whole bodies and drops Range, which the 32 MB boosters.bnk cannot afford.
+   * buffers whole bodies and drops Range, which the 32 MB boosters.bnk cannot afford. A body cut short on either side
+   * (tools-core closing, the tab going away mid-read) ends the response and is not an error of the hub's.
    */
   private async StreamProxy(input: { readonly source: () => Promise<string>; readonly request: IncomingMessage; readonly response: ServerResponse }): Promise<void> {
     const { request, response } = input;
@@ -532,7 +555,8 @@ export class Hub implements ToolCaller {
       if (value != null) forwarded[name] = value;
     }
     response.writeHead(upstream.status, forwarded);
-    if (upstream.body) Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>).pipe(response);
+    // pipeline, not pipe: an upstream error mid-body would otherwise be an unhandled stream error that ends the hub.
+    if (upstream.body) await pipeline(Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>), response).catch(() => response.destroy());
     else response.end();
   }
 

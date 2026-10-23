@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`. The full facade drags in the renderer and the `runtime-dist/`
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`. The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
 ## Bundling (`apps/viewer/esbuild.config.mjs`)
@@ -143,7 +143,8 @@ Every ship's guns (what is mounted and why: `sd-weapons`). `.d.ts` classes: `Eve
 - **The audio cut**: sets and effects hydrate inside `PageAudio.Detached`, then `playMovementSound = false`,
   `turretMovementObserver = null`, the effect's `sourceObserver` / `destinationObserver = null`, and every
   `AudEventCurve` in its start / stop curve sets gets `length = 0` and no keys (a length-0 curve never posts; the
-  files' curves end at t = 1, so they would). The page posts turret sounds itself (W4).
+  files' curves end at t = 1, so they would). The page posts turret sounds itself (`turret-audio.ts`, `sd-weapons`), timing
+  a burst's from the set's `randomFiringDelay` (declared), read right after `EnterStateFiring`.
 - **Paint**: `SetupTurretMaterial` (`ships.ts`) uses the shared SOF; a faction awaits its data.
 - **Retire**: `EveTurretSet` is in `SHIP_RESOURCE_TYPES`; the director takes a ship's sets off (`ShipTurrets.Remove`)
   before `RetireShips`.
@@ -199,3 +200,14 @@ so the page stops such voices itself (`sd-ship-stats`). Which events play: `sd-s
   (applier retries that went through), `backendErrors` / `lastBackendError` (contained calls). Each is logged at most
   once per 10 s (`console.info` for rescheduled, `console.warn` with the stack for contained). `verify-page` checks
   that a TFI build leaves `gameObjects − emitters` unchanged (skipped without a renderer or with audio off).
+- **Undecodable events are learned once and not sent.** The runtime ships no Wwise PTADPCM decoder (removed upstream
+  until its provenance is confirmed; `CjsWemFormat.registerPcmDecoder('wwise-ptadpcm', ...)` would add one), and
+  `CjsAudioMan`'s loader turns a failed media load into no voice. Every turret firing and impact media is PTADPCM, so
+  each post read and failed ~30 variants (a 20-ship fight: ~15 MB/s through the hub, ~3 fps). `PageAudio.Probe` loads
+  an event's media (`library.eventMedia`) after its first send; when every one fails with `CJS_FORMAT_OUTPUT_NOT_SUPPORTED`
+  the event is recorded (`posted[].undecodable`, `get_state.audio.undecodable`) and never sent again. A read failure
+  leaves it unknown. Registering a decoder makes them play with no other change.
+- **Ranged reads come from the hub's audio cache** (`hub/audio-cache.ts`): tools-core answers each range by reading the
+  whole cached bank (~0.8 s for the 390 MB `turrets.bnk`, allocating it each time), which queued hundreds of reads behind
+  the tab's six connections and left their events `loading` forever. The hub downloads a bank whole on its first ranged
+  read (1.4 s for `turrets.bnk`) and slices it from disk after (`sd-dev-env`).

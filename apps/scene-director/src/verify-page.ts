@@ -29,6 +29,7 @@ import {
   type SceneVector,
   type ShipFleetMembership
 } from '@scene-director/scene';
+import { AudioBankCache } from './lib/hub/audio-cache';
 import { Hub } from './lib/hub/hub';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
@@ -205,7 +206,11 @@ interface AudioState {
    * Audio game objects registered with the runtime's manager: the page's emitters and the listener.
    */
   readonly gameObjects?: number;
-  readonly posted: { readonly tick: number; readonly ship: string; readonly event: string; readonly played: boolean }[];
+  readonly posted: { readonly tick: number; readonly ship: string; readonly event: string; readonly played: boolean; readonly undecodable?: boolean }[];
+  /**
+   * Events the runtime decodes none of the media of: recorded, never sent.
+   */
+  readonly undecodable?: string[];
   readonly frameErrors?: number;
   readonly rescheduled?: number;
   readonly backendErrors?: number;
@@ -477,7 +482,8 @@ if (!status.reachable) {
 // Saved scene and fleet composition files go to throwaway directories, never the user's.
 const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-')));
 const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-fleets-')));
-const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, log: () => undefined }).Start();
+// The audio cache is shared with every hub on the machine (a copy of tools-core's banks, not a store).
+const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, audioCache: new AudioBankCache(), log: () => undefined }).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 // Autoplay lets the page turn audio on without a gesture, so the audio check sees the engine stems post.
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] });
@@ -1268,6 +1274,41 @@ try {
       JSON.stringify(Guns(running))
     );
     return `fires at ${target?.distance} m with effectiveness ${Guns(running)[0]?.effectiveness}`;
+  });
+
+  await Check('turret sounds post with the shots', async () => {
+    await LoadTurretScene();
+    const beyond = (state: ViewerState) => (state.audio?.gameObjects ?? 0) - (state.audio?.emitters ?? 0);
+    const before = await WaitFor('the audio settles', 90, (state) => (state.audio && state.audio.state !== 'loading' ? null : JSON.stringify(state.audio)));
+    const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'punisher' });
+    // Firing first: its sounds post once the guns' files have loaded, and every later sound needs them too.
+    const Posts = (state: ViewerState, since: number, ship: string, pattern: RegExp) => (state.audio?.posted ?? []).filter((entry) => entry.tick >= since && entry.ship === ship && pattern.test(entry.event));
+    const fired = await WaitFor('the firing and impact sounds post', 20, (polled) => (Posts(polled, on.tick, 'rifter', /^ship_turret_/u).length && Posts(polled, on.tick, 'punisher', /^ship_impact_/u).length ? null : JSON.stringify(polled.audio?.posted)));
+    const retarget = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher-2' });
+    const deployed = await WaitFor('the deploy sound posts', 5, (polled) => (Posts(polled, retarget.tick, 'rifter', /^turret_move_\w+_out_/u).length ? null : JSON.stringify(polled.audio?.posted)));
+    const clear = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: null });
+    const packed = await WaitFor('the pack sound posts', 5, (polled) => (Posts(polled, clear.tick, 'rifter', /^turret_move_\w+_in_/u).length ? null : JSON.stringify(polled.audio?.posted)));
+    const heard = [...Posts(fired, on.tick, 'rifter', /^ship_turret_/u).slice(0, 1), ...Posts(fired, on.tick, 'punisher', /^ship_impact_/u).slice(0, 1), ...Posts(deployed, retarget.tick, 'rifter', /^turret_move_\w+_out_/u).slice(0, 1), ...Posts(packed, clear.tick, 'rifter', /^turret_move_\w+_in_/u).slice(0, 1)];
+    const audio = packed.audio;
+    const played = audio?.state === 'on';
+    // The firing and impact media are Wwise PTADPCM, which the runtime cannot decode yet: once learned, they are recorded
+    // undecodable and not sent. The movement sounds decode.
+    const [fire, impact, deploy, pack] = heard;
+    Expect(
+      [fire, impact].every((entry) => entry.played === played || entry.undecodable === true),
+      `firing and impact with audio ${audio?.state}: ${JSON.stringify([fire, impact])}`
+    );
+    Expect(
+      [deploy, pack].every((entry) => entry.played === played),
+      `deploy and pack with audio ${audio?.state}: ${JSON.stringify([deploy, pack])}`
+    );
+    // The sets and their effects hydrate with their own audio cut: only the page's emitters register.
+    Expect(beyond(packed) === beyond(before), `audio game objects beyond the page's emitters went ${beyond(before)} -> ${beyond(packed)} with the guns firing: ${JSON.stringify(audio)}`);
+    const undecodable = (audio?.undecodable ?? []).filter((event) => /^ship_(turret|impact)_/u.test(event));
+    const posts = heard.map((entry) => entry.event + ' on ' + entry.ship).join(', ');
+    const outcome = played ? 'played' : 'audio ' + String(audio?.state) + ', recorded unplayed';
+    const unsent = undecodable.length ? '; undecodable, not sent: ' + undecodable.join(', ') : '';
+    return `${posts} (${outcome}${unsent}); ${audio?.gameObjects ?? 0} audio game objects for ${audio?.emitters ?? 0} page emitter(s)`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

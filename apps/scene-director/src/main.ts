@@ -15,12 +15,15 @@
  *          --build <exact EVE build> (resolved from tools-core "latest" when omitted),
  *          --viewer <dir> (the built viewer; dist/apps/viewer beside this bundle by default),
  *          --scenes <dir> (saved scene files; a scene-director/scenes folder in the per-user data directory by default),
- *          --fleets <dir> (saved fleet compositions; a scene-director/fleets folder in the per-user data directory by default)
+ *          --fleets <dir> (saved fleet compositions; a scene-director/fleets folder in the per-user data directory by default),
+ *          --audio-cache <dir> (local copies of tools-core's sound banks the page reads ranges from; a
+ *          scene-director-audio-cache folder in the OS temp directory by default)
  */
 
 import type { Maybe } from '@dereekb/util';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { AudioBankCache, DEFAULT_AUDIO_CACHE_DIRECTORY } from './lib/hub/audio-cache';
 import { DEFAULT_PORT, Hub, LogToStderr } from './lib/hub/hub';
 import { RemoteHub } from './lib/hub/remote-hub';
 import { SceneOf } from './lib/hub/saved-scenes';
@@ -30,7 +33,7 @@ import { ImageOf, ServeMcp } from './lib/mcp/server';
 import { defaultFleetCompositionsDirectory, FleetCompositionFileStore } from './lib/store/composition-files';
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
-const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--in scene.json] [--out file]\n';
+const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -55,6 +58,7 @@ const port = Number(Option('--port', process.env['SCENE_DIRECTOR_PORT'] ?? Strin
 const viewerDirectory = Option('--viewer', process.env['SCENE_DIRECTOR_VIEWER'] ?? path.resolve(import.meta.dirname, '../viewer'));
 const scenes = new SceneFileStore(Option('--scenes', process.env['SCENE_DIRECTOR_SCENES'] || DefaultScenesDirectory()));
 const compositions = new FleetCompositionFileStore(Option('--fleets', process.env['SCENE_DIRECTOR_FLEETS'] || defaultFleetCompositionsDirectory()));
+const audioCache = new AudioBankCache({ directory: Option('--audio-cache', process.env['SCENE_DIRECTOR_AUDIO_CACHE'] || DEFAULT_AUDIO_CACHE_DIRECTORY), log: LogToStderr });
 const toolsCore = new ToolsCore({
   url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
   build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
@@ -66,7 +70,7 @@ const toolsCore = new ToolsCore({
  * @returns The hub to send calls to.
  */
 async function StartHubOrJoin(): Promise<ToolCaller> {
-  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, log: LogToStderr });
+  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, audioCache, log: LogToStderr });
   try {
     return await hub.Start();
   } catch (error) {
@@ -80,7 +84,7 @@ async function StartHubOrJoin(): Promise<ToolCaller> {
  * Runs the hub until SIGINT or SIGTERM.
  */
 async function Serve(): Promise<void> {
-  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, log: LogToStderr }).Start();
+  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, audioCache, log: LogToStderr }).Start();
   const stop = async (): Promise<void> => {
     await hub.Stop();
     process.exit(0);

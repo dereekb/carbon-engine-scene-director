@@ -23,7 +23,8 @@ What works today:
 - **Weapons**: every ship mounts its fit's turrets on its hull's hardpoints, or default
   guns for its hull and race (with a charge) when it has no fit; `set_target` points
   them at a ship or object, and they fire once per weapon cycle with the game's
-  firing effects and impacts.
+  firing effects and impacts, and the turrets' deploy and pack sounds (firing and
+  impact sounds wait on a PTADPCM decoder).
 - **Fleets**: EVE fleet structure (FC, wings, squads with a role and an anchor), and
   fleets fly in formation behind their FC (Follow the FC). Doctrine fleets are
   written once as fleet compositions and dropped in whole.

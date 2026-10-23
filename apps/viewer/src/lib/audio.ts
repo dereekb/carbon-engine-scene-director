@@ -16,6 +16,9 @@
  *   headless whatever the audio state.
  * - The backend is guarded once on (audio-guard.ts): Chrome's AudioParam overlap throws are rescheduled or contained
  *   and counted, so audio never aborts a render frame.
+ * - An event none of whose media the runtime can decode (the turrets' firing and impact sounds are Wwise PTADPCM, and
+ *   the runtime ships no PTADPCM decoder) is learned once, from its first post, and then only recorded: each post
+ *   would otherwise read and fail every media variant again (a 20-ship fight: ~15 MB/s through the hub, ~3 fps).
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -45,6 +48,10 @@ export interface PostedAudioEvent {
    * Whether it reached the enabled audio manager.
    */
   readonly played: boolean;
+  /**
+   * Not sent: none of the event's media can be decoded by the runtime.
+   */
+  readonly undecodable?: true;
 }
 
 /**
@@ -84,6 +91,10 @@ export interface PageAudioReport {
    * The AudioContext's state once one exists: `suspended` while audio is on means the browser holds it until a gesture.
    */
   readonly context?: AudioContextState;
+  /**
+   * Events posted whose media the runtime cannot decode (UNDECODABLE_MEDIA_CODE), so they are recorded, never sent.
+   */
+  readonly undecodable?: readonly string[];
 }
 
 export interface PageAudioPost {
@@ -136,6 +147,11 @@ export interface PageAudioOptions {
 export const POSTED_AUDIO_LIMIT = 20;
 
 /**
+ * The code CjsAudioMan.LoadMedia rejects with for a codec it cannot decode (PTADPCM without a registered decoder).
+ */
+export const UNDECODABLE_MEDIA_CODE = 'CJS_FORMAT_OUTPUT_NOT_SUPPORTED';
+
+/**
  * How long startup waits to learn whether the tab may play audio without a gesture.
  */
 const AUTOPLAY_PROBE_MS = 500;
@@ -155,6 +171,11 @@ export class PageAudio {
   private readonly onChange: () => void;
   private context: Maybe<AudioContext> = null;
   private man: Maybe<CjsAudioMan> = null;
+  private library: Maybe<CjsAudioLibraryDocument> = null;
+  /**
+   * Per posted event: whether any of its media decodes, or `probing` while that is being learned.
+   */
+  private readonly decodable = new Map<string, boolean | 'probing'>();
   private readonly emitters = new Map<string, AudEmitter>();
   private readonly posted: PostedAudioEvent[] = [];
   private frame = 0;
@@ -239,6 +260,7 @@ export class PageAudio {
       if (man.backend) GuardWebAudioBackend(man.backend, { onRescheduled: (error) => this.Rescheduled(error), onContained: (error, where) => this.BackendError(error, where) });
       void context.resume().catch(() => undefined);
       this.man = man;
+      this.library = library;
       this.SetState('on');
       console.info(`audio on: ${Object.keys(library.metadata.SoundBanks).length} sound banks`);
       this.onReady();
@@ -274,13 +296,20 @@ export class PageAudio {
   }
 
   /**
-   * Posts events on a ship's emitter (created on its first event, at its placement), and records them either way.
+   * Posts events on a ship's emitter (created on its first event, at its placement), and records them either way. An
+   * event learned undecodable is only recorded; the first send of any other starts learning whether it decodes.
    *
    * @param post - The ship, the tick, the events and where the ship is drawn.
    */
   Post(post: PageAudioPost): void {
-    const emitter = this.Emitter(post.ship, post.placement);
+    // Undecodable events alone need no emitter.
+    const sends = post.events.some((event) => this.decodable.get(event) !== false) || Boolean(post.stops?.length);
+    const emitter = sends ? this.Emitter(post.ship, post.placement) : null;
     for (const event of post.events) {
+      if (this.decodable.get(event) === false) {
+        this.posted.push({ tick: post.tick, ship: post.ship, event, played: false, undecodable: true });
+        continue;
+      }
       let played = false;
       if (emitter) {
         try {
@@ -291,6 +320,7 @@ export class PageAudio {
         }
       }
       this.posted.push({ tick: post.tick, ship: post.ship, event, played });
+      if (played && !this.decodable.has(event)) this.Probe(event);
     }
     if (emitter && post.stops?.length) {
       try {
@@ -359,7 +389,8 @@ export class PageAudio {
       ...(this.frameErrors ? { frameErrors: this.frameErrors, ...(this.lastFrameError ? { lastFrameError: this.lastFrameError } : {}) } : {}),
       ...(this.rescheduled ? { rescheduled: this.rescheduled } : {}),
       ...(this.backendErrors ? { backendErrors: this.backendErrors, ...(this.lastBackendError ? { lastBackendError: this.lastBackendError } : {}) } : {}),
-      ...(this.context ? { context: this.context.state } : {})
+      ...(this.context ? { context: this.context.state } : {}),
+      ...([...this.decodable.values()].includes(false) ? { undecodable: [...this.decodable].flatMap(([event, decodable]) => (decodable === false ? [event] : [])).sort() } : {})
     };
   }
 
@@ -405,6 +436,33 @@ export class PageAudio {
       }
     }
     return emitter;
+  }
+
+  /**
+   * Learns whether an event can play: whether the runtime decodes any of its media. All of them failing on their
+   * codec marks it undecodable; any other failure (a read) leaves it unknown, to learn again on a later post.
+   *
+   * @param event - The event name.
+   */
+  private Probe(event: string): void {
+    const man = this.man;
+    const media = this.library?.eventMedia?.[event] ?? [];
+    if (!man || !media.length) return;
+    this.decodable.set(event, 'probing');
+    void Promise.all(
+      media.map((id) =>
+        man.LoadMedia(id).then(
+          () => 'decoded' as const,
+          (error: unknown) => ((error as Maybe<{ code?: unknown }>)?.code === UNDECODABLE_MEDIA_CODE ? ('codec' as const) : ('failed' as const))
+        )
+      )
+    ).then((results) => {
+      if (results.includes('decoded')) this.decodable.set(event, true);
+      else if (results.every((result) => result === 'codec')) {
+        this.decodable.set(event, false);
+        console.info(`audio: ${event} is not sent: the runtime decodes none of its ${media.length} media (PTADPCM needs a registered decoder)`);
+      } else this.decodable.delete(event);
+    });
   }
 
   /**

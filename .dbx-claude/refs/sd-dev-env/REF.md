@@ -34,7 +34,7 @@ Set up and verified on a Mac on 2026-10-22: install, `nx build scene-director` a
 | page draws ships | tools-core on `127.0.0.1:5510` (every resource goes through the hub's `/resource` proxy to it) |
 | `ship_stats`, `/ship-stats`, SDE radii, hull names, `add_fleet_composition` without inline dna | a **prepared** SDE in tools-core |
 | locations (`search_map`, `get_system`, `set_location`, dressing) | tools-core's map routes over the SDE (a healthy map index) |
-| prop mod sound | tools-core's audio library, a user gesture in the tab (or autoplay allowed) |
+| sounds (prop mods, modules, turrets) | tools-core's audio library, a user gesture in the tab (or autoplay allowed) |
 | drawing (anything visual) | a real GPU: Windows Chrome / Edge |
 
 A ship with all four `stats` and every composition line with `dna` + `radius` (the TFIs example does) needs no SDE.
@@ -63,6 +63,11 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 - **A hub code change needs the owning session to reconnect its MCP server** (`/mcp`).
 - Page tools go to the newest tab connected to that hub. verify-page starts its own hub on a free port
   (`new Hub({ port: 0 })`), so running it never takes page tools from a tab on 5520.
+- **Audio cache**: ranged `/audio/path` reads come from local copies of tools-core's banks, downloaded whole on first
+  use (`--audio-cache <dir>` / `SCENE_DIRECTOR_AUDIO_CACHE`, default `scene-director-audio-cache` in the OS temp dir,
+  ~372 MB for `turrets.bnk`; shared by every hub, verify-page included; build-keyed, safe to delete). Without it each
+  range costs tools-core a whole-file read (`sd-runtime` → Audio). The proxy uses `pipeline`: an upstream body cut
+  short (a tab reloading mid-read) once crashed the hub on an unhandled stream error.
 - WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
 
 ## verify-page (everything but drawing)

@@ -9,7 +9,7 @@
 slices. **W1 is in**: the runtime-free half in `packages/scene` (default weapons, turret slots, charges, the weapon
 graphic) and the hub's `/weapon` route. **W2 is in**: the page's default fit, cargo charges, `WeaponLookup` and
 mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weapon cycle through `switch_modules`, the
-`Director.OnShot` hook, the cycle-exact draw and impacts. Still to come: W4 turret sounds. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
+`Director.OnShot` hook, the cycle-exact draw and impacts. **W4 is in**: turret sounds (below); the plan is delivered. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
 ## Files
@@ -31,6 +31,7 @@ mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weap
 | `weapons/shots.ts` | `WeaponShot` (the Combat rules hook's event), `ShotTargetKind` |
 | `apps/viewer/src/lib/targets.ts` | `ShipTargets`: each ship's target, cleared on removal, warp and load (node-tested) |
 | `apps/viewer/src/lib/shots.ts` | `WeaponShotsOf`, `ShotQueue`: shots from cycle events, the cycle-exact draw time, counts, settle (node-tested) |
+| `apps/viewer/src/lib/turret-audio.ts` | `TurretAudioPosts`, `TurretSoundQueue`: which emitter posts which turret sound when (node-tested) |
 | `apps/viewer/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `SetTarget`, `OnShot`, `SyncImpactState`, `DriveTurrets` |
 
 ## Default weapons (`defaultWeaponsOf`)
@@ -225,6 +226,46 @@ fleet, a Punisher ordered to orbit the TFI at 2 km with the TFI on it.
   hull, and the `mf1_t1` the older checks use is the Slasher's, with other traits), "weapons follow a new target and stop when it is cleared", "a removed or warping target clears and stops the
   guns", "turrets fire at an object" (an Astrahus; a celestial refused), "launchers are refused" (a Caracal's
   defaults), "turrets are not refused by range" (150 km, effectiveness 0).
+
+## Sounds (W4)
+
+Named by the files (`TurretFileFacts`): the firing effect's `PlayTurretFX` events (`ship_turret_<size><family><n>_play`)
+on the shooter, its `PlayTurretImpact` events (`ship_impact_*`) on a ship it hits, the set's
+`idleToTargetingMovementAudioEvent` (`turret_move_<family>_out_<size>`) and `targetingToIdleMovementAudioEvent`
+(`_in_`). Posted through `PageAudio.Post` on each ship's own emitter (`TurretAudioPosts` → `TurretSoundQueue` →
+`DriveTurrets`):
+
+- **Fire and impact** as each drawn burst starts: the draw plus the set's `randomFiringDelay` (the client's curves sit at
+  t = 0 of `play_start`, played from minus that delay); at the draw without a renderer. No impact on an object (no
+  emitter) or for a miss. A shot that does not draw posts nothing.
+- **Deploy** when a ship takes a target, a first or a new one (the client's `SetTargetObject` posts it for both);
+  **pack** when it loses it (`set_target` null, the target removed, either ship warping). For every weapon module.
+- **One post per (ship, event)** per batch, at its earliest time, and per frame. Nothing for a ship that left.
+- The director keeps `TurretFiles` with or without a renderer (`SyncTurrets` loads each mount's files), so the event
+  names are known headless. Radii (`maxRadiusAttenuation`; the runtime culls each emitter at its playing events'
+  largest, 0 = unbounded): `ship_turret_*` 150-260 km, `ship_impact_*` 10-28.5 km (L / XL 0), `turret_move_*` 2.5-4.3
+  km (XL 36).
+- **Firing and impact sounds are silent for now**: all their media are Wwise PTADPCM and the runtime ships no decoder
+  (`sd-runtime` → Audio), so `PageAudio` learns each such event undecodable from its first post and only records it
+  after. Deploy and pack media decode and play.
+- verify-page (headless): "turret sounds post with the shots" (`ship_turret_sp3_play` on the Rifter,
+  `ship_impact_sp3_play` on its target, then recorded undecodable; `turret_move_projectile_out_small` on a retarget and
+  `_in_small` on a clear, played; `gameObjects − emitters` unchanged).
+
+### Real-GPU listen check (2026-10-23, Windows Chrome, RTX 40 series, SDE 3632936)
+
+Own hub on 5521; the W3 engagement (`.scratch/turrets-gpu/stage-w3.sh`) plus 4 Rifters and 4 Punishers: 20 ships, 87
+sets, every one firing at the other side's FC; camera 2.5 km off a Rifter; the `.scratch/listen/` probe on the master
+bus. Clip and cues: `.scratch/turrets-gpu/w4-listen/` on dbxpc.
+
+- **Before the fixes**: the bus stayed silent (median -120 dBFS) while 1,753 events sat `loading` forever (tools-core's
+  whole-file range reads, ~0.8 s each), and a tab reload mid-read crashed the hub. With the hub's audio cache and the
+  `pipeline` proxy, every event finishes.
+- **Deploy** (8 sides' worth at once): p95 -25.3 dBFS, peak -16.8, 7 voices. **Pack**: p95 -34.2, peak -24.2, 20 voices.
+- **Fire and impact**: 11 events learned undecodable (PTADPCM), not sent. Before the gate they cost 908 range reads
+  (146 MB) per 10 s and 52.5 fps against 55.9; with it, firing runs at 56.7 fps with 0 reads.
+- `audio.gameObjects` 21 = 20 page emitters + the listener throughout; `frameErrors`, `backendErrors`, `rescheduled` 0;
+  `gpuErrors` 0. Voices never piled up, so no voice budget yet: measure again once PTADPCM decodes.
 
 ## Charges (`loadCargoCharges`)
 

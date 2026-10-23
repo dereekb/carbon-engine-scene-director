@@ -600,6 +600,10 @@ declare module '@carbonenginejs/runtime/trinity' {
     isOnline: boolean;
     playMovementSound: boolean;
     turretMovementObserver: object | null;
+    /**
+     * Seconds the last EnterStateFiring waits before its burst starts (up to 0.6 s, plus the tracking time from IDLE).
+     */
+    readonly randomFiringDelay: number;
     SetFiringEffect(effect: EveTurretFiringFX | null): void;
     SetTargetObject(object: EveSpaceObject2 | EveShip2 | null): boolean;
     EnterStateIdle(): void;
@@ -990,6 +994,10 @@ declare module '@carbonenginejs/runtime/audio' {
       readonly SoundBanks: Readonly<Record<string, unknown>>;
       readonly Events: Readonly<Record<string, unknown>>;
     };
+    /**
+     * Every media id an event may play, by event name.
+     */
+    readonly eventMedia?: Readonly<Record<string, readonly string[]>>;
   }
 
   export type CjsWwiseEffectMode = 'strict' | 'approximate-web-audio';
@@ -1141,6 +1149,11 @@ declare module '@carbonenginejs/runtime/audio' {
      */
     GetState(): number;
     CreateEmitter(descriptor?: { readonly name?: string; readonly position?: ArrayLike<number> }): AudEmitter;
+    /**
+     * Reads and decodes one media file (cached). Rejects with `code` `CJS_FORMAT_OUTPUT_NOT_SUPPORTED` for a codec it
+     * cannot decode: Wwise PTADPCM while no decoder is registered (`CjsWemFormat.registerPcmDecoder`).
+     */
+    LoadMedia(mediaID: string, options?: { readonly signal?: AbortSignal }): Promise<AudioBuffer>;
     /**
      * Stops and unregisters an emitter.
      */

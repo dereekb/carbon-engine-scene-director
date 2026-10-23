@@ -18,6 +18,7 @@ import type { ToolsCoreApi } from './tools-core';
 import { MakeFakeObjectData } from './object-data.testing';
 import { MakeFakeDogmaData } from './dogma-data.testing';
 import { MakeFakeWeaponData } from './weapon-data.testing';
+import { AudioBankCache } from './audio-cache';
 
 /** Where the fake tools-core's audio URLs point: a local server a spec starts. */
 let audioUpstream = 'http://127.0.0.1:9';
@@ -401,6 +402,54 @@ describe('prop mods and audio', () => {
       expect((await fetch(`${unprepared.url}prop-mod?module=12084`)).status).toBe(503);
     } finally {
       await unprepared.Stop();
+    }
+  });
+
+  it('an audio body cut short upstream ends that response, not the hub', async () => {
+    const upstream = createServer((_request, response) => {
+      response.writeHead(206, { 'content-type': 'application/octet-stream', 'content-range': 'bytes 0-255/256', 'content-length': '256' });
+      response.write(Buffer.alloc(16));
+      setTimeout(() => response.socket?.destroy(), 20);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    audioUpstream = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+    try {
+      const cut = await fetch(`${hub.url}audio/path/${encodeURIComponent('res:/audio/essential_media/turrets.bnk')}`, { headers: { range: 'bytes=0-255' } });
+      await expect(cut.arrayBuffer()).rejects.toThrow();
+      expect((await fetch(`${hub.url}audio/library`)).status).toBe(206);
+    } finally {
+      audioUpstream = 'http://127.0.0.1:9';
+      await new Promise((resolve) => upstream.close(resolve));
+    }
+  });
+
+  it('the audio routes serve ranges from the audio cache, downloading a bank once', async () => {
+    const bank = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+    const seen: (string | undefined)[] = [];
+    const upstream = createServer((request, response) => {
+      seen.push(request.headers.range);
+      response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '256' });
+      response.end(bank);
+    });
+    await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
+    audioUpstream = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
+    const cached = await StartHub({ audioCache: new AudioBankCache({ directory: await mkdtemp(path.join(os.tmpdir(), 'scene-director-hub-audio-')) }) });
+    try {
+      const resPath = encodeURIComponent('res:/audio/essential_media/turrets.bnk');
+      for (const range of ['bytes=16-31', 'bytes=240-255']) {
+        const part = await fetch(`${cached.url}audio/path/${resPath}`, { headers: { range } });
+        expect(part.status).toBe(206);
+        const [from, to] = range.slice('bytes='.length).split('-').map(Number);
+        expect([...new Uint8Array(await part.arrayBuffer())]).toEqual([...bank.subarray(from, to + 1)]);
+      }
+      expect(seen).toEqual([undefined]);
+      // A read without Range is proxied as before.
+      expect((await fetch(`${cached.url}audio/path/${resPath}`)).status).toBe(200);
+      expect(seen).toEqual([undefined, undefined]);
+    } finally {
+      await cached.Stop();
+      audioUpstream = 'http://127.0.0.1:9';
+      await new Promise((resolve) => upstream.close(resolve));
     }
   });
 

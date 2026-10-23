@@ -123,7 +123,7 @@ import {
   type ShotTargetKind,
   type WeaponShot
 } from '@scene-director/scene';
-import type { SceneClock } from './clock';
+import { TICKS_PER_SECOND, type SceneClock } from './clock';
 import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
@@ -169,6 +169,7 @@ import { ErrorText, ResourceValues } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
+import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
 import { ShipTurrets, type TurretsReport } from './turrets';
 import { WeaponLookup } from './weapon-lookup';
@@ -515,6 +516,15 @@ export class Director {
    */
   private readonly turrets: Maybe<ShipTurrets>;
   /**
+   * The turret files and their firing effects as values, with or without a renderer: the sets mount from them and
+   * their sound events name the turret sounds (turret-plan.ts).
+   */
+  private readonly turretFiles = new TurretFiles({ read: (path) => ResourceValues(path) });
+  /**
+   * Turret sounds waiting for their bursts to start (turret-audio.ts).
+   */
+  private readonly turretSounds = new TurretSoundQueue();
+  /**
    * Every ship's target (set_target; targets.ts): what its turrets aim and fire at.
    */
   readonly targets: ShipTargets;
@@ -585,7 +595,7 @@ export class Director {
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
-    this.turrets = engine ? new ShipTurrets({ files: new TurretFiles({ read: (path) => ResourceValues(path) }), detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
+    this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
     this.targets = new ShipTargets({ HasShip: (id) => world.Curves(id) != null, HasObject: (id) => this.IsAuthoredObject(id), SurfaceDistance: (a, b) => world.SurfaceDistance(a, b) });
     this.shots = new ShotQueue(world.master.tickInterval / 1000);
     this.modules = new ShipModules({
@@ -601,7 +611,9 @@ export class Director {
     world.OnBoundary((boundary) => this.ModuleEvents(this.modules.Boundary(boundary)));
     world.OnWarp((event) => {
       if (event.kind === 'enter') {
-        for (const cleared of this.targets.OnWarpEnter(event.id)) this.turrets?.Aim(cleared.ship, null);
+        const cleared = this.targets.OnWarpEnter(event.id);
+        for (const { ship } of cleared) this.turrets?.Aim(ship, null);
+        this.PostTurretAims(cleared.map(({ ship }) => ({ ship, aim: 'idle' })));
         this.ModuleEvents(this.modules.OnWarpEnter(event.id, event.tick));
       }
     });
@@ -864,14 +876,21 @@ export class Director {
   /**
    * Draws the shots due by `now` (one tick after their exact cycle start), settles weapons whose last burst ran, and
    * keeps every ship's guns on its hull and on its target for the frame (an animated hull rebinds them to its bones
-   * once they load; a rebuilt target is re-aimed). Runs between world.Tick and engine.Frame.
+   * once they load; a rebuilt target is re-aimed). Then posts the turret sounds due: each drawn burst's firing and
+   * impact events as it starts, and the guns' deploy and pack events (turret-audio.ts). Runs between world.Tick and
+   * engine.Frame.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
    */
   DriveTurrets(now: number): void {
-    for (const shot of this.shots.Due(now)) this.DrawShot(shot, now);
+    const drawn = this.shots.Due(now).flatMap((shot) => this.DrawShot(shot, now) ?? []);
+    if (drawn.length) this.turretSounds.Add(TurretAudioPosts({ shots: drawn, transitions: [], facts: (ship, module) => this.TurretSoundFactsOf(ship, module) }));
     for (const weapon of this.shots.Settled(now)) this.turrets?.Settle(weapon.ship, weapon.module);
     this.turrets?.Frame();
+    for (const post of this.turretSounds.Due(now)) {
+      // A ship that left (or not built into the world yet) posts nothing: its emitter is released with it.
+      if (this.world.Curves(post.ship)) this.audio.Post({ ship: post.ship, tick: post.tick, events: post.events, placement: this.AudioPlacement(post.ship, now) });
+    }
   }
 
   /**
@@ -1128,12 +1147,13 @@ export class Director {
       this.propMods.ForgetFailures();
       this.fitLookup.ForgetFailures();
       this.weapons.ForgetFailures();
-      this.turrets?.ForgetFailures();
+      this.turretFiles.ForgetFailures();
       // A load restarts every module online (or offline as fitted) and every ship at full HP.
       moduleEvents.push(...this.modules.Clear(this.world.tick));
       // Targets and shots are live state: a load starts with none.
       this.targets.Clear();
       this.shots.Clear();
+      this.turretSounds.Clear();
       this.turrets?.ClearAims();
       this.turrets?.ResetBursts();
       this.damage.Clear();
@@ -1494,12 +1514,47 @@ export class Director {
    *
    * @param shot - The shot.
    * @param now - The scene clock, in integer 100 ns ticks.
+   * @returns Its sounds' source, starting with the burst (the set's random firing delay after the draw; at once without
+   *   a renderer); null when it was dropped or, with a renderer, its set did not draw it.
    */
-  private DrawShot(shot: WeaponShot, now: number): void {
+  private DrawShot(shot: WeaponShot, now: number): Maybe<TurretShotSound> {
     const present = this.world.Curves(shot.ship) != null && this.targets.KindOf(shot.target) != null;
-    if (!present || this.world.InWarp(shot.ship) || (shot.targetKind === 'ship' && this.world.InWarp(shot.target))) return;
-    const duration = this.turrets?.Fire(shot.ship, shot.module, shot.target, shot.missed === true);
-    if (duration != null) this.shots.Drawn(shot, now, duration);
+    if (!present || this.world.InWarp(shot.ship) || (shot.targetKind === 'ship' && this.world.InWarp(shot.target))) return null;
+    const sound: Omit<TurretShotSound, 'at'> = { ship: shot.ship, module: shot.module, target: shot.target, targetKind: shot.targetKind, ...(shot.missed === true ? { missed: true } : {}), tick: shot.tick };
+    if (!this.turrets) return { ...sound, at: now };
+    const burst = this.turrets.Fire(shot.ship, shot.module, shot.target, shot.missed === true);
+    if (!burst) return null;
+    this.shots.Drawn(shot, now, burst.duration);
+    return { ...sound, at: now + Math.round(burst.delay * TICKS_PER_SECOND) };
+  }
+
+  /**
+   * Posts the deploy (a new target) or pack (none) sounds of ships whose guns changed aim, as they change.
+   *
+   * @param changes - The ships and their new aim.
+   */
+  private PostTurretAims(changes: readonly Pick<TurretAimTransition, 'ship' | 'aim'>[]): void {
+    const transitions = changes.map(({ ship, aim }): TurretAimTransition => ({
+      ship,
+      aim,
+      modules: (this.fittings.get(ship)?.modules ?? []).flatMap((module) => (module.weapon ? [module.key] : [])),
+      tick: this.world.tick,
+      at: this.clock.now
+    }));
+    this.turretSounds.Add(TurretAudioPosts({ shots: [], transitions, facts: (ship, module) => this.TurretSoundFactsOf(ship, module) }));
+  }
+
+  /**
+   * A weapon module's sound events, read off its turret file and firing effect.
+   *
+   * @param ship - The ship id.
+   * @param key - The module key.
+   * @returns Them; null while the module's graphic or files load, or when it has none.
+   */
+  private TurretSoundFactsOf(ship: string, key: string): Maybe<TurretSoundFacts> {
+    const typeID = this.fittings.get(ship)?.modules.find((module) => module.key === key && module.weapon)?.typeID;
+    const resPath = typeID == null ? null : this.weapons.Cached(typeID)?.weapon?.resPath;
+    return resPath ? (this.turretFiles.Cached(resPath)?.facts ?? null) : null;
   }
 
   /**
@@ -1514,6 +1569,7 @@ export class Director {
     if (previous !== target) {
       this.ModuleOutputs(this.modules.Retarget(id, target, this.world.tick));
       this.turrets?.Aim(id, target);
+      this.PostTurretAims([{ ship: id, aim: target == null ? 'idle' : 'targeting' }]);
     }
     return previous;
   }
@@ -1533,11 +1589,14 @@ export class Director {
    */
   private ForgetTarget(id: string): void {
     this.turrets?.Aim(id, null);
-    for (const cleared of this.targets.Remove(id)) {
-      this.ModuleOutputs(this.modules.Retarget(cleared.ship, null, this.world.tick));
-      this.turrets?.Aim(cleared.ship, null);
+    const cleared = this.targets.Remove(id);
+    for (const { ship } of cleared) {
+      this.ModuleOutputs(this.modules.Retarget(ship, null, this.world.tick));
+      this.turrets?.Aim(ship, null);
     }
+    this.PostTurretAims(cleared.map(({ ship }) => ({ ship, aim: 'idle' })));
     this.shots.Forget(id);
+    this.turretSounds.Forget(id);
   }
 
   /**
@@ -1769,15 +1828,15 @@ export class Director {
 
   /**
    * Mounts a ship's weapons on its built hull (turrets.ts): its resolved fit's weapon modules (its own fit's or its
-   * default weapons'), each once its /weapon graphic has landed. A landing graphic syncs every ship again.
+   * default weapons'), each once its /weapon graphic has landed. A landing graphic syncs every ship again. The
+   * weapons' files load with or without a renderer: their sound events name the turret sounds.
    *
    * @param id - The ship id.
    */
   private SyncTurrets(id: string): void {
-    const turrets = this.turrets;
     const entry = this.live.get(id);
     const doc = this.scene?.ships.find((ship) => ship.id === id);
-    if (!turrets || !entry || !doc) return;
+    if (!entry || !doc) return;
     const resolved = this.fittings.get(id);
     for (const module of resolved?.modules ?? []) {
       const typeID = module.typeID;
@@ -1789,12 +1848,10 @@ export class Director {
         this.onChange();
       });
     }
-    turrets.Sync(
-      id,
-      entry.ship,
-      doc.dna,
-      TurretMountsOf(resolved, (typeID) => this.weapons.Cached(typeID)?.weapon ?? null)
-    );
+    const mounts = TurretMountsOf(resolved, (typeID) => this.weapons.Cached(typeID)?.weapon ?? null);
+    // Shared with the sets: each file loads once, and a failure is the mount's to report.
+    for (const mount of mounts) this.turretFiles.Load(mount.resPath).catch(() => undefined);
+    this.turrets?.Sync(id, entry.ship, doc.dna, mounts);
   }
 
   /**
