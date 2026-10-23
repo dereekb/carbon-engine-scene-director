@@ -110,14 +110,40 @@ roll? })` (`ArrivalRefusal`, `ArrivalOf`, `Arriving`, `WarpProfile`; math in `wa
   startsIn? (ticks to its boundary, 0 = the next), landsIn? (s to the exit event: from the profile while scheduled,
   from the warp while warping), landedAt?, leader? }`.
 
+## Flashes
+
+The client's warp effects play on every warp, arrivals included. Which and when: `warp-fx.ts` (`WarpFx`, pure,
+`warp-fx.spec.ts` on real parks); drawing: `warp-effects.ts` (`WarpEffects`, runtime, only with a renderer).
+`Director.DriveWarpEffects(now)` runs in `main.ts` after `DriveModuleEffects`.
+
+- **Warp-out** on `enter`, never for an arrival (it waited off-grid): `res:/fisfx/jump/warp/warp_out_start.black`
+  (EveTransform: `glow_core` 2,000 m + `streak` billboards on a `vfxRoot` child, named curve sets to 0.375 s) and
+  `warp_out.black` (`warpOutTrace`: a beam along +Z, 1 s), both at where warp began, +Z turned along the warp.
+- **Warp-in** once per warp, when the **drawn** ClientBall first comes within max(2,000 m, 4 × radius) of its landing
+  (`WarpInTriggerDistance`), at the landing: the exit event lags the visible arrival by seconds. The exit plays it
+  when no frame did. `warp_in_glow.black` for a SOF radius ≥ 150 m, else `warp_in_noglow.black` (EveTransform
+  `warp_in_flash`: `disc` 500 m, `glow_core` 500 m, `glow_core2` 3,500 m, `streak` 750 m billboards; `_glow` adds
+  `glow_core_big`; one unnamed curve set to 4.125 s).
+- **Scale** radius / 250, clamped [0.25, 8] (`WarpFlashScale`). Radius: the built hull's `boundingSphereRadius`, else
+  the flight's radius. All provisional until the real-GPU check.
+- A placement or a removal ends a warp with no exit: the next frame drops it (`InWarp` false), no flash. A load
+  clears every tracked warp and drawn flash.
+- **Drawing**: each file loads once (`ResourceValues`); every play hydrates a new `EveTransform` inside
+  `PageAudio.Detached` (the files carry no audio), curve LOD off (`NoCurveLod`), wrapped in an `EveRootTransform` on
+  fixed curves (`CreateStaticCurves` / `PlaceStatic`: position, the +Z-to-warp rotation) with the scale on the root,
+  `Engine.AddObject`, then `PlayCurveSets()` on every transform in the tree (`warp_out_start`'s curve sets are on a
+  child). Removed `WARP_EFFECT_LINGER` (0.5 s) after its longest curve set; at most `WARP_EFFECTS_LIVE_MAX` (64) at
+  once, the rest skipped. Teardown: `RemoveObject`, then `RetireShips` against every other root; `Roots()` joins every
+  retained set in `director.ts`.
+- **get_state**: `renderer.warpEffects { live, loading, failed, skipped, errors }`; `simulation.warpFlashes
+  { warpOut, warpIn }` counts the commands, with or without a renderer.
+
 ## Reporting and hooks
 
 - `get_state` per warping ship: `warp` = `phase`, `landing`, `warpSpeed` (AU/s), `alignTicks` (aligning), `distance`
   (from warp start), `remaining`, `progress` (0..1), `landsIn` (s, in warp). `order` stays the warp order through
   landing; `mode` is `warp` until it lands.
 - `DestinyWorld.OnWarp(listener)` reports `enter` / `exit` after the tick they happen in (where warp began or the exit
-  point, the direction, the landing, the warp speed, `arrival: true` for a warp-in), for warp-in effects to come. The client's effects are
-  `res:/fisfx/jump/warp/warp_out_start.black`, `warp_out.black` (leaving), `warp_in_glow.black` /
-  `warp_in_noglow.black` (arriving); playing them needs a real-GPU check.
+  point, the direction, the landing, the warp speed, `arrival: true` for a warp-in): the flashes below play from it.
 - **Far away**: Destiny simulates any distance in float64, but the page draws relative to the scene origin in float32:
   beyond ~100,000 km a ship jitters on screen if the camera goes there.

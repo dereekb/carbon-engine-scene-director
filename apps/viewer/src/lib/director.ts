@@ -213,6 +213,8 @@ import { CURRENT_KEY, type SceneStore } from './store';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
 import { ShipTurrets, type TurretsReport } from './turrets';
+import { WarpEffects, type WarpEffectsReport } from './warp-effects';
+import { WarpFx, type WarpFlashCounts, type WarpFxCommand } from './warp-fx';
 import { WeaponLookup } from './weapon-lookup';
 
 /**
@@ -665,6 +667,14 @@ export class Director {
    */
   private readonly explosions: Maybe<ShipExplosions>;
   /**
+   * Which warp flashes play when (warp-fx.ts), counted with or without a renderer.
+   */
+  private readonly warpFx: WarpFx;
+  /**
+   * The drawn warp flashes (warp-effects.ts); null without a renderer.
+   */
+  private readonly warpEffects: Maybe<WarpEffects>;
+  /**
    * The live fleet view (toLiveFleetScene), memoized by document and destroyed set.
    */
   private liveFleets: Maybe<{ readonly scene: SceneDocument; readonly gone: string; readonly view: LiveFleetView<SceneDocument> }> = null;
@@ -726,11 +736,11 @@ export class Director {
     this.dressing = new LocationDressing({
       engine,
       parts: ReadDressParts(),
-      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()],
+      retained: () => [...this.ShipRoots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()],
       onChange: () => this.onChange(),
       detachAudio: (build) => this.audio.Detached(build)
     });
-    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
+    this.objects = new SceneObjects({ engine, retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()], onChange: () => this.onChange(), onBuilt: (id) => this.ObjectBuilt(id), detachAudio: (build) => this.audio.Detached(build) });
     this.location = new LocationLookup({
       onChange: () => {
         this.Redress();
@@ -744,7 +754,7 @@ export class Director {
       ? new ModuleEffects({
           engine,
           ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ExplosionRoots()],
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()],
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
@@ -752,10 +762,28 @@ export class Director {
       ? new ShipExplosions({
           engine,
           files: this.explosionFiles,
-          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots()],
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.WarpEffectRoots()],
           detachAudio: (build) => this.audio.Detached(build),
           onHide: (id) => this.Hide(id),
           onSound: (id, event) => this.PostExplosionSound(id, event)
+        })
+      : null;
+    this.warpFx = new WarpFx({
+      RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || this.flights.get(id)?.radius || UNBUILT_RADIUS,
+      DrawnPosition: (id, now) => {
+        const curves = world.Curves(id);
+        return curves ? (Array.from(curves.translation.GetValueAt__Ticks(now, vec3.create())) as SceneVector) : null;
+      },
+      InWarp: (id) => world.InWarp(id),
+      get tick() {
+        return world.tick;
+      }
+    });
+    this.warpEffects = engine
+      ? new WarpEffects({
+          engine,
+          retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()],
+          detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
     this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
@@ -819,6 +847,7 @@ export class Director {
         this.PostTurretAims(cleared.map(({ ship }) => ({ ship, aim: 'idle' })));
         this.ModuleEvents(this.modules.OnWarpEnter(event.id, event.tick));
       }
+      this.PlayWarpFlashes(this.warpFx.OnWarp(event));
     });
     if (engine) this.AttachCameraControls(engine.canvas);
   }
@@ -1203,6 +1232,27 @@ export class Director {
   }
 
   /**
+   * Plays the warp-in flashes due on the frame at `now` (a ship drawn near its landing) and removes the flashes that
+   * ran out. Runs between world.Tick and engine.Frame, after DriveModuleEffects.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  DriveWarpEffects(now: number): void {
+    this.PlayWarpFlashes(this.warpFx.Frame(now), now);
+    this.warpEffects?.Frame(now);
+  }
+
+  /**
+   * Draws warp flash commands (counted by warpFx with or without a renderer).
+   *
+   * @param commands - The commands.
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  private PlayWarpFlashes(commands: readonly WarpFxCommand[], now = this.clock.now): void {
+    if (commands.length) this.warpEffects?.Play(commands, now);
+  }
+
+  /**
    * Draws the shots due by `now` (one tick after their exact cycle start), settles weapons whose last burst ran, and
    * keeps every ship's guns on its hull and on its target for the frame (an animated hull rebinds them to its bones
    * once they load; a rebuilt target is re-aimed). Then posts the turret sounds due: each drawn burst's firing and
@@ -1390,8 +1440,8 @@ export class Director {
         });
       }
     }
-    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport>; turrets: Maybe<TurretsReport> } & EngineStats) | { available: false; reason: string } = this.engine
-      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null, turrets: this.turrets?.Report() ?? null }
+    const renderer: ({ available: true; moduleEffects: Maybe<ModuleEffectsReport>; turrets: Maybe<TurretsReport>; warpEffects: Maybe<WarpEffectsReport> } & EngineStats) | { available: false; reason: string } = this.engine
+      ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null, turrets: this.turrets?.Report() ?? null, warpEffects: this.warpEffects?.Report() ?? null }
       : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
       renderer,
@@ -1400,7 +1450,7 @@ export class Director {
       camera: this.engine ? { ...this.engine.camera.Get(), view: this.cinema.active ? 'cinema' : 'orbit', drawn: DrawnCameraReport(this.engine.DrawnCamera()) } : null,
       cinema: this.cinema.Report(this.clock.now),
       environment: this.engine?.Environment() ?? null,
-      simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100 },
+      simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
       ships,
       ...(this.arrivals.Report().length ? { arrivals: this.arrivals.Report() } : {}),
       distances,
@@ -1565,6 +1615,8 @@ export class Director {
     if (restart) {
       this.ModuleOutputs(moduleEvents);
       this.moduleEffects?.Clear();
+      this.warpFx.Clear();
+      this.warpEffects?.Clear();
     } else this.ModuleEvents(moduleEvents);
 
     // Balls follow the document, not the renderer: a rebuilt ship keeps its ball and keeps flying. They are in place
@@ -2499,7 +2551,7 @@ export class Director {
     this.turrets?.Remove(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
-    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()]);
+    RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()]);
   }
 
   /**
@@ -2521,7 +2573,7 @@ export class Director {
       entry.status = 'destroyed';
       if (ship && this.engine) {
         this.engine.RemoveShip(ship);
-        RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots()]);
+        RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots()]);
       }
     }
     this.onChange();
@@ -2540,6 +2592,13 @@ export class Director {
    */
   private ExplosionRoots(): object[] {
     return this.explosions?.Roots() ?? [];
+  }
+
+  /**
+   * The warp flashes' roots, for every retire's retained set.
+   */
+  private WarpEffectRoots(): object[] {
+    return this.warpEffects?.Roots() ?? [];
   }
 
   /**

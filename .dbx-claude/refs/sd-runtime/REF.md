@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts` and `destiny-warp-in.spec.ts` cover `destiny.ts`' tackle, accuracy and arrivals on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
@@ -120,6 +120,13 @@ and `EveShip2.isAnimated` / `overlayEffects` / `AddOverlayEffect` / `RemoveOverl
   placed by curves; `useLodLevel = false` on the whole tree, or small on screen its curve sets step at 1 Hz.
 - **Retire**: stretches and roots go through `RetireShips([root], retained)` with every other live root; the
   director adds `ModuleEffects.Roots()` to the ships', dressing's and objects' retained sets.
+
+## Warp flashes (`warp-effects.ts`)
+
+The warp-out and warp-in flashes (which and when: `sd-destiny` `warp` doc, "Flashes"). Played like the web's trigger:
+hydrate per play inside `PageAudio.Detached`, curve LOD off (`NoCurveLod`, exported from `module-effects.ts`), an
+`EveRootTransform` on fixed curves (`CreateStaticCurves`), `Engine.AddObject`, then `EveTransform.PlayCurveSets()`
+(declared) on every transform in the tree: it plays only its own curve sets, and `warp_out_start`'s sit on a child.
 
 ## Turrets (`turrets.ts`)
 

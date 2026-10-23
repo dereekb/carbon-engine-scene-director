@@ -730,6 +730,10 @@ declare module '@carbonenginejs/runtime/trinity' {
      */
     useLodLevel: boolean;
     PlayCurveSet(name: string, rangeName?: string): void;
+    /**
+     * Plays every one of its own curve sets (not its children's), named or not.
+     */
+    PlayCurveSets(): void;
   }
 
   /**

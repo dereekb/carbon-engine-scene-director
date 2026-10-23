@@ -454,7 +454,7 @@ function ReplayOverlay(overlay: EveMeshOverlayEffect): void {
 /**
  * Turns a transform tree's curve LOD off: small on screen its curve sets would update at 1 Hz.
  */
-function NoCurveLod(transform: EveTransform): void {
+export function NoCurveLod(transform: EveTransform): void {
   transform.useLodLevel = false;
   for (const child of transform.children) NoCurveLod(child);
 }
