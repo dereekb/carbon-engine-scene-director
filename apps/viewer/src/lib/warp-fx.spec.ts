@@ -3,7 +3,7 @@ import { describe, expect, it } from 'vitest';
 import type { WarpEvent } from './destiny';
 import { Fly, Gap, Harness, RequireMotion, RIFTER, Ship, TFI } from './destiny.spec-helper';
 import { vec3 } from './runtime-sim';
-import { RotationToward, WARP_IN_GLOW_PATH, WARP_IN_NOGLOW_PATH, WARP_OUT_PATH, WARP_OUT_START_PATH, WarpFlashScale, WarpFx, WarpInFlashPath, WarpInTriggerDistance, type WarpFxCommand } from './warp-fx';
+import { RotationToward, WARP_IN_GLOW_PATH, WARP_IN_NOGLOW_PATH, WARP_OUT_PATH, WARP_OUT_START_PATH, WarpFlashReplays, WarpFlashScale, WarpFx, WarpInFlashPath, WarpInTriggerDistance, type WarpFxCommand } from './warp-fx';
 import { RoundTrip } from './state-capture.spec-helper';
 
 const RIFTER_RADIUS = 31;
@@ -176,6 +176,16 @@ describe('WarpFx', () => {
       const along = Rotate(RotationToward(direction), [0, 0, 1]);
       direction.forEach((value, axis) => expect(along[axis]).toBeCloseTo(value, 9));
     }
+  });
+});
+
+describe('WarpFlashReplays (sd-time)', () => {
+  it('plays again the swallowed flashes still playing at the target: warp-ins within 4.125 s, warp-outs within 1 s', () => {
+    const Flash = (kind: WarpFxCommand['kind'], ship: string, at: number) => ({ command: { kind, ship, files: [], position: [0, 0, 0] as SceneVector, rotation: [0, 0, 0, 1] as const, scale: 1, tick: at }, at });
+    const swallowed = [Flash('warp-in', 'old', 5.5), Flash('warp-in', 'landing', 6), Flash('warp-out', 'left', 8.9), Flash('warp-out', 'leaving', 9.2), Flash('warp-in', 'now', 10), Flash('warp-in', 'after', 10.5)];
+    expect(WarpFlashReplays(swallowed, 10, 1).map((command) => command.ship)).toEqual(['landing', 'leaving', 'now']);
+    expect(WarpFlashReplays([], 10, 1)).toEqual([]);
+    expect(WarpFlashReplays([Flash('warp-out', 'a', 2e7)], 2.5e7, 1e7).map((command) => command.ship)).toEqual(['a']);
   });
 });
 

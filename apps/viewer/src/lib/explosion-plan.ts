@@ -262,6 +262,59 @@ export function ExplosionSchedule(input: ExplosionScheduleInput): ExplosionTimes
   };
 }
 
+/**
+ * A destroyed ship's explosion as a time-control landing finds it (sd-time), in one time unit throughout.
+ */
+export interface ExplosionReplayDeath {
+  /**
+   * When its explosion starts; null while its killing shot has not drawn.
+   */
+  readonly start: Maybe<number>;
+  /**
+   * When its hull's drawing retires (the wreck switch, ExplosionTimes.hide); null when unknown (the file not loaded).
+   */
+  readonly hide: Maybe<number>;
+  readonly begun: boolean;
+  readonly hidden: boolean;
+  /**
+   * Its ball left the parks.
+   */
+  readonly gone: boolean;
+}
+
+/**
+ * What a landing does with the explosions: `replay` restarts at the target (begun, schedule and posted reset, start =
+ * the target), `hide` retires the hull now (its wreck switch passed while nothing drew), `restart` resets one that
+ * starts after the target (it begins as usual at its start). Deaths in none of them follow the normal path.
+ */
+export interface ExplosionReplayPlan {
+  readonly replay: string[];
+  readonly hide: string[];
+  readonly restart: string[];
+}
+
+/**
+ * Which explosions a time-control jump plays again when it lands (sd-time): the re-simulation runs no drawing, so an
+ * explosion that started before the target and whose hull is still visible at it replays from its start at the target;
+ * one whose wreck switch passed stays hidden (hidden now when the re-simulation never hid it); one starting after the
+ * target begins at its own start.
+ *
+ * @param deaths - The destroyed ships by id.
+ * @param target - The landing, in the deaths' time unit.
+ * @returns The plan.
+ */
+export function ExplosionReplays(deaths: Iterable<readonly [string, ExplosionReplayDeath]>, target: number): ExplosionReplayPlan {
+  const plan = { replay: [] as string[], hide: [] as string[], restart: [] as string[] };
+  for (const [id, death] of deaths) {
+    if (death.gone || death.hidden || death.start == null) continue;
+    if (death.start > target) {
+      if (death.begun) plan.restart.push(id);
+    } else if (death.hide != null && target >= death.hide) plan.hide.push(id);
+    else plan.replay.push(id);
+  }
+  return plan;
+}
+
 function Field(value: unknown, key: string): unknown {
   return value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined;
 }

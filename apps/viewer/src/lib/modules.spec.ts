@@ -159,6 +159,20 @@ describe('ShipModules', () => {
     expect(modules.Incoming('fc')).toEqual([{ from: 'logi', spec: expect.objectContaining({ key: 'high-0' }), effectiveness: 0.5 }]);
   });
 
+  it('lists the running modules with their effect and target for a time-control landing', () => {
+    const port = new FakePort();
+    const modules = new ShipModules(port);
+    modules.SetFit('logi', [Spec('high-0', { ...REMOTE_REP, effectGuid: 'effects.RemoteArmourRepair' }), Spec('low-0', { effectGuid: 'effects.ArmorHardening' }), Spec('low-1')], 0);
+    expect(modules.Switch('logi', 'high-0', 'active', { boundary: 0, target: 'fc' })).toBeNull();
+    expect(modules.Switch('logi', 'low-0', 'active', { boundary: 0 })).toBeNull();
+    modules.Boundary(0);
+    modules.Boundary(1);
+    expect(modules.RunningEffects(2)).toEqual([
+      { ship: 'logi', module: 'high-0', effectGuid: 'effects.RemoteArmourRepair', target: 'fc', cycleTime: 5, tick: 2 },
+      { ship: 'logi', module: 'low-0', effectGuid: 'effects.ArmorHardening', cycleTime: 10, tick: 2 }
+    ]);
+  });
+
   it('stops a targeted module at its cycle end out of reach, and at once when its target goes or warps', () => {
     const port = new FakePort();
     const modules = new ShipModules(port);

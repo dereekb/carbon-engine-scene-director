@@ -1,6 +1,6 @@
 import { SHIP_EXPLOSIONS } from '@scene-director/scene';
 import { describe, expect, it, vi } from 'vitest';
-import { EXPLOSION_LINGER_MARGIN_SECONDS, ExplosionFileFacts, ExplosionFiles, ExplosionRemoveTick, ExplosionSchedule } from './explosion-plan';
+import { EXPLOSION_LINGER_MARGIN_SECONDS, ExplosionFileFacts, ExplosionFiles, ExplosionRemoveTick, ExplosionReplays, ExplosionSchedule, type ExplosionReplayDeath } from './explosion-plan';
 import type { CjsModelValues } from './runtime';
 
 const Sound = (name: string, event: string) => ({
@@ -114,5 +114,32 @@ describe('ExplosionSchedule', () => {
     expect(ExplosionSchedule({ start: 3, facts: null, deathTick: 10, lingerSeconds: 21, tickSeconds: 1 })).toMatchObject({ hide: 3, sounds: [], removeTick: 33 });
     expect(ExplosionRemoveTick(10, 21, 0.5)).toBe(56);
     expect(ExplosionRemoveTick(10, 21.2, 1)).toBe(34);
+  });
+});
+
+describe('ExplosionReplays (sd-time)', () => {
+  const Death = (death: Partial<ExplosionReplayDeath>): ExplosionReplayDeath => ({ start: 10, hide: 11.5, begun: true, hidden: false, gone: false, ...death });
+
+  it('replays a visible explosion from the target, hides one past its wreck switch, and restarts one that starts later', () => {
+    const plan = ExplosionReplays(
+      Object.entries({
+        visible: Death({}),
+        unknownFile: Death({ hide: null }),
+        switched: Death({ hide: 10.5 }),
+        later: Death({ start: 12.5, hide: 14 }),
+        laterNotBegun: Death({ start: 13, begun: false }),
+        pending: Death({ start: null, begun: false }),
+        hidden: Death({ start: 2, hidden: true }),
+        gone: Death({ start: 1, gone: true })
+      }),
+      11
+    );
+    expect(plan).toEqual({ replay: ['visible', 'unknownFile'], hide: ['switched'], restart: ['later'] });
+  });
+
+  it('a jump landing on the start replays it, and on the wreck switch hides it', () => {
+    expect(ExplosionReplays([['a', Death({})]], 10)).toEqual({ replay: ['a'], hide: [], restart: [] });
+    expect(ExplosionReplays([['a', Death({})]], 11.5)).toEqual({ replay: [], hide: ['a'], restart: [] });
+    expect(ExplosionReplays([['a', Death({ begun: false, hide: null })]], 10.2)).toEqual({ replay: ['a'], hide: [], restart: [] });
   });
 });

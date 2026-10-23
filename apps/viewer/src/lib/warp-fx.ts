@@ -45,6 +45,13 @@ export const WARP_FLASH_AUTHORED_RADIUS = 250;
 export const WARP_FLASH_SCALE_MIN = 0.5;
 export const WARP_FLASH_SCALE_MAX = 8;
 
+/**
+ * How long each flash plays, seconds (its files' longest curve set: warp_out's trace 1 s, warp_in's 4.125 s): a
+ * time-control landing plays again the flashes a re-simulation swallowed within that long before the target.
+ */
+export const WARP_OUT_FLASH_SECONDS = 1;
+export const WARP_IN_FLASH_SECONDS = 4.125;
+
 export type WarpFxKind = 'warp-out' | 'warp-in';
 
 export interface WarpFxCommand {
@@ -205,6 +212,30 @@ export class WarpFx {
   private Command(kind: WarpFxKind, ship: string, files: readonly string[], position: SceneVector, direction: SceneVector): WarpFxCommand {
     return { kind, ship, files, position, rotation: RotationToward(direction), scale: WarpFlashScale(this.ships.RadiusOf(ship)), tick: this.ships.tick };
   }
+}
+
+/**
+ * A flash command a time-control re-simulation made but did not draw, with the scene clock it was made at.
+ */
+export interface SwallowedWarpFlash {
+  readonly command: WarpFxCommand;
+  /**
+   * 100 ns ticks.
+   */
+  readonly at: number;
+}
+
+/**
+ * The flashes a time-control landing plays at the target (sd-time): the swallowed ones still playing then, made
+ * within their own length (WARP_OUT_FLASH_SECONDS, WARP_IN_FLASH_SECONDS) before it.
+ *
+ * @param swallowed - The silent frames' flash commands, in order.
+ * @param target - The landing, 100 ns ticks.
+ * @param ticksPerSecond - The clock's ticks per second.
+ * @returns The commands, in order.
+ */
+export function WarpFlashReplays(swallowed: readonly SwallowedWarpFlash[], target: number, ticksPerSecond: number): WarpFxCommand[] {
+  return swallowed.filter(({ command, at }) => at <= target && target - at < (command.kind === 'warp-in' ? WARP_IN_FLASH_SECONDS : WARP_OUT_FLASH_SECONDS) * ticksPerSecond).map(({ command }) => command);
 }
 
 /**

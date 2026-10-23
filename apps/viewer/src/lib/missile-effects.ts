@@ -130,6 +130,10 @@ interface LiveMissile {
    */
   closest: number;
   distance: Maybe<number>;
+  /**
+   * Drawn again mid-flight after a time-control jump: its warheads start on its ball, not at the launcher.
+   */
+  readonly midFlight: boolean;
 }
 
 interface PooledImpact {
@@ -173,9 +177,12 @@ export class ShipMissiles {
    * @param flight - The flight.
    * @param graphic - Its missile graphic (the /missile answer); null flies it undrawn.
    * @param startAt - Scene clock, 100 ns ticks.
+   * @param options - `midFlight`: a missile already flying, drawn again after a time-control jump (sd-time): its
+   *   warheads start on its ball with no launcher offset and no inherited ship velocity, timed on the ball's distance to
+   *   its target.
    * @returns Whether it draws.
    */
-  Launch(flight: MissileFlight, graphic: Maybe<MissileGraphic>, startAt: number): boolean {
+  Launch(flight: MissileFlight, graphic: Maybe<MissileGraphic>, startAt: number, { midFlight = false }: { readonly midFlight?: boolean } = {}): boolean {
     const file = graphic ? this.files.Cached(graphic) : null;
     if (graphic && !file && !this.files.Failure(graphic)) this.files.Load(graphic).catch(() => undefined);
     if (!this.plan.Launch(flight.id, startAt, file?.facts.impactDuration ?? 0)) return false;
@@ -183,7 +190,7 @@ export class ShipMissiles {
       this.plan.Skip(flight.id);
       return false;
     }
-    this.live.set(flight.id, { flight, file, missile: null, ball: null, last: vec3.create(), aimed: null, closest: Infinity, distance: null });
+    this.live.set(flight.id, { flight, file, missile: null, ball: null, last: vec3.create(), aimed: null, closest: Infinity, distance: null, midFlight });
     return true;
   }
 
@@ -348,16 +355,16 @@ export class ShipMissiles {
           // Never throw inside the scene update.
         }
       };
-      if (!this.port.ShipVelocity(flight.ship, now, this.velocity)) vec3.set(this.velocity, 0, 0, 0);
+      if (entry.midFlight || !this.port.ShipVelocity(flight.ship, now, this.velocity)) vec3.set(this.velocity, 0, 0, 0);
       const speed = flight.numbers?.velocity ?? 0;
-      const distance = this.port.SurfaceDistance(flight.ship, flight.target) ?? 0;
+      const distance = entry.midFlight ? this.BallDistance(entry, now) : (this.port.SurfaceDistance(flight.ship, flight.target) ?? 0);
       missile.Start(this.velocity, speed > 0 ? distance / speed : 1);
       // The launch transform is the launcher's muzzle in the missile's space (its ball at `now` subtracted): its +Z is
-      // the eject direction. Identity when the set is not mounted.
+      // the eject direction. Identity when the set is not mounted, and for a missile drawn again mid-flight.
       const start = this.scratch;
       start.fill(0);
       start[0] = start[5] = start[10] = start[15] = 1;
-      if (this.port.FiringBone(flight.ship, flight.module, start)) {
+      if (!entry.midFlight && this.port.FiringBone(flight.ship, flight.module, start)) {
         start[12] -= entry.last[0];
         start[13] -= entry.last[1];
         start[14] -= entry.last[2];
@@ -376,6 +383,14 @@ export class ShipMissiles {
       this.plan.Skip(id);
       this.live.delete(id);
     }
+  }
+
+  /**
+   * A missile drawn again mid-flight: its ball's distance (sampled at `now`) to its target's surface, 0 without one.
+   */
+  private BallDistance(entry: LiveMissile, now: number): number {
+    if (!this.port.TargetPosition(entry.flight.target, now, this.targetPosition)) return 0;
+    return Math.max(0, vec3.distance(entry.last, this.targetPosition) - this.port.TargetRadius(entry.flight.target));
   }
 
   /**

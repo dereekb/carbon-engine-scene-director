@@ -7,25 +7,27 @@
 > pause and fast-forward → T2a the snapshot layer → T2b jump back, the tape and the window → T3 effects across a jump
 > and the real-GPU check). The clock and loop basics are `sd-destiny` ("One clock, one loop").
 
-**Status: T1, T2a and T2b have landed.** T1: rate, pause, fast-forward, the tool, get_state `time`, the HUD row and keys.
+**Status: T1, T2a, T2b and T3 have landed.** T1: rate, pause, fast-forward, the tool, get_state `time`, the HUD row and keys.
 T2a: the snapshot layer (`state-capture.ts`, `destiny-snapshot.ts`, `DestinyWorld.Snapshot()` / `Restore()`, an owner
 `Snapshot()` / `Restore()` each). T2b: the ring of snapshots, recording from the settled scene and the cuts, the tape of
 live commands, `Jump` (restore + silent re-simulation + warm-up + landing, with an undo point), drift detection, the
-director's sim port, `back` / `seek` / `every` / `window`, the `←` key. **Next: T3** re-triggers effects mid-flight at
-a landing (explosions, drawn missiles, module beams, warp flashes) and the real-GPU check; until then a jump tears
-those effects down and they reappear only as new ones start. No smooth reverse playback (user, 2026-10-22).
+director's sim port, `back` / `seek` / `every` / `window`, the `←` key. T3: the effects playing at a landing are drawn
+again (explosions, missiles in flight, module beams and overlays, warp flashes), timeline time (`time.timeline`,
+`seek { timeline }`), a jump across a timeline warp-in cue, and the real-GPU check. No smooth reverse playback (user,
+2026-10-22).
 
 ## Files
 
 | File | Holds |
 |---|---|
-| `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek`, `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
-| `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
+| `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek` (scene seconds, or `TimeSeek` `{ timeline }`), `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
+| `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`, `timeline` included) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
 | `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`; `Advance` = `Set(Next())` for the specs |
 | `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift), `TimeSimPort` / `TapeEntry` / `JumpLanding`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
-| `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`) |
+| `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`), `BoundaryTime(boundary)` (any boundary on the grid: the timeline's t = 0) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
-| `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `SimulationChange` (the cut rule in `Apply`) |
+| `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
+| T3 planners (node-tested) | `explosion-plan.ts` `ExplosionReplays`; `module-fx.ts` `RunningModuleFxCommands` over `ShipModules.RunningEffects`; `warp-fx.ts` `WarpFlashReplays`, `WARP_IN_FLASH_SECONDS` / `WARP_OUT_FLASH_SECONDS`; `missile-flights.ts` `InFlightAt`; `missile-effects.ts` `Launch(…, { midFlight })`; `arrivals.ts` `AwaitsBuild` |
 | `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`) |
 | `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context, `sd-runtime`), `CinemaRig.Rebase(delta)` (`sd-cinema`), `PageAudio.ReleaseAll()` |
 | `apps/viewer/src/lib/state-capture.ts` | `CaptureFields` / `RestoreFields` / `CloneState` / `EstimateBytes`: the generic per-tick state capture every owner's `Snapshot()` / `Restore()` is a one-liner over. Node-tested |
@@ -76,7 +78,11 @@ those effects down and they reappear only as new ones start. No smooth reverse p
   while): applied in the order `every` / `window` (trimming the ring), the jump (`back` seconds from now, or `seek` to a
   scene time), `rate`, `pause`, so `{ back: 10, rate: 0.25 }` re-watches in slow motion and `{ seek: 42, pause: true }`
   lands paused. `{}` reports. Returns the `time` report plus `warnings` (a clamped jump, "already there").
-- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping, effectiveRate?, held?, audio?:
+- **Timeline time** (T3): `time.timeline` is `seconds` less the scene time of the timeline's t = 0
+  (`TimeSimPort.TimelineOrigin` = `world.BoundaryTime(timeline.startTick)`), once a scripted timeline started;
+  `seek: { timeline: s }` jumps to that origin + s (refused without a started timeline). A landing on t = s exactly has
+  fired the cues due at s.
+- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping, timeline?, effectiveRate?, held?, audio?:
   muted | suspended, back, earliest?, latest?, window: { seconds, every, window, snapshots, bytes, budget, capture? },
   recording: { on, since?, why?, cutAt?, waiting? }, replay?: { pending, next?: { tool, seconds } }, drift?: { count,
   tick?, summary? }, jump?: { from, to, snapshot, resimulated, ms, warnings? } }` (`seconds` and `tick` equal
@@ -104,7 +110,9 @@ those effects down and they reappear only as new ones start. No smooth reverse p
     tool, `order_fleet` document orders, `auto_repair`. Patch cues (`ApplyNow`) do not cut (`sd-timeline`).
   - `Director.SimInput(why)` while recording: the `/ship-stats`, fit, hull-dogma and prop mod lookups landing, the
     location answer, an object build without a document radius, and a ship build when the hub has no SDE radius for it
-    or it arrives by warp (`BuildIsSimInput`).
+    or its arrival waits for its builds (`BuildIsSimInput`: `Arrivals.AwaitsBuild`, a group not planned yet that was
+    added with `waitForBuild`). A timeline cue's warp-in plans on flight numbers alone (prefetched in prepare), so its
+    builds landing never cut: a jump crosses a scripted warp-in (below).
   - A settle check failing at a snapshot tick (`the scene stopped being settled (waiting for …)`).
 
 ## The tape (T2b)
@@ -163,6 +171,42 @@ The window is untouched by a jump: the snapshots after the target are the record
   (presentation only: `BuildShipValues` → `HydrateShip` → curves → `AddShip` → `SyncTurrets` → aim → impacts; no
   retune, no re-plan, no cut; dropped if another jump lands first); every turret re-aims at `targets.Of`; impacts sync
   for every ship and object; `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)`; `Mute(rate > 2)`; `onChange`.
+
+## Effects across a jump (T3)
+
+The re-simulation draws nothing, so `EndJump` draws again what plays at the target, from the state the silent frames
+left (`ReplayExplosions` before the hulls re-attach, `ReplayEffects` after the turrets re-aim):
+
+- **Shots**: nothing to do. The queue's entries due after the target draw as usual; those due before were consumed
+  silently (a gap of at most a burst).
+- **Explosions** (`ExplosionReplays(deaths, target)`, in clock ticks; the hide time is the schedule's, or computed from
+  the file's facts for a death begun with a renderer, which has none): started before the target and not hidden →
+  **replay from its start at the target** (`begun` / `schedule` / `posted` reset, `start = target`: drawn, or the
+  headless schedule posts its sounds again); past its wreck switch but never hidden (a drawn death restored mid-play)
+  → `Hide` now; starting after the target and begun → reset to begin at its own start; pending (no start) or hidden →
+  the normal path. The ball's removal tick is the simulation's and does not move.
+- **Missiles** (`MissileFlights.InFlightAt(target)`: the launch moment taken, the hit or vanish still to draw, or no
+  end yet): `ShipMissiles.Launch(flight, graphic, target, { midFlight: true })`: the warheads start on the ball (no
+  launcher offset, no inherited ship velocity, no burst, no sound), timed on the ball's distance to the target's
+  surface. A launch still queued draws normally with its burst.
+- **Module effects**: `moduleEffects.Apply(RunningModuleFxCommands(modules.RunningEffects(tick)), target)`: a `start`
+  for every running module with an overlay, or a beam with a target; no sound posts. A trigger (the web's one-shot)
+  waits for its next cycle.
+- **Warp flashes**: `PlayWarpFlashes` logs the commands a silent frame swallows (`{ command, at }`, only with a
+  renderer); at the landing `WarpFlashReplays` plays those within their own length before the target
+  (`WARP_IN_FLASH_SECONDS` 4.125, `WARP_OUT_FLASH_SECONDS` 1). A ship still streaking in flashes as usual. A failed jump
+  drops the log.
+- **Silent frames run at boundaries only**: a shot due inside a tick draws at the next boundary there, so a kill's
+  explosion starts up to a tick later in the re-simulation than it did live (presentation only: the hide time and
+  sounds, never the kill).
+
+## A jump across a timeline warp-in (T3)
+
+`RestoreSim` puts back the live scene and retires the entries of ships a later cue added; the re-fired cue's `ApplyNow`
+adds them again (balls, arrival, retune from cached lookups) and `FinishApply` rebuilds their hulls after the landing
+(drawn once built; they wait off-grid anyway). The cue's group plans on flight numbers (`waitForBuild: false`), so the
+landing ticks repeat, and the builds landing are no simulation input (`BuildIsSimInput`). A cue-added ship without an
+SDE radius still cuts when its build lands (its formation radius comes from the build).
 
 ## Drift (T2b)
 
@@ -288,10 +332,9 @@ stay unneeded.
 - Not yet checked on the real GPU (T3 does: fps and `gpuErrors` at 4× and 0.25×, turret firing effects on Blue's
   real-time clock in slow motion and pause, the look of a landing).
 
-## Limits (T2b)
+## Limits
 
-- Effects in flight at the target do not re-trigger yet (T3): a running module's beam, a drawn missile, a playing
-  explosion and a warp flash disappear at a jump; new ones start normally.
-- A timeline cue that adds a ship arriving by warp (or without an SDE radius) cuts the window when its build lands, so a
-  jump cannot cross it (`sd-timeline`).
+- A replayed explosion starts over at the target (it does not resume mid-blast), and in a re-simulation a kill's
+  explosion starts on the boundary after its killing shot was due (above).
+- A timeline cue that adds a ship without an SDE radius cuts the window when its build lands (`sd-timeline`).
 - Fleet toggles (`auto_repair`, anchors, personalities) are document edits and cut; journaling them is a follow-up.

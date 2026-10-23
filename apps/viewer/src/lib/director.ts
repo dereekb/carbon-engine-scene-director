@@ -208,7 +208,7 @@ import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type Pick
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinySnapshot, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
 import { DamageModel, type DamageReport } from './damage';
-import { ExplosionFiles, ExplosionRemoveTick, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
+import { ExplosionFiles, ExplosionRemoveTick, ExplosionReplays, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
 import { ShipExplosions, type ShipExplosionReport } from './explosions';
 import {
   DogmaStateOf,
@@ -244,7 +244,7 @@ import { ObjectForward, SceneObjects } from './scene-objects';
 import { LocationDressing } from './location-dressing';
 import { ModuleAudioPost } from './module-audio';
 import { ModuleEffects, type ModuleEffectsReport } from './module-effects';
-import { ModuleFxCommands } from './module-fx';
+import { ModuleFxCommands, RunningModuleFxCommands } from './module-fx';
 import { ShipModules, type CapacitorLanding, type ShipModuleEvent, type TargetingModule } from './modules';
 import { ShipMissiles, type ShipMissilesReport } from './missile-effects';
 import { MissileFlightId, MissileFlights, type MissileFlight, type MissileFlightsReport } from './missile-flights';
@@ -267,7 +267,7 @@ import { CloneState, EstimateBytes, FirstDifference, type CloneMemo } from './st
 import { ParkSnapshotBytes } from './destiny-snapshot';
 import { ShipTurrets, type TurretsReport } from './turrets';
 import { WarpEffects, type WarpEffectsReport } from './warp-effects';
-import { WarpFx, type WarpFlashCounts, type WarpFxCommand } from './warp-fx';
+import { WarpFlashReplays, WarpFx, type SwallowedWarpFlash, type WarpFlashCounts, type WarpFxCommand } from './warp-fx';
 import { WeaponLookup } from './weapon-lookup';
 
 /**
@@ -1031,6 +1031,10 @@ export class Director {
    * Counts jump landings: a hull rebuild started by an earlier one is dropped.
    */
   private landings = 0;
+  /**
+   * The warp flashes a re-simulation made and did not draw, for the landing to play again (WarpFlashReplays).
+   */
+  private swallowedFlashes: SwallowedWarpFlash[] = [];
 
   private get moduleEffects(): Maybe<ModuleEffects> {
     return this.silent ? null : this.moduleEffectsDrawn;
@@ -2088,7 +2092,9 @@ export class Director {
    * @param now - The scene clock, in integer 100 ns ticks.
    */
   private PlayWarpFlashes(commands: readonly WarpFxCommand[], now = this.clock.now): void {
-    if (commands.length) this.warpEffects?.Play(commands, now);
+    if (!commands.length) return;
+    if (this.silent && this.warpEffectsDrawn) this.swallowedFlashes.push(...commands.map((command) => ({ command, at: now })));
+    this.warpEffects?.Play(commands, now);
   }
 
   /**
@@ -2356,7 +2362,11 @@ export class Director {
       BeginJump: () => this.BeginJump(),
       SilentFrame: (now) => this.SilentFrame(now),
       WarmCurves: (now) => this.world.SampleCurves(now),
-      EndJump: (landing) => this.EndJump(landing)
+      EndJump: (landing) => this.EndJump(landing),
+      TimelineOrigin: () => {
+        const start = this.timeline.startTick;
+        return start == null ? null : this.world.BoundaryTime(start);
+      }
     });
   }
 
@@ -2388,11 +2398,12 @@ export class Director {
 
   /**
    * Whether a ship's build landing changes the simulation: its formation radius comes from the build when the hub has
-   * no SDE radius for it, and an arrival plans once its ship is built.
+   * no SDE radius for it, and an arrival that waits for its builds plans once its ship is built. A timeline cue's
+   * warp-in plans on flight numbers alone, so a jump can cross a scripted warp-in (sd-time).
    */
   private BuildIsSimInput(doc: SceneShip): boolean {
     const published = this.hullStats.Cached(doc)?.hull?.published.radius ?? 0;
-    return !(published > 0) || this.world.Arriving(doc.id);
+    return !(published > 0) || this.arrivals.AwaitsBuild(doc.id);
   }
 
   /**
@@ -2562,6 +2573,7 @@ export class Director {
     this.turretsDrawn?.ResetBursts();
     this.audio.ReleaseAll();
     this.audio.Mute(true);
+    this.swallowedFlashes = [];
     this.silent = true;
   }
 
@@ -2584,9 +2596,11 @@ export class Director {
    * after the target, or hidden since the snapshot) gets a presentation-only rebuild; turrets re-aim, impacts sync,
    * the renderer's update time and the camera shot are rebased, and the sounds unmute at the rate's setting.
    */
-  private EndJump({ to, delta }: JumpLanding): void {
+  private EndJump({ to, delta, failed }: JumpLanding): void {
     this.silent = false;
     this.landings += 1;
+    if (failed) this.swallowedFlashes = [];
+    this.ReplayExplosions(to);
     for (const doc of this.scene?.ships ?? []) {
       const entry = this.live.get(doc.id);
       if (!entry) continue;
@@ -2601,10 +2615,55 @@ export class Director {
     }
     for (const id of this.live.keys()) this.turrets?.Aim(id, this.targets.Of(id) ?? null);
     for (const id of [...this.live.keys(), ...(this.scene?.objects ?? []).map((doc) => doc.id)]) this.SyncImpactState(id);
+    this.ReplayEffects(to);
     this.engine?.ResetSceneTime(to);
     this.cinema.Rebase(delta);
     this.audio.Mute(this.time?.muted ?? false);
     this.onChange();
+  }
+
+  /**
+   * A landing's explosions (sd-time, ExplosionReplays): one that started before the target and whose hull is still
+   * visible replays from its start at the target (DriveExplosions draws it, or posts its headless schedule again); one
+   * whose wreck switch passed while nothing drew hides now; one starting after the target begins at its own start.
+   *
+   * @param target - The landing, scene clock.
+   */
+  private ReplayExplosions(target: number): void {
+    const tickSeconds = this.world.master.tickInterval / 1000;
+    const plan = ExplosionReplays(
+      [...this.deaths].map(([id, death]) => {
+        const facts = this.explosionFiles.Cached(death.choice.resPath)?.facts ?? null;
+        const schedule = death.schedule ?? (death.start != null && facts ? ExplosionSchedule({ start: death.start / TICKS_PER_SECOND, facts, deathTick: death.kill.tick, lingerSeconds: death.choice.lingerSeconds, tickSeconds }) : null);
+        return [id, { start: death.start, hide: schedule ? Math.round(schedule.hide * TICKS_PER_SECOND) : null, begun: death.begun, hidden: death.hidden, gone: death.gone }] as const;
+      }),
+      target
+    );
+    for (const id of [...plan.replay, ...plan.restart]) {
+      const death = this.deaths.get(id);
+      if (!death) continue;
+      death.begun = false;
+      death.schedule = null;
+      death.posted = 0;
+      if (plan.replay.includes(id)) death.start = target;
+    }
+    for (const id of plan.hide) this.Hide(id);
+  }
+
+  /**
+   * A landing's drawn effects (sd-time): the re-simulation drew none, so the missiles still flying are drawn again on
+   * their balls (no launcher burst, no sound), every running module's beam or overlay starts silently, and the warp
+   * flashes it made within their own length before the target play.
+   *
+   * @param target - The landing, scene clock.
+   */
+  private ReplayEffects(target: number): void {
+    const drawing = this.missileDrawing;
+    if (drawing) for (const flight of this.missiles.InFlightAt(target)) drawing.Launch(flight, this.MissileGraphicOf(flight), target, { midFlight: true });
+    this.moduleEffects?.Apply(RunningModuleFxCommands(this.modules.RunningEffects(this.world.tick)), target);
+    const flashes = WarpFlashReplays(this.swallowedFlashes, target, TICKS_PER_SECOND);
+    this.swallowedFlashes = [];
+    this.PlayWarpFlashes(flashes, target);
   }
 
   /**

@@ -2251,6 +2251,17 @@ export class DestinyWorld {
     return this.master.currentTime === 0 ? null : this.BoundaryTimeAfter();
   }
 
+  /**
+   * The scene-clock time of a tick boundary: OnBeforeBoundary listeners see `boundary` (the master tick before the
+   * evolve) with this time. Boundaries sit on one grid, so past and future ones are a whole number of intervals away.
+   *
+   * @param boundary - The master tick before the boundary's evolve.
+   * @returns 100 ns ticks; null before the first evolve.
+   */
+  BoundaryTime(boundary: number): Maybe<number> {
+    return this.master.currentTime === 0 ? null : this.BoundaryTimeAfter() + (boundary - this.master.currentTime) * this.master.tickInterval * TICKS_PER_MS;
+  }
+
   private BoundaryTimeAfter(): number {
     return Number(this.master.time) + this.master.tickInterval * TICKS_PER_MS;
   }

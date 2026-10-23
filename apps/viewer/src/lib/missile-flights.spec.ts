@@ -102,6 +102,24 @@ describe('MissileFlights', () => {
     expect(flights.Report(110, () => null)).toMatchObject({ launched: 1, hits: 0, lost: 1, expired: 0 });
   });
 
+  it('lists the missiles drawn at a time: launched and taken, not ended or with their end still to draw', () => {
+    const flights = new MissileFlights(1);
+    const S = TICKS_PER_SECOND;
+    const pursuing = flights.Add(Launch(), NOW);
+    const hitting = flights.Add(Launch({ cycle: 2 }), NOW);
+    const hit = flights.Add(Launch({ cycle: 3 }), NOW);
+    const lost = flights.Add(Launch({ cycle: 4 }), NOW);
+    const later = flights.Add(Launch({ cycle: 5 }), NOW + 4 * S);
+    flights.Due(NOW + 1 * S);
+    flights.End(Event('hit', { id: hitting.id }), NOW + 3 * S, 103);
+    flights.End(Event('hit', { id: hit.id }), NOW + 2 * S, 102);
+    flights.End(Event('lost', { id: lost.id, why: 'its target entered warp' }), NOW + 2 * S, 102);
+    flights.Due(NOW + 2 * S);
+    expect(flights.InFlightAt(NOW + 2.5 * S).map((flight) => flight.id)).toEqual([pursuing.id, hitting.id]);
+    // Its launch not taken yet: the next frame draws it with its burst.
+    expect(flights.InFlightAt(NOW + 5 * S).map((flight) => flight.id)).not.toContain(later.id);
+  });
+
   it('vanishes at once for a lost shooter, and counts an expiry', () => {
     const flights = new MissileFlights(1);
     flights.Add(Launch(), NOW);

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ModuleAudioPost } from './module-audio';
-import { ModuleFxCommands } from './module-fx';
+import { ModuleFxCommands, RunningModuleFxCommands } from './module-fx';
 import type { ShipModuleEvent } from './modules';
 
 function Event(kind: ShipModuleEvent['kind'], cycle: number, extra: Partial<ShipModuleEvent> = {}): ShipModuleEvent {
@@ -43,6 +43,22 @@ describe('ModuleFxCommands', () => {
       ['cycle', 'logi|high-0', 'b1']
     ]);
     expect(ModuleAudioPost(commands[1], 'M').events).toEqual(['remote_shipeffect_switch_size_M', 'remote_shipeffect_switch_duration_6000', 'remote_armorrepair']);
+  });
+});
+
+describe('RunningModuleFxCommands (sd-time)', () => {
+  it('starts every running overlay and targeted beam, and nothing for a targetless beam, a trigger or an undrawn module', () => {
+    const commands = RunningModuleFxCommands([
+      { ship: 'logi', module: 'low-0', effectGuid: 'effects.ArmorHardening', cycleTime: 24, tick: 40 },
+      { ship: 'logi', module: 'high-0', effectGuid: 'effects.RemoteArmourRepair', target: 'tfi', cycleTime: 6, tick: 40 },
+      { ship: 'logi', module: 'high-1', effectGuid: 'effects.RemoteArmourRepair', cycleTime: 6, tick: 40 },
+      { ship: 'tackle', module: 'mid-1', effectGuid: 'effects.ModifyTargetSpeed', target: 'tfi', cycleTime: 5, tick: 40 },
+      { ship: 'tackle', module: 'low-2', cycleTime: 10, tick: 40 }
+    ]);
+    expect(commands.map((command) => [command.op, command.key, command.effect.kind, command.target, command.tick])).toEqual([
+      ['start', 'logi|low-0', 'overlay', undefined, 40],
+      ['start', 'logi|high-0', 'beam', 'tfi', 40]
+    ]);
   });
 });
 

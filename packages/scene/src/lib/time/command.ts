@@ -55,9 +55,10 @@ export interface TimeControlCommand {
    */
   readonly back?: number;
   /**
-   * The scene time to jump to (get_state time.seconds), back inside the window or forward past it.
+   * Where to jump to: a scene time (get_state time.seconds), or `{ timeline }` seconds of timeline time (get_state
+   * time.timeline), back inside the window or forward past it.
    */
-  readonly seek?: number;
+  readonly seek?: TimeSeek;
   /**
    * Snapshot spacing, scene seconds (MIN_SNAPSHOT_EVERY_SECONDS to MAX_SNAPSHOT_EVERY_SECONDS).
    */
@@ -67,6 +68,11 @@ export interface TimeControlCommand {
    */
   readonly window?: number;
 }
+
+/**
+ * A seek target: scene seconds, or `{ timeline }` seconds since the scripted timeline's t = 0.
+ */
+export type TimeSeek = number | { readonly timeline: number };
 
 const COMMAND_KEYS = new Set<string>(['pause', 'rate', 'back', 'seek', 'every', 'window']);
 const COMMAND_KEYS_TEXT = 'pause, rate, back, seek, every, window';
@@ -104,8 +110,8 @@ export function normalizeTimeControlCommand(input: unknown, where = 'time_contro
     if (rate !== undefined && !isTimeRate(rate)) problems.push(`${where}.rate must be a number from ${MIN_TIME_RATE} (1/16, slow motion) to ${MAX_TIME_RATE} (fast-forward); 1 is real time`);
     const backOk = back === undefined || (isFiniteNumber(back) && back > 0);
     if (!backOk) problems.push(`${where}.back must be a number of scene seconds above 0`);
-    const seekOk = seek === undefined || (isFiniteNumber(seek) && seek >= 0);
-    if (!seekOk) problems.push(`${where}.seek must be a scene time in seconds (get_state time.seconds), 0 or more`);
+    const seekOk = seek === undefined || isSeek(seek);
+    if (!seekOk) problems.push(`${where}.seek must be a scene time in seconds (get_state time.seconds), 0 or more, or { timeline: <seconds of timeline time, 0 or more> }`);
     if (back !== undefined && seek !== undefined) problems.push(`${where}: give back or seek, not both`);
     const everyOk = every === undefined || isInRange(every, MIN_SNAPSHOT_EVERY_SECONDS, MAX_SNAPSHOT_EVERY_SECONDS);
     if (!everyOk) problems.push(`${where}.every must be the snapshot spacing in scene seconds, from ${MIN_SNAPSHOT_EVERY_SECONDS} to ${MAX_SNAPSHOT_EVERY_SECONDS}`);
@@ -115,13 +121,21 @@ export function normalizeTimeControlCommand(input: unknown, where = 'time_contro
       ...(typeof pause === 'boolean' ? { pause } : {}),
       ...(isTimeRate(rate) ? { rate } : {}),
       ...(back !== undefined && backOk ? { back: back as number } : {}),
-      ...(seek !== undefined && seekOk ? { seek: seek as number } : {}),
+      ...(seek !== undefined && seekOk ? { seek: typeof seek === 'number' ? seek : { timeline: (seek as { readonly timeline: number }).timeline } } : {}),
       ...(every !== undefined && everyOk ? { every: every as number } : {}),
       ...(window !== undefined && windowOk ? { window: window as number } : {})
     };
   }
   if (problems.length || !command) throw new SceneError(problems);
   return command;
+}
+
+function isSeek(value: unknown): value is TimeSeek {
+  if (isFiniteNumber(value)) return value >= 0;
+  if (!isPlainObject(value)) return false;
+  const keys = Object.keys(value);
+  const timeline = (value as Record<string, unknown>)['timeline'];
+  return keys.length === 1 && keys[0] === 'timeline' && isFiniteNumber(timeline) && timeline >= 0;
 }
 
 function isFiniteNumber(value: unknown): value is number {

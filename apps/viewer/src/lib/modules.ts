@@ -33,6 +33,7 @@ import type { Maybe } from '@dereekb/util';
 import { type CapacitorTransferKind, falloffEffectiveness, type DefenseLayerName, type MissileCombatNumbers, type ModuleActivation, type TurretCombatNumbers } from '@scene-director/scene';
 import { IsCycleRunning, ModuleCycle, type ModuleCycleEvent, type ModuleCycleReport, type ModuleCycleRequest, type ModuleCycleState } from './module-cycle';
 import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
+import type { RunningModuleFx } from './module-fx';
 
 /**
  * What the layer needs from the world: distances, warp and the ships there are.
@@ -524,6 +525,24 @@ export class ShipModules {
    */
   Running(id: string): ShipModuleSpec[] {
     return [...(this.ships.get(id)?.values() ?? [])].flatMap((entry) => (entry.cycle.running ? [entry.spec] : []));
+  }
+
+  /**
+   * Every running module, ship by ship in fit order, with what its effect draws on (module-fx.ts
+   * RunningModuleFxCommands, a time-control landing).
+   *
+   * @param boundary - The master tick now.
+   */
+  RunningEffects(boundary: number): RunningModuleFx[] {
+    const running: RunningModuleFx[] = [];
+    for (const [ship, modules] of this.ships) {
+      for (const [module, entry] of modules) {
+        if (!entry.cycle.running) continue;
+        const { effectGuid, cycleTime } = entry.spec.activation;
+        running.push({ ship, module, ...(effectGuid ? { effectGuid } : {}), ...(entry.target ? { target: entry.target } : {}), cycleTime, tick: boundary });
+      }
+    }
+    return running;
   }
 
   /**

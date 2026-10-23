@@ -160,10 +160,13 @@ describe('Arrivals', () => {
     expect(built.arrivals.Report()[0].state).toBe('waiting');
     const cue = MakeWorld([['a', rifter, [0, 0, 0]]], { ready });
     cue.harness.Ticks(6);
+    expect(built.arrivals.AwaitsBuild('a')).toBe(true);
     cue.arrivals.Add(Group(['a']), { waitForBuild: false });
+    expect(cue.arrivals.AwaitsBuild('a')).toBe(false);
     cue.arrivals.Boundary(cue.harness.world.tick);
     expect(cue.arrivals.Report()[0].state).toBe('scheduled');
     expect(asked).toEqual([true, false]);
+    expect(built.arrivals.AwaitsBuild('b')).toBe(false);
   });
 
   it('keys the landing staggers on seedTick, so a group added at another absolute tick lands the same', () => {

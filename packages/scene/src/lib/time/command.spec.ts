@@ -34,8 +34,17 @@ describe('normalizeTimeControlCommand', () => {
     for (const window of [9, 3601]) expect(catchSceneError(() => normalizeTimeControlCommand({ window })).problems).toEqual([expect.stringContaining('time_control.window must be')]);
   });
 
+  it('takes a seek in timeline seconds', () => {
+    expect(normalizeTimeControlCommand({ seek: { timeline: 3.5 }, rate: 0.5 })).toEqual({ seek: { timeline: 3.5 }, rate: 0.5 });
+    expect(normalizeTimeControlCommand({ seek: { timeline: 0 } })).toEqual({ seek: { timeline: 0 } });
+    for (const seek of [{ timeline: -1 }, { timeline: '3' }, { timeline: 3, scene: 4 }, {}, [3]]) {
+      expect(catchSceneError(() => normalizeTimeControlCommand({ seek })).problems).toEqual([expect.stringContaining('or { timeline: <seconds of timeline time, 0 or more> }')]);
+    }
+  });
+
   it('refuses back with seek', () => {
     expect(catchSceneError(() => normalizeTimeControlCommand({ back: 5, seek: 4 })).problems).toEqual(['time_control: give back or seek, not both']);
+    expect(catchSceneError(() => normalizeTimeControlCommand({ back: 5, seek: { timeline: 1 } })).problems).toEqual(['time_control: give back or seek, not both']);
   });
 
   it('lists every problem at once: a bad pause, a bad rate, bad jump keys and unknown keys', () => {

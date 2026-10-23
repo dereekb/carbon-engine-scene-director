@@ -28,6 +28,11 @@ export interface TimeReport {
   readonly paused: boolean;
   readonly state: TimeState;
   /**
+   * Seconds of timeline time at now (`seconds` less the scene time of the timeline's t = 0), once a scripted timeline
+   * started: what `seek { timeline }` takes.
+   */
+  readonly timeline?: number;
+  /**
    * The rate the page actually kept over the last second, when it fell behind the asked rate (below 95 %): a frame
    * steps ticks for at most its step budget, and the clock waits at the last tick it stepped.
    */

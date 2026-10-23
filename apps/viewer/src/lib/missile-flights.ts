@@ -330,6 +330,27 @@ export class MissileFlights {
   }
 
   /**
+   * The missiles drawn at `now` once the moments due by then are taken: launched (its launch moment taken) and not
+   * ended (its hit or vanish still to draw, or no end yet). A time-control landing draws them again (sd-time).
+   *
+   * @param now - The scene clock, 100 ns ticks.
+   * @returns The flights, in launch order.
+   */
+  InFlightAt(now: number): MissileFlight[] {
+    const launching = new Set<string>();
+    const ends = new Map<string, number>();
+    for (const due of this.due) {
+      if (due.kind === 'launch') launching.add(due.flight.id);
+      else if (!ends.has(due.flight.id)) ends.set(due.flight.id, due.at);
+    }
+    return [...this.flights.values()].filter((flight) => {
+      if (flight.drawAt > now || launching.has(flight.id)) return false;
+      const end = ends.get(flight.id);
+      return end == null ? flight.state === 'flying' && !flight.end : end > now;
+    });
+  }
+
+  /**
    * A ship's launches since the load and its missiles still flying (pursuing or lost and flying on).
    */
   Counts(ship: string): { readonly launched: number; readonly inFlight: number } {

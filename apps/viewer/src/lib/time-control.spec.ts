@@ -133,6 +133,7 @@ describe('TimeControl', () => {
     control.Frame(1000);
     expect(world.tick).toBe(1);
     expect(world.NextBoundaryTime()).toBe(CLOCK_EPOCH_TICKS + TICKS_PER_SECOND);
+    expect([world.BoundaryTime(1), world.BoundaryTime(0), world.BoundaryTime(4)]).toEqual([CLOCK_EPOCH_TICKS + TICKS_PER_SECOND, CLOCK_EPOCH_TICKS, CLOCK_EPOCH_TICKS + 4 * TICKS_PER_SECOND]);
     control.Pause(true);
     for (let ms = 1016; ms < 6000; ms += 16) control.Frame(ms);
     expect(world.tick).toBe(1);
@@ -209,7 +210,7 @@ function Rig({ every = 2, window = 120, settledFrom = 0 }: { every?: number; win
   const world = new DestinyWorld();
   const control = new TimeControl({ clock, world, realNow: () => 0, windowConfig: { every, window } });
   Stage(world);
-  const calls = { restores: 0, begins: 0, ends: 0, silent: 0, warm: 0, failRestore: false, divergent: false };
+  const calls = { restores: 0, begins: 0, ends: 0, silent: 0, warm: 0, failRestore: false, divergent: false, origin: null as number | null };
   const replayed: TapeEntry[] = [];
   const port: TimeSimPort = {
     Capture: () => {
@@ -237,7 +238,8 @@ function Rig({ every = 2, window = 120, settledFrom = 0 }: { every?: number; win
       calls.warm += 1;
       world.SampleCurves(time);
     },
-    EndJump: () => (calls.ends += 1)
+    EndJump: () => (calls.ends += 1),
+    TimelineOrigin: () => calls.origin
   };
   control.AttachSim(port);
   let ms = 0;
@@ -372,6 +374,21 @@ describe('TimeControl jumps (T2b)', () => {
     rig.RunTo(13);
     expect(rig.replayed).toHaveLength(2);
     expect(rig.control.Report().replay).toBeUndefined();
+  });
+
+  it('reports timeline seconds once the timeline started, and seeks by them', () => {
+    const rig = Rig({ every: 2 });
+    rig.RunTo(12);
+    expect(rig.control.Report().timeline).toBeUndefined();
+    expect(() => rig.control.Command({ seek: { timeline: 1 } })).toThrow(/needs a scripted timeline that has started/u);
+    rig.calls.origin = rig.boundaryOf.get(6) ?? 0;
+    rig.RunTo(16);
+    expect(rig.control.Report().timeline).toBeCloseTo(10, 1);
+    rig.control.Command({ seek: { timeline: 3.5 } });
+    const report = rig.control.Report();
+    expect(report.timeline).toBe(3.5);
+    expect(rig.clock.now).toBe((rig.boundaryOf.get(6) ?? 0) + 3.5 * TICKS_PER_SECOND);
+    expect(rig.world.tick).toBe(9);
   });
 
   it('a new live command abandons the recorded future: the tape ahead and the later snapshots', () => {

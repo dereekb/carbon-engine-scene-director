@@ -64,6 +64,48 @@ export function ModuleFxCommands(events: readonly ShipModuleEvent[]): ModuleFxCo
 }
 
 /**
+ * A module running at a time-control landing (ShipModules.RunningEffects).
+ */
+export interface RunningModuleFx {
+  readonly ship: string;
+  readonly module: string;
+  readonly effectGuid?: string;
+  readonly target?: string;
+  readonly cycleTime: number;
+  /**
+   * The master tick now.
+   */
+  readonly tick: number;
+}
+
+/**
+ * The effects to draw again after a time-control jump (sd-time): the re-simulation drew none, so every running module
+ * with a drawable effect starts it, silently (no sound posts go with them): an overlay on its ship, a beam on its target.
+ * A beam without a target gives nothing, and a trigger (a one-shot at a cycle start) waits for its next cycle.
+ *
+ * @param running - The running modules, in fit order.
+ * @returns `start` commands.
+ */
+export function RunningModuleFxCommands(running: readonly RunningModuleFx[]): ModuleFxCommand[] {
+  const commands: ModuleFxCommand[] = [];
+  for (const module of running) {
+    const effect = moduleEffectOf(module.effectGuid);
+    if (!effect || effect.kind === 'trigger' || (effect.kind === 'beam' && !module.target)) continue;
+    commands.push({
+      op: 'start',
+      key: ModuleFxKey(module.ship, module.module),
+      ship: module.ship,
+      module: module.module,
+      effect,
+      ...(module.target && effect.kind === 'beam' ? { target: module.target } : {}),
+      cycleTime: module.cycleTime,
+      tick: module.tick
+    });
+  }
+  return commands;
+}
+
+/**
  * The key module-effects.ts keeps a module's live effect under.
  */
 export function ModuleFxKey(ship: string, module: string): string {

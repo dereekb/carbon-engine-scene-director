@@ -409,6 +409,17 @@ export class Arrivals {
   }
 
   /**
+   * Whether a ship's build landing can still change its arrival: it is in a group not planned yet that waits for its
+   * builds (Add's `waitForBuild`). A timeline cue's group plans on flight numbers alone.
+   *
+   * @param id - The ship id.
+   */
+  AwaitsBuild(id: string): boolean {
+    for (const group of this.groups.values()) if (group.waitForBuild && !group.planned && group.ships.some((ship) => ship.id === id && !ship.dropped)) return true;
+    return false;
+  }
+
+  /**
    * Forgets every group (a load or an open).
    */
   Clear(): void {

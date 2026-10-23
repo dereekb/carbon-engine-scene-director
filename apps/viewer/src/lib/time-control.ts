@@ -38,6 +38,7 @@ import {
   type TimeRecordingReport,
   type TimeReplayReport,
   type TimeReport,
+  type TimeSeek,
   type TimeWaitingReport,
   type TimeWindowReport
 } from '@scene-director/scene';
@@ -192,6 +193,11 @@ export interface TimeSimPort {
    * After a jump lands (or a failed one put the scene back): re-attaches the presentation and leaves silent mode.
    */
   EndJump(landing: JumpLanding): void;
+  /**
+   * The scene clock of the scripted timeline's t = 0 (100 ns ticks), once it started; null without one (get_state
+   * time.timeline, seek { timeline }).
+   */
+  TimelineOrigin?(): Maybe<number>;
 }
 
 /**
@@ -343,10 +349,22 @@ export class TimeControl {
     const warnings: string[] = [];
     if (command.every !== undefined || command.window !== undefined) this.Configure({ every: command.every, window: command.window });
     if (command.back !== undefined) warnings.push(...(this.Jump(this.clock.now - Math.round(command.back * TICKS_PER_SECOND)).warnings ?? []));
-    else if (command.seek !== undefined) warnings.push(...(this.Jump(SceneTicks(command.seek)).warnings ?? []));
+    else if (command.seek !== undefined) warnings.push(...(this.Jump(this.SeekTicks(command.seek)).warnings ?? []));
     if (command.rate !== undefined) this.SetRate(command.rate);
     if (command.pause !== undefined) this.Pause(command.pause);
     return warnings;
+  }
+
+  /**
+   * A seek's scene clock: scene seconds, or timeline seconds from the timeline's t = 0.
+   *
+   * @throws {Error} For timeline seconds when no scripted timeline has started.
+   */
+  private SeekTicks(seek: TimeSeek): number {
+    if (typeof seek === 'number') return SceneTicks(seek);
+    const origin = this.sim?.TimelineOrigin?.() ?? null;
+    if (origin == null) throw new Error('seek { timeline } needs a scripted timeline that has started (get_state time.timeline); give seek scene seconds instead');
+    return origin + Math.round(seek.timeline * TICKS_PER_SECOND);
   }
 
   /**
@@ -581,12 +599,14 @@ export class TimeControl {
     const first = this.snapshots[0];
     const now = this.clock.now;
     const replay = this.ReplayReport();
+    const origin = this.sim?.TimelineOrigin?.() ?? null;
     return {
       seconds: Math.round(this.clock.seconds * 100) / 100,
       tick: this.world.tick,
       rate,
       paused,
       state: this.jumping ? 'jumping' : paused ? 'paused' : 'playing',
+      ...(origin == null ? {} : { timeline: Round2((now - origin) / TICKS_PER_SECOND) }),
       ...(behind ? { effectiveRate: Math.round(effective * 100) / 100 } : {}),
       ...(this.clock.held ? { held: true as const } : {}),
       ...(audio ? { audio } : {}),

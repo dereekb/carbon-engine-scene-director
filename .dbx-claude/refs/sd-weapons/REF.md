@@ -336,6 +336,9 @@ artifacts `run1-launch`, `run2-impact`, `run4-miss`, `run6-fleet`, `run7-scale` 
   impact 64 (+2 before the pool-order fix); impacts at the 64 cap (`impactsSkipped` 159), `failed` 0, `gpuErrors` 0.
   fps 13-17 with missiles (one 4 fps sample) against ~22 with turrets alone before the first launch (`sd-combat` K3
   baseline 17-23 between kills).
+- **Across a time-control jump** (`sd-time`): the missiles still flying at the landing (`MissileFlights.InFlightAt`) are
+  drawn again with `Launch(…, { midFlight: true })`: the warheads start on their balls, with no launcher burst, offset or
+  sound; their hits play as usual.
 
 ## Sounds (W4)
 
