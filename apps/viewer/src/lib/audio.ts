@@ -52,6 +52,10 @@ export interface PostedAudioEvent {
    * Not sent: none of the event's media can be decoded by the runtime.
    */
   readonly undecodable?: true;
+  /**
+   * Not sent: time control muted the page (fast-forward).
+   */
+  readonly muted?: true;
 }
 
 /**
@@ -185,6 +189,8 @@ export class PageAudio {
   private readonly posted: PostedAudioEvent[] = [];
   private frame = 0;
   private lastRealTime: Maybe<number> = null;
+  private suspended = false;
+  private muted = false;
   /**
    * When a frame failure was last logged (performance.now() ms).
    */
@@ -284,7 +290,7 @@ export class PageAudio {
    * audio on if it is still waiting.
    */
   Gesture(): void {
-    if (this.state !== 'off' && this.context?.state === 'suspended') void this.context.resume().catch(() => undefined);
+    if (this.state !== 'off' && !this.suspended && this.context?.state === 'suspended') void this.context.resume().catch(() => undefined);
     void this.Enable({ auto: false });
   }
 
@@ -309,6 +315,11 @@ export class PageAudio {
    * @param post - The ship, the tick, the events and where the ship is drawn.
    */
   Post(post: PageAudioPost): void {
+    if (this.muted) {
+      for (const event of post.events) this.posted.push({ tick: post.tick, ship: post.ship, event, played: false, muted: true });
+      this.posted.splice(0, Math.max(0, this.posted.length - POSTED_AUDIO_LIMIT));
+      return;
+    }
     // Undecodable events alone need no emitter.
     const sends = post.events.some((event) => this.decodable.get(event) !== false) || Boolean(post.stops?.length);
     const emitter = sends ? this.Emitter(post.ship, post.placement) : null;
@@ -348,6 +359,8 @@ export class PageAudio {
    * @param input - The scene clock, the camera's eye and where each ship is drawn.
    */
   Frame(input: PageAudioFrame): void {
+    // A gesture or Enable may have resumed the context while time control holds it.
+    if (this.suspended && this.state === 'on' && this.context?.state === 'running') void this.context.suspend().catch(() => undefined);
     const man = this.man;
     if (this.state !== 'on' || !man) return;
     try {
@@ -373,6 +386,32 @@ export class PageAudio {
         this.frameErrorLoggedAt = at;
       }
     }
+  }
+
+  /**
+   * Time control's pause: suspends the AudioContext, so every voice holds where it is, and resumes it on play. While
+   * paused a gesture does not resume it, and Frame suspends it again after Enable.
+   *
+   * @param on - True suspends.
+   */
+  Suspend(on: boolean): void {
+    this.suspended = on;
+    const context = this.context;
+    if (!context || this.state !== 'on') return;
+    if (on && context.state === 'running') void context.suspend().catch(() => undefined);
+    else if (!on && context.state === 'suspended') void context.resume().catch(() => undefined);
+  }
+
+  /**
+   * Time control's fast-forward (above AUDIBLE_MAX_RATE): releases every emitter, so every voice stops, and drops the
+   * posts while muted (recorded with muted: true). An emitter comes back on its ship's next post after. The prop mods'
+   * and modules' activation sounds are one-shots, so unmuting re-posts nothing.
+   *
+   * @param on - True mutes.
+   */
+  Mute(on: boolean): void {
+    this.muted = on;
+    if (on) for (const ship of [...this.emitters.keys()]) this.Release(ship);
   }
 
   /**
@@ -418,11 +457,17 @@ export class PageAudio {
       off: 'off (?audio=off)',
       'waiting-for-gesture': 'click the view to turn audio on',
       loading: 'loading the audio library...',
-      on: this.context?.state === 'suspended' ? 'on, but the browser holds it: click the view' : `on · ${this.emitters.size} emitter(s)`,
+      on: this.OnText(),
       failed: `failed: ${this.error ?? 'unknown'}`,
       unavailable: `unavailable: ${this.error ?? 'no Web Audio'}`
     };
     return texts[this.state];
+  }
+
+  private OnText(): string {
+    if (this.suspended) return 'on · paused';
+    if (this.muted) return 'on · muted while fast-forwarding';
+    return this.context?.state === 'suspended' ? 'on, but the browser holds it: click the view' : `on · ${this.emitters.size} emitter(s)`;
   }
 
   private Context(): Maybe<AudioContext> {

@@ -11,7 +11,8 @@
 | File | Role |
 |---|---|
 | `apps/viewer/src/lib/destiny.ts` | `DestinyWorld`: the **only** code that touches the parks. Ships, static object balls, orders, warp, following, prop mod state |
-| `apps/viewer/src/lib/clock.ts` | the scene clock: one integer 100 ns tick count both parks and the renderer sample |
+| `apps/viewer/src/lib/clock.ts` | the scene clock: one integer 100 ns tick count both parks and the renderer sample; its `rate` and `paused` (`sd-time`) |
+| `apps/viewer/src/lib/time-control.ts` | `TimeControl`: the frame's tick stepping, pause and rate (`sd-time`) |
 | `apps/viewer/src/main.ts` | the single rAF loop |
 | `apps/viewer/src/lib/flight.ts` | each ship's flight numbers (Ship stats from the hub's `/ship-stats`) |
 | `apps/viewer/src/lib/warp.ts` | warp factor, landing, Destiny's warp-profile math |
@@ -43,17 +44,26 @@
 
 `main.ts` owns the single rAF loop, in this order:
 
-`director.DriveTimeline()` → `clock.Advance` → `world.Tick(now)` → `director.DriveBoosters(now)` →
-`director.TrackCamera(now)` → `director.DriveAudio(now)` → `engine.Frame(timestamp, now)`
+`director.DriveTimeline()` → `timeControl.Frame(timestamp)` (steps the clock and the parks) →
+`director.DriveBoosters(now)` → `director.TrackCamera(now)` → … → `director.DriveAudio(now)` → the `Drive*` effects →
+`engine.Frame(timestamp, now)`
 
-- `OnTick` and `driver.Execute` get the **same integer `now`**.
-- The clock caps a frame at **1 s**, so the master's 6-tick backlog drop never fires and a hidden tab pauses rather
-  than fast-forwards. Follow the FC relies on this: one evolve per `Tick` call.
+- **The stepping loop** (`TimeControl.Frame`, `time-control.ts`, `sd-time`): `clock.Next(frameMs)` gives the frame's
+  target (the real delta capped at **1 s**, times the rate); then for each boundary up to it (`world.NextBoundaryTime()`,
+  `Number(master.time) + tickInterval`), `clock.Set(boundary)` and `world.Tick(boundary)`, which evolves **exactly
+  once** and leaves the grid there; finally `clock.Set(target)` + `world.Tick(target)` (no evolve). So fast-forward
+  runs every tick and `Tick` still sees one evolve per call (Follow the FC relies on this); the master's 6-tick
+  backlog drop never fires. A 40 ms step budget per frame leaves the clock at the last boundary stepped.
+- `NextBoundaryTime()` is null before the first evolve: the first `Tick` anchors the grid at the clock it is called
+  with (the page's first frame). The parks are never reset, so this happens once per tab.
+- `OnTick` and `driver.Execute` get the **same integer `now`**; a boundary's listeners see `clock.now` = the boundary.
+- The 1 s cap still bounds a real frame: a hidden tab pauses rather than fast-forwards.
 - The loop runs without WebGPU too, so headless checks see ships move.
-- **The clock hold** (`SceneClock.Hold()` / `Release()` / `held`): held, `Advance` records frame times but adds no
+- `clock.Advance(frameMs)` (= `Set(Next(frameMs))`) stays for the specs; the page never calls it.
+- **The clock hold** (`SceneClock.Hold()` / `Release()` / `held`): held, `Next` records frame times but adds no
   ticks, so no boundary runs and nothing moves; the frame after `Release` advances by its own delta only. A scripted
-  load holds it while the scene prepares (`sd-timeline`); get_state reports `simulation.held`. Internal to the
-  timeline's prepare: Time control's scene pause is a separate, later thing.
+  load holds it while the scene prepares (`sd-timeline`); get_state reports `simulation.held`. Time control's pause
+  (`clock.paused`, `sd-time`) is separate and does the same to the clock.
 
 ## When things apply
 

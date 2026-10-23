@@ -17,7 +17,7 @@
 - **Add a member to the `.d.ts` when the page starts using it; never reach for `any`.**
 - A runtime-called method we implement either extends a runtime class or implements an interface declared in the
   `.d.ts` first, so a wrong rename fails to compile (see the naming rules in `sd-workspace`).
-- **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`,
+- **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`, `time-control.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
   `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `destiny.spec-helper.ts` (the shared

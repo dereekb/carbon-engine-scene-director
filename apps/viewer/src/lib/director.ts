@@ -184,6 +184,7 @@ import {
   REPAIR_PRESSURE_SECONDS,
   autoRepairOf,
   normalizeAutoRepairCommand,
+  normalizeTimeControlCommand,
   type SceneAutoRepair,
   toAutoRepairGroup,
   toAutoRepairOperations,
@@ -261,6 +262,7 @@ import { ShipScripts } from './ship-scripts';
 import { TimelinePlayer, type CueFireResult, type TimelineSettled } from './timeline';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
+import type { TimeControl } from './time-control';
 import { ShipTurrets, type TurretsReport } from './turrets';
 import { WarpEffects, type WarpEffectsReport } from './warp-effects';
 import { WarpFx, type WarpFlashCounts, type WarpFxCommand } from './warp-fx';
@@ -919,6 +921,10 @@ export class Director {
    */
   private readonly cameraFollow = new CameraFollow();
   /**
+   * The scene clock's time control (time-control.ts): main.ts builds it with the clock and attaches it (AttachTime).
+   */
+  private time: Maybe<TimeControl> = null;
+  /**
    * The cinematic camera (cinema.ts).
    */
   readonly cinema = new CinemaRig();
@@ -1214,6 +1220,7 @@ export class Director {
       delete_scene: async ({ name }) => ({ deleted: await this.store.Delete(RequireName(name)), name }),
       get_state: () => this.State(),
       timeline: (args) => this.Timeline(args),
+      time_control: (args) => this.TimeControl(args),
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
       frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
       order_ship: (args) => this.Manual('order_ship', args, () => this.OrderShip(args['id'], args['order'])),
@@ -2204,6 +2211,39 @@ export class Director {
   }
 
   /**
+   * Takes the page's time control: its pause suspends the page audio and its fast-forward mutes it.
+   *
+   * @param time - main.ts's TimeControl, which steps the clock and the world every frame.
+   */
+  AttachTime(time: TimeControl): void {
+    this.time = time;
+    time.AttachPort({
+      Presentation: ({ paused, muted }) => {
+        this.audio.Suspend(paused);
+        this.audio.Mute(muted);
+        this.onChange();
+      }
+    });
+  }
+
+  /**
+   * time_control: pause or play, and the scene clock's rate (rate first, so { rate, pause: false } plays at it).
+   * `{}` reports.
+   *
+   * @returns get_state's time, plus warnings.
+   * @throws {SceneError} When the command is invalid.
+   * @throws {Error} Before main.ts attached the time control.
+   */
+  TimeControl(input: Record<string, unknown> = {}): object {
+    const command = normalizeTimeControlCommand(input);
+    const time = this.time;
+    if (!time) throw new Error('time control is not attached yet: the page is still starting');
+    if (command.rate !== undefined) time.SetRate(command.rate);
+    if (command.pause !== undefined) time.Pause(command.pause);
+    return { ...time.Report(), warnings: [] };
+  }
+
+  /**
    * The ship the camera follows.
    */
   get followedShip(): Maybe<string> {
@@ -2415,6 +2455,7 @@ export class Director {
       cinema: this.cinema.Report(this.clock.now),
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, ...(this.clock.held ? { held: true } : {}), warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
+      time: this.time?.Report() ?? null,
       timeline: this.TimelineSummary(),
       ships: ships.map((ship) => {
         const script = this.timeline.Script(ship.id);

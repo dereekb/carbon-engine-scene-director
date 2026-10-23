@@ -2101,8 +2101,9 @@ export class DestinyWorld {
   /**
    * Evolves both parks to `now`. When this call will run a tick, the OnBeforeBoundary listeners run first (the
    * timeline's cues), then the prop mods and the OnBoundary listeners, then pending orders, then formation warps,
-   * then the arrivals due, then every following ship is steered. The clock caps a frame at 1 s and a tick is 1 s, so a call evolves at most one tick: the steering
-   * always precedes the tick it is for, which is why there is one OnTick per call rather than a loop. After an evolved
+   * then the arrivals due, then every following ship is steered. A call evolves at most one tick, which is why there is one OnTick per call
+   * rather than a loop: the steering always precedes the tick it is for. TimeControl calls it once per boundary
+   * (NextBoundaryTime), however fast the scene runs. After an evolved
    * tick the warps are tracked and OnWarp's listeners called.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
@@ -2143,6 +2144,20 @@ export class DestinyWorld {
       this.TrackMissiles();
       this.DeliverPropModEvents();
     }
+  }
+
+  /**
+   * The scene-clock time of the next tick boundary: Tick at exactly this time evolves once and leaves the grid there.
+   * TimeControl (time-control.ts) steps a frame's boundaries one by one with it, so fast-forward runs every tick.
+   *
+   * @returns 100 ns ticks; null before the first evolve, which anchors the grid at the clock it is called with.
+   */
+  NextBoundaryTime(): Maybe<number> {
+    return this.master.currentTime === 0 ? null : this.BoundaryTimeAfter();
+  }
+
+  private BoundaryTimeAfter(): number {
+    return Number(this.master.time) + this.master.tickInterval * TICKS_PER_MS;
   }
 
   /**
@@ -2272,7 +2287,7 @@ export class DestinyWorld {
 
   private DeliverBeforeBoundary(): void {
     const boundary = this.master.currentTime;
-    const time = Number(this.master.time) + this.master.tickInterval * TICKS_PER_MS;
+    const time = this.BoundaryTimeAfter();
     for (const listener of this.beforeBoundaryListeners) {
       try {
         listener(boundary, time);

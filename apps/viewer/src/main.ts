@@ -2,9 +2,11 @@
  * The viewer page: restores the last scene, starts the Destiny simulation and
  * the renderer, and serves the page-side tools over the hub link.
  *
- * One animation loop drives everything: it advances the scene clock, evolves
- * the Destiny parks to it, then draws at it, so the ships' ball curves are
- * sampled on the clock the parks run on. It runs with or without WebGPU.
+ * One animation loop drives everything: time control steps the scene clock
+ * and the Destiny parks to the frame's time one tick at a time (at its rate,
+ * or not at all while paused), then the page draws at it, so the ships' ball
+ * curves are sampled on the clock the parks run on. It runs with or without
+ * WebGPU. Space pauses or plays; [ and ] halve or double the rate.
  *
  * Audio (the prop mods' engine sounds) turns on at startup when the tab may
  * autoplay, else on the first click or keypress; `?audio=off` keeps it off.
@@ -15,7 +17,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { normalizeScene, SCENE_SCHEMA } from '@scene-director/scene';
+import { MAX_TIME_RATE, MIN_TIME_RATE, normalizeScene, SCENE_SCHEMA } from '@scene-director/scene';
 import { InAudioDetachScope, SetAudioDetachScope } from './lib/audio-guard';
 import { DressingText } from './lib/celestials';
 import { SceneClock } from './lib/clock';
@@ -26,6 +28,7 @@ import { HubLink } from './lib/link';
 import { LocationText } from './lib/location';
 import { ObjectsText } from './lib/objects';
 import { TimelineText } from './lib/timeline';
+import { TimeControl, TimeText } from './lib/time-control';
 import { LetterboxRect } from './lib/cinema';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
@@ -50,6 +53,7 @@ interface OverlayState {
   hub: boolean;
   renderer: string;
   director: Maybe<Director>;
+  time: Maybe<TimeControl>;
 }
 
 /**
@@ -58,7 +62,7 @@ interface OverlayState {
  */
 class Overlay {
   private readonly element: HTMLElement;
-  private readonly state: OverlayState = { hub: false, renderer: 'starting', director: null };
+  private readonly state: OverlayState = { hub: false, renderer: 'starting', director: null, time: null };
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -87,6 +91,7 @@ class Overlay {
       ['renderer', this.RendererText(director)],
       ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` + (scene.objects?.length ? ` · ${scene.objects.length} object(s)` : '') : 'none']
     ];
+    if (this.state.time) rows.push(['time', TimeText(this.state.time.Report())]);
     if (director) rows.push(['audio', director.audio.Text()]);
     const located = director?.location.Report();
     if (located) rows.push(['location', LocationText(located)]);
@@ -121,7 +126,7 @@ class Overlay {
       <h1>scene-director</h1>
       <dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${Escape(value)}</dd>`).join('')}</dl>
       ${list}
-      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · L letterbox · H hides this</p>`;
+      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · L letterbox · Space pauses · [ ] slower or faster · H hides this</p>`;
     const shipList = this.element.querySelector('ul');
     if (shipList) shipList.scrollTop = scrolled;
   }
@@ -188,6 +193,30 @@ class Presentation {
 }
 
 /**
+ * The time control keys: Space pauses or plays, [ and ] halve or double the rate. Ignored with Ctrl, Meta or Alt, and
+ * while a button or a text field has focus.
+ *
+ * @param time - The page's time control.
+ * @param onChange - Re-renders the overlay.
+ */
+function TimeKeys(time: TimeControl, onChange: () => void): void {
+  addEventListener('keydown', (event) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
+    const focused = document.activeElement;
+    if (focused instanceof HTMLButtonElement || focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement || focused instanceof HTMLSelectElement) return;
+    if (event.key === ' ') {
+      event.preventDefault();
+      time.Pause(!time.paused);
+    } else if (event.key === '[' || event.key === ']') {
+      time.SetRate(Math.min(MAX_TIME_RATE, Math.max(MIN_TIME_RATE, event.key === '[' ? time.rate / 2 : time.rate * 2)));
+    } else {
+      return;
+    }
+    onChange();
+  });
+}
+
+/**
  * Escapes text for HTML.
  *
  * @param text - Anything.
@@ -231,23 +260,17 @@ async function Start(): Promise<void> {
 
   const clock = new SceneClock();
   const world = new DestinyWorld();
+  const timeControl = new TimeControl({ clock, world });
+  overlay.Set({ time: timeControl });
+  TimeKeys(timeControl, () => overlay.Render());
   let engine: Maybe<Engine> = null;
   let engineError: Maybe<Error> = null;
-  let tickError: Maybe<string> = null;
   let liveDirector: Maybe<Director> = null;
   const frame = (timestamp: number): void => {
     // A preparing timeline releases the clock here, so t = 0 is this frame's boundary at the earliest.
     liveDirector?.DriveTimeline();
-    const now = clock.Advance(timestamp);
-    try {
-      world.Tick(now);
-      tickError = null;
-    } catch (error) {
-      // A failed tick must not end the loop; log each distinct failure once.
-      const message = ErrorText(error);
-      if (tickError !== message) console.error(`destiny tick failed: ${message}\n${(error as Maybe<Error>)?.stack ?? ''}`);
-      tickError = message;
-    }
+    // Every tick boundary up to the frame's time, at the clock's rate; a failing tick is logged once and the loop goes on.
+    const now = timeControl.Frame(timestamp);
     liveDirector?.DriveBoosters(now);
     liveDirector?.TrackCamera(now);
     presentation.Apply(liveDirector?.cinema.Presentation() ?? {});
@@ -276,6 +299,7 @@ async function Start(): Promise<void> {
   const audioDisabled = new URLSearchParams(location.search).get('audio') === 'off';
   const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), audioDisabled });
   liveDirector = director;
+  director.AttachTime(timeControl);
   // The runtime's own object loads and the scene update build effects too (a burning hull's fires): they run with the
   // audio seams detached, like every SOF build, so only the page's emitters register (sd-runtime → Audio).
   SetAudioDetachScope((build) => director.audio.Detached(build));
@@ -297,7 +321,7 @@ async function Start(): Promise<void> {
     console.error(`initial scene failed: ${ErrorText(error)}`);
   }
   // For poking at from the browser console.
-  Object.assign(globalThis, { sceneDirector: { director, engine, link, world, clock } });
+  Object.assign(globalThis, { sceneDirector: { director, engine, link, world, clock, timeControl } });
 }
 
 Start().catch((error: unknown) => console.error(`viewer failed to start: ${ErrorText(error)}\n${(error as Maybe<Error>)?.stack ?? ''}`));

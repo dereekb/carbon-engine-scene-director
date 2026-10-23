@@ -45,6 +45,10 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/with at the same object becomes a timeline cue/u);
       expect(tools.find((tool) => tool.name === 'add_fleet_composition')?.description).toMatch(/get_scene \{ at \}/u);
       expect(tools.find((tool) => tool.name === 'get_state')?.inputSchema.properties).not.toHaveProperty('at');
+      expect(tools.find((tool) => tool.name === 'time_control')?.inputSchema).toMatchObject({ properties: { pause: { type: 'boolean' }, rate: { minimum: 1 / 16, maximum: 32 } } });
+      expect(tools.find((tool) => tool.name === 'time_control')?.description).toMatch(/steps every 1 s Destiny tick/u);
+      expect(tools.find((tool) => tool.name === 'get_state')?.description).toMatch(/time is the scene clock under time_control/u);
+      expect(client.getInstructions()).toMatch(/time_control pauses or plays the scene/u);
       expect(tools.find((tool) => tool.name === 'stage_engagement')?.inputSchema).toMatchObject({ properties: { sides: { items: { properties: { personality: {} } } } } });
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);

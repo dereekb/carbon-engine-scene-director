@@ -1,9 +1,12 @@
 /**
  * The scene clock: one integer 100 ns tick count that both the Destiny parks (destiny.ts) and the renderer sample
- * with. The page's animation loop advances it by the real frame time, then evolves the parks to it, then draws at it.
+ * with. The page's animation loop asks it for the frame's target time (Next: the real frame time at its rate), then
+ * TimeControl (time-control.ts) steps the parks to it one tick boundary at a time, setting the clock at each (Set),
+ * then draws at it.
  */
 
 import type { Maybe } from '@dereekb/util';
+import { DEFAULT_TIME_RATE, isTimeRate, MAX_TIME_RATE, MIN_TIME_RATE } from '@scene-director/scene';
 
 /**
  * Destiny and Blue time units: 100 ns ticks.
@@ -16,8 +19,9 @@ export const TICKS_PER_MS = 10_000;
  */
 export const CLOCK_EPOCH_TICKS = 3 * TICKS_PER_SECOND;
 /**
- * The most one frame may advance the clock. A hidden tab or a debugger pause stalls frames; capping the step pauses
- * the scene instead of fast-forwarding it, and keeps the master park's backlog drop (6+ ticks) from ever firing.
+ * The most one real frame may count for, before the rate. A hidden tab or a debugger pause stalls frames; capping the
+ * step pauses the scene instead of fast-forwarding it. At 1× it also keeps the master park's backlog drop (6+ ticks)
+ * from firing; above that TimeControl steps the ticks one by one.
  */
 export const MAX_FRAME_STEP_MS = 1000;
 
@@ -25,12 +29,40 @@ export class SceneClock {
   private ticks = CLOCK_EPOCH_TICKS;
   private lastFrameMs: Maybe<number> = null;
   private holding = false;
+  private timeRate = DEFAULT_TIME_RATE;
+  private pausing = false;
 
   /**
    * Whether the clock is held (Hold): frames are recorded but add no ticks.
    */
   get held(): boolean {
     return this.holding;
+  }
+
+  /**
+   * Whether the clock is paused (time control): frames are recorded but add no ticks.
+   */
+  get paused(): boolean {
+    return this.pausing;
+  }
+
+  set paused(paused: boolean) {
+    this.pausing = paused;
+  }
+
+  /**
+   * Scene time per real time: 1 is real time, 0.25 slow motion, 4 fast-forward.
+   */
+  get rate(): number {
+    return this.timeRate;
+  }
+
+  /**
+   * @throws {RangeError} When the rate is outside [MIN_TIME_RATE, MAX_TIME_RATE].
+   */
+  set rate(rate: number) {
+    if (!isTimeRate(rate)) throw new RangeError(`the clock rate must be from ${MIN_TIME_RATE} to ${MAX_TIME_RATE}, not ${rate}`);
+    this.timeRate = rate;
   }
 
   /**
@@ -48,18 +80,40 @@ export class SceneClock {
   }
 
   /**
-   * Advances by the time since the previous frame, capped at MAX_FRAME_STEP_MS. The first call only records the
-   * frame time, and so does every call while the clock is held.
+   * The frame's target time: now plus the time since the previous frame, capped at MAX_FRAME_STEP_MS, times the rate.
+   * The first call, and every call while the clock is held or paused, targets now. It records the frame time but does
+   * not move the clock (Set does).
+   *
+   * @param frameMs - The animation frame's timestamp, in milliseconds.
+   * @returns The target, in 100 ns ticks.
+   */
+  Next(frameMs: number): number {
+    let target = this.ticks;
+    if (!this.holding && !this.pausing && typeof this.lastFrameMs === 'number' && Number.isFinite(frameMs)) {
+      const step = Math.min(Math.max(frameMs - this.lastFrameMs, 0), MAX_FRAME_STEP_MS);
+      target += Math.round(step * this.timeRate * TICKS_PER_MS);
+    }
+    if (Number.isFinite(frameMs)) this.lastFrameMs = frameMs;
+    return target;
+  }
+
+  /**
+   * Moves the clock.
+   *
+   * @param ticks - The time, in 100 ns ticks (rounded to whole ticks).
+   */
+  Set(ticks: number): void {
+    this.ticks = Math.round(ticks);
+  }
+
+  /**
+   * Advances to the frame's target (Next, then Set) in one step: the specs' clock.
    *
    * @param frameMs - The animation frame's timestamp, in milliseconds.
    * @returns The new time, in 100 ns ticks.
    */
   Advance(frameMs: number): number {
-    if (!this.holding && typeof this.lastFrameMs === 'number' && Number.isFinite(frameMs)) {
-      const step = Math.min(Math.max(frameMs - this.lastFrameMs, 0), MAX_FRAME_STEP_MS);
-      this.ticks += Math.round(step * TICKS_PER_MS);
-    }
-    if (Number.isFinite(frameMs)) this.lastFrameMs = frameMs;
+    this.Set(this.Next(frameMs));
     return this.ticks;
   }
 

@@ -30,6 +30,7 @@ import {
   type ShipFleetMembership,
   type ShipScriptReport,
   type TimelineSummary,
+  type TimeReport,
   type CueReport,
   type SceneCue
 } from '@scene-director/scene';
@@ -4308,6 +4309,110 @@ try {
     const report = await TimelineTool();
     Expect(FiredAt(report)['escort'] === 8, Show(FiredAt(report)));
     return `rw-fc at 5 s, not 4 s; add_ships near it at 4 s refused, at 8 s cued and fired at +8 (${landed.ships.map((ship) => ship.id).join(', ')})`;
+  });
+
+  // Time control (T1): pause, slow motion and fast-forward. The ships carry all four stats; --only time: runs them alone.
+  // Rate and pause last across loads, so every check puts them back to 1× playing.
+  const TimeOf = (state: ViewerState): Maybe<TimeReport> => (state as unknown as { readonly time?: Maybe<TimeReport> }).time ?? null;
+  const TimeControl = (args: Record<string, unknown>) => call<TimeReport & { readonly warnings: string[] }>('time_control', args);
+  const LoadTime = (scene: object) => call('load_scene', { scene: { name: 'verify-time', ...scene } });
+  const Playing = () => TimeControl({ rate: 1, pause: false });
+  const Flying = (ids: string[]) => WaitFor('the ships fly', 30, (polled) => (ids.every((id) => (ShipIn(polled, id).speed ?? 0) > 50) ? null : Show(ids.map((id) => ShipIn(polled, id).speed))));
+
+  await Check('time: pause holds every ship and play resumes', async () => {
+    try {
+      await LoadTime({ ships: [Scripted('a', [0, 0, 0]), Scripted('b', [3000, 0, 0])] });
+      for (const id of ['a', 'b']) await call('order_ship', { id, order: { type: 'direction', direction: [0, 0, 1] } });
+      await Flying(['a', 'b']);
+      const paused = await TimeControl({ pause: true });
+      Expect(paused.paused && paused.state === 'paused' && paused.audio === 'suspended', Show(paused));
+      const first = await call<ViewerState>('get_state');
+      await Delay(2000);
+      const second = await call<ViewerState>('get_state');
+      Expect(first.simulation.tick === second.simulation.tick && TimeOf(second)?.paused === true, `ticks ${first.simulation.tick} -> ${second.simulation.tick}`);
+      for (const id of ['a', 'b']) Expect(Show(ShipIn(first, id).position) === Show(ShipIn(second, id).position), `${id}: ${Show(ShipIn(first, id).position)} -> ${Show(ShipIn(second, id).position)}`);
+      await TimeControl({ pause: false });
+      const resumed = await WaitFor('the tick advances after play', 10, (polled) => (polled.simulation.tick > second.simulation.tick ? null : `tick ${polled.simulation.tick}`));
+      return `held at tick ${second.simulation.tick} for 2 s; playing again at ${resumed.simulation.tick}`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: fast-forward 4× steps every tick, the orbit and the formation hold', async () => {
+    try {
+      await LoadTime({
+        ships: [Scripted('hub', [0, 0, 0]), Scripted('orbiter', [2062, 0, 0]), Scripted('fc', [0, 0, 20_000]), Scripted('m1', [-1500, 0, 18_500]), Scripted('m2', [1500, 0, 18_500])],
+        fleets: [{ id: 'f', commander: 'fc', wings: [{ id: 'f-w', squads: [{ id: 'f-s', role: 'dps', members: ['m1', 'm2'] }] }] }]
+      });
+      await call('order_ship', { id: 'orbiter', order: { type: 'orbit', target: 'hub', range: 2000 } });
+      await call('order_ship', { id: 'fc', order: { type: 'direction', direction: [1, 0, 0], speed: 0.5 } });
+      await Flying(['orbiter', 'fc']);
+      const fast = await TimeControl({ rate: 4 });
+      Expect(fast.rate === 4 && fast.audio === 'muted', Show(fast));
+      const before = await call<ViewerState>('get_state');
+      const bands: number[] = [];
+      const states = new Set<string>();
+      for (let poll = 0; poll < 10; poll++) {
+        await Delay(500);
+        const polled = await call<ViewerState>('get_state');
+        bands.push(ShipIn(polled, 'orbiter').targetDistance ?? Number.NaN);
+        for (const id of ['m1', 'm2']) states.add(ShipIn(polled, id).following?.state ?? 'none');
+      }
+      const after = await call<ViewerState>('get_state');
+      const advanced = after.simulation.tick - before.simulation.tick;
+      Expect(advanced >= 17 && advanced <= 24, `the tick advanced ${advanced} in 5 s at 4×; ${Show(TimeOf(after))}`);
+      Expect(
+        bands.every((band) => band >= 1200 && band <= 2800),
+        `orbit band ${Show(bands.map(Math.round))}`
+      );
+      Expect(
+        [...states].every((state) => state === 'in-formation' || state === 'catching-up'),
+        `members ${[...states].join(', ')}`
+      );
+      Expect(TimeOf(after)?.rate === 4, Show(TimeOf(after)));
+      const effective = TimeOf(after)?.effectiveRate ? '; effective ' + String(TimeOf(after)?.effectiveRate) + '×' : '';
+      return `+${advanced} ticks in ~5 s; orbit ${Math.round(Math.min(...bands))}-${Math.round(Math.max(...bands))} m; members ${[...states].join(', ')}${effective}`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: slow motion 0.25× runs one tick in 4 s', async () => {
+    try {
+      await LoadTime({ ships: [Scripted('a', [0, 0, 0])] });
+      await call('order_ship', { id: 'a', order: { type: 'direction', direction: [0, 0, 1] } });
+      await Flying(['a']);
+      const slow = await TimeControl({ rate: 0.25 });
+      Expect(slow.rate === 0.25 && slow.audio === undefined, Show(slow));
+      const before = await call<ViewerState>('get_state');
+      await Delay(4000);
+      const after = await call<ViewerState>('get_state');
+      const advanced = after.simulation.tick - before.simulation.tick;
+      Expect(advanced >= 0 && advanced <= 2, `the tick advanced ${advanced} in 4 s at 0.25×`);
+      const seconds = (TimeOf(after)?.seconds ?? 0) - (TimeOf(before)?.seconds ?? 0);
+      Expect(seconds >= 0.7 && seconds <= 1.3, `scene seconds +${seconds} in 4 s`);
+      return `+${advanced} tick(s), +${seconds.toFixed(2)} scene s in 4 s`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: rate and pause survive a load; get_state time is complete', async () => {
+    try {
+      await TimeControl({ rate: 0.5, pause: true });
+      await LoadTime({ ships: [Scripted('a', [0, 0, 0])] });
+      const state = await call<ViewerState>('get_state');
+      const time = TimeOf(state);
+      Expect(time?.rate === 0.5 && time.paused && time.state === 'paused' && time.tick === state.simulation.tick && time.seconds === state.simulation.seconds, Show(time));
+      const refused = await TimeControl({ back: 10 }).then(() => null, ErrorMessage);
+      Expect(refused != null && refused.includes('arrive with the snapshots'), `back: ${refused}`);
+      const bad = await TimeControl({ rate: 64 }).then(() => null, ErrorMessage);
+      Expect(bad != null && bad.includes('time_control.rate'), `rate 64: ${bad}`);
+      return `after the load: ${Show(time)}`;
+    } finally {
+      await Playing();
+    }
   });
 
   if (rendering) {

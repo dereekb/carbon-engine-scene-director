@@ -18,3 +18,4 @@ export * from './lib/arrivals';
 export * from './lib/logi';
 export * from './lib/personalities';
 export * from './lib/timeline';
+export * from './lib/time';

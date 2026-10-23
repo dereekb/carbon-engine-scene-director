@@ -138,7 +138,7 @@ The director is both ports.
   (`sd-destiny`), so a cue is exactly the MCP call made just before that tick: an order applies at this boundary, a prop
   mod switch-on is active since this boundary, a module activation lands in this boundary's cycle, a lock starts at the
   next. Within one tick the ship scripts step first (`ships[]` order), then the due cues fire in document order (sorted
-  by `at`). Fast-forward (Time control) loops `Tick`, so it fires cues for free.
+  by `at`). Fast-forward (`sd-time`) steps `Tick` once per boundary, so it fires every cue on its tick; pause runs no boundary, so the cursor waits.
 - **Timeline time** is whole seconds played (`played` boundaries since t = 0; get_state `time` = played − 1). A cue fires
   at played tick `cueDueSecond(at)`. Pause stops `played`: later cues and step waits shift by the pause while the ships
   fly on.
@@ -265,8 +265,8 @@ should. A prepare that hits the 60 s cap says the run may differ.
 ## Seams for Time control and Movie mode
 
 `TimelinePlayer.Snapshot()` / `Restore()` (cursor, played, cue records, camera, the scripts' plain state) round-trip
-through `structuredClone` (spec'd); `liveEdits` lets a jump back re-derive the live scene. `SceneClock.Hold` is the
-primitive Time control's pause generalizes. Due ticks per cue are where event cues (`when`, reserved) plug in; Movie
+through `structuredClone` (spec'd); `liveEdits` lets a jump back re-derive the live scene. `SceneClock.Hold` and Time
+control's pause (`clock.paused`, `sd-time`) both stop the clock; they are independent. Due ticks per cue are where event cues (`when`, reserved) plug in; Movie
 mode replaces `missed` with re-simulation.
 
 ## verify-page (`--only timeline:`, headless, real tools-core)
