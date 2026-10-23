@@ -265,7 +265,13 @@ should. A prepare that hits the 60 s cap says the run may differ.
 ## Seams for Time control and Movie mode
 
 `TimelinePlayer.Snapshot()` / `Restore()` (cursor, played, cue records, camera, the scripts' plain state) round-trip
-through `structuredClone` (spec'd); `liveEdits` lets a jump back re-derive the live scene. `SceneClock.Hold` and Time
+through `structuredClone` (spec'd). **Joined with time control (T2b, `sd-time`)**: every time-control snapshot holds the
+player, the live scene and `liveEdits`, so a jump puts the cursor back and the cues after the target fire again as play
+resumes. The tape replays before the cues (TimeControl's `OnBeforeBoundary` listener is registered before the
+director's). Lever cues need no journal and patch cues do not cut the window (they go through `ApplyNow`, not `Apply`);
+`RestoreSim` retires the live entries of ships absent from the restored live scene and the re-fired cue re-adds them.
+Limit: a cue-added ship's build landing still cuts the window when the hub has no SDE radius for it or it arrives by
+warp (its build gates the formation radius and the arrival plan), so a jump cannot cross such a warp-in yet. `SceneClock.Hold` and Time
 control's pause (`clock.paused`, `sd-time`) both stop the clock; they are independent. Due ticks per cue are where event cues (`when`, reserved) plug in; Movie
 mode replaces `missed` with re-simulation.
 

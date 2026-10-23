@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { catchSceneError } from '../fleets/fleets.spec-helper';
-import { AUDIBLE_MAX_RATE, isTimeRate, MAX_TIME_RATE, MIN_TIME_RATE, normalizeTimeControlCommand } from './command';
+import { AUDIBLE_MAX_RATE, isTimeRate, MAX_SNAPSHOT_EVERY_SECONDS, MAX_TIME_RATE, MAX_TIME_WINDOW_SECONDS, MIN_SNAPSHOT_EVERY_SECONDS, MIN_TIME_RATE, MIN_TIME_WINDOW_SECONDS, normalizeTimeControlCommand } from './command';
 
 describe('normalizeTimeControlCommand', () => {
   it('takes pause and rate, and {} or nothing as a status read', () => {
@@ -23,15 +23,29 @@ describe('normalizeTimeControlCommand', () => {
     }
   });
 
-  it('lists every problem at once: a bad pause, unknown keys and the jump keys that arrive with the snapshots', () => {
-    const problems = catchSceneError(() => normalizeTimeControlCommand({ pause: 'yes', rate: 99, back: 10, seek: 4, every: 5, window: 60, speed: 2 })).problems;
-    expect(problems).toHaveLength(7);
-    expect(problems.filter((problem) => problem.includes('arrive with the snapshots'))).toHaveLength(4);
-    expect(problems).toContain('time_control.speed is not a time_control field (pause, rate)');
+  it('takes back, seek, every and window within their bounds', () => {
+    expect(normalizeTimeControlCommand({ back: 10, rate: 0.25 })).toEqual({ back: 10, rate: 0.25 });
+    expect(normalizeTimeControlCommand({ seek: 0, pause: true })).toEqual({ seek: 0, pause: true });
+    expect(normalizeTimeControlCommand({ every: MIN_SNAPSHOT_EVERY_SECONDS, window: MAX_TIME_WINDOW_SECONDS })).toEqual({ every: 1, window: 3600 });
+    expect(normalizeTimeControlCommand({ every: MAX_SNAPSHOT_EVERY_SECONDS, window: MIN_TIME_WINDOW_SECONDS })).toEqual({ every: 60, window: 10 });
+    for (const back of [0, -1, Number.NaN, '5']) expect(catchSceneError(() => normalizeTimeControlCommand({ back })).problems).toEqual(['time_control.back must be a number of scene seconds above 0']);
+    expect(catchSceneError(() => normalizeTimeControlCommand({ seek: -1 })).problems).toEqual([expect.stringContaining('time_control.seek must be a scene time')]);
+    for (const every of [0.5, 61]) expect(catchSceneError(() => normalizeTimeControlCommand({ every })).problems).toEqual([expect.stringContaining('time_control.every must be')]);
+    for (const window of [9, 3601]) expect(catchSceneError(() => normalizeTimeControlCommand({ window })).problems).toEqual([expect.stringContaining('time_control.window must be')]);
+  });
+
+  it('refuses back with seek', () => {
+    expect(catchSceneError(() => normalizeTimeControlCommand({ back: 5, seek: 4 })).problems).toEqual(['time_control: give back or seek, not both']);
+  });
+
+  it('lists every problem at once: a bad pause, a bad rate, bad jump keys and unknown keys', () => {
+    const problems = catchSceneError(() => normalizeTimeControlCommand({ pause: 'yes', rate: 99, back: -10, every: 0, window: 5, speed: 2 })).problems;
+    expect(problems).toHaveLength(6);
+    expect(problems).toContain('time_control.speed is not a time_control field (pause, rate, back, seek, every, window)');
     expect(problems).toContain('time_control.pause must be true (pause) or false (play)');
   });
 
   it('refuses a non-object', () => {
-    expect(catchSceneError(() => normalizeTimeControlCommand([1])).problems).toEqual(['time_control must be an object { pause?, rate? }']);
+    expect(catchSceneError(() => normalizeTimeControlCommand([1])).problems).toEqual(['time_control must be an object { pause?, rate?, back?, seek?, every?, window? }']);
   });
 });

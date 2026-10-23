@@ -45,7 +45,10 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/with at the same object becomes a timeline cue/u);
       expect(tools.find((tool) => tool.name === 'add_fleet_composition')?.description).toMatch(/get_scene \{ at \}/u);
       expect(tools.find((tool) => tool.name === 'get_state')?.inputSchema.properties).not.toHaveProperty('at');
-      expect(tools.find((tool) => tool.name === 'time_control')?.inputSchema).toMatchObject({ properties: { pause: { type: 'boolean' }, rate: { minimum: 1 / 16, maximum: 32 } } });
+      expect(tools.find((tool) => tool.name === 'time_control')?.inputSchema).toMatchObject({ properties: { pause: { type: 'boolean' }, rate: { minimum: 1 / 16, maximum: 32 }, back: { exclusiveMinimum: 0 }, seek: { minimum: 0 }, every: { minimum: 1, maximum: 60 }, window: { minimum: 10, maximum: 3600 } } });
+      expect(tools.find((tool) => tool.name === 'time_control')?.description).toMatch(/back jumps that many scene seconds back/u);
+      expect(tools.find((tool) => tool.name === 'get_state')?.description).toMatch(/back \(scene seconds a jump can go back now\)/u);
+      expect(client.getInstructions()).toMatch(/time_control \{ back: 10 \} jumps back 10 scene seconds/u);
       expect(tools.find((tool) => tool.name === 'time_control')?.description).toMatch(/steps every 1 s Destiny tick/u);
       expect(tools.find((tool) => tool.name === 'get_state')?.description).toMatch(/time is the scene clock under time_control/u);
       expect(client.getInstructions()).toMatch(/time_control pauses or plays the scene/u);

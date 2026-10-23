@@ -87,6 +87,12 @@ append after the library's. Every library move is scale-free (an allow-list spec
 | `flyby` | ship | 10 s | `flyby`, cut, look lag 0.15 |
 | `over-the-shoulder` | ship (`target`) | holds | `over-the-shoulder`, blend 1.5 s, look lag 0.4 |
 
+## Across a time-control jump (`sd-time`)
+
+`CinemaRig.Rebase(delta)` shifts every scene-tick stamp (`run.start`, `resumeBlend.start`, `release.start`, `pausedAt`,
+`lastTick`, the report time) by the jump: a playing shot continues at its progress, a paused one stays paused, a release
+blend runs on. The camera is a viewing control, never rewound (spec'd in `cinema.spec.ts`).
+
 ## Hardpoints
 
 Generated every frame from the drawn samples, so they follow a ship that flies, turns or warps. Ship hardpoints scale

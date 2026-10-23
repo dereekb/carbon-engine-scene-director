@@ -562,6 +562,17 @@ export class Engine {
    * @param timestamp - The animation frame's timestamp, in milliseconds.
    * @param now - The scene clock, in integer 100 ns ticks.
    */
+  /**
+   * A time-control jump moved the scene clock (backwards, or far forwards): the update context takes the new time as
+   * its last, so the next frame's GetDeltaT is the small step from it and no runtime object sees a negative dt.
+   *
+   * @param now - The scene clock after the jump, 100 ns ticks.
+   */
+  ResetSceneTime(now: number): void {
+    this.scene.updateContext.SetTime(now);
+    this.frameNow = now;
+  }
+
   Frame(timestamp: number, now: number): void {
     if (this.deviceLost) return;
     this.frameNow = now;

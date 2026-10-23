@@ -381,6 +381,25 @@ export class CinemaRig {
   }
 
   /**
+   * A time-control jump moved the scene clock by `delta`: every scene-tick stamp shifts with it, so a playing shot
+   * continues at its progress, a paused one stays paused where it was, and a release blend runs on. The camera is a
+   * viewing control: a jump never rewinds it.
+   *
+   * @param delta - The jump, 100 ns ticks (negative for a jump back).
+   */
+  Rebase(delta: number): void {
+    if (!delta) return;
+    if (this.run) {
+      this.run.start += delta;
+      if (this.run.resumeBlend) this.run.resumeBlend.start += delta;
+    }
+    if (this.release) this.release = { ...this.release, start: this.release.start + delta };
+    if (this.pausedAt != null) this.pausedAt += delta;
+    if (this.lastTick != null) this.lastTick += delta;
+    this.reportedAt += delta;
+  }
+
+  /**
    * The ship and object ids the shot depends on.
    */
   Subjects(): string[] {

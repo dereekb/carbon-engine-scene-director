@@ -126,7 +126,7 @@ class Overlay {
       <h1>scene-director</h1>
       <dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${Escape(value)}</dd>`).join('')}</dl>
       ${list}
-      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · L letterbox · Space pauses · [ ] slower or faster · H hides this</p>`;
+      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · L letterbox · Space pauses · [ ] slower or faster · ← back 10 s · H hides this</p>`;
     const shipList = this.element.querySelector('ul');
     if (shipList) shipList.scrollTop = scrolled;
   }
@@ -193,12 +193,14 @@ class Presentation {
 }
 
 /**
- * The time control keys: Space pauses or plays, [ and ] halve or double the rate. Ignored with Ctrl, Meta or Alt, and
- * while a button or a text field has focus.
+ * The time control keys: Space pauses or plays, [ and ] halve or double the rate, ← jumps back BACK_KEY_SECONDS (as far
+ * as the window reaches). Ignored with Ctrl, Meta or Alt, and while a button or a text field has focus.
  *
  * @param time - The page's time control.
  * @param onChange - Re-renders the overlay.
  */
+const BACK_KEY_SECONDS = 10;
+
 function TimeKeys(time: TimeControl, onChange: () => void): void {
   addEventListener('keydown', (event) => {
     if (event.ctrlKey || event.metaKey || event.altKey || event.repeat) return;
@@ -209,6 +211,15 @@ function TimeKeys(time: TimeControl, onChange: () => void): void {
       time.Pause(!time.paused);
     } else if (event.key === '[' || event.key === ']') {
       time.SetRate(Math.min(MAX_TIME_RATE, Math.max(MIN_TIME_RATE, event.key === '[' ? time.rate / 2 : time.rate * 2)));
+    } else if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      const back = Math.min(BACK_KEY_SECONDS, time.Report().back);
+      if (back <= 0) return;
+      try {
+        time.Command({ back });
+      } catch (error) {
+        console.warn(`time control: ${error instanceof Error ? error.message : String(error)}`);
+      }
     } else {
       return;
     }

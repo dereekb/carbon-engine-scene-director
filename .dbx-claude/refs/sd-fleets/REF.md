@@ -228,6 +228,13 @@ lands over ~10 s after its first flash and reports `formed` ~33 s after the firs
 until then because the FC, which has no follow, counts as formed only once it coasts below the settled speed (a TFI
 coasts ~30 s after the exit). Members were in formation (43/43) within ~6 s of the last landing.
 
+## Time control
+
+`FleetFollowing` (its `memberships` memo reset), `FleetOrders`, `Arrivals`, `FleetTargets` and `FleetCommanders` (the FC
+brains) are time-control owners (`sd-time`): a jump back restores the formation, the orders, the calls and the brains'
+memory, and the live `order_fleet` orders are journaled and replayed. Fleet edits (`order_fleet`'s document orders,
+anchors, personalities) cut the window.
+
 ## Limits
 
 No collisions (ships pass through while re-forming). Slots are rigid: on an FC turn a far squad (logi at 30 km) swings

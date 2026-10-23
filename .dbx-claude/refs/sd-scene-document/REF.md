@@ -126,6 +126,10 @@ Without a timeline in it, normalizing it never projects, and cue-added ids never
 | `orders` | kept ships whose `orders` changed: their scripts restart (T2, `sd-timeline`); timeline edits need no diff field |
 
 `load_scene` / `open_scene` restart every ship at rest at its document placement; a patch touches only what it changes.
+**Edits cut the time-control window** (`sd-time`): `Director.Apply` cuts on a load and on any diff that changes the
+simulation (`SimulationChange`: ships added, removed, rebuilt, moved, retuned, switched, regrouped, re-teamed or
+re-scripted, objects, fleets, location, environment, combat); a camera-only or name-only edit keeps the window. Patch cues
+(`ApplyNow` directly) do not cut.
 Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP and kills) is **never written to the document**, so a
 save or reload starts from the document's placements.
 

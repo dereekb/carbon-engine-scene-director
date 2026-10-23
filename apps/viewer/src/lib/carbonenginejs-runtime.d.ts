@@ -314,6 +314,14 @@ declare module '@carbonenginejs/runtime/trinity' {
   export interface EveUpdateContext {
     readonly renderContext: Tr2RenderContext;
     GetFrustum(): object;
+    /**
+     * The frame's time, 100 ns ticks (EveSpaceScene.Update sets it from its simTime).
+     */
+    GetTime(): number;
+    /**
+     * Moves the current time into lastTime and stores the new one: GetDeltaT is the difference.
+     */
+    SetTime(time: number): void;
   }
 
   /**

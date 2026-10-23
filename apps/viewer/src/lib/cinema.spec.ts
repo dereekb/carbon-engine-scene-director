@@ -359,6 +359,29 @@ describe('CinemaRig over MCP', () => {
     expect(rig.Report().shot?.progress).toBeCloseTo(0.3);
   });
 
+  it('rebases on a time-control jump: a playing shot keeps its progress, a paused one stays paused where it was', () => {
+    const rig = new CinemaRig();
+    rig.Play(dolly, 0);
+    rig.Frame(0, () => moving(0));
+    rig.Frame(4 * SECOND, () => moving(400));
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(4);
+    // A jump back 10 s lands at -6 s: the shot runs on from 4 s.
+    rig.Rebase(-10 * SECOND);
+    rig.Frame(-6 * SECOND, () => moving(0));
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(4);
+    rig.Frame(-5 * SECOND, () => moving(100));
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(5);
+    expect(rig.Report().shot?.progress).toBeCloseTo(0.5);
+    rig.Pause(-5 * SECOND);
+    rig.Rebase(-3 * SECOND);
+    rig.Frame(-7 * SECOND, () => moving(0));
+    expect(rig.Report().state).toBe('paused');
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(5);
+    rig.Resume(-7 * SECOND);
+    rig.Frame(-6 * SECOND, () => moving(100));
+    expect(rig.Report().shot?.elapsed).toBeCloseTo(6);
+  });
+
   it('hands back on stop and replays from where it stopped, blending in from the drawn pose', () => {
     const rig = new CinemaRig();
     rig.Play(dolly, 0);

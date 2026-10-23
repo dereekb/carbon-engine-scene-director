@@ -73,6 +73,13 @@
   sun disc is the planet whose translation curve **is** `scene.sunBall` (Carbon picks the sun by identity). Details:
   `sd-locations`.
 
+### The update context across a time-control jump
+
+`EveSpaceScene.Update(realTime, simTime)` sets `updateContext.SetTime(simTime)`, and 42 runtime call sites read
+`GetDeltaT()` (current − last). A jump back would hand them a negative dt, so `Engine.ResetSceneTime(now)` calls
+`scene.updateContext.SetTime(now)` at the landing: the next frame's dt is its small step (`sd-time`; `GetTime` /
+`SetTime` are declared in the runtime `.d.ts`).
+
 ## Ships (`ships.ts`)
 
 SOF values from DNA (`hull:faction:race`, e.g. `af1_t1:amarrbase:amarr`), hydration into live `EveShip2` graphs, and

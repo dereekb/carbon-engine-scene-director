@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CaptureFields, CloneState, EstimateBytes, RestoreFields } from './state-capture';
+import { CaptureFields, CloneState, EstimateBytes, FirstDifference, RestoreFields } from './state-capture';
 
 class Cycle {
   state = 'off';
@@ -161,5 +161,18 @@ describe('EstimateBytes', () => {
     expect(EstimateBytes(new Map([['k', 1]]))).toBe(8 + 16 + 16 + 2);
     const shared = { n: 1 };
     expect(EstimateBytes([shared, shared])).toBe(8 + 16 + 16 + 16 + 8);
+  });
+});
+
+describe('FirstDifference', () => {
+  it('finds nothing in equal states, NaN and -0 included, and names the first difference', () => {
+    const state = { a: [1, Number.NaN, 0], m: new Map([['x', { hp: new Float64Array([1, 2]) }]]), s: new Set(['p']), b: 3n };
+    expect(FirstDifference(state, CloneState(state))).toBeNull();
+    expect(FirstDifference({ a: [0] }, { a: [-0] })).toBeNull();
+    expect(FirstDifference(state, { ...state, m: new Map([['x', { hp: new Float64Array([1, 2.5]) }]]) })).toBe('m.x.hp[1]: 2 ≠ 2.5');
+    expect(FirstDifference(state, { ...state, b: 4n })).toBe('b: 3n ≠ 4n');
+    expect(FirstDifference({ a: [1] }, { a: [1, 2] })).toBe('a: 1 ≠ 2 entries');
+    expect(FirstDifference(new Map([['x', 1]]), new Map([['y', 1]]))).toBe('the state: key x ≠ y');
+    expect(FirstDifference({ a: 1 }, { a: 1, extra: true })).toBe('extra: undefined ≠ true');
   });
 });

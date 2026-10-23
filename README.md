@@ -64,12 +64,14 @@ What works today:
   and fleet orders, called targets, prop mods, modules, engagements, camera shots,
   warp-in adds) and ships fly their own order lists, played on Destiny ticks once
   the scene is ready, reported in `get_state`, and replayed the same on a restart.
-- **Time control**: pause, slow motion and fast-forward on the scene clock, with
-  every Destiny tick stepped (orders, steering, modules and combat included), so a
-  fight plays the same at any rate (`time_control`, `get_state.time`, Space and
-  `[` `]` on the page).
+- **Time control**: pause, slow motion and fast-forward on the scene clock (every
+  Destiny tick stepped, orders, steering, modules and combat included), and jumping
+  back N seconds or to any time in the recorded window: the page snapshots both
+  Destiny parks and its own per-tick state every few seconds, re-simulates from the
+  nearest snapshot and replays the live commands given since, so the same fight
+  plays again (`time_control`, `get_state.time`, Space, `[` `]` and `←` on the page).
 
-Jumping back in time, movie mode and movie export come in later phases.
+Movie mode and movie export come in later phases.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -179,7 +181,7 @@ connected tab.
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 | `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |
-| `time_control` | page | pause or play, slow motion or fast-forward the scene clock (every tick stepped); jump back and seek come later |
+| `time_control` | page | pause or play, slow motion or fast-forward the scene, and jump back or seek within the recorded window |
 | `timeline` | page | the scene's script: status (every cue and ship script), play, pause, restart; the lever tools and `add_ships`, `add_fleet_composition`, `stage_engagement`, `add_objects` take `at` to add a cue instead of acting now |
 
 Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/tools.ts`).
@@ -229,7 +231,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Logi auto-repair: the `autoRepair` field, repair-target selection, `auto_repair` | [`sd-logi`](.dbx-claude/refs/sd-logi/REF.md) |
 | Fleet personalities: templates, the library, pilot traits, the FC brain | [`sd-personalities`](.dbx-claude/refs/sd-personalities/REF.md) |
 | The timeline and ship orders: cues, steps, validation, the timeline ops | [`sd-timeline`](.dbx-claude/refs/sd-timeline/REF.md) |
-| Time control: rate, pause and fast-forward stepping (snapshots and jumps later) | [`sd-time`](.dbx-claude/refs/sd-time/REF.md) |
+| Time control: rate, pause and fast-forward stepping, snapshots of the parks and per-tick state, the tape, jumps and what cuts the window | [`sd-time`](.dbx-claude/refs/sd-time/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

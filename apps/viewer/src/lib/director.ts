@@ -206,7 +206,7 @@ import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
-import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
+import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinySnapshot, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
 import { DamageModel, type DamageReport } from './damage';
 import { ExplosionFiles, ExplosionRemoveTick, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
 import { ShipExplosions, type ShipExplosionReport } from './explosions';
@@ -259,10 +259,12 @@ import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
 import { ShipScripts } from './ship-scripts';
-import { TimelinePlayer, type CueFireResult, type TimelineSettled } from './timeline';
+import { TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
-import type { TimeControl } from './time-control';
+import type { CapturedSim, JumpLanding, TapeEntry, TimeControl } from './time-control';
+import { CloneState, EstimateBytes, FirstDifference, type CloneMemo } from './state-capture';
+import { ParkSnapshotBytes } from './destiny-snapshot';
 import { ShipTurrets, type TurretsReport } from './turrets';
 import { WarpEffects, type WarpEffectsReport } from './warp-effects';
 import { WarpFx, type WarpFlashCounts, type WarpFxCommand } from './warp-fx';
@@ -647,6 +649,88 @@ interface AppliedScene {
   readonly stopped: number;
   readonly arrivalKeys: ReturnType<Arrivals['Add']>[];
   readonly callWarnings: string[];
+  /**
+   * What of the simulation the diff changed (SimulationChange), or null for a camera-only or name-only edit.
+   */
+  readonly simulation: Maybe<string>;
+}
+
+/**
+ * The live commands the time-control tape journals (sd-time): a jump back replays them at their ticks. A new live
+ * lever joins this list, and its handler does its work synchronously (Director.Replay runs it again).
+ */
+export const JOURNALED_TOOLS = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire'] as const;
+
+/**
+ * The director's own per-tick fields in a time-control snapshot (CaptureSim).
+ */
+interface DirectorSimFields {
+  readonly moduleSpecs: Map<string, string>;
+  readonly flownStates: Map<string, string>;
+  readonly engagements: Map<string, { readonly modules: readonly string[] }>;
+  readonly deaths: Map<string, ShipDeath>;
+  readonly missileHits: WeaponShot[];
+  readonly missileHitShots: Map<string, WeaponShot>;
+  readonly drawnMissileKills: Set<string>;
+  readonly capacitorMoved: Map<string, number>;
+}
+
+/**
+ * The whole simulation between ticks (Director.CaptureSim, sd-time).
+ */
+interface SimState {
+  readonly world: DestinySnapshot;
+  readonly owners: Readonly<Record<string, unknown>>;
+  readonly director: DirectorSimFields;
+  readonly shared: {
+    readonly flights: ReadonlyMap<string, ShipFlight>;
+    readonly fittings: ReadonlyMap<string, ResolvedShipFitting>;
+    readonly unaffectedFlights: ReadonlyMap<string, ShipFlight>;
+    readonly defaultWeapons: ReadonlyMap<string, DefaultWeapons>;
+  };
+  readonly timeline: TimelineSnapshot;
+  readonly scene: Maybe<SceneDocument>;
+  readonly liveEdits: readonly LiveEdit[];
+}
+
+/**
+ * Where a replay differs from the recorded run at a snapshot tick (time-control drift, sd-time): the master park
+ * (its stream and every ball's scalars), then HP, combat (tallies and kills) and the module cycles.
+ *
+ * @returns Null when equal, else the first difference.
+ */
+function SimDrift(recorded: SimState, fresh: SimState): Maybe<string> {
+  return (
+    FirstDifference(recorded.world.master, fresh.world.master, 'master') ?? FirstDifference(recorded.owners['damage'], fresh.owners['damage'], 'damage') ?? FirstDifference(recorded.owners['combat'], fresh.owners['combat'], 'combat') ?? FirstDifference(recorded.owners['modules'], fresh.owners['modules'], 'modules')
+  );
+}
+
+/**
+ * Refills a map in place from another (a restored snapshot's copy).
+ */
+function RefillMap<K, V>(target: Map<K, V>, source: ReadonlyMap<K, V>): void {
+  target.clear();
+  for (const [key, value] of source) target.set(key, value);
+}
+
+/**
+ * What a scene diff changes that a replay would run differently with, for the time-control cut (sd-time): ships added,
+ * removed, rebuilt, moved, retuned, switched, regrouped, re-teamed or re-scripted, objects, fleets, the location, the
+ * environment or combat. A camera-only or name-only edit changes nothing.
+ *
+ * @param diff - diffScenes(before, after).
+ * @param previous - The ships before, by id.
+ * @returns A short list of what changed, or null.
+ */
+function SimulationChange(diff: ReturnType<typeof diffScenes>, previous: ReadonlyMap<string, SceneShip>): Maybe<string> {
+  const changed: string[] = [];
+  const ships = { added: diff.added, removed: diff.removed, rebuilt: diff.rebuilt, moved: diff.moved, retuned: diff.retuned, switched: diff.switched, regrouped: diff.regrouped, scripted: diff.orders };
+  for (const [kind, list] of Object.entries(ships)) if (list.length) changed.push(`${list.length} ship${list.length === 1 ? '' : 's'} ${kind}`);
+  const teams = diff.relabelled.filter((doc) => previous.get(doc.id)?.team !== doc.team).length;
+  if (teams) changed.push(`${teams} ship${teams === 1 ? '' : 's'} re-teamed`);
+  if (Object.values(diff.objects).some((list) => Array.isArray(list) && list.length > 0)) changed.push('objects');
+  for (const kind of ['fleets', 'location', 'environment', 'combat'] as const) if (diff[kind]) changed.push(kind);
+  return changed.length ? changed.join(', ') : null;
 }
 
 /**
@@ -807,11 +891,11 @@ export class Director {
   /**
    * The running modules' drawn effects (module-effects.ts); null without a renderer.
    */
-  private readonly moduleEffects: Maybe<ModuleEffects>;
+  private readonly moduleEffectsDrawn: Maybe<ModuleEffects>;
   /**
    * Every ship's guns on its drawn hull (turrets.ts); null without a renderer.
    */
-  private readonly turrets: Maybe<ShipTurrets>;
+  private readonly turretsDrawn: Maybe<ShipTurrets>;
   /**
    * The turret files and their firing effects as values, with or without a renderer: the sets mount from them and
    * their sound events name the turret sounds (turret-plan.ts).
@@ -830,7 +914,7 @@ export class Director {
   /**
    * The drawn missiles and their impacts (missile-effects.ts); null without a renderer.
    */
-  private readonly missileDrawing: Maybe<ShipMissiles>;
+  private readonly missileDrawingDrawn: Maybe<ShipMissiles>;
   /**
    * Every ship's target (set_target; targets.ts): what its turrets aim and fire at.
    */
@@ -870,7 +954,7 @@ export class Director {
   /**
    * The drawn explosions (explosions.ts); null without a renderer.
    */
-  private readonly explosions: Maybe<ShipExplosions>;
+  private readonly explosionsDrawn: Maybe<ShipExplosions>;
   /**
    * Which warp flashes play when (warp-fx.ts), counted with or without a renderer.
    */
@@ -878,7 +962,7 @@ export class Director {
   /**
    * The drawn warp flashes (warp-effects.ts); null without a renderer.
    */
-  private readonly warpEffects: Maybe<WarpEffects>;
+  private readonly warpEffectsDrawn: Maybe<WarpEffects>;
   /**
    * The live fleet view (toLiveFleetScene), memoized by document, destroyed set and call book version.
    */
@@ -938,6 +1022,36 @@ export class Director {
   private appliedCamera: Maybe<string> = null;
   private queue: Promise<unknown> = Promise.resolve();
 
+  /**
+   * True while a time-control jump re-simulates (sd-time): the drawn owners read null (the director's headless branches
+   * run), onChange is a no-op, and Hide only marks (the hull comes off at the landing).
+   */
+  private silent = false;
+  /**
+   * Counts jump landings: a hull rebuild started by an earlier one is dropped.
+   */
+  private landings = 0;
+
+  private get moduleEffects(): Maybe<ModuleEffects> {
+    return this.silent ? null : this.moduleEffectsDrawn;
+  }
+
+  private get turrets(): Maybe<ShipTurrets> {
+    return this.silent ? null : this.turretsDrawn;
+  }
+
+  private get missileDrawing(): Maybe<ShipMissiles> {
+    return this.silent ? null : this.missileDrawingDrawn;
+  }
+
+  private get explosions(): Maybe<ShipExplosions> {
+    return this.silent ? null : this.explosionsDrawn;
+  }
+
+  private get warpEffects(): Maybe<WarpEffects> {
+    return this.silent ? null : this.warpEffectsDrawn;
+  }
+
   constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), weapons = new WeaponLookup(), missileGraphics = new MissileLookup(), audioDisabled = false }: DirectorOptions) {
     this.hullStats = hullStats;
     this.propMods = propMods;
@@ -949,7 +1063,10 @@ export class Director {
     this.store = store;
     this.world = world;
     this.clock = clock;
-    this.onChange = onChange;
+    // Silent while a jump re-simulates: the overlay and the hub hear about the landing instead.
+    this.onChange = () => {
+      if (!this.silent) onChange();
+    };
     // Fleets fly and take orders as they are live: the destroyed taken out (toLiveFleetScene).
     this.following = new FleetFollowing({ world, scene: () => this.LiveFleets()?.scene ?? null, radiusOf: (id) => this.FormationRadius(id) });
     this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null, reactionOf: (id) => this.ReactionOf(id), seedTick: (tick) => this.SeedTick(tick) });
@@ -978,6 +1095,7 @@ export class Director {
     });
     this.location = new LocationLookup({
       onChange: () => {
+        this.SimInput('the location answer landed');
         this.Redress();
         this.onChange();
       }
@@ -985,7 +1103,7 @@ export class Director {
     // A module already running when audio turns on has played its one-shot activation: nothing to post.
     this.audio = new PageAudio({ disabled: audioDisabled, onChange: () => this.onChange() });
     world.OnPropMod((event) => this.PostPropModAudio(event));
-    this.moduleEffects = engine
+    this.moduleEffectsDrawn = engine
       ? new ModuleEffects({
           engine,
           ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
@@ -993,7 +1111,7 @@ export class Director {
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
-    this.explosions = engine
+    this.explosionsDrawn = engine
       ? new ShipExplosions({
           engine,
           files: this.explosionFiles,
@@ -1014,7 +1132,7 @@ export class Director {
         return world.tick;
       }
     });
-    this.warpEffects = engine
+    this.warpEffectsDrawn = engine
       ? new WarpEffects({
           engine,
           retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.MissileRoots()],
@@ -1022,8 +1140,8 @@ export class Director {
           DrawnPosition: (id, now) => world.Curves(id)?.translation.GetValueAt__Ticks(now, vec3.create()) ?? null
         })
       : null;
-    this.turrets = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
-    this.missileDrawing = engine
+    this.turretsDrawn = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
+    this.missileDrawingDrawn = engine
       ? new ShipMissiles({
           engine,
           files: this.missileFiles,
@@ -1237,7 +1355,12 @@ export class Director {
       stop_shot: (args) => this.StopShot(args),
       resume_shot: () => this.ResumeShot()
     };
-    // A lever given at becomes a timeline cue instead of running now.
+    // Live commands go on the time-control tape: a jump back replays them at their ticks (sd-time).
+    for (const tool of JOURNALED_TOOLS) {
+      const run = handlers[tool];
+      handlers[tool] = (args) => this.Journaled(tool, args, () => run(args));
+    }
+    // A lever given at becomes a timeline cue instead of running now (and is not journaled: the timeline replays it).
     for (const action of TIMELINE_ACTION_NAMES) {
       const run = handlers[action];
       handlers[action] = (args) => (args['at'] != null || args['cue'] != null ? this.AddCue(action, args) : run(args));
@@ -2220,27 +2343,298 @@ export class Director {
     time.AttachPort({
       Presentation: ({ paused, muted }) => {
         this.audio.Suspend(paused);
-        this.audio.Mute(muted);
+        if (!this.silent) this.audio.Mute(muted);
         this.onChange();
       }
+    });
+    time.AttachSim({
+      Capture: () => this.CaptureSim(),
+      Restore: (state) => this.RestoreSim(state as SimState),
+      Settled: () => this.SceneSettled(),
+      Drift: (recorded, fresh) => SimDrift(recorded as SimState, fresh as SimState),
+      Replay: (entry) => this.Replay(entry),
+      BeginJump: () => this.BeginJump(),
+      SilentFrame: (now) => this.SilentFrame(now),
+      WarmCurves: (now) => this.world.SampleCurves(now),
+      EndJump: (landing) => this.EndJump(landing)
     });
   }
 
   /**
-   * time_control: pause or play, and the scene clock's rate (rate first, so { rate, pause: false } plays at it).
-   * `{}` reports.
+   * time_control: the window settings, a jump back or to a scene time, the rate, then pause or play (so
+   * { back: 10, rate: 0.25 } re-watches a moment in slow motion). `{}` reports.
    *
    * @returns get_state's time, plus warnings.
    * @throws {SceneError} When the command is invalid.
-   * @throws {Error} Before main.ts attached the time control.
+   * @throws {Error} Before main.ts attached the time control, or when a jump is refused or failed.
    */
   TimeControl(input: Record<string, unknown> = {}): object {
     const command = normalizeTimeControlCommand(input);
     const time = this.time;
     if (!time) throw new Error('time control is not attached yet: the page is still starting');
-    if (command.rate !== undefined) time.SetRate(command.rate);
-    if (command.pause !== undefined) time.Pause(command.pause);
-    return { ...time.Report(), warnings: [] };
+    const warnings = time.Command(command);
+    return { ...time.Report(), warnings };
+  }
+
+  /**
+   * An async simulation input landed (a lookup, a build, the location): a replay could not reproduce it, so it cuts
+   * the time-control window while one is recorded (sd-time).
+   *
+   * @param why - Named in get_state time.recording.why.
+   */
+  private SimInput(why: string): void {
+    if (this.time?.recordingOn) this.time.Cut(why);
+  }
+
+  /**
+   * Whether a ship's build landing changes the simulation: its formation radius comes from the build when the hub has
+   * no SDE radius for it, and an arrival plans once its ship is built.
+   */
+  private BuildIsSimInput(doc: SceneShip): boolean {
+    const published = this.hullStats.Cached(doc)?.hull?.published.radius ?? 0;
+    return !(published > 0) || this.world.Arriving(doc.id);
+  }
+
+  /**
+   * The per-tick owners the time-control snapshot holds, by name; each Snapshot / Restore over its *_CAPTURE.
+   */
+  private SimOwners(): readonly (readonly [string, { Snapshot(memo?: CloneMemo): unknown; Restore(state: unknown, memo?: CloneMemo): void }])[] {
+    return [
+      ['modules', this.modules],
+      ['damage', this.damage],
+      ['capacitor', this.capacitor],
+      ['locks', this.locks],
+      ['combat', this.combat],
+      ['targets', this.targets],
+      ['fleetTargets', this.fleetTargets],
+      ['commanders', this.commanders],
+      ['autoRepair', this.autoRepair],
+      ['missiles', this.missiles],
+      ['shots', this.shots],
+      ['turretSounds', this.turretSounds],
+      ['warpFx', this.warpFx],
+      ['following', this.following],
+      ['orders', this.orders],
+      ['arrivals', this.arrivals]
+    ];
+  }
+
+  /**
+   * The whole simulation between ticks, for a time-control snapshot (sd-time): the world (both parks and its entries),
+   * every per-tick owner and the director's own per-tick fields in one copy pass (shared references survive), the
+   * timeline player, and the live scene with its live edits (the document is immutable: by reference). New per-tick
+   * state in the director joins here.
+   */
+  private CaptureSim(): CapturedSim {
+    const memo: CloneMemo = new Map();
+    const world = this.world.Snapshot();
+    const owners = Object.fromEntries(this.SimOwners().map(([name, owner]) => [name, owner.Snapshot(memo)]));
+    const director: DirectorSimFields = CloneState(
+      {
+        moduleSpecs: this.moduleSpecs,
+        flownStates: this.flownStates,
+        engagements: this.engagements,
+        deaths: this.deaths,
+        missileHits: this.missileHits,
+        missileHitShots: this.missileHitShots,
+        drawnMissileKills: this.drawnMissileKills,
+        capacitorMoved: this.capacitorMoved
+      },
+      [],
+      memo
+    );
+    // Replaced, never mutated: one level is enough.
+    const shared = { flights: new Map(this.flights), fittings: new Map(this.fittings), unaffectedFlights: new Map(this.unaffectedFlights), defaultWeapons: new Map(this.defaultWeapons) };
+    const timeline = this.timeline.Snapshot();
+    const state: SimState = { world, owners, director, shared, timeline, scene: this.scene, liveEdits: [...this.liveEdits] };
+    const bytes = ParkSnapshotBytes(world.master) + ParkSnapshotBytes(world.replica) + EstimateBytes({ fields: world.fields, ships: world.ships, owners, director, timeline });
+    return { state, bytes };
+  }
+
+  /**
+   * Puts a time-control snapshot back (sd-time). The world restores first (into fresh parks: a failure there changes
+   * nothing), then the owners and the director's fields from one copy pass. Live entries stay (their hulls are what the
+   * simulation reads): each scene ship's is marked settled (ready with a hull, validated without, destroyed when hidden
+   * at the snapshot); a ship absent from the restored live scene (a later cue added it) retires. The memos reset.
+   *
+   * @param state - From CaptureSim.
+   */
+  private RestoreSim(state: SimState): void {
+    this.world.Restore(state.world);
+    const memo: CloneMemo = new Map();
+    for (const [name, owner] of this.SimOwners()) owner.Restore(state.owners[name], memo);
+    const director = CloneState(state.director, [], memo);
+    RefillMap(this.moduleSpecs, director.moduleSpecs);
+    RefillMap(this.flownStates, director.flownStates);
+    RefillMap(this.engagements, director.engagements);
+    RefillMap(this.deaths, director.deaths);
+    RefillMap(this.missileHitShots, director.missileHitShots);
+    RefillMap(this.capacitorMoved, director.capacitorMoved);
+    this.drawnMissileKills.clear();
+    for (const id of director.drawnMissileKills) this.drawnMissileKills.add(id);
+    this.missileHits = director.missileHits;
+    RefillMap(this.flights, state.shared.flights);
+    RefillMap(this.fittings, state.shared.fittings);
+    RefillMap(this.unaffectedFlights, state.shared.unaffectedFlights);
+    RefillMap(this.defaultWeapons, state.shared.defaultWeapons);
+    this.timeline.Restore(state.timeline);
+    this.scene = state.scene;
+    this.liveEdits = [...state.liveEdits];
+    this.liveFleets = null;
+    this.rechargeSynced.clear();
+    const ids = new Set((this.scene?.ships ?? []).map((doc) => doc.id));
+    for (const id of [...this.live.keys()]) if (!ids.has(id)) this.Retire(id);
+    for (const doc of this.scene?.ships ?? []) {
+      let entry = this.live.get(doc.id);
+      if (!entry) {
+        entry = { id: doc.id, dna: doc.dna, status: 'validated', ship: null, error: null, diagnostics: [], hull: null };
+        this.live.set(doc.id, entry);
+      }
+      if (this.deaths.get(doc.id)?.hidden) entry.status = 'destroyed';
+      else if (entry.status !== 'failed') entry.status = this.engine && entry.hull ? 'ready' : 'validated';
+    }
+  }
+
+  /**
+   * A journaled live command run again by the time-control tape (sd-time), synchronously, the way its hub call ran it.
+   *
+   * @param entry - The tape entry.
+   * @throws {Error} When the command fails (counted as drift).
+   */
+  private Replay({ tool, args }: TapeEntry): void {
+    const input = args as Record<string, unknown>;
+    switch (tool as (typeof JOURNALED_TOOLS)[number]) {
+      case 'order_ship':
+        this.Manual('order_ship', input, () => this.OrderShip(input['id'], input['order']));
+        break;
+      case 'order_fleet':
+        this.Manual('order_fleet', input, () => this.FleetOrderNow(input, {}));
+        break;
+      case 'switch_prop_mods':
+        this.Manual('switch_prop_mods', input, () => this.SwitchPropMods(input));
+        break;
+      case 'switch_modules':
+        this.SwitchModules(input);
+        break;
+      case 'set_target':
+        this.SetTarget(input);
+        break;
+      case 'engage':
+        this.Manual('engage', input, () => this.Engage(input));
+        break;
+      case 'cease_fire':
+        this.Manual('cease_fire', input, () => this.CeaseFire(input));
+        break;
+      default:
+        throw new Error(`${tool} is not a journaled tool`);
+    }
+    this.onChange();
+  }
+
+  /**
+   * Runs a journaled hub call and puts it on the time-control tape once it succeeded (sd-time).
+   */
+  private Journaled(tool: string, args: Record<string, unknown>, run: () => unknown): unknown {
+    const time = this.time;
+    if (!time) return run();
+    const mark = time.Mark();
+    const result = run();
+    if (result instanceof Promise) {
+      return result.then((value: unknown) => {
+        time.Record(mark, tool, args);
+        return value;
+      });
+    }
+    time.Record(mark, tool, args);
+    return result;
+  }
+
+  /**
+   * Before a jump restores (sd-time): the transient effects come off (they belong to the time left behind), the turrets
+   * stop aiming, every voice is released, and silent mode starts.
+   */
+  private BeginJump(): void {
+    this.moduleEffectsDrawn?.Clear();
+    this.explosionsDrawn?.Clear();
+    this.missileDrawingDrawn?.Clear();
+    this.warpEffectsDrawn?.Clear();
+    this.turretsDrawn?.ClearAims();
+    this.turretsDrawn?.ResetBursts();
+    this.audio.ReleaseAll();
+    this.audio.Mute(true);
+    this.silent = true;
+  }
+
+  /**
+   * After each re-simulated tick: the presentation queues advance as a headless page's would (shots due are consumed,
+   * deaths get their start and schedule, missile moments are consumed, warp flashes counted).
+   *
+   * @param now - The boundary time.
+   */
+  private SilentFrame(now: number): void {
+    this.DriveTurrets(now);
+    this.DriveMissiles(now);
+    this.DriveExplosions(now);
+    this.DriveWarpEffects(now);
+  }
+
+  /**
+   * A jump landed (or a failed one put the scene back): silent mode ends; a ship hidden at the target loses its drawn
+   * hull, every other drawn hull re-attaches to its new curves, and a ship that needs a hull and has none (destroyed
+   * after the target, or hidden since the snapshot) gets a presentation-only rebuild; turrets re-aim, impacts sync,
+   * the renderer's update time and the camera shot are rebased, and the sounds unmute at the rate's setting.
+   */
+  private EndJump({ to, delta }: JumpLanding): void {
+    this.silent = false;
+    this.landings += 1;
+    for (const doc of this.scene?.ships ?? []) {
+      const entry = this.live.get(doc.id);
+      if (!entry) continue;
+      if (this.deaths.get(doc.id)?.hidden) {
+        this.DropHull(entry);
+        entry.status = 'destroyed';
+        continue;
+      }
+      const curves = this.world.Curves(doc.id);
+      if (entry.ship && curves) AttachShipCurves(entry.ship, curves);
+      else if (!entry.ship && entry.status === 'ready' && curves) void this.RebuildHull(doc, entry, this.landings);
+    }
+    for (const id of this.live.keys()) this.turrets?.Aim(id, this.targets.Of(id) ?? null);
+    for (const id of [...this.live.keys(), ...(this.scene?.objects ?? []).map((doc) => doc.id)]) this.SyncImpactState(id);
+    this.engine?.ResetSceneTime(to);
+    this.cinema.Rebase(delta);
+    this.audio.Mute(this.time?.muted ?? false);
+    this.onChange();
+  }
+
+  /**
+   * Draws a ship again after a jump brought it back (sd-time): presentation only, with no retune, no re-plan and no
+   * cut (its flight and radius were restored). Dropped when another jump landed meanwhile, or the ship died again.
+   *
+   * @param doc - The document ship.
+   * @param entry - Its live entry, marked ready.
+   * @param landing - The landing it belongs to.
+   */
+  private async RebuildHull(doc: SceneShip, entry: LiveShip, landing: number): Promise<void> {
+    const engine = this.engine;
+    if (!engine) return;
+    try {
+      const { values } = await BuildShipValues(doc.dna);
+      if (this.landings !== landing || this.live.get(doc.id) !== entry || entry.ship || this.deaths.get(doc.id)?.hidden) return;
+      const curves = this.world.Curves(doc.id);
+      if (!curves) return;
+      const ship = this.audio.Detached(() => HydrateShip(values));
+      AttachShipCurves(ship, curves);
+      engine.AddShip(ship);
+      entry.ship = ship;
+      entry.status = 'ready';
+      this.SyncTurrets(doc.id);
+      this.turrets?.Aim(doc.id, this.targets.Of(doc.id) ?? null);
+      this.SyncImpactState(doc.id);
+      this.onChange();
+    } catch (error) {
+      console.error(`ship ${doc.id}'s hull did not rebuild after a jump: ${ErrorText(error)}`);
+    }
   }
 
   /**
@@ -2626,6 +3020,9 @@ export class Director {
       return { reloading: true, note: 'The environment changed, so the viewer is reloading with the new scene. Call get_state in a few seconds.', warnings };
     }
     const applied = target ? this.ApplyNow(target, { restart }) : null;
+    // A load or an edit that changes the simulation starts a new time-control window (sd-time).
+    if (applied && restart) this.time?.Cut('a scene was loaded');
+    else if (applied?.simulation) this.time?.Cut(`an edit changed the simulation (${applied.simulation})`);
     if (authored) {
       this.authored = authored.scene;
       const cues = authored.scene.timeline?.cues ?? [];
@@ -2803,7 +3200,7 @@ export class Director {
     // Logi take the new auto-repair settings at once; their switches apply at the next boundary.
     this.SyncAutoRepair();
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
-    return { scene, restart, diff, builds, objectBuilds, retried: retried.length, stopped: stopped.length, arrivalKeys, callWarnings };
+    return { scene, restart, diff, builds, objectBuilds, retried: retried.length, stopped: stopped.length, arrivalKeys, callWarnings, simulation: SimulationChange(diff, previous) };
   }
 
   /**
@@ -2879,7 +3276,8 @@ export class Director {
       entry.error = ErrorText(error);
       console.error(`ship ${doc.id} (${doc.dna}) failed: ${entry.error}`);
     } finally {
-      // The build settles the ship's radius when the hub has no SDE radius for it.
+      // The build settles the ship's radius when the hub has no SDE radius for it, and lets an arrival plan.
+      if (this.BuildIsSimInput(doc)) this.SimInput(`${doc.id}'s build landed`);
       this.following.Reconcile();
       this.onChange();
     }
@@ -2904,6 +3302,7 @@ export class Director {
     void this.hullStats.Lookup(doc).then((answer) => {
       const current = this.scene?.ships.find((ship) => ship.id === id);
       if (!current || HullStatsKey(current) !== key || this.IsDead(id)) return;
+      this.SimInput(`${id}'s /ship-stats lookup landed`);
       this.SetFlight(current, answer);
       // The hull's size may pick a different hull-sized module; its type lets the fit's dogma run.
       this.LookupPropMod(current, answer);
@@ -2928,6 +3327,7 @@ export class Director {
       void this.fitLookup.LookupTypes([hullTypeID]).then(() => {
         const current = this.scene?.ships.find((ship) => ship.id === doc.id);
         if (!current || current.fit || HullStatsKey(current) !== key) return;
+        this.SimInput(`${current.id}'s hull dogma landed`);
         const hull = this.hullStats.Cached(current);
         this.SetFlight(current, hull);
         this.LookupFit(current, hull);
@@ -2941,6 +3341,7 @@ export class Director {
     void this.fitLookup.Prepare({ text, typeIDs: resolved.typeIDs }).then(() => {
       const current = this.scene?.ships.find((ship) => ship.id === doc.id);
       if (!current || this.FitTextOf(current) !== text) return;
+      this.SimInput(`${current.id}'s fit lookup landed`);
       const hull = this.hullStats.Cached(current);
       this.SetFlight(current, hull);
       // A prop mod that resolved meanwhile may need one more type.
@@ -2966,6 +3367,7 @@ export class Director {
       const hull = current ? this.hullStats.Cached(current) : null;
       const now = current ? this.PropModTarget(current, hull) : null;
       if (!current || now == null || PropModKey(now) !== key) return;
+      this.SimInput(`${current.id}'s prop mod lookup landed`);
       this.SetFlight(current, hull);
       // A prop mod replacing the fit's own needs its dogma.
       this.LookupFit(current, hull);
@@ -3907,7 +4309,7 @@ export class Director {
     const entry = this.live.get(id);
     this.live.delete(id);
     // The sets come off the hull first: they are the page's, and RetireShips must not find them on it.
-    this.turrets?.Remove(id);
+    this.turretsDrawn?.Remove(id);
     if (!entry?.ship || !this.engine) return;
     this.engine.RemoveShip(entry.ship);
     RetireShips([entry.ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
@@ -3923,19 +4325,28 @@ export class Director {
     const death = this.deaths.get(id);
     if (!death || death.hidden) return;
     death.hidden = true;
-    this.turrets?.Remove(id);
     this.shots.Forget(id);
     const entry = this.live.get(id);
     if (entry) {
-      const { ship } = entry;
-      entry.ship = null;
       entry.status = 'destroyed';
-      if (ship && this.engine) {
-        this.engine.RemoveShip(ship);
-        RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
-      }
-    }
+      // A jump re-simulating keeps the drawn hull until it lands (EndJump drops it then).
+      if (!this.silent) this.DropHull(entry);
+    } else if (!this.silent) this.turrets?.Remove(id);
     this.onChange();
+  }
+
+  /**
+   * Takes a ship's drawing off (its turrets first: they are the page's, and RetireShips must not find them on it),
+   * keeping its live entry.
+   */
+  private DropHull(entry: LiveShip): void {
+    const { ship } = entry;
+    entry.ship = null;
+    this.turretsDrawn?.Remove(entry.id);
+    if (ship && this.engine) {
+      this.engine.RemoveShip(ship);
+      RetireShips([ship], [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()]);
+    }
   }
 
   /**
@@ -4326,6 +4737,7 @@ export class Director {
   private ObjectBuilt(id: string): void {
     const doc = this.scene?.objects?.find((candidate) => candidate.id === id);
     if (!doc) return;
+    if (doc.radius == null) this.SimInput(`object ${id}'s build landed`);
     if (doc.radius == null && this.world.HasObject(id)) this.world.SetObjectRadius(id, ObjectBallRadius({ sofRadius: this.objects.Entry(id)?.sofRadius }).radius);
     this.SyncImpactState(id);
     if (this.scene) this.engine?.SetDrawReach(this.objects.Reach(this.scene), 'objects');

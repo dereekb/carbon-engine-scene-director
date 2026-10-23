@@ -9,6 +9,8 @@
  * Node-tested (state-capture.spec.ts): it imports no runtime.
  */
 
+import type { Maybe } from '@dereekb/util';
+
 /**
  * What one owner's capture leaves out or treats specially. Every name must be an own field of the owner.
  */
@@ -248,4 +250,54 @@ export function EstimateBytes(value: unknown): number {
     }
   }
   return bytes;
+}
+
+/**
+ * The first place two captured states differ (time control's drift check, sd-time): numbers compare exactly (NaN
+ * equals NaN, 0 equals -0), arrays and typed arrays element by element, Maps and Sets in order, objects by their keys.
+ *
+ * @param a - One captured state (plain data, as CloneState makes it).
+ * @param b - The other.
+ * @param path - The path so far, for the message.
+ * @returns Null when equal, else "path: a ≠ b".
+ */
+export function FirstDifference(a: unknown, b: unknown, path = ''): Maybe<string> {
+  if (a === b || (typeof a === 'number' && typeof b === 'number' && Number.isNaN(a) && Number.isNaN(b))) return null;
+  const here = path || 'the state';
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return `${here}: ${Brief(a)} ≠ ${Brief(b)}`;
+  if (Object.getPrototypeOf(a) !== Object.getPrototypeOf(b)) return `${here}: different kinds`;
+  if (Array.isArray(a) || ArrayBuffer.isView(a)) {
+    const left = a as ArrayLike<unknown>;
+    const right = b as ArrayLike<unknown>;
+    if (left.length !== right.length) return `${here}: ${left.length} ≠ ${right.length} entries`;
+    for (let i = 0; i < left.length; i++) {
+      const difference = FirstDifference(left[i], right[i], `${path}[${i}]`);
+      if (difference) return difference;
+    }
+    return null;
+  }
+  if (a instanceof Map || a instanceof Set) {
+    const left = [...(a as Map<unknown, unknown>).entries()];
+    const right = [...(b as Map<unknown, unknown>).entries()];
+    if (left.length !== right.length) return `${here}: ${left.length} ≠ ${right.length} entries`;
+    for (let i = 0; i < left.length; i++) {
+      const key = String(left[i][0]);
+      if (left[i][0] !== right[i][0]) return `${here}: key ${key} ≠ ${String(right[i][0])}`;
+      const difference = FirstDifference(left[i][1], right[i][1], `${path}.${key}`);
+      if (difference) return difference;
+    }
+    return null;
+  }
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const key of keys) {
+    const difference = FirstDifference((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], path ? `${path}.${key}` : key);
+    if (difference) return difference;
+  }
+  return null;
+}
+
+function Brief(value: unknown): string {
+  if (typeof value === 'bigint') return `${value}n`;
+  if (typeof value === 'object' && value !== null) return Array.isArray(value) ? 'an array' : 'an object';
+  return String(value);
 }

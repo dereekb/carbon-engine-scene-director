@@ -207,6 +207,12 @@ Worked numbers (SDE 3632936, max skills; `selection.spec.ts`): a Guardian's Larg
 Rifter puts ~103 HP/s into a bare Punisher (438 / 625 / 563 HP). Two Guardians on two such Punishers split one each
 (170.7 ≥ 1.25 × 103.3); one Punisher under 400 HP/s gets both.
 
+## Time control
+
+`AutoRepair` is a time-control owner (`Snapshot` / `Restore` over `AUTO_REPAIR_CAPTURE`, `sd-time`): a jump back restores
+its owned modules, incumbents, manual marks and pre-locks, so the same reps land again. `auto_repair` is a document edit:
+it cuts the window (a level-3 follow-up would journal it instead).
+
 ## Seams
 
 - L2 (built): the lock gate for remote repairers (`IsLockGated`), the `retarget` switch option (the module takes the

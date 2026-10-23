@@ -1,7 +1,7 @@
 /**
  * The time_control tool's pure half: the command it takes and its bounds. The page's TimeControl (apps/viewer
- * time-control.ts) runs it on the scene clock: a rate (slow motion, fast-forward) and a pause. Jumping back and seeking
- * inside a recorded window arrive with the snapshots (sd-time).
+ * time-control.ts) runs it on the scene clock: a rate (slow motion, fast-forward), a pause, and jumps back or to any
+ * time inside the recorded window (the page's snapshots, sd-time).
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -22,21 +22,54 @@ export const DEFAULT_TIME_RATE = 1;
  * audible, at normal pitch.
  */
 export const AUDIBLE_MAX_RATE = 2;
+/**
+ * Snapshot spacing, scene seconds: the default, and the bounds `every` takes.
+ */
+export const DEFAULT_SNAPSHOT_EVERY_SECONDS = 5;
+export const MIN_SNAPSHOT_EVERY_SECONDS = 1;
+export const MAX_SNAPSHOT_EVERY_SECONDS = 60;
+/**
+ * How far back the recorded window reaches, scene seconds: the default, and the bounds `window` takes.
+ */
+export const DEFAULT_TIME_WINDOW_SECONDS = 120;
+export const MIN_TIME_WINDOW_SECONDS = 10;
+export const MAX_TIME_WINDOW_SECONDS = 3600;
+/**
+ * The memory the snapshots may hold, MB; the oldest go first past it.
+ */
+export const DEFAULT_TIME_BUDGET_MB = 64;
+/**
+ * The furthest a seek simulates past the recorded end, scene seconds.
+ */
+export const MAX_SEEK_AHEAD_SECONDS = 300;
 
 /**
- * time_control: pause or play, and the scene clock's rate. `{}` reports.
+ * time_control: pause or play, the scene clock's rate, a jump back or to a scene time, and the recording's spacing and
+ * window. Applied in the order window settings, jump, rate, pause. `{}` reports.
  */
 export interface TimeControlCommand {
   readonly pause?: boolean;
   readonly rate?: number;
+  /**
+   * Scene seconds to jump back from now (> 0).
+   */
+  readonly back?: number;
+  /**
+   * The scene time to jump to (get_state time.seconds), back inside the window or forward past it.
+   */
+  readonly seek?: number;
+  /**
+   * Snapshot spacing, scene seconds (MIN_SNAPSHOT_EVERY_SECONDS to MAX_SNAPSHOT_EVERY_SECONDS).
+   */
+  readonly every?: number;
+  /**
+   * How far back the window reaches, scene seconds (MIN_TIME_WINDOW_SECONDS to MAX_TIME_WINDOW_SECONDS).
+   */
+  readonly window?: number;
 }
 
-const COMMAND_KEYS = new Set<string>(['pause', 'rate']);
-
-/**
- * The keys the jump back brings (sd-time), refused until it lands.
- */
-const JUMP_KEYS = new Set<string>(['back', 'seek', 'every', 'window']);
+const COMMAND_KEYS = new Set<string>(['pause', 'rate', 'back', 'seek', 'every', 'window']);
+const COMMAND_KEYS_TEXT = 'pause, rate, back, seek, every, window';
 
 /**
  * Whether a value is a rate the scene clock takes.
@@ -60,18 +93,41 @@ export function normalizeTimeControlCommand(input: unknown, where = 'time_contro
   const problems: string[] = [];
   let command: Maybe<TimeControlCommand> = null;
   if (input != null && !isPlainObject(input)) {
-    problems.push(`${where} must be an object { pause?, rate? }`);
+    problems.push(`${where} must be an object { pause?, rate?, back?, seek?, every?, window? }`);
   } else {
     const object = input ?? {};
     for (const key of Object.keys(object)) {
-      if (JUMP_KEYS.has(key)) problems.push(`${where}.${key}: jumping back and seeking arrive with the snapshots; this page plays, pauses and sets the rate only`);
-      else if (!COMMAND_KEYS.has(key)) problems.push(`${where}.${key} is not a time_control field (pause, rate)`);
+      if (!COMMAND_KEYS.has(key)) problems.push(`${where}.${key} is not a time_control field (${COMMAND_KEYS_TEXT})`);
     }
-    const { pause, rate } = object as Record<string, unknown>;
+    const { pause, rate, back, seek, every, window } = object as Record<string, unknown>;
     if (pause !== undefined && typeof pause !== 'boolean') problems.push(`${where}.pause must be true (pause) or false (play)`);
     if (rate !== undefined && !isTimeRate(rate)) problems.push(`${where}.rate must be a number from ${MIN_TIME_RATE} (1/16, slow motion) to ${MAX_TIME_RATE} (fast-forward); 1 is real time`);
-    command = { ...(typeof pause === 'boolean' ? { pause } : {}), ...(isTimeRate(rate) ? { rate } : {}) };
+    const backOk = back === undefined || (isFiniteNumber(back) && back > 0);
+    if (!backOk) problems.push(`${where}.back must be a number of scene seconds above 0`);
+    const seekOk = seek === undefined || (isFiniteNumber(seek) && seek >= 0);
+    if (!seekOk) problems.push(`${where}.seek must be a scene time in seconds (get_state time.seconds), 0 or more`);
+    if (back !== undefined && seek !== undefined) problems.push(`${where}: give back or seek, not both`);
+    const everyOk = every === undefined || isInRange(every, MIN_SNAPSHOT_EVERY_SECONDS, MAX_SNAPSHOT_EVERY_SECONDS);
+    if (!everyOk) problems.push(`${where}.every must be the snapshot spacing in scene seconds, from ${MIN_SNAPSHOT_EVERY_SECONDS} to ${MAX_SNAPSHOT_EVERY_SECONDS}`);
+    const windowOk = window === undefined || isInRange(window, MIN_TIME_WINDOW_SECONDS, MAX_TIME_WINDOW_SECONDS);
+    if (!windowOk) problems.push(`${where}.window must be the scene seconds kept, from ${MIN_TIME_WINDOW_SECONDS} to ${MAX_TIME_WINDOW_SECONDS}`);
+    command = {
+      ...(typeof pause === 'boolean' ? { pause } : {}),
+      ...(isTimeRate(rate) ? { rate } : {}),
+      ...(back !== undefined && backOk ? { back: back as number } : {}),
+      ...(seek !== undefined && seekOk ? { seek: seek as number } : {}),
+      ...(every !== undefined && everyOk ? { every: every as number } : {}),
+      ...(window !== undefined && windowOk ? { window: window as number } : {})
+    };
   }
   if (problems.length || !command) throw new SceneError(problems);
   return command;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isInRange(value: unknown, min: number, max: number): value is number {
+  return isFiniteNumber(value) && value >= min && value <= max;
 }

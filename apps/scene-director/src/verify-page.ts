@@ -4406,10 +4406,193 @@ try {
       const time = TimeOf(state);
       Expect(time?.rate === 0.5 && time.paused && time.state === 'paused' && time.tick === state.simulation.tick && time.seconds === state.simulation.seconds, Show(time));
       const refused = await TimeControl({ back: 10 }).then(() => null, ErrorMessage);
-      Expect(refused != null && refused.includes('arrive with the snapshots'), `back: ${refused}`);
+      Expect(refused != null && refused.includes('nothing is recorded yet'), `back while paused at the load: ${refused}`);
       const bad = await TimeControl({ rate: 64 }).then(() => null, ErrorMessage);
       Expect(bad != null && bad.includes('time_control.rate'), `rate 64: ${bad}`);
       return `after the load: ${Show(time)}`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  // Time control (T2b): jumps back and forward, the tape and what cuts the window. A moment is read paused: the tick,
+  // every ship's master position, HP layers and death, the kills, the shot and missile counters.
+  const Moment = (state: ViewerState) => ({
+    tick: state.simulation.tick,
+    ships: Object.fromEntries(state.ships.map((ship) => [ship.id, { position: ship.position ?? null, hp: (['shield', 'armor', 'structure'] as const).map((layer) => ship.defense?.[layer].hp ?? null), destroyed: ship.destroyed?.tick ?? null, warp: ship.warp?.phase ?? null, order: ship.order?.type ?? null }])),
+    kills: (state.combat?.kills ?? []).map((kill) => `${kill.ship}<-${kill.by}/${kill.module}@${kill.tick}`),
+    shots: state.combat?.shots ?? 0,
+    hits: state.combat?.hits ?? 0,
+    missiles: state.missiles ? { launched: state.missiles.launched, inFlight: state.missiles.inFlight, hits: state.missiles.hits, flights: state.missiles.flights.map((flight) => `${flight.id}:${flight.state}`) } : null
+  });
+  const MomentDiff = (a: ReturnType<typeof Moment>, b: ReturnType<typeof Moment>): Maybe<string> => {
+    for (const key of ['tick', 'kills', 'shots', 'hits', 'missiles'] as const) if (Show(a[key]) !== Show(b[key])) return `${key}: ${Show(a[key])} then ${Show(b[key])}`;
+    for (const id of new Set([...Object.keys(a.ships), ...Object.keys(b.ships)])) if (Show(a.ships[id]) !== Show(b.ships[id])) return `${id}: ${Show(a.ships[id])} then ${Show(b.ships[id])}`;
+    return null;
+  };
+  const Recorded = () => WaitFor('time control records', 90, (polled) => (TimeOf(polled)?.recording.on ? null : Show(TimeOf(polled)?.recording)));
+  const PausedState = async () => {
+    await TimeControl({ pause: true });
+    return call<ViewerState>('get_state');
+  };
+  const SeekPaused = async (seconds: number) => {
+    const result = await TimeControl({ seek: seconds, pause: true });
+    return { result, state: await call<ViewerState>('get_state') };
+  };
+  const fight: { first?: ReturnType<typeof Moment>; seconds?: number; kill?: { readonly ship: string; readonly by: string; readonly module: string; readonly tick: number }; killSeconds?: number } = {};
+
+  await Check('time: a jump back replays the same fight, kills included, without drift', async () => {
+    try {
+      const red = (id: string, position: SceneVector) => ({ ...Rifter(id, position), team: 'red' });
+      const blue = (id: string, position: SceneVector) => ({ ...Punisher(id, position), team: 'blue' });
+      await LoadCombatScene([blue('p1', [0, 0, 0]), blue('p2', [800, 0, 0]), blue('p3', [-800, 0, 0]), red('r1', [0, 0, 6000]), red('r2', [900, 0, 6500]), red('r3', [-900, 0, 6500])], { seed: 7, death: 'explode' });
+      await Recorded();
+      await call('engage', { ships: ['p1', 'p2', 'p3'], target: 'r1' });
+      await call('engage', { ships: ['r1', 'r2', 'r3'], target: 'p1' });
+      const killed = await WaitFor('the first kill', 120, (polled) => (polled.combat?.kills.length ? null : `shots ${polled.combat?.shots ?? 0}`));
+      const kill = killed.combat?.kills[0];
+      if (!kill) throw new Error('no kill');
+      await WaitFor('5 s past the first kill', 30, (polled) => (polled.simulation.tick >= kill.tick + 5 ? null : `tick ${polled.simulation.tick}`));
+      const first = Moment(await PausedState());
+      const seconds = TimeOf(await call<ViewerState>('get_state'))?.seconds ?? 0;
+      Object.assign(fight, { first, seconds, kill, killSeconds: seconds - (first.tick - kill.tick) });
+      const back = await TimeControl({ back: 15 });
+      Expect(back.jump && back.tick < first.tick && back.paused, Show({ tick: back.tick, jump: back.jump }));
+      const { result, state } = await SeekPaused(seconds);
+      const difference = MomentDiff(first, Moment(state));
+      Expect(!difference, `after back 15 and seek: ${difference}`);
+      Expect((result.jump?.resimulated ?? 99) <= 8, Show(result.jump));
+      await TimeControl({ pause: false });
+      await WaitFor('3 s past the first run', 20, (polled) => (polled.simulation.tick >= first.tick + 3 ? null : `tick ${polled.simulation.tick}`));
+      const again = await SeekPaused(seconds);
+      const replayed = MomentDiff(first, Moment(again.state));
+      Expect(!replayed, `after playing on and seeking back: ${replayed}`);
+      Expect(!TimeOf(again.state)?.drift, Show(TimeOf(again.state)?.drift));
+      return `kill ${kill.ship} by ${kill.by} at tick ${kill.tick}; back 15 s in ${back.jump?.ms} ms (${back.jump?.resimulated} ticks from ${back.jump?.snapshot}); seek ${result.jump?.ms} ms; equal at tick ${first.tick} twice, no drift; window ${Show(TimeOf(again.state)?.window)}`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: a ship destroyed after the target comes back, then dies again at the same tick by the same module', async () => {
+    try {
+      const { kill, killSeconds, first } = fight;
+      if (!kill || killSeconds == null || !first) throw new Error('the fight check did not run');
+      const { state } = await SeekPaused(killSeconds - 2);
+      const victim = ShipIn(state, kill.ship);
+      Expect(!victim.destroyed && ['ready', 'validated'].includes(victim.status ?? '') && (victim.defense?.structure.hp ?? 0) > 0, Show({ status: victim.status, destroyed: victim.destroyed, defense: victim.defense?.structure }));
+      await TimeControl({ pause: false });
+      const dead = await WaitFor('the kill again', 20, (polled) => (ShipIn(polled, kill.ship).destroyed ? null : `tick ${polled.simulation.tick}`));
+      const again = ShipIn(dead, kill.ship).destroyed;
+      Expect(again?.tick === kill.tick && again.by === kill.by && again.module === kill.module, `${Show(again)} vs ${Show(kill)}`);
+      return `${kill.ship} alive at ${killSeconds - 2} s (${victim.status}, structure ${victim.defense?.structure.hp}); died again at tick ${again?.tick} by ${again?.by} ${again?.module}`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: the tape replays live commands at their ticks, and a new command drops the recorded future', async () => {
+    try {
+      await LoadTime({ ships: [Scripted('a', [0, 0, 0]), Scripted('b', [3000, 0, 0])] });
+      await Recorded();
+      await Delay(1500);
+      const t1 = TimeOf(await call<ViewerState>('get_state'))?.seconds ?? 0;
+      await call('order_ship', { id: 'a', order: { type: 'goto', point: [0, 0, 30000] } });
+      await Delay(2500);
+      await call('order_ship', { id: 'b', order: { type: 'direction', direction: [1, 0, 0] } });
+      await Delay(2500);
+      await PausedState();
+      const { state } = await SeekPaused(t1 - 1);
+      const tape = TimeOf(state)?.replay;
+      Expect(tape?.pending === 2 && tape.next?.tool === 'order_ship' && ShipIn(state, 'a').order?.type !== 'goto', Show({ tape, a: ShipIn(state, 'a').order }));
+      await TimeControl({ seek: TimeOf(state)?.latest ?? 0, pause: true });
+      const replayed = await call<ViewerState>('get_state');
+      Expect(!TimeOf(replayed)?.replay && ShipIn(replayed, 'a').order?.type === 'goto' && ShipIn(replayed, 'b').order?.type === 'direction', Show({ replay: TimeOf(replayed)?.replay, a: ShipIn(replayed, 'a').order, b: ShipIn(replayed, 'b').order }));
+      const back = await SeekPaused(t1 - 1);
+      await call('order_ship', { id: 'b', order: { type: 'stop' } });
+      const dropped = TimeOf(await call<ViewerState>('get_state'));
+      Expect(!dropped?.replay && dropped?.latest === dropped?.seconds, Show({ replay: dropped?.replay, latest: dropped?.latest, seconds: dropped?.seconds }));
+      await TimeControl({ pause: false });
+      await Delay(4000);
+      const after = await call<ViewerState>('get_state');
+      Expect(ShipIn(after, 'a').order?.type !== 'goto' && ShipIn(after, 'b').order?.type !== 'direction', Show({ a: ShipIn(after, 'a').order, b: ShipIn(after, 'b').order }));
+      return `2 commands pending after a seek to ${(t1 - 1).toFixed(1)} s, both replayed by the recorded end; a new order at ${TimeOf(back.state)?.seconds} s dropped them`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: a simulation edit cuts the window, a camera-only edit does not; recording waits for the scene to settle', async () => {
+    try {
+      await LoadTime({ ships: [Scripted('a', [0, 0, 0])] });
+      const loaded = TimeOf(await call<ViewerState>('get_state'));
+      Expect(loaded?.recording.why === 'a scene was loaded', Show(loaded?.recording));
+      const on = TimeOf(await Recorded());
+      Expect(on?.recording.since != null && on.recording.since >= (loaded?.recording.cutAt ?? 0), Show(on?.recording));
+      await Delay(3000);
+      await call('patch_scene', { operations: [{ op: 'set_camera', camera: { distance: 4000 } }] });
+      const camera = TimeOf(await call<ViewerState>('get_state'));
+      Expect(camera?.recording.on && camera.back >= 2, Show({ back: camera?.back, recording: camera?.recording }));
+      await call('patch_scene', { operations: [{ op: 'add_ship', ship: Scripted('b', [2000, 0, 0]) }] });
+      const cut = TimeOf(await call<ViewerState>('get_state'));
+      Expect(cut?.back === 0 && cut.recording.why?.includes('an edit changed the simulation'), Show({ back: cut?.back, recording: cut?.recording }));
+      const again = TimeOf(await Recorded());
+      return `after the load: ${Show(loaded?.recording)}; on since ${on?.recording.since} s; camera edit kept back ${camera?.back} s; add_ship cut (${cut?.recording.why}); on again since ${again?.recording.since} s`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: seek forward lands equal inside the recorded range, and simulates on past it', async () => {
+    try {
+      await LoadTime({ ships: [Scripted('hub', [0, 0, 0]), Scripted('orbiter', [2062, 0, 0]), Scripted('runner', [0, 0, 5000])] });
+      await Recorded();
+      await call('order_ship', { id: 'orbiter', order: { type: 'orbit', target: 'hub', range: 2000 } });
+      await call('order_ship', { id: 'runner', order: { type: 'direction', direction: [0, 0.2, 1] } });
+      await Delay(9000);
+      const end = await PausedState();
+      const first = Moment(end);
+      const latest = TimeOf(end)?.seconds ?? 0;
+      await TimeControl({ back: 7 });
+      const { state } = await SeekPaused(latest);
+      const difference = MomentDiff(first, Moment(state));
+      Expect(!difference, `seek to the recorded end: ${difference}`);
+      const ahead = await SeekPaused(latest + 20);
+      const tick = ahead.state.simulation.tick;
+      Expect(tick === first.tick + 20 && TimeOf(ahead.state)?.recording.on && (TimeOf(ahead.state)?.latest ?? 0) >= latest + 20, Show({ tick, first: first.tick, time: TimeOf(ahead.state) }));
+      return `equal at the recorded end (tick ${first.tick}); +20 s past it in ${ahead.result.jump?.ms} ms (${ahead.result.jump?.resimulated} ticks), recording on`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('time: missiles in flight and a ship in warp come back the same across a jump', async () => {
+    try {
+      const teamed = (ship: { readonly id: string }, team: string) => ({ ...ship, team });
+      const ships = [teamed(Caracal('caracal', [0, 0, 0]), 'red'), teamed(Rifter('rifter', [0, 0, 20000]), 'blue'), teamed(Rifter('warper', [5000, 0, 0]), 'blue')];
+      await LoadCombatScene(ships, { seed: 7, death: 'flag' });
+      await Recorded();
+      await call('engage', { ships: ['caracal'], target: 'rifter' });
+      await WaitFor('the first missiles in flight', 90, (polled) => ((polled.missiles?.inFlight ?? 0) > 0 ? null : Show(polled.missiles ?? null)));
+      await call('order_ship', { id: 'warper', order: { type: 'warp', point: [5000, 0, 1_000_000_000] } });
+      const warping = new Set(['aligning', 'warping', 'exiting']);
+      await WaitFor('missiles in flight and the warper in warp', 60, (polled) => ((polled.missiles?.inFlight ?? 0) > 0 && warping.has(ShipIn(polled, 'warper').warp?.phase ?? '') ? null : Show({ missiles: polled.missiles?.inFlight, warp: ShipIn(polled, 'warper').warp?.phase })));
+      const a = await PausedState();
+      const atA = Moment(a);
+      const secondsA = TimeOf(a)?.seconds ?? 0;
+      await TimeControl({ pause: false });
+      await Delay(8000);
+      const b = await PausedState();
+      const atB = Moment(b);
+      const secondsB = TimeOf(b)?.seconds ?? 0;
+      await TimeControl({ back: 12 });
+      const backA = await SeekPaused(secondsA);
+      const differenceA = MomentDiff(atA, Moment(backA.state));
+      Expect(!differenceA, `at the volley: ${differenceA}`);
+      const backB = await SeekPaused(secondsB);
+      const differenceB = MomentDiff(atB, Moment(backB.state));
+      Expect(!differenceB, `8 s later: ${differenceB}`);
+      return `${atA.missiles?.inFlight} missiles in flight and the warper ${atA.ships['warper']?.warp} at tick ${atA.tick}; equal there and at tick ${atB.tick} (missile hits ${atB.missiles?.hits}, warper ${atB.ships['warper']?.warp}) after jumping back`;
     } finally {
       await Playing();
     }

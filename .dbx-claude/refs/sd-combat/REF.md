@@ -456,9 +456,9 @@ shared part, a `globalExplosion` container, timing values). The client picks one
   volley, dps }` and the lock note while held; scene `combat` `{ seed, death, shots, hits, repaired, kills }`.
 - **`Director.OnKill(listener)`**: for the fleet targeting lever and the automatic camera.
 
-## State to snapshot (time control)
+## Snapshot in time control (`sd-time`)
 
-Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies with the repair
+Time control's snapshots (`Director.CaptureSim`, `sd-time`) hold all of it, and a jump back replays the same fight (verify-page `time:`: the same kill tick, killer and module, no drift). Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies with the repair
 tallies, kills, destroyed, spools, the scene's repaired total), a remote repairer's pending `retarget`, the
 `ModuleCycle` activation counters, `Director.engagements`, `AutoRepair` (owned modules with the target asked, incumbent
 targets with their since tick, manual marks, pending adoptions, last resolved settings, pre-locks; `sd-logi`),

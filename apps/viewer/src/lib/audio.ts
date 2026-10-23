@@ -411,7 +411,15 @@ export class PageAudio {
    */
   Mute(on: boolean): void {
     this.muted = on;
-    if (on) for (const ship of [...this.emitters.keys()]) this.Release(ship);
+    if (on) this.ReleaseAll();
+  }
+
+  /**
+   * Stops and drops every ship's emitter (a time-control jump: the voices belong to the time left behind); each comes
+   * back on its ship's next post.
+   */
+  ReleaseAll(): void {
+    for (const ship of [...this.emitters.keys()]) this.Release(ship);
   }
 
   /**

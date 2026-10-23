@@ -1,4 +1,4 @@
-# Time control: pause, slow motion, fast-forward (and, later, jump back)
+# Time control: pause, slow motion, fast-forward and jump back
 
 > The scene clock runs at a rate and can pause, and the page steps every Destiny tick however fast it runs. Fetch
 > before touching `apps/viewer/src/lib/time-control.ts`, `clock.ts`'s rate and pause, `main.ts`'s frame loop,
@@ -7,29 +7,32 @@
 > pause and fast-forward → T2a the snapshot layer → T2b jump back, the tape and the window → T3 effects across a jump
 > and the real-GPU check). The clock and loop basics are `sd-destiny` ("One clock, one loop").
 
-**Status: T1 and T2a have landed.** T1: rate, pause, fast-forward, the tool, get_state `time`, the HUD row and keys.
-T2a: the snapshot layer (node-tested only; nothing in the page calls it yet): `state-capture.ts`, `destiny-snapshot.ts`,
-`DestinyWorld.Snapshot()` / `Restore()` and `Snapshot()` / `Restore()` on every per-tick owner. Jumping back and seeking
-(`back`, `seek`, `every`, `window`) are refused until T2b (the journal of live commands, the ring, re-simulation from the
-nearest snapshot); T3 re-triggers effects after a jump. No smooth reverse playback (user, 2026-10-22).
+**Status: T1, T2a and T2b have landed.** T1: rate, pause, fast-forward, the tool, get_state `time`, the HUD row and keys.
+T2a: the snapshot layer (`state-capture.ts`, `destiny-snapshot.ts`, `DestinyWorld.Snapshot()` / `Restore()`, an owner
+`Snapshot()` / `Restore()` each). T2b: the ring of snapshots, recording from the settled scene and the cuts, the tape of
+live commands, `Jump` (restore + silent re-simulation + warm-up + landing, with an undo point), drift detection, the
+director's sim port, `back` / `seek` / `every` / `window`, the `←` key. **Next: T3** re-triggers effects mid-flight at
+a landing (explosions, drawn missiles, module beams, warp flashes) and the real-GPU check; until then a jump tears
+those effects down and they reappear only as new ones start. No smooth reverse playback (user, 2026-10-22).
 
 ## Files
 
 | File | Holds |
 |---|---|
-| `packages/scene/src/lib/time/command.ts` | `TimeControlCommand`, `normalizeTimeControlCommand` (every problem at once; the jump keys refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate` |
-| `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`), `TIME_STATES`, `TimeAudioState` |
+| `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek`, `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
+| `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
 | `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`; `Advance` = `Set(Next())` for the specs |
-| `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`), `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
+| `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift), `TimeSimPort` / `TapeEntry` / `JumpLanding`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
 | `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
-| `apps/viewer/src/lib/director.ts` | `AttachTime` (the port: presentation → audio), the `time_control` handler, get_state `time` |
-| `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys |
+| `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `SimulationChange` (the cut rule in `Apply`) |
+| `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`) |
+| `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context, `sd-runtime`), `CinemaRig.Rebase(delta)` (`sd-cinema`), `PageAudio.ReleaseAll()` |
 | `apps/viewer/src/lib/state-capture.ts` | `CaptureFields` / `RestoreFields` / `CloneState` / `EstimateBytes`: the generic per-tick state capture every owner's `Snapshot()` / `Restore()` is a one-liner over. Node-tested |
 | `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark` (stream + scalar overlay), `CaptureScalars` / `OverlayScalars`, `STRUCTURAL_BALL_FIELDS` / `STRUCTURAL_PARK_FIELDS`, `ParkSnapshotBytes`, `WARMUP_TICKS` 3, `WARMUP_SAMPLES_PER_TICK` 30. `runtime-sim` only |
 | `apps/viewer/src/lib/destiny.ts` | `Snapshot()` / `Restore()` (`DestinySnapshot`), getter-backed `master` / `replica`, `SampleCurves(time)` |
 | owners | `Snapshot(memo?)` / `Restore(state, memo?)` on `ShipModules`, `DamageModel`, `CapacitorModel`, `ShipLocks`, `CombatRules`, `ShipTargets`, `FleetTargets`, `FleetCommanders`, `AutoRepair`, `MissileFlights`, `ShotQueue`, `TurretSoundQueue`, `WarpFx`, `FleetFollowing`, `FleetOrders`, `Arrivals` (each with a `*_CAPTURE` options constant naming its wiring) |
-| specs | `time/command.spec.ts`, `clock.spec.ts`, `time-control.spec.ts`, `state-capture.spec.ts`, `destiny-snapshot.spec.ts` (the audit, determinism, warm-up, the `SD_BENCH` bench), a `<Owner> snapshots (sd-time)` round trip in each owner's spec over `state-capture.spec-helper.ts` `RoundTrip`; verify-page `time:` |
+| specs | `time/command.spec.ts`, `clock.spec.ts`, `time-control.spec.ts` (T2b: `Rig`, a fake sim port over a real world), `state-capture.spec.ts` (also `FirstDifference`), `cinema.spec.ts` (`Rebase`), `destiny-snapshot.spec.ts` (the audit, determinism, warm-up, the `SD_BENCH` bench), a `<Owner> snapshots (sd-time)` round trip in each owner's spec over `state-capture.spec-helper.ts` `RoundTrip`; verify-page `time:` |
 
 ## The stepping loop
 
@@ -69,11 +72,104 @@ nearest snapshot); T3 re-triggers effects after a jump. No smooth reverse playba
 
 ## The tool and get_state
 
-- `time_control { pause?, rate? }` (page tool, not slow): `rate` applies before `pause`; `{}` reports. Returns the
-  `time` report plus `warnings`. `back` / `seek` / `every` / `window` are refused ("arrive with the snapshots") until
-  T2b.
-- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused, effectiveRate?, held?, audio?: muted |
-  suspended }` (`seconds` and `tick` equal `simulation`'s).
+- `time_control { pause?, rate?, back?, seek?, every?, window? }` (page tool; hub `SLOW_TOOLS`, a long jump can take a
+  while): applied in the order `every` / `window` (trimming the ring), the jump (`back` seconds from now, or `seek` to a
+  scene time), `rate`, `pause`, so `{ back: 10, rate: 0.25 }` re-watches in slow motion and `{ seek: 42, pause: true }`
+  lands paused. `{}` reports. Returns the `time` report plus `warnings` (a clamped jump, "already there").
+- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping, effectiveRate?, held?, audio?:
+  muted | suspended, back, earliest?, latest?, window: { seconds, every, window, snapshots, bytes, budget, capture? },
+  recording: { on, since?, why?, cutAt?, waiting? }, replay?: { pending, next?: { tool, seconds } }, drift?: { count,
+  tick?, summary? }, jump?: { from, to, snapshot, resimulated, ms, warnings? } }` (`seconds` and `tick` equal
+  `simulation`'s; scene seconds throughout). The HUD row adds `back 63 s`, `N s recorded ahead` or `recording waits: 3
+  builds`.
+
+## The window: recording, snapshots and cuts (T2b)
+
+- **Recording starts at the first settled boundary** (`TimeSimPort.Settled` = `Director.SceneSettled`, the timeline's
+  prepare check: every live ship's lookups answered, fit or default weapons resolved, build settled; fleets planned;
+  objects built; the location answered; prefetches done). That is the deterministic start: no async input lands
+  unrecorded after it. While off, get_state `recording.waiting` counts what it waits for.
+- **A snapshot** (`Director.CaptureSim`) is taken right after an evolved tick at that first boundary, then every `every`
+  scene seconds on the grid from it (`(tick − start) % every == 0`), into a ring sorted by tick. Each holds the world
+  (both parks + entries), every owner, the director's per-tick fields, the timeline player, the live scene and its live
+  edits, and its estimated bytes (`ParkSnapshotBytes` × 2 + `EstimateBytes` of the rest). A capture slower than
+  `CAPTURE_SLOW_MS` (15) doubles the spacing (reported in `window.every`).
+- **The ring trims** after each snapshot and on `Configure`: snapshots older than `window` seconds before the latest
+  go, then the oldest past the byte budget (one always stays), then the tape before the earliest snapshot.
+- **Cuts** (`TimeControl.Cut(why)`: the ring, the tape and the drift count go; recording waits to settle again;
+  `recording.why` / `cutAt` name it):
+  - `Director.Apply` on a load (`a scene was loaded`) and on any edit whose diff `SimulationChange` names (ships added,
+    removed, rebuilt, moved, retuned, switched, regrouped, re-teamed or re-scripted, objects, fleets, location,
+    environment, combat). Camera-only and name-only edits keep the window. This covers `patch_scene`, every hub scene
+    tool, `order_fleet` document orders, `auto_repair`. Patch cues (`ApplyNow`) do not cut (`sd-timeline`).
+  - `Director.SimInput(why)` while recording: the `/ship-stats`, fit, hull-dogma and prop mod lookups landing, the
+    location answer, an object build without a document radius, and a ship build when the hub has no SDE radius for it
+    or it arrives by warp (`BuildIsSimInput`).
+  - A settle check failing at a snapshot tick (`the scene stopped being settled (waiting for …)`).
+
+## The tape (T2b)
+
+- **Journaled tools** (`JOURNALED_TOOLS` in director.ts): `order_ship`, `order_fleet` (its live orders), `switch_prop_mods`,
+  `switch_modules`, `set_target`, `engage`, `cease_fire`. `Handlers()` wraps each (inside the timeline's `at` wrapper,
+  so a cued call is not journaled): `Mark()` before, `Record(mark, tool, args)` after success (a promise's success for
+  `order_fleet`). Record does nothing while recording is off, during a jump, or when a cut happened during the call (a
+  document order's `Apply`).
+- **A new live command abandons the recorded future**: the entries not run yet and the snapshots after the current tick
+  go, and the recorded end becomes now.
+- **Replay**: `TimeControl` registers `world.OnBeforeBoundary` in its constructor (before the director's timeline
+  listener), and at boundary k runs every entry of tick k not yet run (`done` false), marking it run, through
+  `Director.Replay` (the unwrapped lever, synchronously; `Manual` as the hub call). During live play every entry is
+  run already; a restore marks the entries from its snapshot's tick on not run. A replay that throws counts as drift.
+- **The landing rule**: landing at T inside tick m, the entries of tick m made at a clock ≤ T run at once; the later
+  ones at boundary m.
+- Only hub calls are journaled: page code (the FC brains, cues) is deterministic and re-derives itself.
+
+## The jump (T2b)
+
+`TimeControl.Jump(target)` (one synchronous task; `Command` turns `back` / `seek` into it):
+
+1. Refused while another jump runs, while the timeline holds the clock, and with nothing recorded (the error says why).
+   A target before the earliest snapshot clamps to it with a warning; past the recorded end it goes at most
+   `MAX_SEEK_AHEAD_SECONDS`; the target equal to now is a no-op ("already there").
+2. The landing tick m = earliest.tick + ⌊(target − earliest.clock) / interval⌋ (snapshots sit on the tick grid). The
+   start: the latest snapshot with tick ≤ m − `WARMUP_TICKS` (else the earliest), or the current state when the target
+   is ahead and no snapshot is closer (a forward seek simulates on from now, recording as it goes).
+3. `undo = Capture()`, `BeginJump()`, `Restore(snapshot)` + `clock.Set(snapshot.clock)`.
+4. Re-simulate k → m: `clock.Set(boundary)`, `world.Tick(boundary)` (the tape replays), `AfterTick` (new snapshots only
+   past the recorded ones; no settle or drift check), `SilentFrame(boundary)`. Over the last `WARMUP_TICKS` intervals,
+   and from the last boundary to the target, `world.SampleCurves` every 1/`WARMUP_SAMPLES_PER_TICK` tick.
+5. Land: `clock.Set(target)`, `world.Tick(target)` (no evolve), the landing rule, `EndJump`. Report `time.jump`.
+6. Any throw: `Restore(undo)`, the clock, the ring, the tape's done flags and the recording state put back,
+   `EndJump({ delta: 0, failed })`, and the error re-thrown as "the jump failed and the scene is as it was: …".
+
+The window is untouched by a jump: the snapshots after the target are the recorded future.
+
+## Presentation across a jump (T2b)
+
+- **Silent mode** (`Director.silent`, between `BeginJump` and `EndJump`): `turrets`, `moduleEffects`, `explosions`,
+  `missileDrawing` and `warpEffects` are getters over `*Drawn` fields that read null, so the headless branches run;
+  `onChange` is a no-op; audio is muted; `Hide` only marks (status `destroyed`, `death.hidden`, the shots forgotten) and
+  the hull comes off at the landing (`DropHull`). `Retire` always takes the drawn turrets off first.
+- **`BeginJump`**: module effects, explosions, drawn missiles and warp flashes cleared; turret aims and bursts reset;
+  `audio.ReleaseAll()` + `Mute(true)`.
+- **`SilentFrame(now)`**: `DriveTurrets`, `DriveMissiles`, `DriveExplosions`, `DriveWarpEffects` at the boundary time, so
+  the presentation queues advance as a headless page's do (not `DriveBoosters`, `TrackCamera`, `DriveAudio`).
+- **`RestoreSim`** never retires a scene ship (the hull the simulation reads must survive); it marks each live entry
+  settled (`ready` with a hull and a renderer, `validated` otherwise, `destroyed` when hidden at the snapshot, `failed`
+  kept), creates one for a scene ship without (a later patch cue removed it), retires the entries of ships absent from
+  the restored live scene, resets the `liveFleets` memo and `rechargeSynced`.
+- **`EndJump`**: a ship hidden at the target loses its drawn hull; every drawn hull re-attaches to its new curves
+  (`AttachShipCurves`); a ship that needs a hull and has none (destroyed after the target) gets `RebuildHull`
+  (presentation only: `BuildShipValues` → `HydrateShip` → curves → `AddShip` → `SyncTurrets` → aim → impacts; no
+  retune, no re-plan, no cut; dropped if another jump lands first); every turret re-aims at `targets.Of`; impacts sync
+  for every ship and object; `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)`; `Mute(rate > 2)`; `onChange`.
+
+## Drift (T2b)
+
+While playing after a jump, an evolved tick that already holds a recorded snapshot captures a fresh one and compares
+(`SimDrift`: `FirstDifference` over the master park's stream and scalars, then `damage`, `combat` and `modules`). Equal
+keeps it; different counts `drift` (first tick and summary kept, `console.warn`), replaces that snapshot and drops the
+later ones. The tape keeps playing.
 
 ## Snapshots of our per-tick state (T2a)
 
@@ -163,18 +259,39 @@ stay unneeded.
 ## Rules
 
 - Nothing but `TimeControl` advances the clock or calls `world.Tick` in the page.
+- **New per-tick state in the director joins `CaptureSim` / `RestoreSim` (`DirectorSimFields`); a new owner joins
+  `SimOwners`; a new live lever joins `JOURNALED_TOOLS` and `Replay`; journaled handlers do their work synchronously.**
+- **A new async input that changes the simulation calls `SimInput(why)`; a new diff field the simulation reads joins
+  `SimulationChange`.**
+- Nothing in a jump may `Retire` a scene ship or `Retune` / `Reconcile` (the hull and the radius are simulation reads).
 - Never call `world.Tick` with a time more than one interval past `master.time` in page code: step boundaries with
   `NextBoundaryTime`, or the master's backlog drop and the one-evolve assumption break.
 - **New per-tick state in an owner joins its snapshot by itself; a new collaborator or constant field joins its
   `*_CAPTURE` wiring** (or the round-trip spec throws on its function). A new owner gets `Snapshot()` / `Restore()` and
-  a round trip. Coming with T2b: new per-tick state in the director joins `CaptureSim`; a new live lever joins the
-  journaled tools; journaled handlers do their work synchronously.
+  a round trip.
 - Never keep a park or a ship's curves across frames outside `DestinyWorld`: a Restore replaces them.
 
 ## Evidence
 
+- verify-page `--only time:` T2b (headless, 2026-10-23, dbxpc, EVE build 3646012): a 3 Punishers vs 3 Rifters fight
+  (seed 7, explode) replayed exactly after `back: 15` and a seek to the paused moment (tick 26, kills, HP, positions,
+  shots), and again after playing on; `back: 15` took 6.5 ms (3 ticks from the snapshot at tick 8), the seek 2.9 ms; the
+  window held 5 snapshots, 452 KB, capture 0.6 ms; no drift. The kill victim (p1) was alive 2 s before its kill
+  (`validated`, structure 562.5) and died again at tick 21 by the same ship and module. The tape: two `order_ship`
+  calls pending after a seek before them, both replayed by the recorded end; a new order dropped them. A `set_camera`
+  patch kept the window, `add_ship` cut it ("an edit changed the simulation (1 ship added)") and recording came back on
+  settling. Seek to the recorded end equal; +20 s past it in 5.9 ms (20 ticks), recording on. A Caracal's 5 missiles in
+  flight and a warping Rifter equal at the volley and 8 s later (5 hits, the warp exiting) after jumping back.
 - verify-page `--only time:` (headless, 2026-10-23, dbxpc): pause held tick 8 for 2 s with identical positions and
   play resumed; 4× gave +20 ticks in ~5 s with an orbit at 2065–2382 m on a 2000 m range and fleet members
   `in-formation` / `catching-up`; 0.25× gave +1 tick and +1.00 scene s in 4 s; rate 0.5 and pause survived a load.
 - Not yet checked on the real GPU (T3 does: fps and `gpuErrors` at 4× and 0.25×, turret firing effects on Blue's
-  real-time clock in slow motion and pause).
+  real-time clock in slow motion and pause, the look of a landing).
+
+## Limits (T2b)
+
+- Effects in flight at the target do not re-trigger yet (T3): a running module's beam, a drawn missile, a playing
+  explosion and a warp flash disappear at a jump; new ones start normally.
+- A timeline cue that adds a ship arriving by warp (or without an SDE radius) cuts the window when its build lands, so a
+  jump cannot cross it (`sd-timeline`).
+- Fleet toggles (`auto_repair`, anchors, personalities) are document edits and cut; journaling them is a follow-up.
