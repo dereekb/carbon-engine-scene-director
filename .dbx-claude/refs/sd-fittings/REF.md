@@ -7,8 +7,16 @@
 
 **Status (2026-10-22)**: slices C1-C2 of the fitted-modules plan
 (`~/.claude/plans/fitted-modules-eft-fits-parsed-into-typed-modules-fit-driven-ship-stats-module-a.md`) are in: fits
-are parsed and ride on scene ships, and the hub resolves fit names and serves dogma bundles. Not yet: the dogma
-evaluator and fit-driven `ship_stats` (C3), the page flying fitted ships and reporting HP / resists (C4), module
+are parsed and ride on scene ships, and the hub resolves fit names and serves dogma bundles. **C3 is partly in**: the
+evaluator (`fitting/dogma.ts` `evaluateShipDogma`), `categories.ts` (`moduleCategoryOf`, the plan's §2.7 table),
+`typed-fit.ts` (`typeEftFit`, `toDogmaModules`) and `defense.ts` (defense, capacitor, targeting, module numbers) exist
+and typecheck, but have **no specs yet and nothing calls them**. A probe over the fixture (2026-10-22, max skills):
+bare Rifter 562.5 / 562.5 / 437.5 HP, capacitor 312.5 GJ in 93.75 s, shield recharge 468.75 s (= tools-core's
+`dogma/evaluate`); + 200mm Steel Plates II armor 1312.5 and mass + 101,250 kg (Armor Layering V and Advanced Armor
+Layering V cut the plate's 150,000 kg; the plan's 1,217,000 kg ignored them); + DC II + 2 Multispectrum Energized
+Membrane II armor EM resonance 0.199594 (80.04 %); + Medium Shield Extender II shield 1937.5, signature 42 m; an active
+5MN Microwarpdrive II also takes capacitor to 250 GJ (the module's own online effect); ~2 ms per TFI evaluation. Not
+yet: the C3 specs and stats / `ship_stats` wiring, the page flying fitted ships and reporting HP / resists (C4), module
 activation (`switch_modules`) and the damage model (C5), module effects and sounds (C6). Until C4 the page ignores a
 fit except through the prop mod a composition line writes into `propMod`. Research behind the design: the dbx-claude
 note `fitted-modules-dogma-and-module-effects-research`.
