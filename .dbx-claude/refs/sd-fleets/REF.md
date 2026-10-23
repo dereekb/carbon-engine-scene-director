@@ -162,7 +162,9 @@ one). Slots go in wing, squad and member order.
 - **States**: `in-formation` while slot error ≤ 200 m + 5 % of slot range + 2.5 s of the anchor's speed
   (`FOLLOW_TOLERANCE`, `_FRACTION`, `_SECONDS`), else `catching-up`; `holding` while its anchor or the FC is in proper
   warp; `warping` in a formation warp until its group has landed; `leading` for the leader of a wing or squad apart;
-  `detached` after an explicit order; `waiting` until the fleet's radii settle.
+  `detached` after an explicit order; `piloting` while a stance's pilot flies it on its own (`sd-piloting`:
+  `SetPiloted`, Reconcile leaves it alone and keeps its slot until its pilot's first order; it rejoins when the stance
+  ends); `waiting` until the fleet's radii settle.
 - **Detach / rejoin**: any `order_ship` movement order on a member detaches it. It rejoins on `{ "type": "rejoin" }`,
   a fleet edit that regroups it, `order_fleet` regroup or fleet warp, or a load/open; a placement edit leaves it
   detached. **The FC is never detached: ordering it moves its fleet.** Nor is a group-apart leader: an order keeps it
@@ -183,7 +185,7 @@ Per member: `fleet`, `wing`, `squad`, `role`, `commands`, `anchor` (`{ ship, ran
 `following` (`state`, `anchor`, `range`, `slot` `{ range, direction }`, `distance`, `slotError`, `warping`, `group`);
 its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop` once settled. Per fleet: the tree with
 `ships` and resolved anchors, `formation` (`ready`, `heading`, counts `following` / `inFormation` / `catchingUp` /
-`holding` / `warping` / `leading` / `detached` / `waiting` / `arriving`: still arriving by warp, `sd-staging`
+`holding` / `warping` / `leading` / `detached` / `piloting` / `waiting` / `arriving`: still arriving by warp, `sd-staging`
 "Warp-in"), `propMods` counts, `modules` (every member's fitted module
 rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.

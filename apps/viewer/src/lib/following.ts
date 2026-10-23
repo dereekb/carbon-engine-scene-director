@@ -8,6 +8,8 @@
  *   slots, and new members wait.
  * - An explicit order on a member (Detach) takes it out of formation until Rejoin, a fleet edit that regroups it, or a
  *   restart (load_scene / open_scene). The FC is never detached: its orders are how its fleet moves.
+ * - Members a pilot flies (their own or a loose stance, SetPiloted) are left alone like detached ones and report
+ *   `piloting`: one still following keeps its slot until its pilot's first order; once the stance ends it rejoins.
  * - Ships whose following ends (they left their fleet, it was removed, they became its FC) stop on both parks;
  *   Reconcile returns them for changes.stopped.
  * - Groups apart (order_fleet on a wing or squad, BreakAway): the group's leader flies its own order and the group's
@@ -28,7 +30,7 @@ import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields,
  * holding: stopped while its anchor or FC is in warp; it flies to its slot once that ship lands. warping: in a
  * formation warp, from the order until its group has landed. leading: it leads a wing or squad apart from its fleet.
  */
-export type FollowingState = 'in-formation' | 'catching-up' | 'holding' | 'warping' | 'leading' | 'detached' | 'waiting' | 'arriving';
+export type FollowingState = 'in-formation' | 'catching-up' | 'holding' | 'warping' | 'leading' | 'detached' | 'piloting' | 'waiting' | 'arriving';
 
 /**
  * A wing or squad flying apart from its fleet's formation on its leader.
@@ -113,6 +115,10 @@ export interface FleetFormationReport {
   readonly warping: number;
   readonly leading: number;
   readonly detached: number;
+  /**
+   * Members a stance's pilot flies on their own (ShipPilots).
+   */
+  readonly piloting: number;
   readonly waiting: number;
   /**
    * Members still arriving by warp (parked off-grid, scheduled or in their warp-in).
@@ -162,6 +168,10 @@ export class FleetFollowing {
    * Members an explicit order took out of formation.
    */
   private readonly detached = new Set<string>();
+  /**
+   * Members their pilots fly (their own or a loose stance).
+   */
+  private readonly piloted = new Set<string>();
   /**
    * Each fleet's plans, by fleet id, with the input they were made from.
    */
@@ -218,6 +228,7 @@ export class FleetFollowing {
     const regrouped = new Set(input.regrouped ?? []);
     if (input.restart) {
       this.detached.clear();
+      this.piloted.clear();
       this.apart.clear();
     }
     for (const id of regrouped) this.detached.delete(id);
@@ -234,6 +245,10 @@ export class FleetFollowing {
       const plans = scene ? this.Plans(scene, fleet) : null;
       for (const [ship, membership] of toFleetAnchors(fleet)) {
         if (!membership.anchor || this.detached.has(ship) || leaders.has(ship)) continue;
+        if (this.piloted.has(ship)) {
+          kept.add(ship);
+          continue;
+        }
         const record = this.ApartRecordOf(ship);
         const groupPlans = record && scene ? this.ApartPlans(scene, fleet, record) : null;
         const plan = record ? groupPlans?.get(ship) : plans?.get(ship);
@@ -256,6 +271,20 @@ export class FleetFollowing {
       }
     }
     return stopped;
+  }
+
+  /**
+   * The ships their pilots fly on their own (ShipPilots): left alone while they are, back in formation once they are not.
+   *
+   * @param ids - Every ship a pilot flies on its own.
+   * @returns The ships whose following ended, as Reconcile returns them; none when nothing changed.
+   */
+  SetPiloted(ids: ReadonlySet<string>): string[] {
+    const same = ids.size === this.piloted.size && [...ids].every((id) => this.piloted.has(id));
+    if (same) return [];
+    this.piloted.clear();
+    for (const id of ids) this.piloted.add(id);
+    return this.Reconcile();
   }
 
   /**
@@ -397,7 +426,9 @@ export class FleetFollowing {
     const apart = this.ApartOf(id);
     const group = apart ? { group: { kind: apart.group.kind, id: apart.group.id, leader: apart.leader } } : {};
     let report: ShipFollowingReport;
-    if (this.detached.has(id)) {
+    if (this.piloted.has(id) && apart?.leader !== id) {
+      report = { state: 'piloting', anchor: anchor.ship, range: anchor.range, ...group };
+    } else if (this.detached.has(id)) {
       report = { state: 'detached', anchor: anchor.ship, range: anchor.range, ...group };
     } else if (apart?.leader === id) {
       report = { state: 'leading', anchor: anchor.ship, range: anchor.range, ...group };
@@ -439,7 +470,7 @@ export class FleetFollowing {
   FleetReport(fleet: Pick<SceneFleet, 'id' | 'commander'>): FleetFormationReport {
     const scene = this.scene();
     const document = scene?.fleets?.find((candidate) => candidate.id === fleet.id);
-    const counts: Record<FollowingState, number> = { 'in-formation': 0, 'catching-up': 0, holding: 0, warping: 0, leading: 0, detached: 0, waiting: 0, arriving: 0 };
+    const counts: Record<FollowingState, number> = { 'in-formation': 0, 'catching-up': 0, holding: 0, warping: 0, leading: 0, detached: 0, piloting: 0, waiting: 0, arriving: 0 };
     for (const [id, membership] of this.Memberships()) {
       if (membership.fleet !== fleet.id || !membership.anchor) continue;
       const state = this.Report(id)?.state;
@@ -455,6 +486,7 @@ export class FleetFollowing {
       warping: counts.warping,
       leading: counts.leading,
       detached: counts.detached,
+      piloting: counts.piloting,
       waiting: counts.waiting,
       arriving: counts.arriving
     };

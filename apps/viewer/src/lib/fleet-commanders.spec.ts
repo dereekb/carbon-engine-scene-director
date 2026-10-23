@@ -149,7 +149,7 @@ interface BrainRun extends FleetBrainAction {
  * The brain over a fake port: every ship settled and planned, facts from the document's positions, the brain's calls
  * landing in the call book, its moves as the FC's order. `Kill` explodes a ship (out of the live view), `Flag` flags it.
  */
-function BrainRig(scene: SceneDocument) {
+function BrainRig(scene: SceneDocument, piloted: ReadonlySet<string> = new Set()) {
   const runs: BrainRun[] = [];
   const handovers: { fleet: string; from: string; to: string }[] = [];
   const destroyed = new Set<string>();
@@ -194,7 +194,8 @@ function BrainRig(scene: SceneDocument) {
     HandOver: (fleet, from, to, apply) => {
       handovers.push({ fleet, from, to });
       apply();
-    }
+    },
+    Piloted: (id) => piloted.has(id)
   };
   const commanders = new FleetCommanders({ port });
   holder.commanders = commanders;
@@ -371,6 +372,18 @@ describe('FleetCommanders: the FC brain', () => {
     expect(rig.live().fleets?.[0].commander).toBe('d1');
     expect(rig.commanders.Report(FLEET, 8)).toMatchObject({ state: 'leaderless', pending: [] });
     expect(rig.runs.length).toBe(before);
+  });
+
+  it('a stance flown by the acting FC takes the move and prop mods levers; the brain still calls targets', () => {
+    const rig = BrainRig(BrainScene('sharp'), new Set(['fc']));
+    rig.Steps(1, 30);
+    expect(rig.runs.length).toBeGreaterThan(0);
+    expect(rig.runs.every((run) => run.lever !== 'move' && run.lever !== 'prop-mods')).toBe(true);
+    expect(rig.runs.some((run) => (run.args['order'] as Record<string, unknown>)['type'] === 'targets')).toBe(true);
+    expect(rig.commanders.Report(FLEET, 30)).toMatchObject({ manual: [], piloted: ['move', 'prop-mods'] });
+    const free = BrainRig(BrainScene('sharp'));
+    free.Steps(1, 30);
+    expect(free.commanders.Report(FLEET, 30)).not.toHaveProperty('piloted');
   });
 
   it('a lever a model pulls is manual until set_fleet_personality; cease_fire also holds the fleet', () => {

@@ -179,6 +179,9 @@ OrderOf, CallOf, PropMods, Run, HandOver), so the brain is node-tested with a fa
   targets / free-fire, engage and cease_fire on members → `call` + `free-fire` (cease_fire also `held`, the others
   let it go); a fleet (not wing or squad) move or warp, `order_ship` on the acting FC (and a ship script's steps on
   it) → `move`; switch_prop_mods on members → `prop-mods`. The brain's own calls never pass through it.
+  A stance flown by the acting FC (`FleetBrainPort.Piloted`, `ShipPilots.Flies`, `sd-piloting`) holds `move` and
+  `prop-mods` for each step it flies (not in `manual`: `fc.piloted` reports them); the brain still calls targets and
+  free fire. No stance on the FC: the brain moves it as before.
   `set_fleet_personality` (any `update_fleet` whose `set` has `personality`, `AfterOperations` from `Edit` and
   `CueEdit`) clears `manual`, `held` and the pending decisions; a held fleet's members get their holds lifted
   (`FleetTargets.Rearm`) so the brain's call is shot again.

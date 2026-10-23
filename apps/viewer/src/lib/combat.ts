@@ -479,6 +479,22 @@ export class CombatRules {
   }
 
   /**
+   * The ships that hit a ship in the last DPS_WINDOW_SECONDS and the tick each last did (a pilot's attackedBy), latest
+   * first.
+   *
+   * @param id - The ship.
+   * @param boundary - The master tick now.
+   * @returns The attackers and their ticks.
+   */
+  AttackedAt(id: string, boundary: number): { readonly id: string; readonly tick: number }[] {
+    const since = boundary - DPS_WINDOW_SECONDS / this.port.tickSeconds;
+    return [...(this.tallies.get(id)?.attackers ?? [])]
+      .filter(([, tick]) => tick > since)
+      .sort((a, b) => b[1] - a[1])
+      .map(([ship, tick]) => ({ id: ship, tick }));
+  }
+
+  /**
    * A ship left the scene: its tallies (repairs included), spools and destroyed flag go (its kill stays in Kills).
    */
   Remove(id: string): void {

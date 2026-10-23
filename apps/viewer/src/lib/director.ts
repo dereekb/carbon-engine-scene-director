@@ -237,7 +237,8 @@ import {
   type ShipModuleRowState
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
-import { CombatProfileOf, HeadingVectorOf, IncomingRepsOf, RemainingEhpOf, TackleOn } from './pilot-facts';
+import { CombatProfileOf, HeadingVectorOf, IncomingRepsOf, RemainingEhpOf, TackleModulesOf, TackleOn } from './pilot-facts';
+import { ShipPilots, type PilotFormation, type ShipStanceReport } from './pilots';
 import { type FleetCommandReport, FleetCommanders, type ShipPilotReport } from './fleet-commanders';
 import { CaptureFleetHeirs, InheritFleetOrders } from './fleet-succession';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
@@ -286,6 +287,10 @@ import { WeaponLookup } from './weapon-lookup';
  * Radius assumed for a ship that is not built yet, for framing and distances.
  */
 const UNBUILT_RADIUS = 100;
+/**
+ * Module categories a ship's pilot runs: a manual switch_modules on one holds the pilot (ShipPilots.Manual).
+ */
+const PILOT_MODULE_CATEGORIES: ReadonlySet<string> = new Set(['prop', 'point', 'scram', 'web']);
 const DEFAULT_SCREENSHOT_WIDTH = 1280;
 /**
  * The class-values note while a ship's /ship-stats lookup is in flight.
@@ -965,6 +970,10 @@ export class Director {
    * its acting commanders (fleet-commanders.ts); the live fleet view splices the calls and commanders over the document.
    */
   private readonly commanders: FleetCommanders;
+  /**
+   * The pilots that fly their stances (sd-piloting).
+   */
+  private readonly pilots: ShipPilots;
   private readonly killListeners = new Set<KillListener>();
   private readonly primaryListeners = new Set<PrimaryListener>();
   /**
@@ -1307,7 +1316,33 @@ export class Director {
           this.following.Reconcile();
           InheritFleetOrders(world, heirs);
           this.onChange();
-        }
+        },
+        Piloted: (id) => this.pilots.Flies(id)
+      }
+    });
+    this.pilots = new ShipPilots({
+      port: {
+        get tickSeconds() {
+          return world.master.tickInterval / 1000;
+        },
+        Stances: () => this.ResolvedStances(),
+        StanceDue: (id) => this.commanders.StanceDueOf(id),
+        Facts: () => this.BrainFacts(),
+        Settled: (id) => this.ShipSettled(id),
+        OrderOf: (id) => {
+          const motion = world.Motion(id);
+          return motion ? (motion.pendingOrder ?? motion.order) : null;
+        },
+        CalledOf: (id) => this.fleetTargets.CallOf(id)?.target ?? null,
+        AttackedBy: (id, boundary) => this.combat.AttackedAt(id, boundary).map((hit) => ({ id: hit.id, at: hit.tick * (world.master.tickInterval / 1000) })),
+        Order: (id, order) => {
+          const refusal = world.OrderRefusal(id, order);
+          if (refusal !== null || !world.Order(id, order)) throw new Error(refusal ?? `ship "${id}" has no Destiny ball`);
+        },
+        SwitchPropMod: (id, active, boundary) => this.PilotPropMod(id, active, boundary),
+        Tackle: (id) => TackleModulesOf(this.modules.Specs(id), (key) => this.modules.State(id, key, world.tick)),
+        SwitchTackle: (id, key, active, target) => this.modules.Switch(id, key, active ? 'active' : 'online', { boundary: world.tick, ...(target ? { target, retarget: true } : {}) }),
+        Formation: (formation) => this.PilotFormation(formation)
       }
     });
     // Shields recharge, then the FC brains decide, fleets move to their next called targets, locks advance and
@@ -1319,6 +1354,8 @@ export class Director {
       // The brains' calls land before the sync, so their locks start at this boundary.
       this.StepFleetBrains(boundary);
       this.SyncFleetTargets(boundary);
+      // The pilots see this boundary's calls; their orders apply at this tick.
+      this.StepPilots(boundary);
       // Logi pick their targets before the lock sweep, so a new rep target's lock starts at this boundary.
       this.SyncAutoRepair(boundary);
       this.LockEvents(this.locks.Boundary(boundary, this.WantedLocks()));
@@ -1445,12 +1482,14 @@ export class Director {
     const normalized = normalizeShipOrderRequest(named.order, { ships, objects: this.TargetIds(), self: id });
     if (normalized.type === 'stance') {
       this.commanders.SetShipStance(id, stanceOfOrder(normalized));
+      this.pilots.Release([id]);
       return { id, order: normalized, tick: this.world.tick, ...this.StanceReport(id) };
     }
     if (normalized.type === 'rejoin') {
       const following = this.following.Rejoin(id);
       // A rejoin takes the pilot back into formation: its own stance, live or written, ends.
       if (this.commanders.ShipStances().get(id) ?? this.scene?.ships.find((doc) => doc.id === id)?.stance) this.commanders.SetShipStance(id, null);
+      this.pilots.Release([id]);
       return { id, order: normalized, tick: this.world.tick, following, ...this.StanceReport(id) };
     }
     const refusal = this.world.OrderRefusal(id, normalized);
@@ -1653,6 +1692,7 @@ export class Director {
     const tick = this.world.tick;
     const delays = this.PilotDelays(request, resolved, tick);
     this.commanders.SetStance(resolved.group, stanceOfOrder(order), { tick, delays });
+    this.pilots.Release(resolved.ships);
     const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
     const stances = this.ResolvedStances();
     const ships = resolved.ships.map((id) => {
@@ -1671,6 +1711,33 @@ export class Director {
    */
   private ResolvedStances(): Map<string, ResolvedShipStance> {
     return resolveShipStances(this.LiveFleets()?.scene ?? this.Current(), { ships: this.commanders.ShipStances() });
+  }
+
+  /**
+   * get_state's ships[].stance: every ship a stance flies or holds in line, and every pilot still taking one up.
+   *
+   * @returns By ship id; ships with no stance are left out.
+   */
+  private StanceStates(): Map<string, ShipStanceReport> {
+    const reports = new Map<string, ShipStanceReport>();
+    for (const [id, stance] of this.ResolvedStances()) if (stance.type !== 'in-line' || this.pilots.Has(id)) reports.set(id, this.pilots.Report(id, stance, this.world.tick));
+    return reports;
+  }
+
+  /**
+   * A fleet's pilots by state, for get_state's fleets[].stances.
+   *
+   * @param ships - Its ships.
+   * @param stances - StanceStates.
+   * @returns `{ stances }` when any ship has one.
+   */
+  private FleetStanceCounts(ships: readonly string[], stances: ReadonlyMap<string, ShipStanceReport>): { readonly stances?: Readonly<Record<string, number>> } {
+    const counts: Record<string, number> = {};
+    for (const id of ships) {
+      const state = stances.get(id)?.state;
+      if (state) counts[state] = (counts[state] ?? 0) + 1;
+    }
+    return Object.keys(counts).length ? { stances: counts } : {};
   }
 
   /**
@@ -1883,6 +1950,8 @@ export class Director {
       const { modules, unmatched } = selectFittedModules({ modules: resolved.modules }, command.modules);
       for (const selector of unmatched) skipped.push({ id, module: selector, reason: 'it fits no module matching it' });
       // A manual switch of a logi's remote repairers takes it off auto-repair until auto_repair hands it back.
+      // So does a switch of what a pilot runs (its prop mod, point, scram or web): it holds the pilot.
+      if (modules.some((module) => PILOT_MODULE_CATEGORIES.has(module.category))) this.pilots.Manual([id]);
       if (modules.some((module) => REMOTE_REPAIRER_CATEGORIES.includes(module.category)) && this.autoRepair.IsAuto(id)) {
         this.autoRepair.Manual(id);
         notes.push(`"${id}": switch_modules took its remote repairers off auto-repair (auto_repair on: true on its squad hands them back)`);
@@ -2515,6 +2584,7 @@ export class Director {
       ['fleetTargets', this.fleetTargets],
       ['commanders', this.commanders],
       ['autoRepair', this.autoRepair],
+      ['pilots', this.pilots],
       ['missiles', this.missiles],
       ['shots', this.shots],
       ['turretSounds', this.turretSounds],
@@ -2993,7 +3063,12 @@ export class Director {
 
   State(): object {
     const memberships = this.scene ? toFleetMemberships(this.LiveFleets()?.scene ?? this.scene) : new Map<string, ShipFleetMembership>();
-    const ships = (this.scene?.ships ?? []).map((doc) => this.ShipState(doc, memberships.get(doc.id)));
+    const stances = this.StanceStates();
+    const ships = (this.scene?.ships ?? []).map((doc) => {
+      const ship = this.ShipState(doc, memberships.get(doc.id));
+      const stance = stances.get(doc.id);
+      return stance ? { ...ship, stance } : ship;
+    });
     const moduleRows = new Map(ships.map((ship) => [ship.id, ship.fit?.modules ?? []]));
     const distances = [];
     for (let a = 0; a < ships.length; a++) {
@@ -3039,6 +3114,7 @@ export class Director {
             command: this.orders.GroupReport({ fleet: report.id, kind: 'fleet', id: report.id }),
             ...this.CalledState({ fleet: report.id, kind: 'fleet', id: report.id }),
             ...this.AutoRepairFleetState(report.id),
+            ...this.FleetStanceCounts(report.ships, stances),
             ...this.FcState(report.id),
             wings: report.wings.map((wing) => ({
               ...wing,
@@ -3223,6 +3299,7 @@ export class Director {
     // A load opens with the document's calls; a patch keeps the live calls it leaves standing, pruned.
     const callWarnings = restart || !this.scene ? [] : this.commanders.AfterEdit(this.scene, scene);
     if (restart) this.commanders.Clear();
+    if (restart) this.pilots.Clear();
     // A load revives the destroyed: they retire here and rebuild as retried ships. A patch keeps them dead.
     if (restart) this.Revive();
     for (const doc of diff.removed) {
@@ -3264,6 +3341,7 @@ export class Director {
       this.engagements.delete(doc.id);
       this.fleetTargets.Forget(doc.id);
       this.autoRepair.Forget(doc.id);
+      this.pilots.Forget(doc.id);
       this.rechargeSynced.delete(doc.id);
       this.damage.Remove(doc.id);
       this.capacitor.Remove(doc.id);
@@ -4598,7 +4676,64 @@ export class Director {
   private Manual<T>(tool: string, args: unknown, run: () => T): T {
     const result = run();
     this.commanders.TakeLevers(tool, args);
+    this.PilotsTakenOver(tool, args, result);
     return result;
+  }
+
+  /**
+   * A model's order_ship (not a stance order or rejoin) or switch_prop_mods holds the pilots of the ships it named until
+   * a stance order or rejoin (ShipPilots.Manual).
+   */
+  private PilotsTakenOver(tool: string, args: unknown, result: unknown): void {
+    if (args === null || typeof args !== 'object') return;
+    const record = args as Readonly<Record<string, unknown>>;
+    if (tool === 'order_ship' && typeof record['id'] === 'string') {
+      const order = record['order'];
+      const type = order !== null && typeof order === 'object' ? (order as Readonly<Record<string, unknown>>)['type'] : null;
+      if (type !== 'stance' && type !== 'rejoin') this.pilots.Manual([record['id']]);
+    } else if (tool === 'switch_prop_mods' && result !== null && typeof result === 'object' && 'ships' in result) {
+      this.pilots.Manual(((result as SwitchPropModsResult).ships ?? []).map((ship) => ship.id));
+    }
+  }
+
+  /**
+   * The pilots' step at a boundary (ShipPilots.Step), right after the fleets' target sync; a failure is logged and the
+   * boundary goes on.
+   */
+  private StepPilots(boundary: number): void {
+    try {
+      this.pilots.Step(boundary);
+    } catch (error) {
+      console.error(`the pilots failed at tick ${boundary}: ${ErrorText(error)}`);
+    }
+  }
+
+  /**
+   * A pilot's switch_prop_mods on its own ship, after its reaction (toPilotDelays keyed on the pilot and the tick).
+   *
+   * @returns Ticks until it takes the switch.
+   * @throws {Error} When it fits no prop mod or the world refuses the switch.
+   */
+  private PilotPropMod(id: string, active: boolean, boundary: number): number {
+    const doc = this.scene?.ships.find((ship) => ship.id === id);
+    const refusal = this.FitsPropMod(doc) ? this.world.PropModRefusal(id, active) : 'it fits no prop mod';
+    if (refusal !== null) throw new Error(refusal);
+    const delay = toPilotDelays({ key: `pilot|${id}`, tick: this.SeedTick(boundary), ships: [id], issuer: '', reactionOf: (ship) => this.ReactionOf(ship) }).get(id) ?? 0;
+    if (!this.world.SwitchPropMod(id, active, { delay })) throw new Error(`ship "${id}" has no Destiny ball`);
+    return delay;
+  }
+
+  /**
+   * The pilots' formation: groups whose stance ended regrouped, in-line wing and squad stances apart on their leaders,
+   * ships flying their own or a loose stance left alone (FleetFollowing.SetPiloted).
+   */
+  private PilotFormation({ piloted, apart, regroup }: PilotFormation): void {
+    if (regroup.length) this.following.Regroup(regroup);
+    for (const group of apart) {
+      const now = this.following.Apart(group.key);
+      if (!now || now.leader !== group.leader || now.ships.length !== group.ships.length || group.ships.some((id) => !now.ships.includes(id))) this.following.BreakAway(group);
+    }
+    this.following.SetPiloted(piloted);
   }
 
   /**
@@ -4710,7 +4845,9 @@ export class Director {
     if (target != null && typeof target !== 'string') throw new Error('target must be a ship id');
     if (envelope != null && typeof envelope !== 'boolean') throw new Error('envelope must be true or false');
     if (!this.scene?.ships.some((doc) => doc.id === ship)) throw new Error(`ship "${ship}" is not in the scene`);
-    return toShipOverview({ ship, ships: this.BrainFacts(), within, limit, target, envelope, stance: this.ResolvedStances().get(ship) });
+    const resolved = this.ResolvedStances().get(ship);
+    // The stance block carries the pilot's state too (ShipPilots.Report): what it flies, its window and why.
+    return toShipOverview({ ship, ships: this.BrainFacts(), within, limit, target, envelope, stance: resolved ? this.pilots.Report(ship, resolved, this.world.tick) : undefined });
   }
 
   /**
@@ -4859,6 +4996,7 @@ export class Director {
     this.engagements.delete(id);
     this.fleetTargets.Forget(id);
     this.autoRepair.Forget(id);
+    this.pilots.Forget(id);
     if (this.targets.Of(id) != null) {
       this.targets.Set(id, null);
       this.turrets?.Aim(id, null);

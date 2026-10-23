@@ -164,6 +164,22 @@ describe('FleetFollowing', () => {
     expect(unfollow).not.toHaveBeenCalled();
   });
 
+  it('leaves piloted members alone, keeps their slot until their pilot orders them, and rejoins them after', () => {
+    const rig = new Rig();
+    rig.following.Reconcile();
+    expect(rig.following.SetPiloted(new Set(['d1']))).toEqual([]);
+    expect(rig.world.Following('d1')).toMatchObject({ anchor: 'fc' });
+    expect(rig.following.Report('d1')).toEqual({ state: 'piloting', anchor: 'fc', range: 1000 });
+    expect(rig.world.Order('d1', { type: 'stop' })).toBe(true);
+    expect(rig.following.Reconcile()).toEqual([]);
+    expect(rig.world.Following('d1')).toBeNull();
+    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toMatchObject({ piloting: 1, detached: 0 });
+    expect(rig.following.SetPiloted(new Set(['d1']))).toEqual([]);
+    rig.following.SetPiloted(new Set());
+    expect(rig.world.Following('d1')).toMatchObject({ anchor: 'fc' });
+    expect(rig.following.Report('d1')?.state).not.toBe('piloting');
+  });
+
   it('reports each member and the fleet', () => {
     const rig = new Rig();
     rig.following.Reconcile();
@@ -176,7 +192,7 @@ describe('FleetFollowing', () => {
     expect(d1?.slotError).toBeLessThanOrEqual(250);
     expect(rig.following.Report('fc')).toBeNull();
     expect(rig.following.Report('loner')).toBeNull();
-    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toEqual({ ready: true, heading: [0, 0], following: 4, inFormation: 3, catchingUp: 0, holding: 0, warping: 0, leading: 0, detached: 1, waiting: 0, arriving: 0 });
+    expect(rig.following.FleetReport({ id: 'f', commander: 'fc' })).toEqual({ ready: true, heading: [0, 0], following: 4, inFormation: 3, catchingUp: 0, holding: 0, warping: 0, leading: 0, detached: 1, piloting: 0, waiting: 0, arriving: 0 });
   });
 
   it('reports members holding while the FC is in warp, then catching up', () => {

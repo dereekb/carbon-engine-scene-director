@@ -1696,6 +1696,37 @@ try {
     return `rifter sees punisher at ${punisher.distance} m (in ${punisher.incomingDps} / out ${punisher.outgoingDps} dps, hit ${punisher.hitChance}); ${envelope?.ideal?.type} ideal ${envelope?.ideal?.ideal} m in ${Show(envelope?.ideal?.window)}`;
   });
 
+  await Check('pilots fly their stances: a kiter holds its window and a model takes it over', async () => {
+    interface StanceState {
+      readonly state?: string;
+      readonly focus?: string;
+      readonly window?: readonly [number, number];
+      readonly decisions?: readonly unknown[];
+    }
+    const StanceOf = (state: ViewerState, id: string): Maybe<StanceState> => (ShipIn(state, id) as { readonly stance?: StanceState }).stance ?? null;
+    const ships = [
+      { ...Rifter('rifter', [0, 0, 0]), team: 'blue' },
+      { ...Punisher('punisher', [20_000, 0, 0]), team: 'red' }
+    ];
+    await LoadCombatScene(ships, { death: 'flag' });
+    await call('order_ship', { id: 'punisher', order: { type: 'approach', target: 'rifter' } });
+    await call('order_ship', { id: 'rifter', order: { type: 'stance', set: { type: 'kite' } } });
+    const flying = await WaitFor('the rifter kites in its window', 60, (polled) => {
+      const stance = StanceOf(polled, 'rifter');
+      return stance?.focus === 'punisher' && stance.window && (stance.decisions?.length ?? 0) > 0 && (stance.state === 'orbiting' || stance.state === 'holding') ? null : Show(stance);
+    });
+    const window = StanceOf(flying, 'rifter')?.window ?? [0, 0];
+    const overview = await call<ShipOverview>('get_overview', { ship: 'rifter', envelope: false });
+    const distance = overview.rows.find((row) => row.id === 'punisher')?.distance ?? 0;
+    Expect(distance > window[0] * 0.8 && distance < window[1] * 1.3, `punisher at ${distance} m, window ${Show(window)}`);
+    Expect((overview.stance as { readonly state?: string } | undefined)?.state != null, Show(overview.stance));
+    await call('order_ship', { id: 'rifter', order: { type: 'stop' } });
+    const manual = await WaitFor('a model takes the pilot over', 5, (polled) => (StanceOf(polled, 'rifter')?.state === 'manual' ? null : Show(StanceOf(polled, 'rifter'))));
+    await call('order_ship', { id: 'rifter', order: { type: 'stance', set: { type: 'kite' } } });
+    await WaitFor('a stance order hands it back', 10, (polled) => (StanceOf(polled, 'rifter')?.state !== 'manual' ? null : Show(StanceOf(polled, 'rifter'))));
+    return `kites the punisher at ${distance} m in ${Show(window)}; ${StanceOf(manual, 'rifter')?.state} after order_ship, flying again after a stance order`;
+  });
+
   await Check("set_target locks with EVE's lock time and the guns wait for the lock", async () => {
     await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [5000, 0, 0])], { death: 'flag' });
     const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });

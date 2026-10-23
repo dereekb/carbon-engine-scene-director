@@ -2,6 +2,7 @@ import type { Maybe } from '@dereekb/util';
 import { agilityTimeConstant, DEFENSE_LAYERS, type DefenseLayerName, maxWeaponReachOf, type PilotRemoteRepair, type PilotTackle, type PilotWeapon, type SceneVector, pilotWeaponOfMissile, pilotWeaponOfTurret, type ShipCombatProfile, type ShipDefense, TARGET_EFFECT_ATTRIBUTES } from '@scene-director/scene';
 import type { ShipFlight } from './flight';
 import type { ShipModuleSpec, TargetingModule } from './modules';
+import type { PilotTackleModule } from './pilots';
 import { HeadingForward } from './steering';
 
 /**
@@ -165,4 +166,24 @@ export function IncomingRepsOf(incoming: readonly { readonly spec: ShipModuleSpe
     const { repair, cycleTime } = spec.activation;
     return sum + (repair && cycleTime > 0 ? (repair.amount / cycleTime) * effectiveness : 0);
   }, 0);
+}
+
+/**
+ * A ship's point, scram and web for its pilot (ShipPilots' tackle): usable ones, with their activation range and
+ * whether each runs (activating, active or reactivating) and on what.
+ *
+ * @param specs - Its fitted modules (ShipModules.Specs).
+ * @param stateOf - A module's live state by key (ShipModules.State).
+ * @returns The tackle modules, in fit order.
+ */
+export function TackleModulesOf(specs: readonly ShipModuleSpec[], stateOf: (key: string) => Maybe<{ readonly state: string; readonly target?: string }>): PilotTackleModule[] {
+  const modules: PilotTackleModule[] = [];
+  for (const spec of specs) {
+    const kind = spec.activation.category;
+    if (!IsUsable(spec) || (kind !== 'point' && kind !== 'scram' && kind !== 'web')) continue;
+    const live = stateOf(spec.key);
+    const running = live?.state === 'activating' || live?.state === 'active' || live?.state === 'reactivating';
+    modules.push({ key: spec.key, kind, range: spec.activation.range ?? 0, running, ...(running && live?.target ? { target: live.target } : {}) });
+  }
+  return modules;
 }

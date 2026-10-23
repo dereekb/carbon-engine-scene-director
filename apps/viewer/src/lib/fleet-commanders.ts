@@ -123,6 +123,11 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
+ * The levers a stance flown by a personality fleet's acting FC takes from its brain.
+ */
+export const FLEET_PILOTED_LEVERS: readonly FleetBrainLever[] = ['move', 'prop-mods'];
+
+/**
  * Ticks: the gate stops waiting for unsettled ships after this many boundaries (they count as they are, noted).
  */
 export const FLEET_GATE_TICKS = 20;
@@ -185,6 +190,11 @@ export interface FleetBrainPort {
    * designate inherit the order.
    */
   HandOver(fleet: string, from: string, to: string, apply: () => void): void;
+  /**
+   * Whether a stance's pilot flies the ship now (ShipPilots.Flies): on the acting FC it takes the brain's move and prop
+   * mods levers.
+   */
+  Piloted?(id: string): boolean;
 }
 
 /**
@@ -210,6 +220,10 @@ export interface FleetCommandReport {
    */
   readonly ability: number;
   readonly state: FleetCommandState;
+  /**
+   * The levers a stance flown by the acting FC holds (its pilot moves it and runs the prop mods).
+   */
+  readonly piloted?: readonly FleetBrainLever[];
   readonly successor?: string;
   /**
    * Seconds until the designate takes command.
@@ -272,6 +286,10 @@ interface FleetBrain {
    */
   refusals: Map<string, string>;
   readonly manual: Set<FleetBrainLever>;
+  /**
+   * A stance's pilot flew the acting FC at the last step (it held the move and prop mods levers).
+   */
+  piloted?: boolean;
   held: boolean;
   handover: Maybe<FleetHandover>;
   leaderless: boolean;
@@ -496,6 +514,18 @@ export class FleetCommanders {
    */
   StanceOf(group: FleetGroup): Maybe<LiveStance> {
     return this.stances.get(toFleetGroupKey(group)) ?? null;
+  }
+
+  /**
+   * When a pilot takes up the latest live stance order that named it: that order's tick + its delay.
+   *
+   * @param id - The ship.
+   * @returns The tick; null when no live stance order named it.
+   */
+  StanceDueOf(id: string): Maybe<number> {
+    let latest: Maybe<LiveStance> = null;
+    for (const entry of this.stances.values()) if (entry.delays.has(id) && (!latest || entry.tick >= latest.tick)) latest = entry;
+    return latest ? latest.tick + (latest.delays.get(id) ?? 0) : null;
   }
 
   /**
@@ -819,6 +849,7 @@ export class FleetCommanders {
       reach: brain?.reach ?? NO_REACH,
       stance: personality.movement.stance,
       manual,
+      ...(brain?.piloted ? { piloted: [...FLEET_PILOTED_LEVERS] } : {}),
       ...(brain?.held ? { held: true as const } : {}),
       pending: memory.pending.map((each) => ({ lever: each.lever, dueIn: Math.max(0, each.due - tick), why: each.why })),
       decisions: memory.decisions.map((decision) => {
@@ -877,7 +908,11 @@ export class FleetCommanders {
     brain.team = picture.team;
     brain.hostiles = picture.hostiles.length;
     brain.reach = picture.reach;
-    const step = stepFleetBrain({ picture, personality, memory: brain.memory, tick, readyAt: brain.readyAt, seed, manual: [...brain.manual], held: brain.held });
+    // A stance flown by the acting FC moves it and runs the prop mods; the brain still calls targets and free fire.
+    const piloted = fc != null && port.Piloted?.(fc.ship) === true;
+    const manual = piloted ? [...new Set<FleetBrainLever>([...brain.manual, ...FLEET_PILOTED_LEVERS])] : [...brain.manual];
+    brain.piloted = piloted;
+    const step = stepFleetBrain({ picture, personality, memory: brain.memory, tick, readyAt: brain.readyAt, seed, manual, held: brain.held });
     brain.memory = step.memory;
     for (const action of step.actions) {
       try {

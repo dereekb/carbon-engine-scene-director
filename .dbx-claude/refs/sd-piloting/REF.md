@@ -2,11 +2,12 @@
 
 > How a ship decides its own range and maneuvering from both sides' numbers, and the stances that tell it to. The
 > plan is `~/.claude/plans/i-want-to-work-woolly-flame.md` (slices P1-P6). **Status: P1 (the pure math in
-> `packages/scene/src/lib/piloting/`), P2 (stances in the document and as live orders) and P3 (`get_overview`, the
-> ship-relative overview) have landed.** The page's pilots (P4), the outside-program driver (P5) and the dbxpc evidence
-> (P6) are still to come; until P4 no pilot flies a stance: the page checks, keeps and resolves them only. Related refs: `sd-destiny` (the parks, orders, the legacy orbit),
-> `sd-combat` (hit chance, missile application), `sd-fleets` (Follow the FC), `sd-personalities` (the FC brain's
-> `toFleetMove`, which keeps moving personality fleets until a stance takes its `move` lever in P4).
+> `packages/scene/src/lib/piloting/`), P2 (stances in the document and as live orders), P3 (`get_overview`, the
+> ship-relative overview) and P4 (the page's pilots fly their stances, `apps/viewer/src/lib/pilots.ts`) have landed.**
+> The outside-program driver (P5) and the dbxpc evidence (P6) are still to come. Related refs: `sd-destiny` (the
+> parks, orders, the legacy orbit), `sd-combat` (hit chance, missile application), `sd-fleets` (Follow the FC, the
+> `piloting` state), `sd-personalities` (the FC brain's `toFleetMove`; a stance on the acting FC takes its `move` and
+> `prop-mods` levers).
 
 ## The stance (decided with the user)
 
@@ -116,6 +117,56 @@ Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbi
 - **The tool**: `get_overview { ship, within?, limit?, target?, envelope? }`, `where: 'page'`, `Director.Overview`
   (checks the args, then `toShipOverview` over `BrainFacts` with `ResolvedStances().get(ship)`); read-only, not
   journaled. verify-page: "get_overview measures the fight from one ship".
+
+## The page's pilots (P4, `apps/viewer/src/lib/pilots.ts`)
+
+- **`ShipPilots`** over `ShipPilotsPort` (node-tested, imports nothing from ./runtime), stepped by
+  `Director.StepPilots(boundary)` in the `OnBoundary` listener right after `SyncFleetTargets` (it sees this boundary's
+  calls; its orders apply this tick). Each boundary: **take up** the live stances (`Director.ResolvedStances()`), sync
+  the **formation**, then step every ship whose stance it flies itself (`stance.pilot` and `flownBy` = itself: an
+  in-line group's leader, the FC for a fleet's, every loose member, a ship's own, a free ship's).
+- **Response**: a stance that changes while the latest live order_fleet stance order naming the ship is still due
+  (`FleetCommanders.StanceDueOf`: that order's tick + its `toPilotDelays` delay) waits as `pending`; the ship keeps
+  flying its previous stance (or stays in line) until then. order_ship's own stance applies at once.
+- **Formation** (`Formation` → `Director.PilotFormation`): ships flying alone (`fliesAlone`: own, role default,
+  loose, or a free ship) go to `FleetFollowing.SetPiloted` (left alone like detached, report `piloting`, keep their
+  slot until their pilot's first order, rejoin when the stance ends); an in-line wing or squad stance flies apart on its
+  leader (`BreakAway`, only when `following.Apart` differs) and `Regroup`s when it ends. A fleet stance flies the FC:
+  members follow it as always. **No stance anywhere: no record, no Formation change, no calls.**
+- **Gate**: no facts or no profile (pending numbers), `!Settled`, or `away` (warp, arriving, destroyed) → `waiting`.
+- **Picture** from `BrainFacts` (one call per boundary, only when a pilot steps): `toPilotContact` for every non-away
+  ship; hostiles / friends by `overviewRelationOf` within `FLEET_AWARENESS_RANGE`; focus = own target if hostile > the
+  called target (`FleetTargets.CallOf`) > nearest hostile; anchor = `stance.pilot.on`; `attackedBy` from
+  `CombatRules.AttackedAt` (tick × tickSeconds, the DPS window); `now` = boundary × tickSeconds.
+- **Calls**: `order_ship` → `world.Order` (a refusal is logged on the decision); `switch_prop_mods` →
+  `Director.PilotPropMod` (the pilot's own reaction delay, `toPilotDelays` keyed `pilot|<id>` on the seeded tick); the
+  same switch again within `PILOT_PROP_MOD_REPEAT_TICKS` (10) of the last is dropped (the switch is queued, or the
+  MWD runs out its cycle). **Tackle**: the ship's point / scram / web (`TackleModulesOf`) run on the focus while it is
+  in their range and the pilot fights (not support, disengaging, waiting or idle), switched with `retarget`; it only
+  ever stops modules it switched on (`owned`), and stops them when its stance ends.
+- **Stagger**: the first ideal's `idealAt` is set back by `unitHash('pilot|<id>') × refresh`, so pilots that start
+  together refresh on different boundaries.
+- **Manual**: `Director.Manual` (a model's order_ship that is not a stance order or rejoin, switch_prop_mods' switched
+  ships, a ship script's steps) and switch_modules touching `prop` / `point` / `scram` / `web` call `ShipPilots.Manual`:
+  the pilot holds (`manual`) until a stance order names it (order_ship stance, order_fleet stance: `Release`), a
+  rejoin, or its stance changes.
+- **FC brain**: `FleetBrainPort.Piloted` (`ShipPilots.Flies`) on the acting FC adds `FLEET_PILOTED_LEVERS` (`move`,
+  `prop-mods`) to that step's manual levers; `fc.piloted` reports them.
+- **get_state**: `ships[].stance` for every ship with a stance or a pilot record: the resolved stance and sources,
+  `flownBy`, `state` (`in-line` for a member its leader flies, `manual`, else the step's), `focus`, `window`, `ideal`,
+  `why`, `pending { type, flownBy, at, in }` and the last `PILOT_DECISIONS_KEPT` (6) decisions (`order_ship`,
+  `switch_prop_mods`, `switch_modules`, with `why` and any `refused`); `fleets[].stances` counts members by state.
+  `get_overview`'s `stance` block is the same report. Cleared on a load, forgotten when a ship goes, in the
+  time-control snapshot (`SimOwners` `pilots`).
+- **Specs** (`pilots.spec.ts`): the controller over a fake port (own stance, no stance, in-line squad apart and
+  regroup, the response delay, manual and release, owned tackle, a snapshot round trip, 50 loose pilots against 10
+  hostiles: ~25-30 ms per boundary on this Mac for the steps alone); on the parks with the real `stepShipPilot`: an
+  MWD Rifter kiting a Punisher-like brawler (lasers 6 + 2.5 km, an 8 km web) holds 9-14 km from 40 s to 160 s (it
+  settles at ~11.5 km: web + 1.5 km), the same run twice gives identical ball states and orders, MWD Guardian logi
+  orbit a TFI flying straight inside 20-30 km, and a Rifter burns out at 30 % HP, waits out of reach, and re-engages
+  at 60 %. verify-page: "pilots fly their stances: a kiter holds its window and a model takes it over".
+- **Cost not yet measured on the page**: `BrainFacts` rebuilds every ship's profile (`CombatProfileOf`) on each call,
+  and both the FC brains and the pilots call it once per boundary. Measure on the GPU in P6 before caching per ship.
 
 ## Destiny facts the math stands on
 
