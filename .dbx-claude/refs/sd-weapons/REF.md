@@ -11,8 +11,10 @@ graphic) and the hub's `/weapon` route. **W2 is in**: the page's default fit, ca
 mounting (`ShipTurrets`). **W3 is in**: `set_target`, turrets firing on the weapon cycle through `switch_modules`, the
 `Director.OnShot` hook, the cycle-exact draw and impacts. **W4 is in**: turret sounds (below); the plan is delivered.
 **Missiles** (`~/.claude/plans/missiles-launchers-fire-destiny-pursued-evemissiles-that-hit-through-eve-s-missi.md`):
-**M1 is in** (default missiles, launcher charges, the `/missile` route; the numbers: `sd-combat` → Missiles); M2 (the
-page fires them, headless) and M3 (drawn, real GPU) are to come, so launchers are still refused activation. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
+**M1 is in** (default missiles, launcher charges, the `/missile` route; the numbers: `sd-combat` → Missiles); **M2a is
+in** (Destiny missile balls, the flight book, missile hits and expiry rows: `sd-destiny` → Missile balls, `sd-combat` →
+Missiles in the page; not wired yet); M2b (the page fires them, headless) and M3 (drawn, real GPU) are to come, so
+launchers are still refused activation. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
 ## Files

@@ -12,3 +12,4 @@ export { vec3 } from '@carbonenginejs/runtime/math/vec3';
 export type { Vec3 } from '@carbonenginejs/runtime/math/vec3';
 export { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall } from '@carbonenginejs/server/destiny';
 export type { DestinyInt64 } from '@carbonenginejs/server/destiny';
+export { CollideTwoSpheres } from '@carbonenginejs/server/destiny/geometry';

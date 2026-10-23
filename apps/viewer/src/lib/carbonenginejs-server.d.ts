@@ -22,6 +22,7 @@ declare module '@carbonenginejs/server/destiny' {
       readonly DSTBALL_STOP: number;
       readonly DSTBALL_ORBIT: number;
       readonly DSTBALL_WARP: number;
+      readonly DSTBALL_MISSILE: number;
     };
     readonly id: bigint;
     /**
@@ -215,6 +216,29 @@ declare module '@carbonenginejs/server/destiny' {
      */
     EntityWarpIn(id: DestinyInt64, x: number, y: number, z: number, warpFactor: number): void;
     SetBallMassive(id: DestinyInt64, flag: boolean): void;
+    /**
+     * The server's PyLaunchMissile: puts an existing ball at the owner's centre with a unit velocity toward the target
+     * (`aimedLaunch` 1) or along the owner's velocity, then MissileFollow pursues the target. `massive` 0 keeps the
+     * ball's massiveness. Returns without a word for a missing owner; a missing or cloaked target leaves the motion set.
+     *
+     * @throws {RangeError} For flags that are no bytes, or a negative target id.
+     */
+    LaunchMissile(id: DestinyInt64, targetId: DestinyInt64, ownerId: DestinyInt64, aimedLaunch: number, massive: number): void;
+    /**
+     * Pursues a target in mode DSTBALL_MISSILE: straight on for the first 800 ms, then at the predicted intercept at
+     * full thrust, follow range -(radius + target radius). Stops the ball and returns for a target in another bubble
+     * (a master only) or a cloaked one; returns without a word for a missing or moribund target, or the same ids.
+     */
+    MissileFollow(id: DestinyInt64, targetId: DestinyInt64, ownerId: DestinyInt64): void;
     SetupWarpConstants(warpFactor: number, warpDistance: number, out: Partial<WarpConstants>): WarpConstants;
   }
+}
+
+declare module '@carbonenginejs/server/destiny/geometry' {
+  /**
+   * Destiny's swept-sphere contact: two points moving linearly from p0 to p1 and q0 to q1 over one interval.
+   *
+   * @returns The first contact time in [0, 1] (0 when already within `collRadius`), or -1 for none.
+   */
+  export function CollideTwoSpheres(p0: ArrayLike<number>, p1: ArrayLike<number>, q0: ArrayLike<number>, q1: ArrayLike<number>, collRadius: number): number;
 }

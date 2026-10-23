@@ -71,6 +71,12 @@
  *   it takes no orders, no prop mod and no formation warp, is no one's target, and Steer leaves it alone; a follower
  *   that landed holds, stopped, until its group's leader, its anchor and its frame ship have landed too, then follows.
  *   A follower whose anchor or FC is still arriving holds as it does for a warping one. A placement ends an arrival.
+ * - Missiles (LaunchMissile). A missile is a ball on both parks from the same counter, launched by the server's own
+ *   LaunchMissile (aimed, non-massive) and pursuing its target with MissileFollow. Destiny's own completion needs a
+ *   massive target and a PyOS host, so after each evolve the page runs the contact itself on the master balls: expiry
+ *   first (the whole-tick floor / ceil rule), then a lost shooter (it vanishes), a lost target (Destiny turned it: it
+ *   flies on to its expiry), then Destiny's swept CollideTwoSpheres. An ended ball flies on straight and leaves both
+ *   parks MISSILE_BALL_LINGER_TICKS boundaries later, for the drawn missile.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -78,7 +84,7 @@ import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTAN
 import { TICKS_PER_MS } from './clock';
 import { CycleEnd } from './module-cycle';
 import type { EveShip2 } from './runtime';
-import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
+import { CjsBallparkController, CjsDestinyBall, CjsDestinyClientBall, CollideTwoSpheres, ITriQuaternionFunction, quat, vec3, type Quat } from './runtime-sim';
 import { FleetFrame, FormationGoto, FramePoint, HeadingForward, SETTLE_HOLD, SETTLE_SPEED, WarpFrame, type FormationGoto as FormationGotoResult } from './steering';
 import { DEFAULT_WARP_SPEED, LandingPoint, WarpExitTime, WarpFactor, WarpInBackdate, WarpInExitTicks, WarpLength, WarpPhaseAt, type WarpProfile, type WarpProfileDistances } from './warp';
 
@@ -99,6 +105,7 @@ const OBJECT_BALL_MASS = 1;
  */
 const GOTO_DISTANCE = 1e17;
 const INT32_MAX = 2 ** 31 - 1;
+const MISSILE_MODE = CjsDestinyBall.DSTBALLMODE.DSTBALL_MISSILE;
 const DEGREES = Math.PI / 180;
 
 /**
@@ -642,6 +649,122 @@ interface ArrivalEntry {
 }
 
 /**
+ * How many tick boundaries a missile's ball stays on the parks after its flight ended (a hit, an expiry or a lost
+ * shooter): the drawn missile trails the master by about a tick and its warhead decides its own detonation, so it needs
+ * its ClientBall until then. The same with or without a renderer, so the parks hold the same balls either way.
+ */
+export const MISSILE_BALL_LINGER_TICKS = 3;
+
+/**
+ * What a missile ball flies with: the charge's mass (kg), agility, max velocity (m/s) and radius (m).
+ */
+export interface MissilePhysics {
+  readonly mass: number;
+  readonly agility: number;
+  readonly maxVelocity: number;
+  readonly radius: number;
+}
+
+export interface MissileLaunch {
+  /**
+   * The flight's id (the director's `<ship>|<module>|<activation>|<cycle>`).
+   */
+  readonly id: string;
+  /**
+   * The launching ship.
+   */
+  readonly owner: string;
+  /**
+   * A ship or an object.
+   */
+  readonly target: string;
+  readonly physics: MissilePhysics;
+  /**
+   * The fractional master tick its flight time runs from, at or after the current tick: the ball flies from the next
+   * evolved tick on.
+   */
+  readonly launchedAt: number;
+  /**
+   * The fractional master tick it expires at: launchedAt + flightTime / tick seconds.
+   */
+  readonly expiresAt: number;
+}
+
+export type MissileEventKind = 'hit' | 'expired' | 'lost';
+
+/**
+ * Where a missile's flight stands: pursuing its target, flying on straight after losing it, or ended (its ball lingers).
+ */
+export type MissileFlightState = 'flying' | 'lost' | 'done';
+
+/**
+ * A missile's end or loss, queued until TakeMissileEvents.
+ */
+export interface MissileEvent {
+  readonly kind: MissileEventKind;
+  readonly id: string;
+  readonly owner: string;
+  readonly target: string;
+  /**
+   * The exact, fractional master tick: a hit's contact, an expiry's expiresAt, a loss's tick.
+   */
+  readonly at: number;
+  /**
+   * The master tick it was found at.
+   */
+  readonly tick: number;
+  readonly why?: string;
+  /**
+   * Whether the flight ended (a hit, an expiry, a lost shooter). A missile that lost its target flies on straight to
+   * its expiry, doing no damage.
+   */
+  readonly ended: boolean;
+}
+
+/**
+ * A missile as the master holds it.
+ */
+export interface MissileReport {
+  readonly id: string;
+  readonly owner: string;
+  readonly target: string;
+  readonly state: MissileFlightState;
+  readonly position: SceneVector;
+  readonly velocity: SceneVector;
+  readonly speed: number;
+  readonly mode: string;
+  /**
+   * Metres, surface to surface to its target; null when the target has no ball.
+   */
+  readonly distance: Maybe<number>;
+  /**
+   * Seconds until it expires (0 once ended).
+   */
+  readonly expiresIn: number;
+  readonly why?: string;
+}
+
+interface MissileEntry {
+  readonly id: string;
+  readonly ballId: number;
+  readonly owner: string;
+  readonly target: string;
+  readonly radius: number;
+  readonly launchedAt: number;
+  readonly expiresAt: number;
+  state: MissileFlightState;
+  why: Maybe<string>;
+  /**
+   * The tick its ball leaves both parks, once ended.
+   */
+  removeAt: Maybe<number>;
+  /**
+   * The master positions of the missile and its target at the start of the tick being evolved.
+   */
+  from: Maybe<{ readonly missile: SceneVector; readonly target: Maybe<SceneVector> }>;
+}
+
+/**
  * A static object's ball.
  */
 interface ObjectEntry {
@@ -743,6 +866,11 @@ export class DestinyWorld {
    * Prop mod events waiting for the end of the tick (or the call) that made them.
    */
   private propModEvents: PropModEvent[] = [];
+  private readonly missiles = new Map<string, MissileEntry>();
+  /**
+   * Missile ends and losses waiting for TakeMissileEvents.
+   */
+  private missileEvents: MissileEvent[] = [];
   private nextBallId = FIRST_SHIP_BALL_ID;
 
   constructor() {
@@ -876,7 +1004,9 @@ export class DestinyWorld {
    * Removes a ship's ball from both parks (they drop it on their next tick). Every ship approaching, keeping range on
    * or orbiting it, or with such an order (or a warp to it) pending, stops at once on both parks first. A warp to it
    * that already applied flies on to where it was. Ships following it in formation
-   * are left to the caller to re-point (Follow) in the same call; Steer halts any it does not.
+   * are left to the caller to re-point (Follow) in the same call; Steer halts any it does not. Destiny turns the
+   * missiles pursuing it, which the next tick reports lost; its own missiles vanish then too (RemoveMissilesOf takes
+   * them off at once).
    *
    * @param id - The ship id.
    * @returns The ids of the ships it stopped, in the order they were added.
@@ -904,7 +1034,7 @@ export class DestinyWorld {
    * Stops a destroyed ship for good on both parks while its ball stays for its explosion: its order, pending order,
    * following and formation warp end, its prop mod switches off (cause `destroyed`, delivered before this returns),
    * and every ship following it, or ordered or queued at it, stops (re-point followers with Follow in the same call).
-   * From then on OrderRefusal, Follow, WarpInFormation and PropModRefusal refuse it, as an anchor, frame or target
+   * Every missile pursuing it is lost (LoseMissileTargets); its own missiles vanish at the next tick. From then on OrderRefusal, Follow, WarpInFormation and PropModRefusal refuse it, as an anchor, frame or target
    * too. RemoveShip takes the ball off later.
    *
    * @param id - The ship id.
@@ -925,6 +1055,7 @@ export class DestinyWorld {
     this.PropModOffNow(entry, 'it was destroyed', 'destroyed');
     this.Halt(entry, 'destroyed');
     this.DeliverPropModEvents();
+    this.LoseMissileTargets(id, 'its target was destroyed');
     const stopped: string[] = [];
     for (const other of this.ships.values()) {
       if (other === entry) continue;
@@ -1587,6 +1718,294 @@ export class DestinyWorld {
   }
 
   /**
+   * Launches a missile: a new ball on both parks at the owner's centre (free, not massive, not interactive), then the
+   * server's LaunchMissile, aimed at the target and non-massive, whose MissileFollow pursues it (mode DSTBALL_MISSILE).
+   * Nothing is added when it is refused (MissileRefusal), or when either park did not reach the missile mode.
+   *
+   * @param launch - The flight's id, owner, target, physics and times.
+   * @returns Why it was refused, or null.
+   */
+  LaunchMissile(launch: MissileLaunch): Maybe<string> {
+    const refusal = this.MissileRefusal(launch);
+    if (refusal) return refusal;
+    const owner = this.ships.get(launch.owner) as ShipEntry;
+    const target = this.TargetEntry(launch.target) as { readonly ballId: number };
+    const from = this.master.GetBall(owner.ballId) as CjsDestinyBall;
+    const ballId = this.nextBallId++;
+    const { mass, agility, maxVelocity, radius } = launch.physics;
+    this.Both((park) => {
+      park.AddBall(ballId, mass, radius, maxVelocity, true, false, false, false, false, from.x, from.y, from.z, 0, 0, 0, agility, 1);
+      park.LaunchMissile(ballId, target.ballId, owner.ballId, 1, 0);
+    });
+    if (this.master.GetBall(ballId)?.mode !== MISSILE_MODE || this.replica.GetBall(ballId)?.mode !== MISSILE_MODE) {
+      this.Both((park) => park.RemoveBall(ballId));
+      return 'Destiny refused the launch';
+    }
+    this.missiles.set(launch.id, { id: launch.id, ballId, owner: launch.owner, target: launch.target, radius, launchedAt: launch.launchedAt, expiresAt: launch.expiresAt, state: 'flying', why: null, removeAt: null, from: null });
+    return null;
+  }
+
+  /**
+   * Why a missile cannot be launched: the owner or the target has no ball, the owner was destroyed or is in proper warp
+   * or arriving, the target is the owner, was destroyed, is in proper warp, arriving, or in another Destiny bubble
+   * (MissileFollow refuses that on the master only, so the parks would diverge), the id is already flying, or the
+   * missile does not fly.
+   *
+   * @param launch - The launch.
+   * @returns The refusal, or null.
+   */
+  MissileRefusal(launch: MissileLaunch): Maybe<string> {
+    const owner = this.ships.get(launch.owner);
+    const ownerBall = owner ? this.master.GetBall(owner.ballId) : null;
+    const targetShip = this.ships.get(launch.target);
+    const target = this.TargetEntry(launch.target);
+    const targetBall = target ? this.master.GetBall(target.ballId) : null;
+    const { mass, agility, maxVelocity, radius } = launch.physics;
+    let refusal: Maybe<string> = null;
+    if (!owner || !ownerBall) refusal = `ship "${launch.owner}" has no ball`;
+    else if (owner.destroyed) refusal = `ship "${launch.owner}" was destroyed`;
+    else if (this.InProperWarp(owner)) refusal = `ship "${launch.owner}" is in warp`;
+    else if (this.Arriving(launch.owner)) refusal = `ship "${launch.owner}" is arriving`;
+    else if (launch.target === launch.owner) refusal = 'a ship cannot launch at itself';
+    else if (!targetBall) refusal = `target "${launch.target}" is gone`;
+    else if (targetShip?.destroyed) refusal = `target "${launch.target}" was destroyed`;
+    else if (this.InProperWarp(targetShip)) refusal = `target "${launch.target}" is in warp`;
+    else if (targetShip && this.Arriving(launch.target)) refusal = `target "${launch.target}" is arriving`;
+    else if (ownerBall.mNewBubble !== targetBall.mNewBubble) refusal = `target "${launch.target}" is in another Destiny bubble`;
+    else if (this.missiles.has(launch.id)) refusal = `missile "${launch.id}" is already flying`;
+    else if (![mass, agility, maxVelocity, radius].every(Number.isFinite) || mass <= 0 || agility <= 0 || maxVelocity <= 0 || radius < 0) refusal = 'its missile does not fly';
+    else if (!(launch.expiresAt > launch.launchedAt)) refusal = 'its missile has no flight time';
+    return refusal;
+  }
+
+  /**
+   * Turns every missile pursuing a target straight on along its velocity (as Destiny's StopAllFollowers does), on both
+   * parks: it is lost and flies on to its expiry, doing no damage. Destroy calls it, because a destroyed ship's ball
+   * stays for its explosion and Destiny never stops the pursuit itself.
+   *
+   * @param target - The ship or object id.
+   * @param why - The loss's reason ("its target was destroyed").
+   * @returns The missiles it turned.
+   */
+  LoseMissileTargets(target: string, why: string): string[] {
+    const lost: string[] = [];
+    for (const entry of this.missiles.values()) {
+      if (entry.state !== 'flying' || entry.target !== target) continue;
+      this.Straighten(entry);
+      entry.state = 'lost';
+      entry.why = why;
+      this.missileEvents.push(this.MissileEventOf(entry, 'lost', this.master.currentTime, false));
+      lost.push(entry.id);
+    }
+    return lost;
+  }
+
+  /**
+   * The missile ends and losses since the last call, in the order they happened.
+   *
+   * @returns The events.
+   */
+  TakeMissileEvents(): MissileEvent[] {
+    const events = this.missileEvents;
+    this.missileEvents = [];
+    return events;
+  }
+
+  /**
+   * Takes a missile's ball off both parks now, with no event.
+   *
+   * @param id - The flight id.
+   * @returns False for an unknown missile.
+   */
+  RemoveMissile(id: string): boolean {
+    const entry = this.missiles.get(id);
+    if (entry) this.DropMissile(entry);
+    return entry != null;
+  }
+
+  /**
+   * Takes every missile a ship launched off both parks now, with no event: for a shooter removed from the scene.
+   *
+   * @param ship - The owner's id.
+   * @returns The flights removed.
+   */
+  RemoveMissilesOf(ship: string): string[] {
+    const removed: string[] = [];
+    for (const entry of [...this.missiles.values()]) {
+      if (entry.owner !== ship) continue;
+      this.DropMissile(entry);
+      removed.push(entry.id);
+    }
+    return removed;
+  }
+
+  /**
+   * Takes every missile off both parks and drops the queued events: for a load.
+   */
+  ClearMissiles(): void {
+    for (const entry of [...this.missiles.values()]) this.DropMissile(entry);
+    this.missileEvents = [];
+  }
+
+  MissileIds(): string[] {
+    return [...this.missiles.keys()];
+  }
+
+  /**
+   * A missile as the master holds it.
+   *
+   * @param id - The flight id.
+   * @returns The report, or null for an unknown missile.
+   */
+  Missile(id: string): Maybe<MissileReport> {
+    const entry = this.missiles.get(id);
+    const ball = entry ? this.master.GetBall(entry.ballId) : null;
+    if (!entry || !ball) return null;
+    const target = this.TargetEntry(entry.target);
+    const targetBall = target ? this.master.GetBall(target.ballId) : null;
+    const tickSeconds = this.master.tickInterval / 1000;
+    return {
+      id: entry.id,
+      owner: entry.owner,
+      target: entry.target,
+      state: entry.state,
+      position: [Round(ball.x, 100), Round(ball.y, 100), Round(ball.z, 100)],
+      velocity: [Round(ball.vx, 100), Round(ball.vy, 100), Round(ball.vz, 100)],
+      speed: Round(Math.hypot(ball.vx, ball.vy, ball.vz), 10),
+      mode: ModeName(ball.mode),
+      distance: targetBall ? Round(Math.hypot(ball.x - targetBall.x, ball.y - targetBall.y, ball.z - targetBall.z) - ball.radius - targetBall.radius, 1) : null,
+      expiresIn: entry.state === 'done' ? 0 : Round(Math.max(0, entry.expiresAt - this.master.currentTime) * tickSeconds, 1000),
+      ...(entry.why ? { why: entry.why } : {})
+    };
+  }
+
+  /**
+   * The replica ClientBall a drawn missile flies on (translation only).
+   *
+   * @param id - The flight id.
+   * @returns The ClientBall, or null for an unknown missile.
+   */
+  MissileCurves(id: string): Maybe<CjsDestinyClientBall> {
+    const entry = this.missiles.get(id);
+    const ball = entry ? this.replica.GetBall(entry.ballId) : null;
+    return ball instanceof CjsDestinyClientBall ? ball : null;
+  }
+
+  /**
+   * Before an evolve: where each missile in flight and its target are on the master.
+   */
+  private SnapshotMissiles(): void {
+    for (const entry of this.missiles.values()) {
+      const ball = entry.state === 'done' ? null : this.master.GetBall(entry.ballId);
+      const target = entry.state === 'flying' ? this.TargetEntry(entry.target) : null;
+      const targetBall = target ? this.master.GetBall(target.ballId) : null;
+      entry.from = ball ? { missile: [ball.x, ball.y, ball.z], target: targetBall ? [targetBall.x, targetBall.y, targetBall.z] : null } : null;
+    }
+  }
+
+  /**
+   * After an evolved tick k → k + 1, on the master: ended balls past their linger leave both parks; then each missile
+   * in flight expires first (k + 1 past its expiresAt: the EVE server removes it before the tick that would carry it
+   * on, which gives the whole-tick floor / ceil range), else is lost with its shooter (destroyed, in warp, removed: it
+   * vanishes), else loses its target (its ball left the missile mode: Destiny's StopAllFollowers turned it, because the
+   * target entered warp or was removed), else hits on Destiny's swept CollideTwoSpheres over the tick (missile radius
+   * plus target radius; a point test would miss frigates at 10 km/s). Ends send the ball straight on.
+   */
+  private TrackMissiles(): void {
+    const tick = this.master.currentTime;
+    const start = tick - 1;
+    for (const entry of [...this.missiles.values()]) {
+      if (entry.state === 'done') {
+        if (entry.removeAt != null && tick >= entry.removeAt) this.DropMissile(entry);
+        continue;
+      }
+      const ball = this.master.GetBall(entry.ballId);
+      const from = entry.from;
+      entry.from = null;
+      if (!ball) {
+        this.EndMissile(entry, 'lost', tick, 'its ball is gone');
+        continue;
+      }
+      if (tick > entry.expiresAt) {
+        this.EndMissile(entry, 'expired', entry.expiresAt);
+        continue;
+      }
+      const shooter = this.ShooterLoss(entry);
+      if (shooter) {
+        this.EndMissile(entry, 'lost', tick, shooter);
+        continue;
+      }
+      if (entry.state !== 'flying') continue;
+      const target = this.TargetEntry(entry.target);
+      const targetBall = target ? this.master.GetBall(target.ballId) : null;
+      if (ball.mode !== MISSILE_MODE || !targetBall) {
+        entry.state = 'lost';
+        entry.why = this.TargetLoss(entry);
+        this.missileEvents.push(this.MissileEventOf(entry, 'lost', tick, false));
+        continue;
+      }
+      if (!from?.target) continue;
+      const contact = CollideTwoSpheres(from.missile, [ball.x, ball.y, ball.z], from.target, [targetBall.x, targetBall.y, targetBall.z], entry.radius + targetBall.radius);
+      if (contact >= 0 && contact <= 1) this.EndMissile(entry, 'hit', start + contact);
+    }
+  }
+
+  /**
+   * Why a missile's shooter can no longer have it: removed, destroyed or in proper warp.
+   */
+  private ShooterLoss(entry: MissileEntry): Maybe<string> {
+    const owner = this.ships.get(entry.owner);
+    let why: Maybe<string> = null;
+    if (!owner) why = 'its ship was removed';
+    else if (owner.destroyed) why = 'its ship was destroyed';
+    else if (this.InProperWarp(owner)) why = 'its ship entered warp';
+    return why;
+  }
+
+  /**
+   * Why a missile's pursuit ended without a hit.
+   */
+  private TargetLoss(entry: MissileEntry): string {
+    const ship = this.ships.get(entry.target);
+    let why = 'its target was lost';
+    if (!this.TargetEntry(entry.target)) why = 'its target was removed';
+    else if (ship?.destroyed) why = 'its target was destroyed';
+    else if (this.InProperWarp(ship)) why = 'its target entered warp';
+    return why;
+  }
+
+  /**
+   * Ends a missile's flight: straight on along its velocity on both parks, its ball leaving MISSILE_BALL_LINGER_TICKS
+   * boundaries later.
+   */
+  private EndMissile(entry: MissileEntry, kind: MissileEventKind, at: number, why?: string): void {
+    if (entry.state === 'flying') this.Straighten(entry);
+    entry.state = 'done';
+    if (why) entry.why = why;
+    entry.removeAt = this.master.currentTime + MISSILE_BALL_LINGER_TICKS;
+    this.missileEvents.push(this.MissileEventOf(entry, kind, at, true));
+  }
+
+  /**
+   * GotoDirection along the master velocity on both parks (the parks are in lockstep, so the replica's is the same).
+   */
+  private Straighten(entry: MissileEntry): void {
+    const ball = this.master.GetBall(entry.ballId);
+    if (!ball || Math.hypot(ball.vx, ball.vy, ball.vz) === 0) return;
+    const { vx, vy, vz } = ball;
+    this.Both((park) => park.GotoDirection(entry.ballId, vx, vy, vz));
+  }
+
+  private DropMissile(entry: MissileEntry): void {
+    this.missiles.delete(entry.id);
+    this.Both((park) => park.RemoveBall(entry.ballId));
+  }
+
+  private MissileEventOf(entry: MissileEntry, kind: MissileEventKind, at: number, ended: boolean): MissileEvent {
+    return { kind, id: entry.id, owner: entry.owner, target: entry.target, at, tick: this.master.currentTime, ...(entry.why && kind === 'lost' ? { why: entry.why } : {}), ended };
+  }
+
+  /**
    * Evolves both parks to `now`. When this call will run a tick, pending orders apply first, then formation warps,
    * then the arrivals due, then every following ship is steered. The clock caps a frame at 1 s and a tick is 1 s, so a call evolves at most one tick: the steering
    * always precedes the tick it is for, which is why there is one OnTick per call rather than a loop. After an evolved
@@ -1614,6 +2033,7 @@ export class DestinyWorld {
       this.Steer();
       this.MarkAligning();
     }
+    if (due) this.SnapshotMissiles();
     let failure: unknown = null;
     for (const park of [this.master, this.replica]) {
       try {
@@ -1625,6 +2045,7 @@ export class DestinyWorld {
     if (failure !== null) throw failure instanceof Error ? failure : new Error(String(failure));
     if (due) {
       this.TrackWarps();
+      this.TrackMissiles();
       this.DeliverPropModEvents();
     }
   }

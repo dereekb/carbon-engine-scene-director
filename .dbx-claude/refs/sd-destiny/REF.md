@@ -19,7 +19,7 @@
 | `apps/viewer/src/lib/steering.ts` | Follow the FC's steering math (`sd-fleets`) |
 | `packages/scene/src/lib/orders.ts` | `order_ship` request normalization (`normalizeShipOrderRequest`) |
 | `apps/viewer/src/lib/carbonenginejs-server.d.ts` | the server's types |
-| specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `destiny-warp-in.spec.ts` (arrivals), `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only). New DestinyWorld specs share `destiny.spec-helper.ts` (`Harness` with `Ticks` / `Until` / `Sample`, the Rifter, Guardian and TFI fixtures, `BallStates` for lockstep) |
+| specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `destiny-warp-in.spec.ts` (arrivals), `destiny-missile.spec.ts` (missiles), `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only). New DestinyWorld specs share `destiny.spec-helper.ts` (`Harness` with `Ticks` / `Until` / `Sample`, the Rifter, Guardian and TFI fixtures, `BallStates` for lockstep) |
 
 ## The two parks (must stay in lockstep)
 
@@ -103,6 +103,57 @@ destroyed`, `target "x" was destroyed`), `Follow`, `WarpInFormation`, `PropModRe
 refuse it as ship, anchor, frame or target; `PlaceShip` ignores it. `IsDestroyed(id)` reads the flag. The ball stays
 for the explosion (the linger: `ExplosionRemoveTick`, death tick + ceil((lingerSeconds + 2) / tick)), then the director
 calls `RemoveShip` at that boundary, with or without a renderer; a re-added id is alive. Spec: `destiny-destroy.spec.ts`.
+
+## Missile balls (missiles M2a)
+
+A missile in flight is a ball on both parks (`LaunchMissile`), beside ships and objects, from the same ball counter.
+Combat rules, the flight book and the director's wiring: `sd-combat` → Missiles in the page; the numbers: `sd-combat` →
+Missiles.
+
+- **`LaunchMissile({ id, owner, target, physics: { mass, agility, maxVelocity, radius }, launchedAt, expiresAt })`**
+  returns a refusal or null. **`MissileRefusal`** refuses, adding nothing: the owner or target has no ball (`target
+  "x" is gone`), the owner destroyed, in proper warp or arriving, the target the owner, destroyed, in proper warp or
+  arriving, the master balls' `mNewBubble` differ (`target "x" is in another Destiny bubble`: `MissileFollow` refuses
+  that on the master only, `OrderRefusal`'s rule), a flying id, a missile that does not fly, no flight time. One `Both`:
+  `AddBall` (free, not global, not massive, not interactive, not junk) at the owner's master centre, then the server's
+  `LaunchMissile(ball, target, owner, 1, 0)` (aimed: a unit velocity at the target, so a stationary owner never launches
+  backwards; 0 keeps it non-massive), whose `MissileFollow` sets DSTBALL_MISSILE (5): straight for the first 800 ms,
+  then the predicted intercept at full thrust (follow range −(radius + target radius)). A park not in mode 5 after it:
+  the ball comes off both, `Destiny refused the launch`.
+- **Why the page detects arrival**: Destiny's completion needs a massive target (`CollisionBallNeighborIgnore` skips
+  non-massive neighbours, and every ship here is non-massive) and a PyOS host for `DoCollision`. So `Tick` snapshots
+  each flying missile's and target's master positions before the evolve, and **`TrackMissiles`** (after `TrackWarps`)
+  checks, per missile, in order:
+  1. **expiry**: the evolved tick k + 1 > `expiresAt` → `expired` at `expiresAt`, that tick unchecked for contact (the
+     EVE server removes it before the tick that would carry it on);
+  2. **a lost shooter**: the owner removed, destroyed or in proper warp → `lost` (`its ship was removed` / `was
+     destroyed` / `entered warp`), ended: it vanishes;
+  3. **a lost target** (flying only): the master ball left mode 5 (Destiny's `StopAllFollowers` turned it into GOTO
+     along its velocity: the target's `RealWarp` or `RemoveBall`) or the target's ball is gone → `lost` (`its target
+     entered warp` / `was removed` / `was lost`), not ended: it flies on straight to its expiry, then `expired`;
+  4. **contact**: `CollideTwoSpheres(m0, m1, t0, t1, missile radius + target radius)` (Destiny's swept test, exported
+     by `@carbonenginejs/server/destiny/geometry`, re-exported by `runtime-sim`); f in [0, 1] → `hit` at k + f. A
+     point test would miss: at 9-10 km/s a missile crosses a frigate within one tick.
+- **Ends** (a hit, an expiry, a lost shooter): `GotoDirection` along the master velocity on both parks, the entry
+  `done`, and its ball leaves both parks **`MISSILE_BALL_LINGER_TICKS` (3)** boundaries later (the drawn missile needs
+  its ClientBall; the same with or without a renderer). Events `{ kind: hit | expired | lost, id, owner, target, at,
+  tick, why?, ended }` queue until **`TakeMissileEvents()`**.
+- **`LoseMissileTargets(target, why)`**: every missile pursuing it goes straight on (both parks) and is `lost` at once.
+  `Destroy(id)` calls it with `its target was destroyed` (the dead ball lingers, so Destiny never stops the pursuit).
+- **The whole-tick rule**: `launchedAt` is the fractional master tick the flight time runs from, at or after the call;
+  the ball flies from the next evolved tick, so it flies floor or ceil whole ticks: a 7.505 s light missile launched
+  with `launchedAt` k + 0.3 flies 7 ticks (`expired` at k + 7.805, found at k + 8), with k + 0.7 it flies 8. The
+  director passes the cycle start + 1 tick (the drawn frame, as turret shots draw), so a first cycle (u = 0) flies
+  ceil(T) and later ones floor or ceil with EVE's odds.
+- **Queries and cleanup**: `RemoveMissile(id)`, `RemoveMissilesOf(ship)` (a removed shooter, no events),
+  `ClearMissiles()` (a load: balls and queued events), `Missile(id)` (`{ state, position, velocity, speed, mode,
+  distance (surface to surface), expiresIn (s), why? }`), `MissileCurves(id)` (the replica ClientBall), `MissileIds()`.
+- **Measured** (`destiny-missile.spec.ts`, 2026-10-23): a 9,675 m/s heavy at a Rifter-sized target 20 km off hits in
+  its third tick (19,669 m) at exactly the fraction a direct `CollideTwoSpheres` on the recorded positions gives; it
+  still hits a target orbiting at 1 km at 400 m/s. **The drawn lag**: right after each evolve the replica ClientBall
+  trails the master by 1.0 tick (as the drawn ships do), the turret draw rule's tick. Another bubble needs ~20,000 km
+  here (10,000 km is still one connected bubble). Master and replica `BallStates` stay equal through launch, pursuit,
+  contact, loss and removal.
 
 ## Static object balls (`sd-objects`)
 

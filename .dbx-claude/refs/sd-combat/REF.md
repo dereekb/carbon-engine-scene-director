@@ -18,7 +18,9 @@ pinned `referenceRadius` (below, Real-GPU evidence). The plan is **delivered**.
 **Missiles** (`~/.claude/plans/missiles-launchers-fire-destiny-pursued-evemissiles-that-hit-through-eve-s-missi.md`):
 **M1 is in** (2026-10-23): EVE's missile rules and numbers in `packages/scene` (Missiles, below), the evaluator's
 missile effects (`sd-fittings`), default missiles and the `/missile` route (`sd-weapons`), `ship_stats` launcher rows.
-M2 (Destiny missiles, hits, expiry, kills in the page, headless) and M3 (drawn, real GPU) are to come.
+**M2a is in** (2026-10-23): Destiny missile balls (`sd-destiny` → Missile balls), the flight book and missile hits /
+expiry rows in Combat rules (Missiles in the page, below), node-tested but **not wired**: launchers are still refused
+activation. M2b (activation, the director, tools, get_state, verify-page) and M3 (drawn, real GPU) are to come.
 
 ## Files (K1)
 
@@ -222,6 +224,39 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
 - get_state `destroyed.explosion`: `{ state: waiting | playing | done | failed, file, scale?, localBlasts?,
   wreckSwitchTime?, totalDuration?, removesAt, gone }`.
 
+## Missiles in the page (M2a: built and spec'd, wired in M2b)
+
+| File | Holds |
+|---|---|
+| `weapons/shots.ts` (scene) | `WeaponShot.missile?: WeaponShotMissile` `{ id, launchedAt, damage, explosion }` (damage and explosion fixed at launch; null without dogma) |
+| `viewer/destiny.ts` | the missile balls (`sd-destiny` → Missile balls) |
+| `viewer/missile-flights.ts` | `MissileFlights` (`Add`, `Refused` / `RefusalOf`, `End`, `ShotOf`, `Due`, `Prune`, `Counts`, `InFlightOf`, `Report`, `Forget`, `Clear`), `MissileFlightId`, `MISSILE_REPORT_ROWS` (40), `MISSILE_FLIGHT_KEEP_TICKS` (linger + 2) |
+| `viewer/combat.ts` | missile outcomes in `Resolve`, `Expire`, `MISSILE_EXPIRED_NOTE`, `MISSILE_TARGET_DESTROYED`; rows' `missile: true` |
+
+- **A missile hit is a `WeaponShot`** (`MissileFlights.ShotOf`): the launcher's ship, module, typeID and name, the
+  charge, target and kind, the launch's cycle and activation, `tick` the boundary it resolves at, `at` the contact,
+  distance 0, effectiveness 1, `missile` from the flight. `Resolve` sorts it with the boundary's turret shots by (at,
+  ship, module), so which one kills stays deterministic. A destroyed target (earlier in the boundary too): `overkill`.
+  An object, or no dogma (`damage` null): `hits` with `objects take no damage` / `no EVE dogma for its weapon: it does
+  no damage`. A ship: `chance = quality = missileApplication(...)` from its live `SignatureOf` and `Speed` against the
+  launch's explosion, `result: 'hits'` (no roll, no wrecking, no spool), `shotDamage(damage, quality)` into
+  `DamageModel.ApplyHit`; a ship the model does not track takes nothing (the turret note). Kills as turrets:
+  `ShipKill.weapon` is the launcher's name. Spec: Scourge Heavy on a Punisher at rest applies 37 / 105 (72.2 HP raw),
+  then the shield's kinetic resonance.
+- **`Expire(shot, why, boundary)`**: a missile that finished without reaching its target records a row with no
+  damage and no `onDamaged`: `misses` with its note (`it ran out of flight time`, `its target entered warp`, `its target
+  was removed`, `its ship …`), `overkill` for `its target was destroyed` (or a target destroyed meanwhile). So shots,
+  hits and misses count finished launches.
+- **The flight book** (`MissileFlights`): `Add(launch, now)` records `{ id: <ship>|<module>|<activation>|<cycle>, ship,
+  module, typeID, name, charge, target, targetKind, cycle, activation, tick, at, numbers }` (the spec's missile numbers
+  at launch: a refitted launcher or a shooter killed after a hit was found still lands it) with `drawAt` = T(boundary)
+  + (at + 1 − tick) ticks. `End(event, now, boundary)` applies a DestinyWorld event: `finishes` once per flight (a
+  hit → `Resolve`; a loss or expiry → `Expire`; a lost target's later expiry only ends its flight), the end's draw time
+  by the same rule, and a `hit` or `vanish` moment for `Due(now)` (with the `launch` moments, in draw order).
+  `Counts(ship)` `{ launched, inFlight }`, `InFlightOf(ship, module)`, `Report(boundary, world.Missile)`: `{ inFlight,
+  launched, hits, expired, lost, refused, flights }` (at most 40 rows, flying first, soonest end first: `{ id, ship,
+  module, charge, target, state: flying | lost | hit | expired, launchedAt, age, expiresIn, distance, speed, why }`).
+
 ## Locks and the gate (`locks.ts`)
 
 - **Lifecycle** `waiting` → `locking` → `locked` on boundaries. A lock starts at the first boundary after its request,
@@ -350,8 +385,9 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies, kills, destroyed,
 spools), the `ModuleCycle` activation counters, `Director.engagements`, `FleetTargets` (own marks, called targets,
 holds, responses, the last calls and primaries: `sd-fleets` doc `targets`), and `Director.deaths` (kill, explosion
-choice, start, hidden, `removeTick`, gone). The RNG is the document's seed, so a re-simulation rolls the same; explosions
-re-trigger from their kills' times.
+choice, start, hidden, `removeTick`, gone), `DestinyWorld`'s missile entries and balls, and `MissileFlights` (the
+drawn missiles replay from the flights). The RNG is the document's seed, so a re-simulation rolls the same; explosions
+re-trigger from their kills' times. Missiles add no randomness.
 
 ## Seams
 
@@ -361,8 +397,9 @@ re-trigger from their kills' times.
   before the lock sweep (not `OnKill`, which runs inside `Shots` and would re-enter ShipModules for no earlier first
   shot); `Director.OnPrimary(listener)` reports each group's primary change for the automatic camera.
 - Logi auto-repair: `DamageModel.Fractions` / `Report`, `CombatRules.Report(id).dps.taken`, `Attackers(id)`.
-- Missiles (M1 in: the numbers, `missileApplication`): M2 adds missile hits as `WeaponShot`s with a `missile` field
-  through `Resolve` and the shared `applyLayeredDamage`.
+- Missiles (M2a in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
+  `applyLayeredDamage`; M2b wires them (launches from launcher cycle events, `MissileArrivals` at each boundary before
+  `ModuleEvents`, the hits in that boundary's `Resolve`, then `OnShot`).
 
 ## Verify-page (K2)
 

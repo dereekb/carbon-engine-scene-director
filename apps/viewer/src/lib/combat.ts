@@ -38,8 +38,10 @@ import {
   type ShotTargetKind,
   shotDamage,
   type TurretCombatNumbers,
+  missileApplication,
   vortonApplication,
-  type WeaponShot
+  type WeaponShot,
+  type WeaponShotMissile
 } from '@scene-director/scene';
 import type { DamageModel } from './damage';
 
@@ -134,7 +136,21 @@ export interface CombatRow {
    */
   readonly layer?: DefenseLayerName;
   readonly note?: string;
+  /**
+   * A missile's row.
+   */
+  readonly missile?: true;
 }
+
+/**
+ * Why an expired or lost missile did nothing: its row's note.
+ */
+export const MISSILE_EXPIRED_NOTE = 'it ran out of flight time';
+
+/**
+ * The loss reason that makes a lost missile's row `overkill` rather than `misses`.
+ */
+export const MISSILE_TARGET_DESTROYED = 'its target was destroyed';
 
 /**
  * A ship's combat in get_state.
@@ -246,6 +262,22 @@ export class CombatRules {
     for (const id of damaged) this.onDamaged(id);
   }
 
+  /**
+   * Records a missile that finished without reaching its target: no damage, no onDamaged. Its row is `overkill` when
+   * its target was destroyed (or is now), else `misses`.
+   *
+   * @param shot - The missile's shot (missile set; at the end's time).
+   * @param why - Its note: MISSILE_EXPIRED_NOTE, or the loss's reason.
+   * @param boundary - The master tick.
+   */
+  Expire(shot: WeaponShot, why: string, boundary: number): void {
+    const overkill = why === MISSILE_TARGET_DESTROYED || this.destroyed.has(shot.target);
+    const outcome: ShotOutcome = { result: overkill ? 'overkill' : 'misses', chance: 0, quality: 0, damage: 0, layers: NO_LAYERS, note: why };
+    shot.missed = !overkill;
+    shot.outcome = outcome;
+    this.Record(shot, outcome, boundary);
+  }
+
   IsDestroyed(id: string): boolean {
     return this.destroyed.has(id);
   }
@@ -332,9 +364,11 @@ export class CombatRules {
   private Outcome(shot: WeaponShot): ShotOutcome {
     const { target } = shot;
     let outcome: ShotOutcome;
-    const numbers = this.port.Weapon(shot.ship, shot.module);
+    const numbers = shot.missile ? null : this.port.Weapon(shot.ship, shot.module);
     if (this.destroyed.has(target)) {
       outcome = { result: 'overkill', chance: 1, quality: 0, damage: 0, layers: NO_LAYERS };
+    } else if (shot.missile) {
+      outcome = this.MissileOutcome(shot, shot.missile);
     } else if (this.port.KindOf(target) !== 'ship' || !numbers) {
       const chance = numbers && numbers.falloff == null ? (shot.distance <= numbers.optimal ? 1 : 0) : shot.effectiveness;
       const roll = rollShot(this.Roll(shot), chance);
@@ -387,6 +421,33 @@ export class CombatRules {
   }
 
   /**
+   * A missile that reached its target: it always hits, for EVE's missile formula on its launch damage with the
+   * target's live signature and speed.
+   */
+  private MissileOutcome(shot: WeaponShot, missile: WeaponShotMissile): ShotOutcome {
+    const { target } = shot;
+    let outcome: ShotOutcome;
+    if (this.port.KindOf(target) !== 'ship' || !missile.damage) {
+      outcome = { result: 'hits', chance: 1, quality: 1, damage: 0, layers: NO_LAYERS, note: missile.damage ? 'objects take no damage' : 'no EVE dogma for its weapon: it does no damage' };
+    } else {
+      const explosion = missile.explosion;
+      const quality = explosion ? missileApplication({ signatureRadius: this.port.SignatureOf(target), targetSpeed: this.port.Speed(target), explosionRadius: explosion.radius, explosionVelocity: explosion.velocity, drf: explosion.drf }) : 1;
+      let damage = 0;
+      let layers: Readonly<Record<DefenseLayerName, number>> = NO_LAYERS;
+      let note: Maybe<string> = null;
+      const applied = quality > 0 ? this.damage.ApplyHit(target, shotDamage(missile.damage, quality)) : null;
+      if (applied) {
+        damage = applied.total;
+        layers = applied.taken;
+      } else if (quality > 0) {
+        note = 'takes no damage: no EVE dogma for its hull';
+      }
+      outcome = { result: 'hits', chance: quality, quality, damage, layers, ...(note ? { note } : {}) };
+    }
+    return outcome;
+  }
+
+  /**
    * A disintegrator's spool for this shot: consecutive cycles on the target since its activation, × perCycle, capped.
    * The first shot has none; a new activation or target resets it.
    */
@@ -419,7 +480,8 @@ export class CombatRules {
       quality: Round(outcome.quality, 3),
       damage: Round(outcome.damage, 1),
       ...(deepest ? { layer: deepest } : {}),
-      ...(outcome.note ? { note: outcome.note } : {})
+      ...(outcome.note ? { note: outcome.note } : {}),
+      ...(shot.missile ? { missile: true as const } : {})
     };
     this.shots += 1;
     if (hit) this.hits += 1;

@@ -1,7 +1,7 @@
 import type { Maybe } from '@dereekb/util';
 import { combatRoll, type ShipDefense, type ShotTargetKind, type TurretCombatNumbers, type WeaponShot } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
-import { type AccuracyNumbers, type CombatPort, CombatRules, DPS_WINDOW_SECONDS } from './combat';
+import { type AccuracyNumbers, type CombatPort, CombatRules, DPS_WINDOW_SECONDS, MISSILE_EXPIRED_NOTE, MISSILE_TARGET_DESTROYED } from './combat';
 import { DamageModel } from './damage';
 
 const ONES = { em: 1, thermal: 1, kinetic: 1, explosive: 1 };
@@ -29,6 +29,7 @@ const GUN: TurretCombatNumbers = {
 class FakePort implements CombatPort {
   readonly tickSeconds = 1;
   chance = 1;
+  speed = 400;
   readonly weapons = new Map<string, TurretCombatNumbers>([['high-0', GUN]]);
   readonly objects = new Set(['astrahus']);
   readonly asked: AccuracyNumbers[] = [];
@@ -39,7 +40,7 @@ class FakePort implements CombatPort {
   }
 
   Speed(): number {
-    return 400;
+    return this.speed;
   }
 
   Weapon(_ship: string, module: string): Maybe<TurretCombatNumbers> {
@@ -200,5 +201,91 @@ describe('CombatRules', () => {
     expect(rules.Attackers('punisher', 50)).toEqual(['rifter']);
     expect(rules.Attackers('punisher', 100)).toEqual([]);
     expect(rules.Totals()).toEqual({ shots: 5, hits: 5 });
+  });
+});
+
+// A Caracal's HML II with Scourge Heavy at max skills (plan §1.6): 204.875 kinetic per missile, explosion 105 m,
+// 127.5 m/s, drf 0.682.
+const SCOURGE = { em: 0, thermal: 0, kinetic: 204.875, explosive: 0 };
+const HEAVY_EXPLOSION = { radius: 105, velocity: 127.5, drf: 0.682 };
+
+function MissileShot(extra: Partial<WeaponShot> = {}): WeaponShot {
+  return Shot({ ship: 'caracal', module: 'high-1', typeID: 2410, name: 'Heavy Missile Launcher II', distance: 0, at: 9.5, missile: { id: 'caracal|high-1|1|1', launchedAt: 7.2, damage: SCOURGE, explosion: HEAVY_EXPLOSION }, ...extra });
+}
+
+describe('CombatRules missiles', () => {
+  it("hits a Punisher at rest for 37 / 105 of its damage, through the shield's kinetic resonance", () => {
+    const { rules, damage, port, damaged } = Rules();
+    port.speed = 0;
+    const layer = { hp: 10_000, resonances: { ...ONES, kinetic: 0.6 }, resists: { em: 0, thermal: 0, kinetic: 0.4, explosive: 0 }, ehp: 10_000 };
+    damage.SetDefense('punisher', { shield: layer, armor: layer, structure: layer, ehp: 30_000, shieldRecharge: 0 });
+    const shot = MissileShot();
+    rules.Resolve([shot], 10);
+    expect(shot.missed).toBe(false);
+    expect(shot.outcome?.result).toBe('hits');
+    expect(shot.outcome?.chance).toBeCloseTo(37 / 105, 3);
+    expect(shot.outcome?.quality).toBeCloseTo(37 / 105, 3);
+    expect(204.875 * (37 / 105)).toBeCloseTo(72.2, 1);
+    expect(shot.outcome?.damage).toBeCloseTo(204.875 * (37 / 105) * 0.6, 6);
+    expect(port.asked).toEqual([]);
+    expect(damaged).toEqual(['punisher']);
+    expect(rules.Report('caracal', 10)?.lastHits[0]).toMatchObject({ target: 'punisher', result: 'hits', missile: true, layer: 'shield' });
+  });
+
+  it('applies less to a fast target, with no roll', () => {
+    const { rules } = Rules();
+    const shot = MissileShot();
+    rules.Resolve([shot], 10);
+    expect(shot.outcome?.quality).toBeCloseTo(((37 / 105) * (127.5 / 400)) ** 0.682, 9);
+  });
+
+  it('sorts missile hits with the turret shots: after a turret kill they are overkill, and a killing missile is fatal', () => {
+    const turretFirst = Rules(1);
+    const turret = Shot({ at: 9.2 });
+    const missile = MissileShot({ at: 9.5 });
+    turretFirst.rules.Resolve([missile, turret], 10);
+    expect(turret.fatal).toBe(true);
+    expect(missile.outcome).toMatchObject({ result: 'overkill', damage: 0 });
+
+    const missileFirst = Rules(1);
+    const kill = MissileShot({ at: 9.1 });
+    missileFirst.rules.Resolve([Shot({ at: 9.2 }), kill], 10);
+    expect(kill.fatal).toBe(true);
+    expect(missileFirst.rules.Kills()[0]).toMatchObject({ ship: 'punisher', by: 'caracal', module: 'high-1', weapon: 'Heavy Missile Launcher II', at: 9.1 });
+    const later = MissileShot({ at: 10.4, tick: 11 });
+    missileFirst.rules.Resolve([later], 11);
+    expect(later.outcome).toMatchObject({ result: 'overkill', damage: 0 });
+  });
+
+  it('records expired and lost missiles with no damage: misses with their note, overkill on a destroyed target', () => {
+    const { rules, damaged } = Rules();
+    const expired = MissileShot();
+    rules.Expire(expired, MISSILE_EXPIRED_NOTE, 20);
+    const warped = MissileShot({ missile: { id: 'caracal|high-1|1|2', launchedAt: 8, damage: SCOURGE, explosion: HEAVY_EXPLOSION } });
+    rules.Expire(warped, 'its target entered warp', 21);
+    const dead = MissileShot();
+    rules.Expire(dead, MISSILE_TARGET_DESTROYED, 22);
+    expect([expired, warped, dead].map((shot) => [shot.missed, shot.outcome?.result, shot.outcome?.damage])).toEqual([
+      [true, 'misses', 0],
+      [true, 'misses', 0],
+      [false, 'overkill', 0]
+    ]);
+    expect(damaged).toEqual([]);
+    const report = rules.Report('caracal', 22);
+    expect(report).toMatchObject({ shots: 3, hits: 1, misses: 2, dealt: 0 });
+    expect(report?.lastHits.map((row) => [row.result, row.note, row.missile])).toEqual([
+      ['overkill', MISSILE_TARGET_DESTROYED, true],
+      ['misses', 'its target entered warp', true],
+      ['misses', MISSILE_EXPIRED_NOTE, true]
+    ]);
+  });
+
+  it('does no damage to an object, or without dogma', () => {
+    const { rules } = Rules();
+    const object = MissileShot({ target: 'astrahus', targetKind: 'object' });
+    const bare = MissileShot({ missile: { id: 'x', launchedAt: 7, damage: null, explosion: null } });
+    rules.Resolve([object, bare], 10);
+    expect(object.outcome).toMatchObject({ result: 'hits', damage: 0, note: 'objects take no damage' });
+    expect(bare.outcome).toMatchObject({ result: 'hits', damage: 0, note: 'no EVE dogma for its weapon: it does no damage' });
   });
 });
