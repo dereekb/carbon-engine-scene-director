@@ -398,6 +398,10 @@ declare module '@carbonenginejs/runtime/trinity' {
      * Arms the impact overlay with the remaining shield, armor and hull fractions; no impacts draw before a call.
      */
     SetImpactDamageState(shield: number, armor: number, hull: number, doCreateArmorImpacts?: boolean): void;
+    /**
+     * Removes every shield and armor impact (the armor holes SetImpactDamageState only ever adds, and their fires).
+     */
+    ClearImpactDamage(): void;
   }
 
   /**
@@ -588,6 +592,10 @@ declare module '@carbonenginejs/runtime/trinity' {
      * Arms the impact overlay with the remaining shield, armor and hull fractions; no impacts draw before a call.
      */
     SetImpactDamageState(shield: number, armor: number, hull: number, doCreateArmorImpacts?: boolean): void;
+    /**
+     * Removes every shield and armor impact (the armor holes SetImpactDamageState only ever adds, and their fires).
+     */
+    ClearImpactDamage(): void;
   }
 
   /**

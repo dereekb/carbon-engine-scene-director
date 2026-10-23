@@ -207,7 +207,7 @@ import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinySnapshot, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
-import { DamageModel, type DamageReport } from './damage';
+import { DamageModel, type DamageReport, ImpactsHealed } from './damage';
 import { ExplosionFiles, ExplosionRemoveTick, ExplosionReplays, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
 import { ShipExplosions, type ShipExplosionReport } from './explosions';
 import {
@@ -1035,6 +1035,11 @@ export class Director {
    * The warp flashes a re-simulation made and did not draw, for the landing to play again (WarpFlashReplays).
    */
   private swallowedFlashes: SwallowedWarpFlash[] = [];
+  /**
+   * Each ship's and object's HP fractions when the jump began: the landing clears the armor impacts of one that healed
+   * (ImpactsHealed).
+   */
+  private departedFractions = new Map<string, ReturnType<DamageModel['Fractions']>>();
 
   private get moduleEffects(): Maybe<ModuleEffects> {
     return this.silent ? null : this.moduleEffectsDrawn;
@@ -2046,10 +2051,13 @@ export class Director {
    * it tracks none), so the firing effects draw impacts on it: shield above 5 %, then armor, then hull.
    *
    * @param id - The ship or object id.
+   * @param clear - Take its impacts off first (a jump landed where it had healed: the overlay only ever adds armor
+   * impacts).
    */
-  SyncImpactState(id: string): void {
+  SyncImpactState(id: string, clear = false): void {
     const drawn = this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null;
     if (typeof drawn?.SetImpactDamageState !== 'function') return;
+    if (clear && typeof drawn.ClearImpactDamage === 'function') drawn.ClearImpactDamage();
     const fractions = this.damage.Fractions(id);
     drawn.SetImpactDamageState(fractions?.shield ?? 1, fractions?.armor ?? 1, fractions?.structure ?? 1);
   }
@@ -2356,7 +2364,7 @@ export class Director {
     time.AttachSim({
       Capture: () => this.CaptureSim(),
       Restore: (state) => this.RestoreSim(state as SimState),
-      Settled: () => this.SceneSettled(),
+      Settled: () => this.SceneSettled({ simulation: true }),
       Drift: (recorded, fresh) => SimDrift(recorded as SimState, fresh as SimState),
       Replay: (entry) => this.Replay(entry),
       BeginJump: () => this.BeginJump(),
@@ -2574,6 +2582,7 @@ export class Director {
     this.audio.ReleaseAll();
     this.audio.Mute(true);
     this.swallowedFlashes = [];
+    this.departedFractions = new Map(this.ImpactIds().map((id) => [id, this.damage.Fractions(id)]));
     this.silent = true;
   }
 
@@ -2614,12 +2623,22 @@ export class Director {
       else if (!entry.ship && entry.status === 'ready' && curves) void this.RebuildHull(doc, entry, this.landings);
     }
     for (const id of this.live.keys()) this.turrets?.Aim(id, this.targets.Of(id) ?? null);
-    for (const id of [...this.live.keys(), ...(this.scene?.objects ?? []).map((doc) => doc.id)]) this.SyncImpactState(id);
+    for (const id of this.ImpactIds()) this.SyncImpactState(id, ImpactsHealed(this.departedFractions.get(id), this.damage.Fractions(id)));
+    this.departedFractions.clear();
     this.ReplayEffects(to);
     this.engine?.ResetSceneTime(to);
     this.cinema.Rebase(delta);
     this.audio.Mute(this.time?.muted ?? false);
     this.onChange();
+  }
+
+  /**
+   * The ships and objects whose drawn hulls carry an impact overlay.
+   *
+   * @returns Their ids.
+   */
+  private ImpactIds(): string[] {
+    return [...this.live.keys(), ...(this.scene?.objects ?? []).map((doc) => doc.id)];
   }
 
   /**
@@ -2842,9 +2861,12 @@ export class Director {
    * Whether the live scene is ready for t = 0 (a scripted load's prepare): every live ship's /ship-stats lookup answered
    * (a failure counts), its prop mod looked up, its fit (or its default weapons' hull type) resolved and its build
    * settled; every fleet planned; every object built; the location loaded; every prefetch for the ships the patch cues
-   * add settled (counted as lookups).
+   * add settled (counted as lookups). For time-control recording (`simulation`) a build counts only when its landing is
+   * a simulation input (BuildIsSimInput): a timeline cue's warp-in building does not stop the window.
+   *
+   * @param options - simulation: what the simulation waits for, not the drawing.
    */
-  private SceneSettled(): TimelineSettled {
+  private SceneSettled(options: { readonly simulation?: boolean } = {}): TimelineSettled {
     const waiting = { lookups: 0, fits: 0, builds: 0, fleets: 0, objects: 0, location: 0 };
     const scene = this.scene;
     for (const doc of scene?.ships ?? []) {
@@ -2855,7 +2877,7 @@ export class Director {
       const hullTypeID = answer?.hull?.typeID;
       if (this.fittings.get(doc.id)?.pending || (!doc.fit && hullTypeID != null && this.fitLookup.TypePending(hullTypeID))) waiting.fits += 1;
       const status = this.live.get(doc.id)?.status;
-      if (status === 'queued' || status === 'building') waiting.builds += 1;
+      if ((status === 'queued' || status === 'building') && (!options.simulation || this.BuildIsSimInput(doc))) waiting.builds += 1;
     }
     for (const fleet of scene?.fleets ?? []) if (!this.following.Ready(fleet.id)) waiting.fleets += 1;
     for (const doc of scene?.objects ?? []) {

@@ -203,6 +203,15 @@ describe('CombatRules', () => {
     expect(rules.Attackers('punisher', 100)).toEqual([]);
     expect(rules.Totals()).toEqual({ shots: 5, hits: 5, repaired: 0 });
   });
+
+  it('reports the DPS window without pruning it, so a snapshot does not depend on when get_state ran (sd-time)', () => {
+    const { rules } = Rules(1e9);
+    for (let cycle = 1; cycle <= 5; cycle++) rules.Resolve([Shot({ cycle, at: cycle * 10, tick: cycle * 10 })], cycle * 10);
+    const before = rules.Snapshot();
+    expect(rules.Report('rifter', 70)?.dps.dealt).toBe(0);
+    expect(rules.Report('punisher', 70)?.dps.taken).toBe(0);
+    expect(rules.Snapshot()).toEqual(before);
+  });
 });
 
 // A Caracal's HML II with Scourge Heavy at max skills (plan §1.6): 204.875 kinetic per missile, explosion 105 m,

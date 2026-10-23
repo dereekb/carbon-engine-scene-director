@@ -27,7 +27,7 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 | `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`), `BoundaryTime(boundary)` (any boundary on the grid: the timeline's t = 0) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
 | `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
-| T3 planners (node-tested) | `explosion-plan.ts` `ExplosionReplays`; `module-fx.ts` `RunningModuleFxCommands` over `ShipModules.RunningEffects`; `warp-fx.ts` `WarpFlashReplays`, `WARP_IN_FLASH_SECONDS` / `WARP_OUT_FLASH_SECONDS`; `missile-flights.ts` `InFlightAt`; `missile-effects.ts` `Launch(…, { midFlight })`; `arrivals.ts` `AwaitsBuild` |
+| T3 planners (node-tested) | `damage.ts` `ImpactsHealed`; `explosion-plan.ts` `ExplosionReplays`; `module-fx.ts` `RunningModuleFxCommands` over `ShipModules.RunningEffects`; `warp-fx.ts` `WarpFlashReplays`, `WARP_IN_FLASH_SECONDS` / `WARP_OUT_FLASH_SECONDS`; `missile-flights.ts` `InFlightAt`; `missile-effects.ts` `Launch(…, { midFlight })`; `arrivals.ts` `AwaitsBuild` |
 | `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`) |
 | `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context, `sd-runtime`), `CinemaRig.Rebase(delta)` (`sd-cinema`), `PageAudio.ReleaseAll()` |
 | `apps/viewer/src/lib/state-capture.ts` | `CaptureFields` / `RestoreFields` / `CloneState` / `EstimateBytes`: the generic per-tick state capture every owner's `Snapshot()` / `Restore()` is a one-liner over. Node-tested |
@@ -91,10 +91,11 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 
 ## The window: recording, snapshots and cuts (T2b)
 
-- **Recording starts at the first settled boundary** (`TimeSimPort.Settled` = `Director.SceneSettled`, the timeline's
-  prepare check: every live ship's lookups answered, fit or default weapons resolved, build settled; fleets planned;
-  objects built; the location answered; prefetches done). That is the deterministic start: no async input lands
-  unrecorded after it. While off, get_state `recording.waiting` counts what it waits for.
+- **Recording starts at the first settled boundary** (`TimeSimPort.Settled` = `Director.SceneSettled({ simulation:
+  true })`, the timeline's prepare check: every live ship's lookups answered, fit or default weapons resolved, build
+  settled; fleets planned; objects built; the location answered; prefetches done; except that a build counts only when
+  its landing is a simulation input, `BuildIsSimInput`, the same rule as the cut). That is the deterministic start: no
+  async input lands unrecorded after it. While off, get_state `recording.waiting` counts what it waits for.
 - **A snapshot** (`Director.CaptureSim`) is taken right after an evolved tick at that first boundary, then every `every`
   scene seconds on the grid from it (`(tick − start) % every == 0`), into a ring sorted by tick. Each holds the world
   (both parks + entries), every owner, the director's per-tick fields, the timeline player, the live scene and its live
@@ -158,8 +159,10 @@ The window is untouched by a jump: the snapshots after the target are the record
   `missileDrawing` and `warpEffects` are getters over `*Drawn` fields that read null, so the headless branches run;
   `onChange` is a no-op; audio is muted; `Hide` only marks (status `destroyed`, `death.hidden`, the shots forgotten) and
   the hull comes off at the landing (`DropHull`). `Retire` always takes the drawn turrets off first.
-- **`BeginJump`**: module effects, explosions, drawn missiles and warp flashes cleared; turret aims and bursts reset;
-  `audio.ReleaseAll()` + `Mute(true)`.
+- **`BeginJump`**: module effects, explosions, drawn missiles and warp flashes cleared (module effects and explosions
+  in one `RetireShips` each: a retire walks every drawn object, and one per effect cost 2.4 s with 20 effects in a
+  54-ship fight); turret aims and bursts reset; `audio.ReleaseAll()` + `Mute(true)`; each ship's and object's HP
+  fractions kept (`departedFractions`).
 - **`SilentFrame(now)`**: `DriveTurrets`, `DriveMissiles`, `DriveExplosions`, `DriveWarpEffects` at the boundary time, so
   the presentation queues advance as a headless page's do (not `DriveBoosters`, `TrackCamera`, `DriveAudio`).
 - **`RestoreSim`** never retires a scene ship (the hull the simulation reads must survive); it marks each live entry
@@ -170,7 +173,9 @@ The window is untouched by a jump: the snapshots after the target are the record
   (`AttachShipCurves`); a ship that needs a hull and has none (destroyed after the target) gets `RebuildHull`
   (presentation only: `BuildShipValues` → `HydrateShip` → curves → `AddShip` → `SyncTurrets` → aim → impacts; no
   retune, no re-plan, no cut; dropped if another jump lands first); every turret re-aims at `targets.Of`; impacts sync
-  for every ship and object; `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)`; `Mute(rate > 2)`; `onChange`.
+  for every ship and object, cleared first on a hull whose armor or structure fraction rose across the jump
+  (`ImpactsHealed`: the runtime's `SetImpactDamageState` only ever adds armor impacts, so a jump back to full HP kept
+  the dying hull's holes and fires, drawn as big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)`; `Mute(rate > 2)`; `onChange`.
 
 ## Effects across a jump (T3)
 
@@ -205,7 +210,8 @@ left (`ReplayExplosions` before the hulls re-attach, `ReplayEffects` after the t
 `RestoreSim` puts back the live scene and retires the entries of ships a later cue added; the re-fired cue's `ApplyNow`
 adds them again (balls, arrival, retune from cached lookups) and `FinishApply` rebuilds their hulls after the landing
 (drawn once built; they wait off-grid anyway). The cue's group plans on flight numbers (`waitForBuild: false`), so the
-landing ticks repeat, and the builds landing are no simulation input (`BuildIsSimInput`). A cue-added ship without an
+landing ticks repeat, and the builds landing are no simulation input (`BuildIsSimInput`): they neither cut nor hold the
+recording's settle check at a snapshot tick. A cue-added ship without an
 SDE radius still cuts when its build lands (its formation radius comes from the build).
 
 ## Drift (T2b)
@@ -284,9 +290,9 @@ later ones. The tape keeps playing.
   60 exact. The spec asserts < 0.5° at 3 × 30. T2b samples with `world.SampleCurves` over the last `WARMUP_TICKS`.
 - A failed restore (truncated bytes) throws before the swap: the parks, the curves and every field stay as they were.
 
-## Measurements (T2a bench, `SD_BENCH=1`, node on dbxpc, 2026-10-23)
+## Measurements
 
-Ships in rings behind a turning TFI, a quarter orbiting, a quarter on goto orders, the rest following, all sampled
+**The T2a bench** (`SD_BENCH=1`, node on dbxpc, 2026-10-23). Ships in rings behind a turning TFI, a quarter orbiting, a quarter on goto orders, the rest following, all sampled
 every frame. World only (both parks and the world's entries; the director's owners come in T2b's
 `time.window.capture`).
 
@@ -295,6 +301,13 @@ every frame. World only (both parks and the world's entries; the director's owne
 | 50 | 1.6 ms | 6.1 KB | 109 KB | 142 KB | 4.0 ms | 1.3 ms | 0.7 ms | 2307 s |
 | 200 | 2.8 ms | 24 KB | 427 KB | 561 KB | 8.2 ms | 4.3 ms | 0.9 ms | 585 s |
 | 500 | 6.2 ms | 61 KB | 1.0 MB | 1.4 MB | 23.7 ms | 11.2 ms | 3.1 ms | 234 s |
+
+**On the real GPU** (the page's full snapshot: both parks and every owner; NVIDIA Lovelace, 2026-10-23): 10 ships
+(the fight above) capture 0.9 ms, 7 snapshots 1.2 MB (~175 KB each), a jump 70–78 ms. The TFIs vs 10 Feroxes (54 ships):
+capture 4.6–7.2 ms (one spike doubled `every` to 10 s in the first run), ~2.1 MB a snapshot (9 kept 18.6 MB), a `back
+10` / `back 20` 155–189 ms (3–5 ticks), fps 28 right after. Of a jump, the re-simulated ticks cost ~12 ms; the rest is
+`BeginJump`'s teardown and the landing's effects (module effects 29.5 ms). Before the batched clears a `back 10` took
+2.7 s there (2.4 s in `ModuleEffects.Clear`).
 
 The scalar overlay is about two thirds of a snapshot (mostly each ball's typed arrays; the streams under a tenth, the
 entries the rest). The default 120 s window fits the budget even at 500 ships, so the smaller-snapshot optimizations
@@ -310,6 +323,9 @@ stay unneeded.
 - Nothing in a jump may `Retire` a scene ship or `Retune` / `Reconcile` (the hull and the radius are simulation reads).
 - Never call `world.Tick` with a time more than one interval past `master.time` in page code: step boundaries with
   `NextBoundaryTime`, or the master's backlog drop and the one-evolve assumption break.
+- **A report never changes captured state**: get_state runs at no fixed tick, so a report-time prune or memo makes a
+  snapshot depend on polling (`CombatRules.Report` pruned its DPS windows: a false drift, `dealtWindow: 15 ≠ 20
+  entries`, after a replay nobody polled). Prune on the simulation's own path; memos go in `reset`.
 - **New per-tick state in an owner joins its snapshot by itself; a new collaborator or constant field joins its
   `*_CAPTURE` wiring** (or the round-trip spec throws on its function). A new owner gets `Snapshot()` / `Restore()` and
   a round trip.
@@ -329,8 +345,31 @@ stay unneeded.
 - verify-page `--only time:` (headless, 2026-10-23, dbxpc): pause held tick 8 for 2 s with identical positions and
   play resumed; 4× gave +20 ticks in ~5 s with an orbit at 2065–2382 m on a 2000 m range and fleet members
   `in-formation` / `catching-up`; 0.25× gave +1 tick and +1.00 scene s in 4 s; rate 0.5 and pause survived a load.
-- Not yet checked on the real GPU (T3 does: fps and `gpuErrors` at 4× and 0.25×, turret firing effects on Blue's
-  real-time clock in slow motion and pause, the look of a landing).
+- verify-page `--only time:` T3 (headless, 2026-10-23, dbxpc): all 14 pass. 4× fires a default Rifter's 3 guns on
+  every 1.69 s cycle (33 shots in 20.1 scene s, 35.6 expected); `time.timeline` 6.03 at 6 s played, `seek { timeline:
+  3 }` in 1.7 ms with the cue fired, `{ timeline: 1 }` before it; a cue warp-in (`add_fleet_composition` at 5) landed at
+  ticks `{ wr-fc: 14, wr-s-01: 18, wr-s-02: 15 }` from t = 0 three times (live, after a seek before the cue, after a jump
+  to 5.03 s mid-warp), recording kept, no drift; a kill's explosion replayed from a landing 0.25 s before the
+  re-simulation's hide (its sound posted again) and hid 2 s later; 5 missiles in flight at a landing hit once (5 / 5
+  both runs). The check fixes: the Rifter's target sat 1.8 km outside its lock range, and a landed FC keeps its
+  `arrival` report. The first run cut the window at the cue's builds (the settle check counted them): fixed above.
+- The full verify-page on the T2b tree (headless, 2026-10-23): 146 ok, 1 skip (SOF audio without a renderer), 2 FAIL,
+  both pre-existing and filed (`sd-timeline`): "a moving FC dies …" (a race) and "the warp-in shot anchors …".
+- **Real GPU** (Windows Chrome, NVIDIA Lovelace, 2026-10-23, a private hub on 5521; `.scratch/time-control-gpu/` on
+  dbxpc): red 3 Rifters + a Caracal vs blue 3 Punishers at 15 km off the Jita 4-4 CNAP, seed 7, explode, 3 Rifters
+  warping in. A jump 29 s back to 1.5 s before the reinforcements' landing (from 3 s after the first kill): 77.7 ms
+  (3 ticks); the replay matched the first run tick for tick (shots, missile launches and hits, the kill at the same
+  tick, by the same gun), no drift; a plain `back 10` 70 ms. The orbiting Punisher's drawn forward vector after the
+  jump stayed within **0.006°** of the first run's at the same scene time over 3 s (112 frames; frame-to-frame steps
+  0.03°). The killed FC was drawn again before its kill and exploded again at it; a landing inside an explosion
+  replayed it from the start; the 3 warp-in flashes played at the landing; missiles redrawn mid-flight start on their
+  balls (no launcher burst or streak). **Found and fixed**: the dying hull's armor impacts survived the jump (fireballs
+  on a full-HP ship, absent in the live frames at the same time; `ClearImpactDamage` fixed it, the frames then
+  matched). Audio: `backendErrors` 0 throughout; emitters drop to 0 at a jump and come back with the next decodable
+  post (turret and impact sounds here are undecodable PTADPCM, so the explosion brings them back). 4× for 20 s: 86
+  ticks, fps mean 41 / min 37, `gpuErrors` 0, no shortfall; 0.25× for 20 s: 6 ticks, fps 44.6 / min 39, `gpuErrors` 0;
+  a paused frame held for 2 s. Module effects: the TFI fight's 20 running effects were drawn again at a landing (20
+  live before and after `back 6`, none failed, 29.5 ms to apply).
 
 ## Limits
 
@@ -338,3 +377,7 @@ stay unneeded.
   explosion starts on the boundary after its killing shot was due (above).
 - A timeline cue that adds a ship without an SDE radius cuts the window when its build lands (`sd-timeline`).
 - Fleet toggles (`auto_repair`, anchors, personalities) are document edits and cut; journaling them is a follow-up.
+- Missiles relaunched at a landing whose target's hull is being rebuilt (it died after the target) fly undrawn: the
+  rebuild is async (84 ms for a Punisher) and `ShipMissiles.Start` skips a flight with no drawn target (a follow-up).
+- A missile drawn mid-flight starts with an identity launch transform: on its ball (no launcher streak), but its
+  warheads' eject axis is world +Z, which a volley flying another way may show as a hook (unverified; a follow-up).

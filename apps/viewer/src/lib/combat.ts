@@ -437,8 +437,9 @@ export class CombatRules {
   Report(id: string, boundary: number): Maybe<ShipCombatReport> {
     const tally = this.tallies.get(id);
     if (!tally) return null;
-    this.Prune(tally, boundary);
-    const window = (rows: readonly { readonly amount: number }[]): number => Round(rows.reduce((sum, row) => sum + row.amount, 0) / DPS_WINDOW_SECONDS, 1);
+    // Read-only: pruning here would make a time-control snapshot depend on when get_state was called (sd-time).
+    const since = boundary - DPS_WINDOW_SECONDS / this.port.tickSeconds;
+    const window = (rows: readonly { readonly tick: number; readonly amount: number }[]): number => Round(rows.reduce((sum, row) => (row.tick > since ? sum + row.amount : sum), 0) / DPS_WINDOW_SECONDS, 1);
     return {
       dealt: Round(tally.dealt, 1),
       taken: Round(tally.taken, 1),

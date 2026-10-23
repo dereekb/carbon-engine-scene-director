@@ -1,6 +1,6 @@
 import type { ShipDefense } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
-import { DamageModel } from './damage';
+import { DamageModel, ImpactsHealed } from './damage';
 import { RoundTrip } from './state-capture.spec-helper';
 
 const RESONANCES = { em: 0.4, thermal: 0.65, kinetic: 0.75, explosive: 0.9 };
@@ -111,5 +111,18 @@ describe('DamageModel snapshots (sd-time)', () => {
     expect(trip.mutated).not.toEqual(trip.before);
     expect(trip.after).toEqual(trip.before);
     expect(trip.again).toEqual(trip.snapshot);
+  });
+});
+
+describe('ImpactsHealed', () => {
+  it('is true only when armor or structure rose across a jump', () => {
+    const at = (shield: number, armor: number, structure: number) => ({ shield, armor, structure });
+    expect(ImpactsHealed(at(0, 0, 0.4), at(0.8, 1, 1))).toBe(true);
+    expect(ImpactsHealed(at(0, 0.2, 1), at(0, 0.5, 1))).toBe(true);
+    expect(ImpactsHealed(at(0, 0, 0), null)).toBe(true);
+    expect(ImpactsHealed(at(0.1, 1, 1), at(0.9, 1, 1))).toBe(false);
+    expect(ImpactsHealed(at(1, 0.6, 1), at(1, 0.3, 0.9))).toBe(false);
+    expect(ImpactsHealed(null, at(1, 1, 1))).toBe(false);
+    expect(ImpactsHealed(null, null)).toBe(false);
   });
 });

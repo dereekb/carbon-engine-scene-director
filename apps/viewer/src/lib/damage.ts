@@ -317,3 +317,16 @@ function Round(value: number, digits: number): number {
   const scale = 10 ** digits;
   return Math.round(value * scale) / scale;
 }
+
+/**
+ * Whether a drawn hull's armor impacts went stale across a time-control jump (sd-time): the runtime's impact overlay only
+ * ever adds them (SetImpactDamageState grows the holes and their fires toward the damage, never back), so a landing
+ * where armor or structure stands higher than when the jump began clears them before re-arming.
+ *
+ * @param departed - The fractions when the jump began (null: untracked, full).
+ * @param landed - The fractions at the landing (null: untracked, full).
+ * @returns True when armor or structure rose.
+ */
+export function ImpactsHealed(departed: Maybe<Readonly<Record<DefenseLayerName, number>>>, landed: Maybe<Readonly<Record<DefenseLayerName, number>>>): boolean {
+  return (landed?.armor ?? 1) > (departed?.armor ?? 1) || (landed?.structure ?? 1) > (departed?.structure ?? 1);
+}

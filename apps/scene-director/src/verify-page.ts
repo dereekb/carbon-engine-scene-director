@@ -4602,7 +4602,7 @@ try {
 
   await Check("time: fast-forward 4× fires a default Rifter's guns on every cycle", async () => {
     try {
-      await LoadCombatScene([Teamed(Rifter('rifter', [0, 0, 0]), 'red'), Teamed(Punisher('punisher', [0, 0, 30_000]), 'blue')], { seed: 7, death: 'flag' });
+      await LoadCombatScene([Teamed(Rifter('rifter', [0, 0, 0]), 'red'), Teamed(Punisher('punisher', [0, 0, 20_000]), 'blue')], { seed: 7, death: 'flag' });
       await call('engage', { ships: ['rifter'], target: 'punisher' });
       const firing = await WaitFor('the guns fire', 60, (polled) => ((ShipIn(polled, 'rifter').shots ?? 0) > 0 ? null : Show(ShipIn(polled, 'rifter').locks)));
       const guns = ShipGuns(firing, 'rifter').filter((gun) => gun.cycleTime != null);
@@ -4653,7 +4653,11 @@ try {
         for (const ship of group.ships) if (startedAt != null && ship.landsIn != null && landings[ship.id] == null) landings[ship.id] = polled.simulation.tick + ship.landsIn - startedAt;
       }
       if (warping == null && ids.some((id) => polled.ships.find((ship) => ship.id === id)?.arrival?.state === 'warping')) warping = TimeOf(polled)?.timeline ?? null;
-      const arriving = ids.some((id) => polled.ships.find((ship) => ship.id === id)?.arrival != null);
+      // A landed ship keeps its arrival report until it follows or takes an order (the FC never does here).
+      const arriving = ids.some((id) => {
+        const state = polled.ships.find((ship) => ship.id === id)?.arrival?.state;
+        return state != null && state !== 'landed';
+      });
       return ids.every((id) => landings[id] != null) && !arriving && ids.every((id) => polled.ships.some((ship) => ship.id === id)) ? null : Show({ landings, timeline: TimelineOf(polled)?.time });
     });
     return { landings, warping: warping as Maybe<number>, end };
@@ -4680,7 +4684,10 @@ try {
       Expect(Show(first.landings) === Show(second.landings), `landings ${Show(first.landings)} then ${Show(second.landings)}`);
       await TimeControl({ seek: { timeline: first.warping ?? 0 }, pause: true });
       const mid = await call<ViewerState>('get_state');
-      Expect(ids.some((id) => ShipIn(mid, id).arrival?.state === 'warping'), Show(ids.map((id) => ShipIn(mid, id).arrival ?? null)));
+      Expect(
+        ids.some((id) => ShipIn(mid, id).arrival?.state === 'warping'),
+        Show(ids.map((id) => ShipIn(mid, id).arrival ?? null))
+      );
       await TimeControl({ pause: false });
       const third = await CueLandings(ids, 'the group lands after a jump into its warp');
       Expect(Show(first.landings) === Show(third.landings), `landings ${Show(first.landings)} then ${Show(third.landings)} after a jump into the warp`);

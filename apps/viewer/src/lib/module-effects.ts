@@ -186,10 +186,29 @@ export class ModuleEffects {
   }
 
   /**
-   * Removes every effect (a load restarts every module).
+   * Removes every effect (a load restarts every module, a time-control jump starts over). One retire for all of them:
+   * each walks every drawn object for what they share, so one per effect cost seconds in a 54-ship fight (sd-time).
    */
   Clear(): void {
-    for (const entry of [...this.entries.values()]) this.Discard(entry);
+    const roots: object[] = [];
+    for (const entry of [...this.entries.values()]) {
+      this.entries.delete(entry.key);
+      const { drawn } = entry;
+      entry.drawn = null;
+      if (!drawn) continue;
+      try {
+        if (drawn.kind === 'overlay') this.DetachOverlay(drawn);
+        else roots.push(this.Detach(drawn));
+      } catch (error) {
+        this.Record(`${entry.key} teardown: ${ErrorText(error)}`);
+      }
+    }
+    if (!roots.length) return;
+    try {
+      RetireShips(roots, this.retained());
+    } catch (error) {
+      this.Record(`teardown: ${ErrorText(error)}`);
+    }
   }
 
   /**
@@ -436,10 +455,19 @@ export class ModuleEffects {
       this.DetachOverlay(drawn);
       return;
     }
+    RetireShips([this.Detach(drawn)], [...this.retained(), ...this.Roots()]);
+  }
+
+  /**
+   * Takes a beam or trigger out of the scene, its resources still held.
+   *
+   * @returns Its root, to retire.
+   */
+  private Detach(drawn: Exclude<DrawnEffect, { readonly kind: 'overlay' }>): object {
     const root = drawn.kind === 'trigger' ? drawn.root : drawn.stretch;
     if (drawn.added) this.engine.RemoveObject(root);
     if (drawn.kind === 'stretch3') for (const controller of drawn.stretch.controllers) controller.Unlink();
-    RetireShips([root], [...this.retained(), ...this.Roots()]);
+    return root;
   }
 }
 

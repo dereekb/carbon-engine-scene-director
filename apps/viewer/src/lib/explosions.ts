@@ -201,10 +201,31 @@ export class ShipExplosions {
   }
 
   /**
-   * Removes every explosion (a load revives everyone).
+   * Removes every explosion (a load revives everyone, a time-control jump starts over), in one retire: each walks every
+   * drawn object for what they share (sd-time).
    */
   Clear(): void {
-    for (const id of [...this.entries.keys()]) this.Remove(id);
+    const roots: object[] = [];
+    for (const entry of [...this.entries.values()]) {
+      this.entries.delete(entry.id);
+      const { root, child } = entry;
+      entry.root = null;
+      entry.child = null;
+      if (!root) continue;
+      try {
+        child?.Stop();
+        this.engine.RemoveObject(root);
+        roots.push(root);
+      } catch (error) {
+        this.Record(`ship ${entry.id} explosion teardown: ${ErrorText(error)}`);
+      }
+    }
+    if (!roots.length) return;
+    try {
+      RetireShips(roots, this.retained());
+    } catch (error) {
+      this.Record(`explosion teardown: ${ErrorText(error)}`);
+    }
   }
 
   /**
