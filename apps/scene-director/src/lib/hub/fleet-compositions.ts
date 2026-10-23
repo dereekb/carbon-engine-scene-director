@@ -3,14 +3,14 @@
  * answered by the hub. Compositions are saved as files on disk; the built-in examples (FLEET_COMPOSITION_EXAMPLES)
  * are read-only, and a saved composition of the same name shadows one.
  *
- * add_fleet_composition fills each ship line's missing `dna` and `radius` from tools-core's EVE data, then forwards
- * one `add_fleet_composition` patch operation to the viewer (or applies it to a passed `scene` with no tab): the
- * operation itself is pure and looks nothing up.
+ * add_fleet_composition fills each ship line's missing `dna` and `radius` from tools-core's EVE data, resolves `near`
+ * (off a ship, object or celestial, on the commander's radius) and `warpIn.from: { celestial }` through ScenePlaces,
+ * then forwards one `add_fleet_composition` patch operation to the viewer (or applies it to a passed `scene` with no
+ * tab): the operation itself is pure and looks nothing up.
  */
 
 import type { Maybe } from '@dereekb/util';
 import {
-  applySceneOperations,
   countFleetCompositionShips,
   type CompositionShip,
   DEFAULT_FORMATION_RADIUS,
@@ -19,7 +19,6 @@ import {
   isPropModModuleKeyword,
   normalizeFleetComposition,
   normalizePropModName,
-  normalizeScene,
   type PropModModule,
   readEftHeader,
   readEftPropMod,
@@ -29,13 +28,19 @@ import {
   toFleetAnchors
 } from '@scene-director/scene';
 import { FleetCompositionError, type FleetCompositionFileStore } from '../store/composition-files';
+import type { MapDataApi } from './map-data';
 import type { SavedScenesPage } from './saved-scenes';
+import { HasWarpInFrom, IsRecord, ScenePlaces } from './scene-places';
 import { type ResolvedHull, ShipDataError, type ShipDataApi } from './ship-data';
 import { ErrorMessage, ToolError, type ToolArgs } from './tool-call';
 
 export interface FleetCompositionsOptions {
   readonly files: FleetCompositionFileStore;
   readonly shipData: ShipDataApi;
+  /**
+   * The map data, for `near` and `warpIn.from` off a celestial of the scene's location.
+   */
+  readonly mapData: MapDataApi;
   readonly page: SavedScenesPage;
 }
 
@@ -264,13 +269,13 @@ function addedFleet(scene: Maybe<Pick<SceneDocument, 'fleets'>>): Maybe<AddedFle
 export class FleetCompositions {
   readonly files: FleetCompositionFileStore;
   private readonly shipData: ShipDataApi;
-  private readonly page: SavedScenesPage;
+  private readonly places: ScenePlaces;
   private examples: Maybe<Example[]> = null;
 
-  constructor({ files, shipData, page }: FleetCompositionsOptions) {
+  constructor({ files, shipData, mapData, page }: FleetCompositionsOptions) {
     this.files = files;
     this.shipData = shipData;
-    this.page = page;
+    this.places = new ScenePlaces({ shipData, mapData, page });
   }
 
   /**
@@ -292,22 +297,24 @@ export class FleetCompositions {
 
   async add(args: ToolArgs): Promise<object> {
     const composition = await this.load(args);
+    if (args['position'] != null && args['near'] != null) throw new ToolError("give position or near, not both: the FC's place");
+    if (args['position'] == null && args['near'] == null) throw new ToolError("position or near is required: the FC's [x, y, z] in metres, or near { ship | object | celestial, range?, direction? }");
     const [resolved, propMods] = await Promise.all([resolveCompositionHulls({ composition, shipData: this.shipData }), resolveCompositionPropMods({ composition, shipData: this.shipData })]);
     if (resolved.problems.length) throw new FleetCompositionError(resolved.problems);
+    const from = IsRecord(args['warpIn']) ? args['warpIn']['from'] : null;
+    const before = await this.places.Before(args, { read: args['near'] != null || IsRecord(args['facing']) || IsRecord(from) });
     const operation: Record<string, unknown> = { op: 'add_fleet_composition', composition: resolved.composition };
-    for (const key of ['position', 'heading', 'facing', 'fleet', 'team']) if (args[key] != null) operation[key] = args[key];
-
-    let result: object;
-    if (args['scene'] != null) {
-      const { scene, warnings } = applySceneOperations(normalizeScene(args['scene']).scene, [operation]);
-      result = { added: addedFleet(scene), hulls: resolved.hulls, propMods: propMods.propMods, scene, warnings: [...resolved.warnings, ...propMods.warnings, ...warnings], loaded: false };
-    } else if (this.page.Connected()) {
-      const patched = (await this.page.Call('patch_scene', { operations: [operation] })) as { readonly scene?: SceneDocument; readonly warnings?: string[] };
-      result = { added: addedFleet(patched.scene), hulls: resolved.hulls, propMods: propMods.propMods, ...patched, warnings: [...resolved.warnings, ...propMods.warnings, ...(patched.warnings ?? [])] };
-    } else {
-      throw new ToolError(`${this.page.NotConnected().message} Or pass "scene" to build a document without a tab.`);
+    for (const key of ['position', 'heading', 'fleet', 'team']) if (args[key] != null) operation[key] = args[key];
+    if (args['facing'] != null) operation['facing'] = await this.places.ResolveFacing(args['facing'], before.scene);
+    if (args['near'] != null) {
+      const place = await this.places.ResolvePlace(args['near'], { before: before.scene, leadRadius: resolved.composition.commander.radius ?? 0 });
+      operation['position'] = place.position;
+      if (place.heading != null && args['heading'] == null && args['facing'] == null && !HasWarpInFrom(args['warpIn'])) operation['heading'] = place.heading;
     }
-    return result;
+    if (args['warpIn'] != null) operation['warpIn'] = await this.places.ResolveWarpIn(args['warpIn'], before.scene);
+
+    const applied = await this.places.Apply(before, [operation]);
+    return { added: addedFleet(applied.scene), hulls: resolved.hulls, propMods: propMods.propMods, ...applied.rest, warnings: [...resolved.warnings, ...propMods.warnings, ...applied.warnings] };
   }
 
   async save(args: ToolArgs): Promise<object> {

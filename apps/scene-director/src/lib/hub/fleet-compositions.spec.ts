@@ -1,11 +1,16 @@
 import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { applySceneOperations, type MapCelestial, normalizeScene, type SceneDocument, type SceneVector, toLocationPlacement } from '@scene-director/scene';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { FleetCompositions, requireFleetComposition, resolveCompositionHulls, resolveCompositionPropMods } from './fleet-compositions';
-import { MakeFakeShipData, PROP_MOD_LISTING_ROUTE } from './ship-data.testing';
-import { ToolError } from './tool-call';
+import { Locations } from './locations';
+import { MakeFakeMapData } from './map-data.testing';
+import type { SavedScenesPage } from './saved-scenes';
+import { WARP_IN_DOCUMENT_WARNING } from './scene-places';
+import { MakeFakeShipData, PROP_MOD_LISTING_ROUTE, TFI_DNA } from './ship-data.testing';
+import { ToolError, type ToolArgs } from './tool-call';
 
 const GUARDIAN = 'ac3_t2:carthum:amarr';
 const NO_PAGE = {
@@ -16,14 +21,52 @@ const NO_PAGE = {
   }
 };
 
+const CNAP = 'Jita IV - Moon 4 - Caldari Navy Assembly Plant';
+
+/**
+ * A tab holding a document: get_scene returns it; patch_scene applies the operations, records them and answers with
+ * a stand-in arrivals report, as the page does for warpIn.
+ */
+class FakePage implements SavedScenesPage {
+  scene: SceneDocument;
+  readonly patches: Record<string, unknown>[][] = [];
+
+  constructor(scene: unknown) {
+    this.scene = normalizeScene(scene).scene;
+  }
+
+  Connected(): boolean {
+    return true;
+  }
+
+  NotConnected(): ToolError {
+    return new ToolError('not connected');
+  }
+
+  async Call(name: string, args: ToolArgs = {}): Promise<unknown> {
+    let result: unknown = null;
+    if (name === 'get_scene') result = this.scene;
+    else if (name === 'patch_scene') {
+      this.patches.push(args['operations'] as Record<string, unknown>[]);
+      const { scene, warnings, arrivals } = applySceneOperations(this.scene, args['operations']);
+      this.scene = scene;
+      result = { scene, warnings, changes: {}, ...(arrivals ? { arrivals: arrivals.map((arrival) => ({ group: arrival.group, state: 'waiting', ships: arrival.ships.length })) } : {}) };
+    }
+    return result;
+  }
+}
+
 let compositions: FleetCompositions;
 let calls: string[];
 
-beforeEach(async () => {
+function MakeCompositions(page: SavedScenesPage, files: FleetCompositionFileStore): FleetCompositions {
   const fake = MakeFakeShipData();
   calls = fake.calls;
-  const files = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-')));
-  compositions = new FleetCompositions({ files, shipData: fake.shipData, page: NO_PAGE });
+  return new FleetCompositions({ files, shipData: fake.shipData, mapData: MakeFakeMapData().mapData, page });
+}
+
+beforeEach(async () => {
+  compositions = MakeCompositions(NO_PAGE, new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-'))));
 });
 
 describe('resolveCompositionPropMods', () => {
@@ -133,6 +176,51 @@ describe('FleetCompositions', () => {
     await expect(compositions.call('add_fleet_composition', { position: [0, 0, 0] })).rejects.toThrow(/give composition .* or name/u);
     await expect(compositions.call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0] })).rejects.toThrow(/No viewer tab is connected\. Or pass "scene"/u);
     await expect(compositions.call('add_fleet_composition', { name: 'nope', position: [0, 0, 0] })).rejects.toThrow(/no fleet composition "nope"/u);
+  });
+
+  it('refuses position and near together, and neither', async () => {
+    await expect(compositions.call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0], near: { ship: 'x' }, scene: { name: 'x' } })).rejects.toThrow(/give position or near, not both/u);
+    await expect(compositions.call('add_fleet_composition', { name: 'tfis', scene: { name: 'x' } })).rejects.toThrow(/position or near is required/u);
+  });
+
+  it('places the FC off a celestial on its radius, warping in from another, and warns that a document places them', async () => {
+    const { mapData } = MakeFakeMapData();
+    const located = ((await new Locations({ mapData, page: NO_PAGE }).SetLocation({ scene: { name: 'loc' }, celestial: CNAP, range: 30000 })) as { readonly scene: SceneDocument }).scene;
+    const celestials = await mapData.SystemCelestials(30000142);
+    const cnap = celestials.find((celestial) => celestial.name === CNAP) as MapCelestial;
+    const star = celestials.find((celestial) => celestial.kind === 'star') as MapCelestial;
+    const result = (await compositions.call('add_fleet_composition', { name: 'tfis', scene: located, near: { celestial: CNAP, range: 20000 }, warpIn: { from: { celestial: star.name }, stagger: 6 } })) as { added: { commander: string }; scene: SceneDocument; warnings: string[] };
+    const origin = located.location?.origin as SceneVector;
+    const expected = toLocationPlacement({ kind: cnap.kind, position: cnap.position, radius: cnap.radius, range: 20000 + 250 }).origin as SceneVector;
+    const fc = result.scene.ships.find((ship) => ship.id === result.added.commander);
+    for (const axis of [0, 1, 2]) expect(Math.abs((fc?.position[axis] ?? 0) - (expected[axis] - origin[axis]))).toBeLessThanOrEqual(1);
+    const from = star.position.map((value, axis) => Math.round(value - origin[axis])) as SceneVector;
+    const yaw = (Math.atan2((fc?.position[0] ?? 0) - from[0], (fc?.position[2] ?? 0) - from[2]) * 180) / Math.PI;
+    expect(Math.abs((((fc?.rotation[0] ?? 0) - yaw + 540) % 360) - 180)).toBeLessThan(0.01);
+    expect(result.warnings).toContain(WARP_IN_DOCUMENT_WARNING);
+  });
+
+  it("takes a near ship's heading, sends warpIn to the tab and passes its arrivals back; from overrides the heading", async () => {
+    const files = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'fleet-compositions-')));
+    const page = new FakePage({ name: 'tab', ships: [{ id: 'anchor', dna: TFI_DNA, rotation: [90, 0, 0] }] });
+    const tab = MakeCompositions(page, files);
+    const result = (await tab.call('add_fleet_composition', { name: 'tfis', near: { ship: 'anchor', range: 10000 }, warpIn: true })) as { added: { commander: string }; arrivals: unknown; warnings: string[] };
+    const operation = page.patches[0][0];
+    expect(operation).toMatchObject({ warpIn: true, heading: 90 });
+    const fc = page.scene.ships.find((ship) => ship.id === result.added.commander);
+    expect(fc?.position[0]).toBeGreaterThanOrEqual(10000 + 250);
+    expect(Math.abs(fc?.position[2] ?? 1)).toBeLessThanOrEqual(1);
+    expect(result.arrivals).toEqual([{ group: 'tfis', state: 'waiting', ships: 44 }]);
+    expect(result.warnings).not.toContain(WARP_IN_DOCUMENT_WARNING);
+
+    await tab.call('add_fleet_composition', { name: 'tfis', near: { ship: 'anchor', range: 10000 }, warpIn: { from: [0, 0, -100000] } });
+    const second = page.patches[1][0];
+    expect(second['heading']).toBeUndefined();
+    expect(second['warpIn']).toEqual({ from: [0, 0, -100000] });
+  });
+
+  it('refuses a warpIn.from celestial without a location', async () => {
+    await expect(compositions.call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0], scene: { name: 'x' }, warpIn: { from: { celestial: CNAP } } })).rejects.toThrow(/warpIn\.from\.celestial: the scene has no location/u);
   });
 
   it('saves, lists, gets and deletes, with the example read-only and shadowed by a save', async () => {

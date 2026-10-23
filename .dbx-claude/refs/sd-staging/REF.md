@@ -14,11 +14,12 @@
   `{ "op": "stage_engagement", "sides": [...], ... }`) take the same fields with every line's `dna` filled. They
   accept `near.ship` / `near.object` and a ship or object id for `facing` **against the draft** (`staging/draft.ts`),
   so one patch can stage off a ship or object it just added. They refuse celestials and hull names without dna.
-- **`hub/scene-places.ts` `ScenePlaces`** holds the plumbing `Staging` and the objects tools (`sd-objects`) share,
-  moved verbatim out of `staging.ts`: `Before` (the tab's document, or a passed `scene`), `Apply` (one `patch_scene`
-  or a local apply; operation warnings split from the rest of the result), `ResolveRadii`, `ResolvePlace` (`near` off
-  a ship, object or celestial → the lead's point, the implied heading, the reference point) and `ResolveFacing`
-  (`{ celestial }` → a point). `Staging` keeps its constructor options; `staging.spec.ts` guards the extraction.
+- **`hub/scene-places.ts` `ScenePlaces`** holds the plumbing `Staging`, `FleetCompositions` (`add_fleet_composition`'s
+  `near`) and the objects tools (`sd-objects`) share, moved out of `staging.ts`: `Before` (the tab's document, or a
+  passed `scene`; `{ read: false }` skips get_scene), `Apply` (one `patch_scene` or a local apply; operation warnings
+  split from the rest of the result), `ResolveRadii`, `ResolvePlace` (`near` off a ship, object or celestial → the
+  lead's point, the implied heading, the reference point), `ResolveFacing` (`{ celestial }` → a point) and
+  `ResolveWarpIn` (`warpIn.from: { celestial }` → a point). `staging.spec.ts` guards the extraction.
 
 | File | Role |
 |---|---|
@@ -130,6 +131,13 @@ off-grid and land from warp at their placements (Destiny's EntityWarpIn: `sd-des
   (B's is A's + 180°), `add_ship` along its rotation's yaw. `from` (a point, or a ship/object id off the draft; the hub
   turns `{ celestial }` into a point) **sets the heading** (yaw from it to the lead's place) and is refused with
   `heading` / `facing`, for joins, for engagement sides and for `add_ship`.
+- **Hub tools** (`ScenePlaces`): `add_ships` and `add_fleet_composition` forward `warpIn` with `from: { celestial }`
+  resolved to its scene point (`ResolveWarpIn`; a scene with no location is refused; a join's `warpIn` goes through
+  untouched, so the op refuses its `from`); an engagement side's `warpIn` rides on the side as given. Under
+  `warpIn.from` the hub adds no implied heading off a `near` ship or object (it would clash). `Apply` on a passed
+  `scene` (no tab) adds `WARP_IN_DOCUMENT_WARNING` ("warpIn lands ships from warp only in the viewer; this document
+  places them at their landing") when the patch recorded arrivals; with a tab the result passes the page's
+  `arrivals` reports through.
 - **Joins** (`fleet: { id, squad }`) land at their **live** formation slots: `landing: formation`, group
   `<fleet>/<squad>`, leader = the fleet's FC (not in `ships`); the page reads the FC's live position and heading.
 - **The page** (`apps/viewer/src/lib/arrivals.ts`, node-tested; `Director.arrivals`): `Arrivals.Add` parks each ship

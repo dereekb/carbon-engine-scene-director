@@ -76,10 +76,15 @@ Exactly the anchors the fleet rules resolve; nothing re-derived.
   hull with no `dna`, warns when a line's `dna` names another SOF hull than the EVE data. It checks each distinct
   module name (group 46 listing; `PropModByName`), reports `propMods` (`module`, `typeID`, `from`: `sde` / `unknown` /
   `unchecked`); unknown warns and those ships fly the hull-sized default.
-- Tool args: `name` | `composition` (inline), `position` (the FC's), `heading` (yaw°) or `facing` (a point), `fleet?`,
-  `team?`, `warpIn?` (land from warp: `sd-staging` "Warp-in"; `from` sets the heading), `scene?` (edit that document
-  with no tab; result returned, not shown). Result = `patch_scene` result +
-  `added` (`fleet`, `commander`, `ships`), `hulls`, `propMods`.
+- Tool args: `name` | `composition` (inline), `position` (the FC's) **or** `near { ship | object | celestial, range?,
+  direction? }` (exactly one; resolved by `ScenePlaces.ResolvePlace` on the **commander line's** radius, as
+  `add_ships`; off a ship or object it takes that heading unless `heading`, `facing` or `warpIn.from` is given),
+  `heading` (yaw°) or `facing` (a point or `{ celestial }`), `fleet?`, `team?`, `warpIn?` (land from warp: `sd-staging`
+  "Warp-in"; `from` sets the heading, `{ celestial }` resolved to a point), `scene?` (edit that document with no tab;
+  result returned, not shown; a `warpIn` then warns that the document places them at their landing). The tool reads
+  the tab's document (get_scene) only when `near` or a `{ celestial }` needs it. Result = `patch_scene` result (the
+  page's `arrivals` included) + `added` (`fleet`, `commander`, `ships`), `hulls`, `propMods`. `FleetCompositions` takes
+  `mapData` (for celestials).
 - Remove again: `{ "op": "remove_fleet", "fleet": "tfis", "withShips": true }`; look at it with
   `frame_camera { "target": "tfis-fc" }`. The raw op is `{ "op": "add_fleet_composition", "composition", "position",
   "heading"? | "facing"?, "fleet"?, "team"?, "warpIn"? }` (its fleet recorded in the result's `arrivals`) and composes with other ops in one patch.

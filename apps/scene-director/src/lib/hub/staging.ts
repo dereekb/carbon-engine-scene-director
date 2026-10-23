@@ -2,7 +2,8 @@
  * The scene-building tools (`add_ships`, `stage_engagement`), answered by the hub. The hub resolves every name first:
  * hull names to SOF DNA and the EVE radius, compositions by name, and (through ScenePlaces) celestials of the scene's
  * location to scene points and the EVE radii of the fleet a ship joins. Then it forwards one pure `add_ships` / `stage_engagement` patch
- * operation to the viewer (or applies it to a passed `scene` with no tab), and reports the ids it created.
+ * operation to the viewer (or applies it to a passed `scene` with no tab), and reports the ids it created. `warpIn`
+ * (add_ships, and each engagement side) rides on the operation; the page's `arrivals` reports come back in the result.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -28,7 +29,7 @@ import {
 import { type CompositionHullReport, type CompositionPropModReport, type FleetCompositions, requireFleetComposition, resolveCompositionHulls, resolveCompositionPropMods } from './fleet-compositions';
 import type { MapDataApi } from './map-data';
 import type { SavedScenesPage } from './saved-scenes';
-import { IsRecord, ScenePlaces, ThrowProblems, Without } from './scene-places';
+import { HasWarpInFrom, IsRecord, ScenePlaces, ThrowProblems, Without } from './scene-places';
 import type { ResolvedHull, ShipDataApi } from './ship-data';
 import { ErrorMessage, type ToolArgs } from './tool-call';
 
@@ -144,9 +145,10 @@ export class Staging {
       else if (place) operation['position'] = place.position;
       if (args['heading'] != null) operation['heading'] = args['heading'];
       else if (args['facing'] != null) operation['facing'] = await this.places.ResolveFacing(args['facing'], before.scene);
-      else if (place?.heading != null) operation['heading'] = place.heading;
+      else if (place?.heading != null && !HasWarpInFrom(args['warpIn'])) operation['heading'] = place.heading;
       if (args['near'] != null && args['position'] != null) operation['near'] = args['near'];
     }
+    if (args['warpIn'] != null) operation['warpIn'] = joins ? args['warpIn'] : await this.places.ResolveWarpIn(args['warpIn'], before.scene);
     if (fleet) operation['fleet'] = FillSquadRole(fleet, { role: (line['role'] as Maybe<SquadRole>) ?? null, isNew });
     const radii = joins && typeof fleet?.['id'] === 'string' ? await this.places.ResolveRadii(FleetShipIds(before.scene, fleet['id']), before.scene) : null;
     if (radii) operation['radii'] = radii.radii;

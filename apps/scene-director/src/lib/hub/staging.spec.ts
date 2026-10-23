@@ -8,6 +8,7 @@ import { FleetCompositions } from './fleet-compositions';
 import { Locations } from './locations';
 import { MakeFakeMapData } from './map-data.testing';
 import type { SavedScenesPage } from './saved-scenes';
+import { WARP_IN_DOCUMENT_WARNING } from './scene-places';
 import { MakeFakeShipData, SDE, SHIP_ROUTES, TFI_DNA } from './ship-data.testing';
 import { DefaultSquadRole, Staging } from './staging';
 import { ToolError, type ToolArgs } from './tool-call';
@@ -48,9 +49,9 @@ class FakePage implements SavedScenesPage {
     let result: unknown = null;
     if (name === 'get_scene') result = this.scene;
     else if (name === 'patch_scene') {
-      const { scene, warnings } = applySceneOperations(this.scene, args['operations']);
+      const { scene, warnings, arrivals } = applySceneOperations(this.scene, args['operations']);
       this.scene = scene;
-      result = { scene, warnings, ships: [], changes: {} };
+      result = { scene, warnings, ships: [], changes: {}, ...(arrivals ? { arrivals: arrivals.map((arrival) => ({ group: arrival.group, landing: arrival.landing, state: 'waiting' })) } : {}) };
     }
     return result;
   }
@@ -101,8 +102,8 @@ async function Refused(action: Promise<unknown>): Promise<string> {
 
 beforeAll(async () => {
   const { shipData } = MakeFakeShipData(ROUTES);
-  compositions = new FleetCompositions({ files: new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-staging-'))), shipData, page: NO_PAGE });
   const { mapData } = MakeFakeMapData();
+  compositions = new FleetCompositions({ files: new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-staging-'))), shipData, mapData, page: NO_PAGE });
   const set = (await new Locations({ mapData, page: NO_PAGE }).SetLocation({ scene: { name: 'loc' }, celestial: CNAP, range: 30000 })) as { readonly scene: SceneDocument };
   located = set.scene;
   cnap = (await mapData.SystemCelestials(30000142)).find((celestial) => celestial.name === CNAP) as MapCelestial;
@@ -189,6 +190,33 @@ describe('add_ships', () => {
   it('needs a tab or a scene', async () => {
     expect(await Refused(MakeStaging().staging.AddShips({ dna: TFI_DNA }))).toMatch(/Or pass "scene"/u);
   });
+
+  it('warps in from a celestial (the heading from it), and warns that a document places them at their landing', async () => {
+    const result = (await MakeStaging().staging.AddShips({ scene: located, hull: 'Guardian', count: 3, near: { celestial: CNAP, range: 20000 }, warpIn: { from: { celestial: CNAP }, stagger: 2 } })) as Record<string, any>;
+    const origin = located.location?.origin as SceneVector;
+    const station = cnap.position.map((value, axis) => Math.round(value - origin[axis])) as SceneVector;
+    const lead = result['added'].lead;
+    const yaw = (Math.atan2(lead.position[0] - station[0], lead.position[2] - station[2]) * 180) / Math.PI;
+    expect(Math.abs(lead.heading - yaw)).toBeLessThan(0.01);
+    expect(result['warnings']).toContain(WARP_IN_DOCUMENT_WARNING);
+    expect(result['arrivals']).toBeUndefined();
+  });
+
+  it("does not add a near ship's heading under warpIn.from, and passes joins' warpIn and the page's arrivals through", async () => {
+    const page = new FakePage(FLEET_SCENE);
+    const { staging } = MakeStaging(page);
+    await staging.AddShips({ hull: 'Tempest Fleet Issue', near: { ship: 'tfi-1' }, warpIn: { from: [0, 0, -100000] } });
+    const free = (page.calls.at(-1)?.args['operations'] as Record<string, unknown>[])[0];
+    expect(free['heading']).toBeUndefined();
+    expect(free['warpIn']).toEqual({ from: [0, 0, -100000] });
+
+    const joined = (await staging.AddShips({ hull: 'Tempest Fleet Issue', count: 2, fleet: { id: 'tfi', squad: 'dps' }, warpIn: { stagger: 3 } })) as Record<string, any>;
+    const join = (page.calls.at(-1)?.args['operations'] as Record<string, unknown>[])[0];
+    expect(join['warpIn']).toEqual({ stagger: 3 });
+    expect(joined['arrivals']).toEqual([{ group: 'tfi/dps', landing: 'formation', state: 'waiting' }]);
+    expect(joined['warnings']).not.toContain(WARP_IN_DOCUMENT_WARNING);
+    expect(await Refused(staging.AddShips({ hull: 'Tempest Fleet Issue', fleet: { id: 'tfi', squad: 'dps' }, warpIn: { from: { celestial: CNAP } } }))).toMatch(/warpIn\.from/u);
+  });
 });
 
 describe('stage_engagement', () => {
@@ -230,6 +258,17 @@ describe('stage_engagement', () => {
     for (const axis of [0, 1, 2]) expect(Math.abs(center[axis] - (expected[axis] - origin[axis]))).toBeLessThanOrEqual(1);
     const station = cnap.position.map((value, axis) => Math.round(value - origin[axis])) as SceneVector;
     expect(result['engagement'].heading).toBeCloseTo(tangentHeading(station, center), 3);
+  });
+
+  it("passes each side's warpIn to the operation", async () => {
+    const page = new FakePage({ name: 'tab' });
+    const result = (await MakeStaging(page).staging.StageEngagement({ sides: [{ ships: [{ hull: 'Guardian', count: 2 }] }, { ships: [{ hull: 'Guardian' }], warpIn: { stagger: 5, together: false } }] })) as Record<string, any>;
+    const operation = (page.calls.at(-1)?.args['operations'] as Record<string, any>[])[0];
+    expect(operation['sides'][1].warpIn).toEqual({ stagger: 5, together: false });
+    expect(operation['sides'][0].warpIn).toBeUndefined();
+    expect(result['arrivals']).toEqual([{ group: 'red', landing: 'document', state: 'waiting' }]);
+    const local = (await MakeStaging().staging.StageEngagement({ scene: { name: 'x' }, sides: [{ ships: [{ hull: 'Guardian' }], warpIn: true }, { ships: [{ hull: 'Guardian' }] }] })) as Record<string, any>;
+    expect(local['warnings']).toContain(WARP_IN_DOCUMENT_WARNING);
   });
 
   it('surfaces the refusals', async () => {

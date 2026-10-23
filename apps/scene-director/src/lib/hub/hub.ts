@@ -200,7 +200,7 @@ export class Hub implements ToolCaller {
       Call: (name: string, args?: ToolArgs) => this.CallPage(name, args)
     };
     this.savedScenes = new SavedScenes({ files: scenes, page });
-    this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, page });
+    this.fleetCompositions = new FleetCompositions({ files: compositions, shipData: this.shipData, mapData: this.mapData, page });
     this.locations = new Locations({ mapData: this.mapData, page });
     this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, page });
     this.objects = new ObjectTools({ objectData: this.objectData, shipData: this.shipData, mapData: this.mapData, page });

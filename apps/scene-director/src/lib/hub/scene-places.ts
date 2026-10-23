@@ -1,8 +1,8 @@
 /**
- * Places in a scene, for the hub's scene-building tools (`add_ships`, `stage_engagement`, `add_objects`): the
- * document to build on, one patch_scene for the result, `near` a ship, object or celestial of the scene's location
- * resolved to a scene point, `facing: { celestial }` resolved to a point, and the EVE radii of ships already in the
- * scene. Staging and the objects tools share it.
+ * Places in a scene, for the hub's scene-building tools (`add_ships`, `stage_engagement`, `add_fleet_composition`,
+ * `add_objects`): the document to build on, one patch_scene for the result, `near` a ship, object or celestial of the
+ * scene's location resolved to a scene point, `facing: { celestial }` and `warpIn.from: { celestial }` resolved to
+ * points, and the EVE radii of ships already in the scene. Staging, fleet compositions and the objects tools share it.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -64,6 +64,21 @@ export interface ResolvedPlace {
   readonly reference: SceneVector;
 }
 
+/**
+ * The warning of a warpIn applied to a passed document (no tab): only the page flies arrivals.
+ */
+export const WARP_IN_DOCUMENT_WARNING = 'warpIn lands ships from warp only in the viewer; this document places them at their landing';
+
+/**
+ * True when a tool's `warpIn` gives `from`, which sets the heading (so no implied heading is added).
+ *
+ * @param warpIn - The tool's warpIn.
+ * @returns Whether it gives from.
+ */
+export function HasWarpInFrom(warpIn: unknown): boolean {
+  return IsRecord(warpIn) && warpIn['from'] != null;
+}
+
 export class ScenePlaces {
   private readonly shipData: ShipDataApi;
   private readonly mapData: MapDataApi;
@@ -79,12 +94,14 @@ export class ScenePlaces {
    * The document to build on: the passed `scene`, else the tab's (empty before any load).
    *
    * @param args - The tool's arguments.
+   * @param options - Whether the tab's document is read.
+   * @param options.read - False skips get_scene when nothing resolves against the document (its scene is then empty).
    * @returns The normalized document and whether a tab holds it.
    */
-  async Before(args: ToolArgs): Promise<SceneBefore> {
+  async Before(args: ToolArgs, options: { readonly read?: boolean } = {}): Promise<SceneBefore> {
     let before: SceneBefore;
     if (args['scene'] != null) before = { scene: normalizeScene(args['scene']).scene, live: false };
-    else if (this.page.Connected()) before = { scene: normalizeScene((await this.page.Call('get_scene')) ?? createEmptyScene()).scene, live: true };
+    else if (this.page.Connected()) before = { scene: options.read === false ? createEmptyScene() : normalizeScene((await this.page.Call('get_scene')) ?? createEmptyScene()).scene, live: true };
     else throw new ToolError(`${this.page.NotConnected().message} Or pass "scene" to build a document without a tab.`);
     return before;
   }
@@ -100,8 +117,8 @@ export class ScenePlaces {
   async Apply(before: SceneBefore, operations: readonly Record<string, unknown>[]): Promise<SceneApplied> {
     let applied: SceneApplied;
     if (!before.live) {
-      const { scene, warnings } = applySceneOperations(before.scene, [...operations]);
-      applied = { scene, warnings, rest: { scene, loaded: false } };
+      const { scene, warnings, arrivals } = applySceneOperations(before.scene, [...operations]);
+      applied = { scene, warnings: arrivals?.length ? [...warnings, WARP_IN_DOCUMENT_WARNING] : warnings, rest: { scene, loaded: false } };
     } else {
       const patched = (await this.page.Call('patch_scene', { operations })) as Record<string, unknown> & { readonly scene?: SceneDocument; readonly warnings?: string[] };
       applied = { scene: patched.scene ?? null, warnings: patched.warnings ?? [], rest: Without(patched, ['warnings']) };
@@ -198,6 +215,25 @@ export class ScenePlaces {
       if (facing['celestial'] == null) throw new ToolError('facing must be [x, y, z], a ship or object id, or { celestial }');
       if (!before.location) throw new ToolError('facing.celestial: the scene has no location; set_location first');
       resolved = ToScene((await this.ResolveCelestial(facing['celestial'], before.location)).position, before.location);
+    }
+    return resolved;
+  }
+
+  /**
+   * `warpIn`: a `from: { celestial }` becomes its scene point (it only sets the heading); anything else passes through
+   * for the operation to read.
+   *
+   * @param warpIn - The candidate.
+   * @param before - The document.
+   * @returns The warpIn for the operation.
+   */
+  async ResolveWarpIn(warpIn: unknown, before: SceneDocument): Promise<unknown> {
+    let resolved = warpIn;
+    const from = IsRecord(warpIn) ? warpIn['from'] : null;
+    if (IsRecord(warpIn) && IsRecord(from)) {
+      if (from['celestial'] == null) throw new ToolError('warpIn.from must be [x, y, z], a ship or object id, or { celestial }');
+      if (!before.location) throw new ToolError('warpIn.from.celestial: the scene has no location; set_location first');
+      resolved = { ...warpIn, from: ToScene((await this.ResolveCelestial(from['celestial'], before.location)).position, before.location) };
     }
     return resolved;
   }
