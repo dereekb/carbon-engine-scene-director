@@ -12,3 +12,4 @@ export * from './lib/objects';
 export * from './lib/extent';
 export * from './lib/cinema';
 export * from './lib/waypoints';
+export * from './lib/weapons';

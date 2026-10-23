@@ -27,10 +27,10 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
   (`hub/remote-hub.ts`, same `Call` surface as `Hub`; `hub/tool-call.ts`). A joined hub keeps the owner's scenes and
   fleets directories.
 - **HTTP routes** (`hub.ts`): `/build`, `/resfileindex.txt`, `/resource/<path>`, `/ship-stats`, `/prop-mod`,
-  `/fit/type`, `/dogma/types`, `/dogma/skills` (`sd-fittings`), `/audio/library`, `/audio/path/<encoded res:/ path>`
-  (streams, forwards `Range`), `/map/system`, `/ws`. The hub's HTTP layer is GET-only; tools-core POSTs go through
-  `hub/sde-client.ts` (`SdeClient`, shared by `ShipData` and `DogmaData`: the SDE build pin, the cache, the failure
-  mapping).
+  `/fit/type`, `/dogma/types`, `/dogma/skills` (`sd-fittings`), `/weapon` (`sd-weapons`), `/audio/library`,
+  `/audio/path/<encoded res:/ path>` (streams, forwards `Range`), `/map/system`, `/ws`. The hub's HTTP layer is
+  GET-only; tools-core POSTs go through `hub/sde-client.ts` (`SdeClient`, shared by `ShipData`, `DogmaData` and
+  `WeaponData`: the SDE build pin, the cache, the failure mapping).
 
 ## Layout
 

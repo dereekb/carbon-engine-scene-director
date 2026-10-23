@@ -28,7 +28,7 @@ effects and play its sounds (below). Research behind the design: the dbx-claude 
 | `staging/add-ships.ts` | `pushStagedShips` moves a staged ship's inline fit into `fits` |
 | `fitting/dogma.ts` | `evaluateShipDogma` (the evaluator, below), `stackingFactor`, `STACKING_EXEMPT_CATEGORIES`, `DOGMA_OPERATIONS`, `DOGMA_ATTRIBUTES` |
 | `fitting/typed-fit.ts` | `typeEftFit` (the typed fit), `eftTypeNames`, `fittingTypeIDs`, `toDogmaModules`, `selectFittedModules` (module selectors) |
-| `fitting/categories.ts` | `MODULE_CATEGORIES`, `moduleCategoryOf` (group, refined by effect: scram / point, siege / triage, weapons) |
+| `fitting/categories.ts` | `MODULE_CATEGORIES`, `moduleCategoryOf` (group, refined by effect: scram / point, siege / triage, weapons), `WEAPON_KIND_EFFECTS` / `weaponKindOf` (42 turret, 40 launcher: `sd-weapons`) |
 | `fitting/defense.ts` | `shipDefenseOf`, `shipCapacitorOf`, `shipTargetingOf`, `moduleNumbersOf` (cycle, capacitor need, range, falloff, repair), `localRepairRates` |
 | `stats/ship-stats.ts` | `computeShipStats`'s `dogma` input and `dogmaShipStats` (the dogma path, below) |
 | `apps/scene-director/src/lib/hub/ship-stats-tool.ts` | `ship_stats`' `fit`, `active` and `trace` (`ResolveFit`, `AnswerFitted`) |
@@ -123,8 +123,8 @@ tools-core):
   `Unknown type in EFT text` becomes `not-found`. **Names are case-sensitive** (tools-core matches exact English
   names; `warp scrambler ii` is not found). Slot from the item's `slot` (`medium` → `mid`; `null` for drones, charges,
   cargo); group and category from `types/<id>?lang=en`. Cached per exact name.
-- **`Bundle(ids)`**: `types/<id>?lang=en` (name, group, category, published, the `mass` / `radius` / `capacity` /
-  `volume` columns) + `sde/typeDogma/<id>` (attribute values, effect ids, the `isDefault` effect); then every effect
+- **`Bundle(ids)`**: `types/<id>?lang=en` (name, group, category, published, `raceID`, the `mass` / `radius` /
+  `capacity` / `volume` columns) + `sde/typeDogma/<id>` (attribute values, effect ids, the `isDefault` effect); then every effect
   the types carry (`sde/dogmaEffects/<id>`: `effectCategoryID`, `guid`, `isWarpSafe`, `isOffensive`, `isAssistance`,
   the duration / discharge / range / falloff / tracking attribute ids, `modifierInfo`); then the attributes those
   modifiers and effects name, `FIXED_ATTRIBUTE_IDS`, and each record's `maxAttributeID` (`sde/dogmaAttributes/<id>`:
@@ -137,15 +137,21 @@ tools-core):
 
 ### The fixture (`fitting/fixtures/dogma-3632936.json`)
 
-The merge of `/dogma/types` for 6 hulls (587 Rifter, 17732 TFI, 11987 Guardian, 19720 Revelation, 22474 Damnation,
-37604 Apostle), the 13 `BAKED_PROP_MODS` and 24 modules (plates, membranes, DC II, extender, hardeners, local / remote /
-ancillary reps and paste, booster, scram, point, web, cap transmitter, siege, triage, suppressor, rig, neut, a turret)
-with `/dogma/skills`: 555 types, 814 effects, 764 attributes, 514 KB. Specs read it from disk (`readFileSync`), the
-hub's through `DogmaFixture()`. **Re-capture when CCP rebalances** (and re-check the stats parity spec, C3):
+The merge of `/dogma/types` for 14 hulls (587 Rifter, 17732 TFI, 11987 Guardian, 19720 Revelation, 22474 Damnation,
+37604 Apostle, and for the default weapons 597 Punisher, 16227 Ferox, 641 Megathron, 642 Apocalypse, 621 Caracal, 4310
+Tornado, 47270 Vedmak, 54732 Stormbringer), the 13 `BAKED_PROP_MODS`, 24 modules (plates, membranes, DC II, extender,
+hardeners, local / remote / ancillary reps and paste, booster, scram, point, web, cap transmitter, siege, triage,
+suppressor, rig, neut, a turret), the default weapons' 23 turrets, 3 launchers and their charges, and the TFI's and
+Revelation's cargo charges (`sd-weapons`), with `/dogma/skills`: 612 types, 854 effects, 773 attributes, 545 KB. Every
+type record carries its `raceID` when it has one (2026-10-23). Specs read it from disk (`readFileSync`), the hub's
+through `DogmaFixture()`. **Re-capture when CCP rebalances** (and re-check the stats parity spec, C3, and the weapon
+records, `sd-weapons`):
 
 ```sh
 node bin/scene-director.js serve --port 5521 --scenes /tmp/sd/scenes --fleets /tmp/sd/fleets &   # tools-core on 5510
 IDS=587,17732,11987,19720,22474,37604,438,440,12058,12076,12068,12084,41239,41253,5945,5975,35662,35660,41238,20347,11269,2048,3831,2281,13992,1183,3540,33103,28668,10850,448,3244,527,26914,3608,16487,4292,4294,4409,31900,25894,12271,2929
+IDS=$IDS,597,16227,641,642,621,4310,47270,54732,2889,2913,37306,3041,3520,3057,37298,3074,3082,3090,37303,3178,3146,3186,37302,47914,47918,47922,52915,54742,54748,54753,2404,2410,19739
+IDS=$IDS,185,193,201,17668,246,254,262,17686,222,230,238,17648,47924,47928,47932,52916,54784,54786,54783,12775,12779,21894,41332,41330
 curl -s "http://127.0.0.1:5521/dogma/types?ids=$IDS" -o types.json && curl -s http://127.0.0.1:5521/dogma/skills -o skills.json
 # merge: { sdeBuild, types, effects, attributes } = union of both, keys sorted numerically, compact JSON
 ```
@@ -159,6 +165,10 @@ curl -s "http://127.0.0.1:5521/dogma/types?ids=$IDS" -o types.json && curl -s ht
   by category: drones and fighters, `charges` (the ammo pool), `cargo` (cargo modules are never fitted). Names that do
   not resolve are listed in `unknown` and left out of dogma.
 - `prop: true` marks the first fitted MWD / AB (group 46) in written order: the module the ship's `propMod` stands for.
+- `weapon: 'turret' | 'launcher'` marks a module with effect 42 `turretFitted` / 40 `launcherFitted`, when the bundle
+  has its effects (`weaponKindOf`). `fittingTypeIDs` returns the modules, their loaded charges **and the cargo
+  charges**, so a turret with none loaded can take one from cargo (`loadCargoCharges`, `sd-weapons`) with its dogma
+  already in the bundle.
 - `toDogmaModules`: resolved modules only, `/OFFLINE` ones `offline`, the rest `online` unless the state callback says
   otherwise. `selectFittedModules(fit, selectors)`: a key (`mid-2`), a category keyword, `all`, or a module name in any
   case; it returns the modules in fit order and the selectors that matched none.

@@ -85,6 +85,11 @@ export interface DogmaTypeRecord {
   readonly capacity?: number;
   readonly volume?: number;
   /**
+   * The type's race (1 Caldari, 2 Minmatar, 4 Amarr, 8 Gallente, 16 Jove, 128 ORE, 135 Triglavian, 168 EDENCOM), when
+   * it has one: a hull's default weapons follow it.
+   */
+  readonly raceID?: number;
+  /**
    * The type's dogma attribute values by attribute id.
    */
   readonly attributes: Record<string, number>;
@@ -242,7 +247,7 @@ function readTypeRecord(value: unknown): Maybe<DogmaTypeRecord> {
       groupID: value['groupID'],
       categoryID: value['categoryID'],
       published: value['published'] === true,
-      ...optionalNumbers(value, ['mass', 'radius', 'capacity', 'volume', 'defaultEffect'] as const),
+      ...optionalNumbers(value, ['mass', 'radius', 'capacity', 'volume', 'raceID', 'defaultEffect'] as const),
       attributes,
       effects: value['effects'].filter((id): id is number => isId(id))
     };

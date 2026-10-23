@@ -181,6 +181,7 @@ export class DogmaData implements DogmaDataApi {
       const value = ReadNumber(type[key]);
       if (value != null) columns[key] = value;
     }
+    const raceID = ReadNumber(type['raceID']);
     return {
       typeID,
       name: ReadName(type['name']) ?? `type ${typeID}`,
@@ -188,6 +189,7 @@ export class DogmaData implements DogmaDataApi {
       categoryID: ReadNumber(type['categoryID']) ?? 0,
       published: type['published'] === true,
       ...columns,
+      ...(raceID == null ? {} : { raceID }),
       attributes: Object.fromEntries(dogma.attributes),
       effects: [...dogma.effects].filter((id): id is number => typeof id === 'number'),
       ...(dogma.defaultEffect == null ? {} : { defaultEffect: dogma.defaultEffect })

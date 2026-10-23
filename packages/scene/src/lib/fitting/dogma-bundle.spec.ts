@@ -11,7 +11,9 @@ describe('dogma bundles', () => {
     expect(problems).toEqual([]);
     expect(bundle).toEqual(FIXTURE);
     expect(Object.values(FIXTURE.types).filter((type) => type.categoryID === 16)).toHaveLength(512);
-    expect(FIXTURE.types['17732']).toMatchObject({ name: 'Tempest Fleet Issue', groupID: 27, categoryID: 6 });
+    expect(FIXTURE.types['17732']).toMatchObject({ name: 'Tempest Fleet Issue', groupID: 27, categoryID: 6, raceID: 2 });
+    expect(bundle?.types['54732']?.raceID).toBe(168);
+    expect(bundle?.types['2048']?.raceID).toBeUndefined();
   });
 
   it('drops malformed records with a problem, and refuses a value that is no bundle', () => {

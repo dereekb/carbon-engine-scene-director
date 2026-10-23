@@ -35,6 +35,8 @@ describe('DogmaData', () => {
     expect(Object.keys(bundle.types)).toEqual(['587', '2048']);
     expect(bundle.types['2048']).toEqual(fixture.types['2048']);
     expect(bundle.missing).toEqual([99999999]);
+    expect(bundle.types['587'].raceID).toBe(2);
+    expect(bundle.types['2048']).not.toHaveProperty('raceID');
     for (const effect of fixture.types['2048'].effects) expect(bundle.effects[effect]).toEqual(fixture.effects[effect]);
     expect(bundle.effects['2302'].modifiers).toContainEqual({ func: 'ItemModifier', domain: 'shipID', modifiedAttributeID: 267, modifyingAttributeID: 267, operation: 0 });
     expect(bundle.attributes['267']).toEqual({ attributeID: 267, name: 'armorEmDamageResonance', stackable: false, highIsGood: false, defaultValue: 1, maxAttributeID: 1527 });

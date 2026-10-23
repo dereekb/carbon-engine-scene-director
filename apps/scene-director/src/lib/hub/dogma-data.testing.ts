@@ -54,7 +54,7 @@ export function DogmaRoutes(): Record<string, Answer> {
   const routes: Record<string, Answer> = { '/eve/latest/build': { json: { build: SDE, builds: { sde: SDE } } } };
   const groups = new Map<number, number[]>();
   for (const type of Object.values(fixture.types)) {
-    routes[`${base}/types/${type.typeID}?lang=en`] = { json: { typeID: type.typeID, groupID: type.groupID, categoryID: type.categoryID, published: type.published, mass: type.mass, radius: type.radius, capacity: type.capacity, volume: type.volume, name: { text: type.name, language: 'en' } } };
+    routes[`${base}/types/${type.typeID}?lang=en`] = { json: { typeID: type.typeID, groupID: type.groupID, categoryID: type.categoryID, published: type.published, mass: type.mass, radius: type.radius, capacity: type.capacity, volume: type.volume, raceID: type.raceID, name: { text: type.name, language: 'en' } } };
     routes[`${base}/sde/typeDogma/${type.typeID}`] = {
       json: { table: 'typeDogma', payload: { dogmaAttributes: Object.entries(type.attributes).map(([attributeID, value]) => ({ attributeID: Number(attributeID), value })), dogmaEffects: type.effects.map((effectID) => ({ effectID, isDefault: effectID === type.defaultEffect })) } }
     };

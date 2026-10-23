@@ -5,7 +5,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { moduleCategoryOf, type ModuleCategory } from './categories';
+import { moduleCategoryOf, type ModuleCategory, weaponKindOf, type WeaponKind } from './categories';
 import type { DogmaBundle, FitTypeAnswer, FitTypeCategory } from './dogma-bundle';
 import type { DogmaModuleInput, DogmaModuleState } from './dogma';
 import type { EftFit, EftItemLine, EftLine, EftSlot } from './eft';
@@ -30,6 +30,10 @@ export interface FittedModule {
   readonly groupID: Maybe<number>;
   readonly slot: EftSlot;
   readonly category: ModuleCategory;
+  /**
+   * A turret or launcher (effect 42 / 40), when the bundle knows the module's effects.
+   */
+  readonly weapon?: WeaponKind;
   readonly offline?: true;
   readonly charge?: FittedModuleCharge;
   /**
@@ -115,13 +119,16 @@ export function typeEftFit(fit: EftFit, config: TypeEftFitConfig): ShipFitting {
     const isProp = !prop && type?.groupID === PROP_MOD_GROUP;
     if (isProp) prop = true;
     const charge = line.charge ? resolve(line.charge) : null;
+    const effects = type?.typeID == null ? null : bundle?.types[type.typeID]?.effects;
+    const weapon = weaponKindOf(effects);
     typed.modules.push({
       key: `${slot}-${index}`,
       name: type?.name ?? line.name,
       typeID: type?.typeID ?? null,
       groupID: type?.groupID ?? null,
       slot,
-      category: type ? moduleCategoryOf(type.groupID, type.typeID == null ? null : bundle?.types[type.typeID]?.effects) : 'other',
+      category: type ? moduleCategoryOf(type.groupID, effects) : 'other',
+      ...(weapon ? { weapon } : {}),
       ...(line.offline ? { offline: true as const } : {}),
       ...(line.charge ? { charge: { name: charge?.name ?? line.charge, typeID: charge?.typeID ?? null } } : {}),
       ...(isProp ? { prop: true as const } : {}),
@@ -156,7 +163,8 @@ export function eftTypeNames(fit: EftFit): string[] {
 }
 
 /**
- * The type ids the dogma of a typed fit needs: its modules and their charges (drones and cargo play no part).
+ * The type ids the dogma of a typed fit needs: its modules and their charges, and the cargo charges a turret with
+ * none loaded takes its ammo from (loadCargoCharges). Drones and other cargo play no part.
  *
  * @param fitting - The typed fit.
  * @returns The ids, once each.
@@ -167,6 +175,7 @@ export function fittingTypeIDs(fitting: ShipFitting): number[] {
     if (module.typeID != null) ids.add(module.typeID);
     if (module.charge?.typeID != null) ids.add(module.charge.typeID);
   }
+  for (const charge of fitting.charges) if (charge.typeID != null) ids.add(charge.typeID);
   return [...ids];
 }
 

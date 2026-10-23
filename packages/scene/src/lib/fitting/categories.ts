@@ -78,6 +78,26 @@ export const MODULE_CATEGORY_GROUPS: Readonly<Record<number, ModuleCategory>> = 
 export const MODULE_CATEGORY_EFFECTS: Readonly<Record<number, ModuleCategory>> = { 5934: 'scram', 39: 'point', 6582: 'siege', 6581: 'triage', 42: 'weapon', 40: 'weapon' };
 
 /**
+ * What kind of weapon a module is: a turret or a missile launcher.
+ */
+export type WeaponKind = 'turret' | 'launcher';
+
+/**
+ * The effects that make a module a weapon: 42 turretFitted, 40 launcherFitted.
+ */
+export const WEAPON_KIND_EFFECTS: Readonly<Record<number, WeaponKind>> = { 42: 'turret', 40: 'launcher' };
+
+/**
+ * A module's weapon kind, from its effects.
+ *
+ * @param effects - Its effect ids.
+ * @returns `turret`, `launcher`, or null for a module that is no weapon.
+ */
+export function weaponKindOf(effects: Maybe<readonly number[]>): Maybe<WeaponKind> {
+  return effects?.map((effect) => WEAPON_KIND_EFFECTS[effect]).find(Boolean) ?? null;
+}
+
+/**
  * A module's category.
  *
  * @param groupID - Its EVE group.

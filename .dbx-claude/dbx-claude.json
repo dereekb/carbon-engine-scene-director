@@ -574,6 +574,52 @@
             ]
           }
         ]
+      },
+      {
+        "name": "sd-weapons",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "turret",
+              "turrets",
+              "weapon",
+              "weapons",
+              "gun",
+              "guns",
+              "set_target",
+              "EveTurretSet",
+              "firing",
+              "impact",
+              "impacts",
+              "muzzle",
+              "rate of fire",
+              "default weapons",
+              "autocannon",
+              "railgun",
+              "blaster",
+              "laser"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/weapons/",
+              "hub/weapon-data",
+              "apps/viewer/src/lib/weapon-lookup",
+              "apps/viewer/src/lib/turret",
+              "apps/viewer/src/lib/targets",
+              "apps/viewer/src/lib/shots"
+            ],
+            "every": 12
+          },
+          {
+            "toolNames": [
+              "mcp__scene-director__set_target",
+              "mcp__scene-director__switch_modules"
+            ]
+          }
+        ]
       }
     ]
   }

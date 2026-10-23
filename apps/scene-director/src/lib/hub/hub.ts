@@ -5,7 +5,8 @@
  * HTTP routes: /build, /resfileindex.txt, /resource/<path> (tools-core proxies),
  * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /prop-mod?module= (a prop mod's numbers by type id
  * or EVE name), /fit/type?name=&hull= (a fit line's EVE type and slot), /dogma/types?ids= (a DogmaBundle of up to 200
- * types) and /dogma/skills (every published skill's), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
+ * types) and /dogma/skills (every published skill's), /weapon?type= (a weapon's graphic: its .black, slot collection and
+ * SOF faction), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
  * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range),
  * /health, and the viewer files.
  *
@@ -43,6 +44,7 @@ import { MapData, type MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
 import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
 import { DogmaData, type DogmaDataApi, MAX_DOGMA_TYPE_IDS } from './dogma-data';
+import { WeaponData, type WeaponDataApi } from './weapon-data';
 import { SdeClient } from './sde-client';
 import { AnswerPropMod, AnswerShipStats } from './ship-stats-tool';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
@@ -102,6 +104,10 @@ export interface HubOptions {
    */
   readonly dogmaData?: DogmaDataApi;
   /**
+   * Weapon graphics from tools-core (`/weapon`); shares ShipData's client when both are defaults.
+   */
+  readonly weaponData?: WeaponDataApi;
+  /**
    * tools-core's map routes, for the location tools; read from `toolsCore.url` on ShipData's pinned SDE build when omitted.
    */
   readonly mapData?: MapDataApi;
@@ -155,6 +161,7 @@ export class Hub implements ToolCaller {
   readonly fleetCompositions: FleetCompositions;
   readonly shipData: ShipDataApi;
   readonly dogmaData: DogmaDataApi;
+  readonly weaponData: WeaponDataApi;
   readonly mapData: MapDataApi;
   readonly locations: Locations;
   readonly staging: Staging;
@@ -168,12 +175,14 @@ export class Hub implements ToolCaller {
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
 
-  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, dogmaData, mapData, objectData, log = LogToStderr }: HubOptions = {}) {
+  constructor({ host = '127.0.0.1', port = DEFAULT_PORT, toolsCore = new ToolsCore(), viewerDirectory = null, scenes = new SceneFileStore(), compositions = new FleetCompositionFileStore(), shipData, dogmaData, weaponData, mapData, objectData, log = LogToStderr }: HubOptions = {}) {
     this.host = host;
     this.port = port;
     this.toolsCore = toolsCore;
     this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
-    this.dogmaData = dogmaData ?? new DogmaData({ sde: this.shipData instanceof ShipData ? this.shipData.sde : new SdeClient({ url: toolsCore.url }) });
+    const sde = this.shipData instanceof ShipData ? this.shipData.sde : new SdeClient({ url: toolsCore.url });
+    this.dogmaData = dogmaData ?? new DogmaData({ sde });
+    this.weaponData = weaponData ?? new WeaponData({ sde });
     this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
     this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), resourceBuild: () => this.toolsCore.ResolveBuild() });
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
@@ -388,6 +397,8 @@ export class Hub implements ToolCaller {
       await this.ServePropMod(url, response);
     } else if (pathname === '/fit/type' || pathname === '/dogma/types' || pathname === '/dogma/skills') {
       await this.ServeJson(response, () => this.AnswerDogma(pathname, url));
+    } else if (pathname === '/weapon') {
+      await this.ServeJson(response, () => this.AnswerWeapon(url));
     } else if (pathname === '/audio/library') {
       await this.StreamProxy({ source: () => this.toolsCore.AudioLibraryUrl(), request, response });
     } else if (pathname.startsWith('/audio/path/')) {
@@ -445,6 +456,18 @@ export class Hub implements ToolCaller {
       answer = this.dogmaData.Skills();
     }
     return answer;
+  }
+
+  /**
+   * A weapon's graphic for the page: `type` is its EVE type id. Errors map as /ship-stats does.
+   *
+   * @param url - The request URL.
+   * @returns The WeaponGraphic.
+   */
+  private async AnswerWeapon(url: URL): Promise<unknown> {
+    const type = url.searchParams.get('type') ?? '';
+    if (!/^\d+$/u.test(type)) throw new ShipDataError('invalid', 'type must be an EVE type id');
+    return this.weaponData.Weapon(Number(type));
   }
 
   /**

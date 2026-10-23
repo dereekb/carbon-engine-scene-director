@@ -44,10 +44,23 @@ describe('typeEftFit', () => {
     const tfi = typed(FITS['tfi']);
     const cargoModules = tfi.cargo.filter((item) => item.category === 'module').map((item) => item.name);
     expect(cargoModules).toEqual(['100MN Afterburner II', 'Signature Radius Suppressor I', 'Stasis Webifier II', 'Warp Scrambler II']);
-    expect(tfi.charges.map((item) => [item.name, item.quantity])).toEqual([['Nanite Repair Paste', 250]]);
+    expect(tfi.charges.map((item) => [item.name, item.quantity])).toEqual([
+      ['Barrage L', 1800],
+      ['Hail L', 2000],
+      ['Nanite Repair Paste', 250],
+      ['Republic Fleet EMP L', 1000]
+    ]);
     for (const name of cargoModules) expect(fittingTypeIDs(tfi)).not.toContain(fixtureTypeID(name));
     expect(tfi.modules.some((module) => module.name === '100MN Afterburner II')).toBe(false);
-    expect(tfi.unknown).toContain('Barrage L');
+    expect(tfi.unknown).toContain('Republic Fleet Fusion L');
+  });
+
+  it('marks turrets and launchers by their effects, and ids the cargo charges for dogma', () => {
+    const tfi = typed(FITS['tfi']);
+    expect(tfi.modules.filter((module) => module.weapon).map((module) => [module.key, module.weapon])).toEqual(['high-0', 'high-1', 'high-3', 'high-4', 'high-6', 'high-7'].map((key) => [key, 'turret']));
+    expect(typed('[Caracal, x]\nHeavy Missile Launcher II').modules[0]).toMatchObject({ category: 'weapon', weapon: 'launcher' });
+    expect(typeEftFit(parseEftFit(FITS['tfi']), { answer: fixtureAnswer }).modules.some((module) => module.weapon)).toBe(false);
+    expect(fittingTypeIDs(tfi)).toEqual(expect.arrayContaining(['Barrage L', 'Hail L', 'Republic Fleet EMP L'].map(fixtureTypeID)));
   });
 
   it("keeps the Damnation's lowercase /offline bursts offline and its cargo bursts out of the fit", () => {

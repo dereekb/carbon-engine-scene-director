@@ -38,6 +38,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
   module effects
 - `sd-locations`: the document's location, tools-core map quirks, name resolution (doc: `dressing`)
 - `sd-cinema`: the cinematic camera: hardpoints, the shot spec and moves, waypoints, `FreeCamera`, takeover, letterbox
+- `sd-weapons`: turrets on every ship (the fit's or default guns), mounting, targets, firing on the weapon cycle,
+  impacts, and the shot hook Combat rules builds on
 
 When a change alters behavior a ref describes, update the ref in the same commit (a new area gets a new `sd-*` ref,
 declared with its triggers in `.dbx-claude/dbx-claude.json` `references.project`, and a row in the README's

@@ -17,6 +17,7 @@ import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
 import type { ToolsCoreApi } from './tools-core';
 import { MakeFakeObjectData } from './object-data.testing';
 import { MakeFakeDogmaData } from './dogma-data.testing';
+import { MakeFakeWeaponData } from './weapon-data.testing';
 
 /** Where the fake tools-core's audio URLs point: a local server a spec starts. */
 let audioUpstream = 'http://127.0.0.1:9';
@@ -363,6 +364,20 @@ describe('fit routes', () => {
       expect(Object.keys(((await (await fetch(`${fits.url}dogma/skills`)).json()) as { types: object }).types)).toHaveLength(512);
     } finally {
       await fits.Stop();
+    }
+  });
+
+  it('GET /weapon answers a weapon graphic and maps failures', async () => {
+    const weapons = await StartHub({ shipData: MakeFakeShipData().shipData, weaponData: MakeFakeWeaponData() });
+    try {
+      expect(await (await fetch(`${weapons.url}weapon?type=2929`)).json()).toMatchObject({ typeID: 2929, name: '800mm Repeating Cannon II', kind: 'turret', slot: 'turrets', size: 3, sofFactionName: 'brutor' });
+      const missing = await fetch(`${weapons.url}weapon?type=448`);
+      expect(missing.status).toBe(404);
+      expect(await missing.json()).toMatchObject({ failure: 'not-found' });
+      expect((await fetch(`${weapons.url}weapon?type=abc`)).status).toBe(400);
+      expect((await fetch(`${weapons.url}weapon`)).status).toBe(400);
+    } finally {
+      await weapons.Stop();
     }
   });
 });
