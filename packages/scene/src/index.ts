@@ -17,3 +17,4 @@ export * from './lib/combat';
 export * from './lib/arrivals';
 export * from './lib/logi';
 export * from './lib/personalities';
+export * from './lib/timeline';

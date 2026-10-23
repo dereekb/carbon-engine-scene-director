@@ -746,6 +746,23 @@
             ]
           }
         ]
+      },
+      {
+        "name": "sd-timeline",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": ["timeline", "cue", "cues", "add_cue", "update_cue", "remove_cue", "set_timeline", "clear_timeline", "ship orders", "TimelinePlayer", "ShipScripts", "OnBeforeBoundary", "liveEdits", "play start"]
+          },
+          {
+            "pathContains": ["packages/scene/src/lib/timeline/", "apps/viewer/src/lib/timeline", "apps/viewer/src/lib/ship-scripts"],
+            "every": 12
+          },
+          {
+            "toolNames": ["mcp__scene-director__timeline"]
+          }
+        ]
       }
     ]
   }

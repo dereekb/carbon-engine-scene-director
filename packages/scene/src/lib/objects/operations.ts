@@ -3,6 +3,7 @@ import { DNA_PATTERN, isPlainObject, type JsonObject, readId, readNumber, readSh
 import { largeSceneWarning } from '../extent';
 import type { FleetOperationContext } from '../fleets/operations';
 import { removeCalledTarget } from '../fleets/targets';
+import { removeTimelineReferences } from '../timeline/prune';
 import type { SceneVector } from '../scene';
 import { readStagingDraft, type StagingDraft, stagingTakenIds } from '../staging/draft';
 import { readFacing, readStagingNear, readStagingPrefix, readStagingRadii, resolveStagingNear, stagingNearReference, type StagingReadContext } from '../staging/add-ships';
@@ -84,6 +85,7 @@ export function applyObjectOperation(operation: JsonObject, context: FleetOperat
         const camera = draft['camera'];
         if (isPlainObject(camera) && camera['target'] === operation['id']) camera['target'] = null;
         removeCalledTarget(String(operation['id']), context);
+        removeTimelineReferences({ objects: [String(operation['id'])] }, context);
       }
       break;
     }

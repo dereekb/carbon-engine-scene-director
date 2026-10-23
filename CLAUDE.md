@@ -46,6 +46,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
   remote reps locking
 - `sd-personalities`: fleet personalities: the `cjs-fleet-personality/1` templates, the hub library and embedding,
   pilot traits, and the FC brain (succession, handover, calls, stances, free fire)
+- `sd-timeline`: the scene's script: `timeline` cues and ship `orders`, validation against the projected scene, `adds`,
+  the timeline ops and pruning; later the page player, live vs authored, determinism
 
 When a change alters behavior a ref describes, update the ref in the same commit (a new area gets a new `sd-*` ref,
 declared with its triggers in `.dbx-claude/dbx-claude.json` `references.project`, and a row in the README's

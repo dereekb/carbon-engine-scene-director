@@ -26,13 +26,15 @@
   hostility; independent of fleets), `position`, `rotation`, `type?`, `stats?`, `propMod?`, `fit?` (EFT text or a key
   of `fits`: `sd-fittings`), `pilot?` (`{ command?, reaction? }` in [0, 1], higher better: FC ability and how fast
   it answers fleet orders, `personalities/pilots.ts`; a pilot name and other keys are reserved, stored with a warning;
-  stored for fleet personalities, not acted on yet), `orders?` (reserved: stored, not played).
+  stored for fleet personalities, not acted on yet), `orders?` (the ship's own script: order_ship steps with `after` /
+  `duration`, `timeline/steps.ts`, `sd-timeline`).
 - Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?` (`fleets[].personality?` names a built-in
   or a `personalities` key), `objects?`, `fits?` (EFT text by key; omitted when empty), `personalities?` (custom
   `cjs-fleet-personality/1` templates by key, never a built-in name; each resolves through `extends` to `line`;
   `personalities/`; normalized before fleets so the fleets' names check), `combat?` (`{ seed?, death? }`: the seed every shot's roll is keyed by, an integer 0 … 2³² − 1,
   default 1; `death` `"explode"` (default) or `"flag"`; omitted when empty; `combat/document.ts`, `sd-combat`),
-  `location?`, `timeline?` (reserved).
+  `location?`, `timeline?` (the scene's script: cues at a time, each running one lever; validated against the scene
+  projected to the cue's time, `timeline/`, `sd-timeline`). Both are validated and stored; the page plays them from T2.
 - Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
   `position`, `rotation`, `radius?` (the radius order ranges use: add_objects fills the type's SDE radius, or its SOF
   bounding radius where the SDE has none or gives a wreck its 14 m placeholder; without one the page takes the SOF
@@ -54,7 +56,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 
 | Op family | Ops | Where |
 |---|---|---|
-| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`; `stats` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list with a warning; `remove_object` prunes the same) | `scene.ts` |
+| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`, `orders`; `stats` and `orders` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list and from the timeline's cues and ship steps, with a warning; `remove_object`, `remove_fleet`, `remove_wing` and `remove_squad` prune the same) | `scene.ts` |
 | scene | `set_camera`, `set_environment` (merged), `rename`, `set_location` (whole), `clear_location` | `scene.ts` |
 | fleets | `add_/update_/remove_fleet`, `..._wing`, `..._squad`, `move_to_squad`, `remove_from_fleet`, `set_anchor`; `update_fleet` / `_wing` / `_squad` `set { targets }` edits a group's called targets and `set { autoRepair }` its logi auto-repair (`null` clears) | `fleets/operations.ts`, `fleets/targets.ts` (`sd-fleets`, doc `targets`), `logi/auto-repair.ts` (`sd-logi`) |
 | compositions | `add_fleet_composition` | `compositions/operation.ts` (`sd-fleets` → `compositions`) |
@@ -63,6 +65,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | fits | `set_fits { fits: { key: text \| null } }` (merged; `null` deletes a key no ship uses) | `fitting/operation.ts` (`sd-fittings`) |
 | personalities | `set_personalities { personalities: { key: template \| null } }` (merged; `null` deletes a key no fleet uses; a fleet picks one with `update_fleet set { personality }`) | `personalities/document.ts` |
 | combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
+| timeline | `add_cue { cue }` / `update_cue { id, set }` (an action replaces the cue's and clears `adds`) / `remove_cue { id }` / `set_timeline { timeline \| null }` / `clear_timeline` | `timeline/operations.ts` (`sd-timeline`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 
 The result is `{ scene, warnings, arrivals? }`: `arrivals` lists the groups a `warpIn` added (`sd-staging` "Warp-in");
@@ -94,6 +97,7 @@ branch of `applyOperation` in `scene.ts`.
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 | `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |
+| `orders` | kept ships whose `orders` changed: their scripts restart (T2, `sd-timeline`); timeline edits need no diff field |
 
 `load_scene` / `open_scene` restart every ship at rest at its document placement; a patch touches only what it changes.
 Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP and kills) is **never written to the document**, so a

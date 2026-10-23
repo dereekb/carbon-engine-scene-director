@@ -48,17 +48,30 @@ describe('scene documents', () => {
     }
   });
 
-  it('unknown keys warn and are dropped; reserved keys are kept with a warning', () => {
+  it('unknown keys warn and are dropped; the timeline and ship orders are validated, a pilot name stays reserved', () => {
     const { scene, warnings } = normalizeScene({
       colour: 'red',
-      timeline: [{ at: 1 }],
-      ships: [{ id: 'a', dna: 'af1_t1:amarrbase:amarr', speed: 3, orders: [{ orbit: 'b' }] }]
+      timeline: [{ at: 1, order_ship: { id: 'a', order: { type: 'stop' } } }],
+      ships: [
+        { id: 'a', dna: 'af1_t1:amarrbase:amarr', speed: 3, orders: [{ type: 'orbit', target: 'b', range: 500 }], pilot: { name: 'Jo' } },
+        { id: 'b', dna: 'mf1_t1:minmatarbase:minmatar' }
+      ]
     });
     expect((scene as unknown as Record<string, unknown>)['colour']).toBeUndefined();
     expect((scene.ships[0] as unknown as Record<string, unknown>)['speed']).toBeUndefined();
-    expect(scene.ships[0].orders).toEqual([{ orbit: 'b' }]);
-    expect(scene.timeline).toEqual([{ at: 1 }]);
-    expect(warnings).toHaveLength(4);
+    expect(scene.ships[0].orders).toEqual([{ type: 'orbit', target: 'b', range: 500, speed: 1 }]);
+    expect(scene.timeline).toEqual({ cues: [{ id: 'cue-1', at: 1, order_ship: { id: 'a', order: { type: 'stop' } } }] });
+    expect(warnings.filter((warning) => /colour|speed|pilot/.test(warning))).toHaveLength(3);
+    expect(warnings.some((warning) => /reserved for a later phase and is stored but not played/.test(warning))).toBe(false);
+    expect(catchSceneError(() => normalizeScene({ ships: [{ id: 'a', dna: 'af1_t1:amarrbase:amarr', orders: [{ orbit: 'b' }] }] })).problems.join('\n')).toMatch(/orders\[0\]\.type must be one of/);
+  });
+
+  it('diffs ship orders: a kept ship whose script changed restarts it', () => {
+    const before = normalizeScene({ ships: [...duel.ships.map((ship) => ({ ...ship }))] }).scene;
+    const after = applySceneOperations(before, [{ op: 'update_ship', id: 'a', set: { orders: [{ type: 'stop' }] } }]).scene;
+    expect(diffScenes(before, after).orders.map((ship) => ship.id)).toEqual(['a']);
+    expect(diffScenes(after, applySceneOperations(after, [{ op: 'update_ship', id: 'a', set: { orders: null } }]).scene).orders.map((ship) => ship.id)).toEqual(['a']);
+    expect(diffScenes(null, after).orders).toEqual([]);
   });
 
   it('operations edit a copy and validate the result', () => {

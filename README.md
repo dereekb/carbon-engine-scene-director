@@ -57,8 +57,8 @@ What works today:
   letterbox and a clean HUD, directed by Claude over MCP: hardpoint listing,
   shots, sequences and a named shot library.
 
-Damage, explosions and timelines come in later phases; the
-document's `orders` and `timeline` fields stay reserved until then.
+The document's `timeline` and ship `orders` are validated and stored but not
+played yet; playing them, time control, movie mode and movie export come in later phases.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -215,6 +215,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Combat: locks, hit chance, damage, kills, explosions | [`sd-combat`](.dbx-claude/refs/sd-combat/REF.md) |
 | Logi auto-repair: the `autoRepair` field, repair-target selection, `auto_repair` | [`sd-logi`](.dbx-claude/refs/sd-logi/REF.md) |
 | Fleet personalities: templates, the library, pilot traits, the FC brain | [`sd-personalities`](.dbx-claude/refs/sd-personalities/REF.md) |
+| The timeline and ship orders: cues, steps, validation, the timeline ops | [`sd-timeline`](.dbx-claude/refs/sd-timeline/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

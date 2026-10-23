@@ -17,6 +17,11 @@ import { keepSceneArrivals, readWarpIn, type SceneArrival, toArrivalLane } from 
 import { applyPersonalityOperation, normalizeScenePersonalities, PERSONALITY_OPERATIONS } from './personalities/document';
 import type { FleetPersonality } from './personalities/personality';
 import { normalizeShipPilot, pilotFlightPart, type SceneShipPilot } from './personalities/pilots';
+import { normalizeSceneTimeline } from './timeline/normalize';
+import { normalizeShipOrderSteps, type SceneShipStep, type ShipStepName, shipStepNameWarning } from './timeline/steps';
+import { applyTimelineOperation, TIMELINE_OPERATIONS } from './timeline/operations';
+import { removeTimelineReferences } from './timeline/prune';
+import type { SceneTimeline } from './timeline/timeline';
 /**
  * The scene document: the JSON a person or Claude writes to describe a scene,
  * and the only state a saved scene keeps. The page translates it into runtime
@@ -71,9 +76,10 @@ export interface SceneShip {
    */
   fit?: string;
   /**
-   * Reserved for the movement phase: stored, not played yet.
+   * The ship's own script (timeline/steps.ts): order_ship orders it flies in turn from play start, each with `after`
+   * (seconds to wait first) and `duration` (seconds it lasts). Omitted when empty.
    */
-  orders?: unknown;
+  orders?: SceneShipStep[];
   /**
    * The pilot's traits (personalities/pilots.ts): `command` (FC ability) and `reaction`, 0..1. Any other key, or a
    * pilot name, is reserved for the character system: stored, not used yet. Ships fly with the max-skills pilot.
@@ -150,9 +156,10 @@ export interface SceneDocument {
    */
   combat?: SceneCombat;
   /**
-   * Reserved for the timeline phase: stored, not played yet.
+   * The scene's script (timeline/timeline.ts): cues at a time from play start, each running one lever (a ship or fleet
+   * order, prop mods, modules, targets, a camera shot, a document patch). Omitted when it has no cues.
    */
-  timeline?: unknown;
+  timeline?: SceneTimeline;
 }
 
 export interface NormalizedScene {
@@ -206,6 +213,10 @@ export interface SceneDiff {
    * Whether the combat settings changed: the seed takes effect for later shots, the death mode for later deaths.
    */
   readonly combat: boolean;
+  /**
+   * Ships present before and after whose `orders` changed: the page restarts their scripts.
+   */
+  readonly orders: SceneShip[];
 }
 
 /**
@@ -213,14 +224,13 @@ export interface SceneDiff {
  */
 type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
 
-/**
- * Keys reserved for later phases; accepted and kept, but not acted on yet.
- */
-const RESERVED_SCENE_KEYS = ['timeline'] as const;
-const RESERVED_SHIP_KEYS = ['orders'] as const;
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', 'personalities', 'combat', 'timeline']);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders']);
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'fits', 'personalities', 'combat', ...RESERVED_SCENE_KEYS]);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', ...RESERVED_SHIP_KEYS]);
+/**
+ * Until the page plays them (the timeline's player lands in the next slice), a document with a script says so.
+ */
+export const TIMELINE_NOT_PLAYED_WARNING = 'timeline and ship orders are validated and stored; the page plays them from the next release';
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
 
@@ -290,12 +300,14 @@ export function normalizeScene(input: unknown): NormalizedScene {
   const ships = input['ships'];
   if (ships !== undefined && !Array.isArray(ships)) problems.push('ships must be an array');
   const ids = new Set<string>();
+  const scripted: { readonly ship: SceneShip; readonly index: number; readonly orders: unknown }[] = [];
   for (const [index, ship] of (Array.isArray(ships) ? ships : []).entries()) {
     const normalized = normalizeShip(ship, `ships[${index}]`, { problems, warnings, fits: fits.fits });
     if (!normalized) continue;
     if (ids.has(normalized.id)) problems.push(`ships[${index}].id "${normalized.id}" is used more than once`);
     ids.add(normalized.id);
     scene.ships.push(normalized);
+    if (isPlainObject(ship) && ship['orders'] != null) scripted.push({ ship: normalized, index, orders: ship['orders'] });
   }
 
   const objects = normalizeSceneObjects({ input: input['objects'], shipIds: ids });
@@ -319,11 +331,7 @@ export function normalizeScene(input: unknown): NormalizedScene {
   problems.push(...combat.problems);
   warnings.push(...combat.warnings);
   if (combat.combat) scene.combat = combat.combat;
-  for (const key of RESERVED_SCENE_KEYS) {
-    if (input[key] === undefined) continue;
-    scene[key] = structuredClone(input[key]);
-    warnings.push(`${key} is reserved for a later phase and is stored but not played yet`);
-  }
+  normalizeScript({ input, scene, scripted, targetIds: new Set([...ids, ...objects.ids]), problems, warnings });
 
   if (problems.length) throw new SceneError(problems);
   return { scene, warnings };
@@ -337,8 +345,8 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "add_ship", ship, warpIn? }   warpIn (true, or { stagger?, together? }): it lands from warp at its placement,
  *                                       along its rotation's yaw (the result's arrivals; the page plans it)
  *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot? } }
- *                                       each key replaces the ship's value (stats and propMod as a whole); null clears
- *                                       type, stats, propMod, fit and pilot
+ *                                       each key replaces the ship's value (stats, propMod and orders as a whole); null
+ *                                       clears type, stats, propMod, fit, pilot and orders
  *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused) and off
  *                                       every fleet's, wing's and squad's called targets, with a warning
  *   { op: "set_camera", camera }            merged into the current camera
@@ -386,6 +394,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_combat", seed?: n | null, death?: "explode" | "flag" | null }
  *                                       merged into the document's combat; null resets a field (see
  *                                       combat/document.ts)
+ *   { op: "add_cue", cue }   { op: "update_cue", id, set }   { op: "remove_cue", id }   { op: "set_timeline", timeline }
+ *   { op: "clear_timeline" }               the timeline's cues (see timeline/operations.ts); removing a ship, object,
+ *                                       fleet, wing or squad prunes the cues and ship steps naming it, with a warning
  *
  * @param scene - A normalized document.
  * @param operations - The edits.
@@ -449,6 +460,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
         if (next.camera['target'] === operation['id']) next.camera['target'] = null;
         removeShipFromFleets(String(operation['id']), context);
         removeCalledTarget(String(operation['id']), context);
+        removeTimelineReferences({ ships: [String(operation['id'])] }, context);
       }
       break;
     }
@@ -479,6 +491,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (FIT_OPERATIONS.has(String(operation['op']))) applyFitOperation(operation, context);
       else if (COMBAT_OPERATIONS.has(String(operation['op']))) applyCombatOperation(operation, context);
       else if (PERSONALITY_OPERATIONS.has(String(operation['op']))) applyPersonalityOperation(operation, context);
+      else if (TIMELINE_OPERATIONS.has(String(operation['op']))) applyTimelineOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
   }
 }
@@ -488,8 +501,8 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move, relabel, retune, switch and regroup, whether the environment, camera,
- *   fleets or location changed, and what changed in the objects.
+ * @returns The ships to add, remove, rebuild, move, relabel, retune, switch, regroup and restart the scripts of, whether
+ *   the environment, camera, fleets or location changed, and what changed in the objects.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
   const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
@@ -508,7 +521,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     regrouped: [],
     location: !sameJson(before?.location ?? null, after.location ?? null),
     objects: diffSceneObjects(before?.objects ?? [], after.objects ?? []),
-    combat: !sameJson(before?.combat ?? null, after.combat ?? null)
+    combat: !sameJson(before?.combat ?? null, after.combat ?? null),
+    orders: []
   };
   const membershipsBefore = toFleetMemberships(before ?? {});
   const membershipsAfter = toFleetMemberships(after);
@@ -527,8 +541,41 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     }
     if (old && !sameJson(membershipsBefore.get(id), membershipsAfter.get(id))) diff.regrouped.push(ship);
     if (old && (old.propMod?.active === true) !== (ship.propMod?.active === true)) diff.switched.push(ship);
+    if (old && !sameJson(old.orders ?? null, ship.orders ?? null)) diff.orders.push(ship);
   }
   return diff;
+}
+
+interface NormalizeScriptInput {
+  readonly input: JsonObject;
+  readonly scene: SceneDocument;
+  readonly scripted: readonly { readonly ship: SceneShip; readonly index: number; readonly orders: unknown }[];
+  readonly targetIds: ReadonlySet<string>;
+  readonly problems: string[];
+  readonly warnings: string[];
+}
+
+/**
+ * Reads the ships' orders, then the timeline (last: its projection applies patch cues to the rest of the document), and
+ * warns about step targets that are neither an id the document holds nor one a cue adds.
+ */
+function normalizeScript(input: NormalizeScriptInput): void {
+  const { scene, problems, warnings } = input;
+  const memberships = toFleetMemberships(scene);
+  const names: ShipStepName[] = [];
+  for (const { ship, index, orders } of input.scripted) {
+    const steps = normalizeShipOrderSteps({ input: orders, where: `ships[${index}].orders`, self: ship.id, targets: input.targetIds, inFleet: memberships.has(ship.id) });
+    problems.push(...steps.problems);
+    warnings.push(...steps.warnings);
+    names.push(...steps.names);
+    if (steps.steps) ship.orders = steps.steps;
+  }
+  const timeline = normalizeSceneTimeline({ input: input.input['timeline'], scene, apply: applySceneOperations, project: !problems.length });
+  problems.push(...timeline.problems);
+  warnings.push(...timeline.warnings);
+  for (const name of names) if (!timeline.addedTargets.has(name.target)) warnings.push(shipStepNameWarning(name));
+  if (timeline.timeline) scene.timeline = timeline.timeline;
+  if (scene.timeline || scene.ships.some((ship) => ship.orders)) warnings.push(TIMELINE_NOT_PLAYED_WARNING);
 }
 
 function normalizeEnvironment(input: unknown, problems: string[], warnings: string[]): SceneEnvironment {
@@ -611,10 +658,6 @@ function normalizeShip(input: unknown, where: string, context: NormalizeShipCont
   warnings.push(...fit.warnings);
   if (fit.fit != null) ship.fit = fit.fit;
 
-  if (input['orders'] !== undefined) {
-    ship.orders = structuredClone(input['orders']);
-    warnings.push(`${where}.orders is reserved for a later phase and is stored but not played yet`);
-  }
   const pilot = normalizeShipPilot({ input: input['pilot'], where: `${where}.pilot` });
   problems.push(...pilot.problems);
   warnings.push(...pilot.warnings);
