@@ -76,7 +76,7 @@ function spliceCalls(fleets: SceneFleet[], calls: ReadonlyMap<string, readonly s
  * @param fleet - The fleet.
  * @returns Its ships, each once.
  */
-function fleetOrder(fleet: SceneFleet): string[] {
+export function toFleetShipOrder(fleet: SceneFleet): string[] {
   const ships = new Set<string>([fleet.commander]);
   for (const wing of fleet.wings) if (wing.commander) ships.add(wing.commander);
   for (const wing of fleet.wings) for (const squad of wing.squads) if (squad.commander) ships.add(squad.commander);
@@ -94,7 +94,7 @@ function fleetOrder(fleet: SceneFleet): string[] {
  * @returns The acting commander; null when nobody in the fleet is alive.
  */
 export function toDefaultFleetSuccessor(fleet: SceneFleet, gone: ReadonlySet<string>): Maybe<string> {
-  return fleetOrder(fleet).find((ship) => !gone.has(ship)) ?? null;
+  return toFleetShipOrder(fleet).find((ship) => !gone.has(ship)) ?? null;
 }
 
 /**
@@ -111,7 +111,7 @@ export function toDefaultFleetSuccessor(fleet: SceneFleet, gone: ReadonlySet<str
  */
 export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(scene: S, gone: ReadonlySet<string>, overlay: LiveFleetOverlay = {}): LiveFleetView<S> {
   const fleets = scene.fleets ?? [];
-  const touched = fleets.filter((fleet) => fleetOrder(fleet).some((ship) => gone.has(ship)));
+  const touched = fleets.filter((fleet) => toFleetShipOrder(fleet).some((ship) => gone.has(ship)));
   if (!touched.length && !overlay.calls?.size) return { scene, changes: new Map(), warnings: [] };
 
   const cloned = structuredClone(fleets);
@@ -121,7 +121,7 @@ export function toLiveFleetScene<S extends { readonly fleets?: SceneFleet[] }>(s
   const changes = new Map<string, LiveFleetChange>();
   const dropped = new Set<string>();
   for (const fleet of touched) {
-    const order = fleetOrder(fleet);
+    const order = toFleetShipOrder(fleet);
     const destroyed = order.filter((ship) => gone.has(ship));
     const successor = toDefaultFleetSuccessor(fleet, gone);
     if (!successor) {
