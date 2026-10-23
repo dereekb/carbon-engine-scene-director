@@ -215,9 +215,12 @@ with remove_ship's warnings; a fleet with nobody alive is dropped. Never written
   rules: no more damage until a load, its kill not repeated. Repairs still land on it.
 - Tallies: dealt / taken, a 20 s trailing DPS window, shots / hits / misses, the 3 latest rows fired (`lastHits`) and
   taken (`lastTaken`), contributors, `Attackers` (who shot it in the window). Scene totals: shots, hits.
-- **Director wiring**: one `OnBoundary` listener, in order: `combat.Recharge(tick s)` (impact overlays re-armed when
-  the shield moved > 0.1 %), `locks.Boundary(boundary, WantedLocks())`, `Engagements(boundary)` (an engaged ship's
-  matching turrets back `online` switch active again), `ModuleEvents(modules.Boundary(boundary))`. `Shots` resolves the
+- **Director wiring**: one `OnBoundary` listener, in order: `RemoveDead(boundary)`, `combat.Recharge(tick s)` (impact
+  overlays re-armed when the shield moved > 0.1 %), `SyncFleetTargets(boundary)` (the fleet targeting lever: members
+  take their groups' next live called targets, locks asked at `boundary − 1`; `sd-fleets` doc `targets`),
+  `locks.Boundary(boundary, WantedLocks())` (wanted: targets, turret aims, then called members' pre-locks under
+  `maxLocks`), `Engagements(boundary)` (an engaged ship's matching turrets back `online` switch active again, then
+  `fleetTargets.Armed()` members with `["turret"]`), `ModuleEvents(modules.Boundary(boundary))`. `Shots` resolves the
   boundary's shots before the `OnShot` listeners (the hook's contract is unchanged) and `SyncImpactState` follows the
   damage. A destroyed ship is no target: `ShipTargets` and `ShipModules` `HasShip` and the locks' `IsTargetable` are
   `world.Curves(id) != null && !combat.IsDestroyed(id)`. On a kill (`Killed`) every target on it clears
@@ -299,14 +302,18 @@ shared part, a `globalExplosion` container, timing values). The client picks one
 ## State to snapshot (time control)
 
 Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies, kills, destroyed,
-spools), the `ModuleCycle` activation counters, `Director.engagements`, and `Director.deaths` (kill, explosion choice,
-start, hidden, `removeTick`, gone). The RNG is the document's seed, so a re-simulation rolls the same; explosions
+spools), the `ModuleCycle` activation counters, `Director.engagements`, `FleetTargets` (own marks, called targets,
+holds, responses, the last calls and primaries: `sd-fleets` doc `targets`), and `Director.deaths` (kill, explosion
+choice, start, hidden, `removeTick`, gone). The RNG is the document's seed, so a re-simulation rolls the same; explosions
 re-trigger from their kills' times.
 
 ## Seams
 
-- Fleet targeting lever: members armed through `engage`, `SetShipTarget` for called primaries, `ShipLocks.Keep` for
-  pre-locks, `OnKill` to move on, `CombatRules.Attackers`.
+- Fleet targeting lever (built, `sd-fleets` doc `targets`): `SetShipTarget(…, { requestedAt })` for called primaries;
+  `Engagements` arms `FleetTargets.Armed()` like an engagement; pre-locks join `WantedLocks` under `maxLocks` (not
+  `ShipLocks.Keep`: sticky, and at the limit it can block the primary's own lock); the move-on is the boundary sync
+  before the lock sweep (not `OnKill`, which runs inside `Shots` and would re-enter ShipModules for no earlier first
+  shot); `Director.OnPrimary(listener)` reports each group's primary change for the automatic camera.
 - Logi auto-repair: `DamageModel.Fractions` / `Report`, `CombatRules.Report(id).dps.taken`, `Attackers(id)`.
 - Missiles: a `missile` kind through `Resolve` with the shared `applyLayeredDamage`.
 

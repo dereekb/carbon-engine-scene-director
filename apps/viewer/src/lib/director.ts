@@ -91,6 +91,12 @@ import {
   fitTextOf,
   isFleetDocumentOrder,
   type CalledTargetStatus,
+  calledTargetsOf,
+  describeFleetGroup,
+  type FleetGroup,
+  type FleetTargetsOrder,
+  type ResolvedFleetOrder,
+  toFleetGroupKey,
   normalizeFleetOrderRequest,
   toFleetOrderOperations,
   toPilotDelays,
@@ -194,6 +200,7 @@ import {
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
+import { type CalledPrimaryChange, type FleetGroupCalledReport, FleetTargets, type ShipCallReport, type ShipTargetSource } from './fleet-targets';
 import { FleetFollowing, type ShipFollowingReport } from './following';
 import { Arrivals, WARP_IN_HIDDEN_DISTANCE } from './arrivals';
 import { EncodePng, type CameraEye, type DrawnCamera, type Engine, type EngineStats } from './engine';
@@ -416,6 +423,10 @@ export interface SetTargetResult {
     readonly target: Maybe<string>;
     readonly previous?: string;
     /**
+     * `called` when clearing its own target handed the ship its group's call (FleetTargets).
+     */
+    readonly source?: ShipTargetSource;
+    /**
      * The ship's turrets (its fit's, or its default guns).
      */
     readonly turrets: number;
@@ -447,9 +458,48 @@ export interface EngageResult {
 
 export interface CeaseFireResult {
   readonly tick: number;
-  readonly ships: { readonly id: string; readonly modules: string[]; readonly unlocked?: true }[];
+  readonly ships: {
+    readonly id: string;
+    readonly modules: string[];
+    readonly unlocked?: true;
+    /**
+     * A fleet member under its groups' calls: `hold` keeps the call and its locks unarmed, `stand-down` drops it
+     * (FleetTargets), until its group calls again, it is engaged, or a load.
+     */
+    readonly held?: 'hold' | 'stand-down';
+  }[];
   readonly skipped: { readonly id: string; readonly reason: string }[];
 }
+
+/**
+ * What an order_fleet targets order did, beside order_fleet's usual fields.
+ */
+export interface FleetTargetsOrderResult {
+  /**
+   * The group's called targets after the order, as the document writes them.
+   */
+  readonly targets: string[];
+  /**
+   * Its live primary and the live queue after it.
+   */
+  readonly primary: Maybe<string>;
+  readonly queue: string[];
+  /**
+   * The group's ships after the sync: each one's target, where it came from, its pilot response and its lock.
+   */
+  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly source?: ShipTargetSource; readonly respondsIn?: number; readonly lock?: Maybe<ShipLockReportState> }[];
+  /**
+   * The group's ships not on its primary, with why: own target, logi, in warp, holding, stood down, responding, or
+   * following a nearer group's call.
+   */
+  readonly skipped: { readonly id: string; readonly reason: string }[];
+  readonly warnings?: string[];
+}
+
+/**
+ * Called when a fleet's, wing's or squad's live called primary changes (Director.OnPrimary).
+ */
+export type PrimaryListener = (change: CalledPrimaryChange) => void;
 
 /**
  * Called with every kill at its tick boundary, with the killing shot (Director.OnKill).
@@ -665,7 +715,12 @@ export class Director {
    * Ships engaged on their target (engage): the module selectors kept firing until cease_fire.
    */
   private readonly engagements = new Map<string, { readonly modules: readonly string[] }>();
+  /**
+   * The fleet targeting lever: who follows which called primary, own-target marks, holds and pilot responses.
+   */
+  readonly fleetTargets: FleetTargets;
   private readonly killListeners = new Set<KillListener>();
+  private readonly primaryListeners = new Set<PrimaryListener>();
   /**
    * Ships destroyed with death "explode", until a load revives them or remove_ship removes them.
    */
@@ -800,6 +855,15 @@ export class Director {
     // A destroyed ship is no target: nothing locks, aims or runs a module on it.
     const live = (id: string): boolean => world.Curves(id) != null && !this.combat.IsDestroyed(id);
     this.targets = new ShipTargets({ HasShip: live, HasObject: (id) => this.IsAuthoredObject(id), SurfaceDistance: (a, b) => world.SurfaceDistance(a, b) });
+    this.fleetTargets = new FleetTargets({
+      Status: (id) => this.CalledTargetStatus(id),
+      // An arriving ship takes the call once it lands, as a ship in warp does.
+      CanTarget: (id) => live(id) && !world.InWarp(id) && !world.Arriving(id),
+      TargetOf: (id) => this.targets.Of(id),
+      get tickSeconds() {
+        return world.master.tickInterval / 1000;
+      }
+    });
     this.shots = new ShotQueue(world.master.tickInterval / 1000);
     this.capacitor = new CapacitorModel(world.master.tickInterval / 1000);
     this.locks = new ShipLocks({
@@ -838,11 +902,12 @@ export class Director {
         return world.master.tickInterval / 1000;
       }
     });
-    // Shields recharge, then locks advance and engagements re-arm, then cycles land: right after the prop mods apply
-    // and before orders, so a siege module's physics fly from that tick.
+    // Shields recharge, then fleets move to their next called targets, locks advance and engagements re-arm, then cycles
+    // land: right after the prop mods apply and before orders, so a siege module's physics fly from that tick.
     world.OnBoundary((boundary) => {
       this.RemoveDead(boundary);
       this.SyncRecharged(this.combat.Recharge(world.master.tickInterval / 1000));
+      this.SyncFleetTargets(boundary);
       this.LockEvents(this.locks.Boundary(boundary, this.WantedLocks()));
       this.Engagements(boundary);
       this.ModuleEvents(this.modules.Boundary(boundary));
@@ -946,12 +1011,67 @@ export class Director {
       // is asynchronous while the world ticks on.
       const resolved = this.orders.Resolve(request);
       const tick = this.world.tick;
+      const targetsOrder = request.order.type === 'targets' ? request.order : null;
+      const warnings = targetsOrder ? this.CallWarnings(resolved, targetsOrder) : [];
       const operations = toFleetOrderOperations(this.Current(), resolved, { statusOf: (id) => this.CalledTargetStatus(id) });
-      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown }) : null;
+      // Each pilot but the giver takes the new call after its response time; the order re-arms the group's holds.
+      if (targetsOrder) this.fleetTargets.Respond(resolved.ships, toPilotDelays({ key: toFleetGroupKey(resolved.group), tick, delay: request.delay ?? 0, ships: resolved.ships, issuer: resolved.issuer }), tick);
+      const patch = operations.length ? ((await this.Apply(applySceneOperations(this.Current(), operations))) as { readonly ships?: unknown; readonly warnings?: string[] }) : null;
+      // An unchanged list still re-arms and reports.
+      if (targetsOrder) this.SyncFleetTargets();
       const { ships: builds, ...rest } = patch ?? {};
       const result: FleetOrderResult = this.orders.Fly(resolved, { tick });
-      return { ...result, operations, ...(patch ? { ...rest, builds } : {}) };
+      const called = targetsOrder ? this.CallResult(resolved) : {};
+      return { ...result, operations, ...(patch ? { ...rest, builds } : {}), ...called, ...(targetsOrder && (warnings.length || patch?.warnings?.length) ? { warnings: [...warnings, ...(patch?.warnings ?? [])] } : {}) };
     });
+  }
+
+  /**
+   * A targets order's live checks before its edit: a destroyed primary is refused (as set_target refuses it); a
+   * destroyed id in a queue or set, and a target on the giver's team, are warned about.
+   *
+   * @param resolved - The resolved order.
+   * @param order - Its targets order.
+   * @returns The warnings.
+   * @throws {SceneError} When the primary was destroyed.
+   */
+  private CallWarnings(resolved: ResolvedFleetOrder, order: FleetTargetsOrder): string[] {
+    const destroyed = (id: string): boolean => this.combat.IsDestroyed(id) || this.IsDead(id);
+    if (order.primary != null && destroyed(order.primary)) throw new SceneError([`order_fleet.order.primary: target "${order.primary}" was destroyed`]);
+    const named = order.primary != null ? [order.primary] : [...(order.queue ?? order.set ?? [])];
+    const docs = new Map((this.scene?.ships ?? []).map((doc) => [doc.id, doc]));
+    const team = docs.get(resolved.issuer)?.team;
+    const warnings: string[] = [];
+    for (const id of named) {
+      if (destroyed(id)) warnings.push(`"${id}" was destroyed: it is skipped until a load`);
+      if (team && docs.get(id)?.team === team) warnings.push(`"${resolved.issuer}" and the called target "${id}" are both on team "${team}"`);
+    }
+    return warnings;
+  }
+
+  /**
+   * A targets order's result after its sync: the group's list, live primary and queue, each ship's target, and who does
+   * not shoot the call with why.
+   *
+   * @param resolved - The resolved order.
+   * @returns The fields.
+   */
+  private CallResult(resolved: ResolvedFleetOrder): Omit<FleetTargetsOrderResult, 'warnings'> {
+    const { group } = resolved;
+    const tick = this.world.tick;
+    const called = this.fleetTargets.GroupReport(group);
+    const ships: FleetTargetsOrderResult['ships'] = [];
+    const skipped: FleetTargetsOrderResult['skipped'] = [];
+    for (const id of resolved.ships) {
+      const target = this.targets.Of(id);
+      const source = this.fleetTargets.Source(id);
+      const respondsIn = this.fleetTargets.Report(id, tick)?.respondsIn;
+      const lock = target ? this.LockState(id, target) : null;
+      ships.push({ id, target, ...(source ? { source } : {}), ...(respondsIn != null ? { respondsIn } : {}), ...(lock ? { lock } : {}) });
+      const reason = this.IsDead(id) ? 'it was destroyed' : this.fleetTargets.SkipReason(id, group, tick);
+      if (reason) skipped.push({ id, reason });
+    }
+    return { targets: calledTargetsOf(this.Current(), group), primary: called?.primary ?? null, queue: called?.queue ?? [], ships, skipped };
   }
 
   /**
@@ -1035,7 +1155,10 @@ export class Director {
       for (const selector of unmatched) skipped.push({ id, module: selector, reason: 'it fits no module matching it' });
       // Turrets fire at the ship's target: a switch's target becomes it first, as set_target would.
       const aimsTurrets = command.state === 'active' && command.target != null && command.target !== id && modules.some((module) => module.weapon === 'turret');
-      if (aimsTurrets && command.target && this.targets.KindOf(command.target) && !this.world.InWarp(id) && !this.world.InWarp(command.target)) this.SetShipTarget(id, command.target);
+      if (aimsTurrets && command.target && this.targets.KindOf(command.target) && !this.world.InWarp(id) && !this.world.InWarp(command.target)) {
+        this.SetShipTarget(id, command.target);
+        this.fleetTargets.Own(id);
+      }
       const switched: SwitchedModule[] = [];
       for (const module of modules) {
         const result = this.SwitchModule(id, module, command, delays.get(id) ?? 0);
@@ -1080,6 +1203,7 @@ export class Director {
       else if (this.combat.IsDestroyed(id)) reason = 'it was destroyed';
       else if (this.world.InWarp(id)) reason = 'it is in warp';
       else if (target && kind === 'ship' && this.world.InWarp(target)) reason = `its target "${target}" is in warp`;
+      else if (!target && this.fleetTargets.Source(id) === 'called') reason = this.FollowsCallReason(id);
       if (reason) {
         skipped.push({ id, reason });
         continue;
@@ -1087,12 +1211,29 @@ export class Director {
       const turrets = (this.fittings.get(id)?.modules ?? []).filter((module) => module.weapon === 'turret');
       const retargeted = this.modules.Running(id).filter((spec) => spec.activation.weapon === 'turret').length;
       const previous = this.SetShipTarget(id, target ?? null);
+      // A target given here is the ship's own: it wins over its groups' calls until it clears.
+      if (target) this.fleetTargets.Own(id);
       if (!target) this.engagements.delete(id);
       const lock = target ? this.LockState(id, target, this.locks.Of(id).some((held) => held.target === target) ? null : this.RequestLock(id, target)) : null;
       ships.push({ id, target: target ?? null, ...(previous && previous !== target ? { previous } : {}), turrets: turrets.length, retargeted: previous === (target ?? null) ? 0 : retargeted, ...(lock ? { lock } : {}) });
     }
+    // A cleared own target hands the ship its group's call at once.
+    if (!target && ships.length) this.SyncFleetTargets();
+    const rows = target ? ships : ships.map((row) => (this.fleetTargets.Source(row.id) === 'called' ? { ...row, target: this.targets.Of(row.id), source: 'called' as const } : row));
     this.onChange();
-    return { tick: this.world.tick, target: target ?? null, ships, skipped };
+    return { tick: this.world.tick, target: target ?? null, ships: rows, skipped };
+  }
+
+  /**
+   * Why set_target null skips a ship that follows its group's call: it has no own target to clear.
+   *
+   * @param id - The ship.
+   * @returns The reason.
+   */
+  private FollowsCallReason(id: string): string {
+    const call = this.fleetTargets.CallOf(id);
+    const group = call ? `${describeFleetGroup(call.group)}'s call on "${call.target}"` : "its group's call";
+    return `it has no own target: it follows ${group} (cease_fire holds its fire; order_fleet targets drop or clear ends the call)`;
   }
 
   /**
@@ -1138,6 +1279,8 @@ export class Director {
       }
       if (team && docs.get(id)?.team === team) warnings.push(`"${id}" and its target "${target}" are both on team "${team}"`);
       this.SetShipTarget(id, target);
+      this.fleetTargets.Own(id);
+      this.fleetTargets.Rearm([id]);
       this.engagements.set(id, { modules: command.modules });
       const modules: EngageResult['ships'][number]['modules'] = [];
       for (const module of turrets) {
@@ -1167,9 +1310,12 @@ export class Director {
     if (selected.problems.length) throw new SceneError([...selected.problems]);
     const ships: CeaseFireResult['ships'] = [];
     const skipped: CeaseFireResult['skipped'] = [];
+    const armed = new Set(this.fleetTargets.Armed());
     for (const id of selected.ships) {
       const engagement = this.engagements.get(id);
       this.engagements.delete(id);
+      // A fleet member holds (keeps the call and its locks, unarmed) or stands down from the call (unlock).
+      const held = this.fleetTargets.Hold(id, command.unlock ? 'stand-down' : 'hold') ? (command.unlock ? ('stand-down' as const) : ('hold' as const)) : null;
       const resolved = this.fittings.get(id);
       const turrets = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, engagement?.modules ?? DEFAULT_ENGAGE_MODULES).modules.filter((module) => module.weapon === 'turret') : [];
       const modules: string[] = [];
@@ -1180,9 +1326,10 @@ export class Director {
       }
       const unlocked = command.unlock && this.targets.Of(id) != null;
       if (unlocked) this.SetShipTarget(id, null);
-      if (!engagement && !modules.length && !unlocked) skipped.push({ id, reason: 'it is not engaged and its turrets are not firing' });
-      else ships.push({ id, modules, ...(unlocked ? { unlocked: true as const } : {}) });
+      if (!engagement && !armed.has(id) && !modules.length && !unlocked) skipped.push({ id, reason: 'it is not engaged and its turrets are not firing' });
+      else ships.push({ id, modules, ...(unlocked ? { unlocked: true as const } : {}), ...(held ? { held } : {}) });
     }
+    if (command.unlock) this.SyncFleetTargets();
     this.onChange();
     return { tick: this.world.tick, ships, skipped };
   }
@@ -1203,8 +1350,8 @@ export class Director {
   }
 
   /**
-   * Listens to every kill at its tick boundary, with the killing shot: for the fleet targeting lever and the automatic
-   * camera. A listener that throws is logged and the rest still run.
+   * Listens to every kill at its tick boundary, with the killing shot: for the automatic camera (the fleet targeting
+   * lever moves on at the next boundary's sync instead). A listener that throws is logged and the rest still run.
    *
    * @param listener - Called with each kill.
    * @returns The unsubscribe.
@@ -1213,6 +1360,20 @@ export class Director {
     this.killListeners.add(listener);
     return () => {
       this.killListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Listens to every change of a fleet's, wing's or squad's live called primary (an order, a patch, a kill, a warp or a
+   * removal moving it on): for the automatic camera. A listener that throws is logged and the rest still run.
+   *
+   * @param listener - Called with each change.
+   * @returns The unsubscribe.
+   */
+  OnPrimary(listener: PrimaryListener): () => void {
+    this.primaryListeners.add(listener);
+    return () => {
+      this.primaryListeners.delete(listener);
     };
   }
 
@@ -1482,10 +1643,12 @@ export class Director {
             propMods: this.FleetPropMods(report.ships),
             modules: FleetModuleCountsOf(report.ships.flatMap((id) => moduleRows.get(id) ?? [])) satisfies FleetModuleCounts,
             command: this.orders.GroupReport({ fleet: report.id, kind: 'fleet', id: report.id }),
+            ...this.CalledState({ fleet: report.id, kind: 'fleet', id: report.id }),
             wings: report.wings.map((wing) => ({
               ...wing,
               command: this.orders.GroupReport({ fleet: report.id, kind: 'wing', id: wing.id }),
-              squads: wing.squads.map((squad) => ({ ...squad, command: this.orders.GroupReport({ fleet: report.id, kind: 'squad', id: squad.id }) }))
+              ...this.CalledState({ fleet: report.id, kind: 'wing', id: wing.id }),
+              squads: wing.squads.map((squad) => ({ ...squad, command: this.orders.GroupReport({ fleet: report.id, kind: 'squad', id: squad.id }), ...this.CalledState({ fleet: report.id, kind: 'squad', id: squad.id }) }))
             }))
           }))
         : [],
@@ -1575,6 +1738,7 @@ export class Director {
       this.locks.Remove(doc.id);
       this.combat.Remove(doc.id);
       this.engagements.delete(doc.id);
+      this.fleetTargets.Forget(doc.id);
       this.rechargeSynced.delete(doc.id);
       this.damage.Remove(doc.id);
       this.capacitor.Remove(doc.id);
@@ -1617,6 +1781,7 @@ export class Director {
       this.locks.Clear();
       this.combat.Clear();
       this.engagements.clear();
+      this.fleetTargets.Clear();
       this.rechargeSynced.clear();
       this.shots.Clear();
       this.turretSounds.Clear();
@@ -1666,6 +1831,8 @@ export class Director {
     for (const doc of [...switching.values()].filter(alive)) this.world.SetPropModActive(doc.id, doc.propMod?.active === true && this.FitsPropMod(doc));
     if (restart) this.orders.Reset();
     stopped.push(...this.following.Reconcile({ regrouped: diff.regrouped.map((doc) => doc.id), restart }));
+    // Members take their groups' calls (a load's, a patch's edit or removal) before the result is read.
+    this.SyncFleetTargets();
     await this.store.Put(CURRENT_KEY, scene);
     for (const doc of builds) this.live.set(doc.id, { id: doc.id, dna: doc.dna, status: 'queued', ship: null, error: null, diagnostics: [], hull: null });
     this.onChange();
@@ -2097,9 +2264,9 @@ export class Director {
    * @param target - The ship or object.
    * @returns The refusal, or null.
    */
-  private RequestLock(id: string, target: string): Maybe<string> {
+  private RequestLock(id: string, target: string, requestedAt = this.world.tick): Maybe<string> {
     const wanted = new Set([target, ...(this.modules.TurretAims().get(id) ?? [])]);
-    return this.locks.Request(id, target, this.world.tick, wanted);
+    return this.locks.Request(id, target, requestedAt, wanted);
   }
 
   /**
@@ -2117,13 +2284,19 @@ export class Director {
   }
 
   /**
-   * Each ship's wanted locks at a boundary: its target and what its turrets aim at.
+   * Each ship's wanted locks at a boundary: its target and what its turrets aim at, then a called member's pre-locks
+   * (its call's next queued targets) while it is under its lock limit, so the sweep never has to choose.
    */
   private WantedLocks(): Map<string, Set<string>> {
     const wanted = this.modules.TurretAims();
     for (const doc of this.scene?.ships ?? []) {
       const target = this.IsDead(doc.id) ? null : this.targets.Of(doc.id);
       if (target) wanted.set(doc.id, new Set([target, ...(wanted.get(doc.id) ?? [])]));
+      const preLocks = target ? this.fleetTargets.PreLocks(doc.id) : [];
+      const maxLocks = preLocks.length ? this.LockTargeting(doc.id)?.maxLocks : null;
+      const set = wanted.get(doc.id);
+      if (maxLocks == null || !set) continue;
+      for (const preLock of preLocks) if (set.size < maxLocks) set.add(preLock);
     }
     return wanted;
   }
@@ -2177,14 +2350,30 @@ export class Director {
         this.engagements.delete(id);
         continue;
       }
-      const target = this.targets.Of(id);
-      const resolved = this.fittings.get(id);
-      if (!target || !resolved?.dogma || this.world.InWarp(id)) continue;
-      const { modules } = selectFittedModules({ modules: resolved.modules }, engagement.modules);
-      for (const module of modules) {
-        if (module.weapon !== 'turret' || this.modules.CycleState(id, module.key) !== 'online') continue;
-        this.modules.Switch(id, module.key, 'active', { boundary, target });
-      }
+      this.ArmTurrets(id, engagement.modules, boundary);
+    }
+    // Members following a call are armed like an engagement: calling a primary makes them shoot it.
+    for (const id of this.fleetTargets.Armed()) {
+      if (this.engagements.has(id) || this.world.Curves(id) == null || this.combat.IsDestroyed(id)) continue;
+      this.ArmTurrets(id, DEFAULT_ENGAGE_MODULES, boundary);
+    }
+  }
+
+  /**
+   * Switches a ship's selected turrets that are back online active at its target.
+   *
+   * @param id - The ship.
+   * @param selectors - The module selectors (engage's modules).
+   * @param boundary - The master tick.
+   */
+  private ArmTurrets(id: string, selectors: readonly string[], boundary: number): void {
+    const target = this.targets.Of(id);
+    const resolved = this.fittings.get(id);
+    if (!target || !resolved?.dogma || this.world.InWarp(id)) return;
+    const { modules } = selectFittedModules({ modules: resolved.modules }, selectors);
+    for (const module of modules) {
+      if (module.weapon !== 'turret' || this.modules.CycleState(id, module.key) !== 'online') continue;
+      this.modules.Switch(id, module.key, 'active', { boundary, target });
     }
   }
 
@@ -2214,11 +2403,13 @@ export class Director {
    *
    * @param id - The ship id.
    * @param target - The ship or object; null clears it.
+   * @param options - `requestedAt`: the tick its lock is asked for, if not now (the boundary sync asks at boundary - 1,
+   *   so the lock starts at that boundary like the sweep's).
    * @returns Its previous target.
    */
-  private SetShipTarget(id: string, target: Maybe<string>): Maybe<string> {
+  private SetShipTarget(id: string, target: Maybe<string>, options: { readonly requestedAt?: number } = {}): Maybe<string> {
     const previous = this.targets.Set(id, target);
-    if (target) this.RequestLock(id, target);
+    if (target) this.RequestLock(id, target, options.requestedAt);
     if (previous !== target) {
       this.ModuleOutputs(this.modules.Retarget(id, target, this.world.tick));
       this.turrets?.Aim(id, target);
@@ -2631,7 +2822,8 @@ export class Director {
 
   /**
    * A called target's live status (fleets/targets.ts), the first that applies: destroyed (either death mode), missing
-   * (no Destiny ball: not built yet, or gone), warping (a ship in warp), else live. An object is live once built.
+   * (no Destiny ball: not built yet, or gone), warping (a ship in warp, or waiting to warp in), else live. An object is
+   * live once built.
    *
    * @param id - A ship or object id.
    * @returns Its status.
@@ -2641,8 +2833,33 @@ export class Director {
     let status: CalledTargetStatus = 'live';
     if (this.combat.IsDestroyed(id) || this.IsDead(id)) status = 'destroyed';
     else if (!kind) status = 'missing';
-    else if (kind === 'ship' && this.world.InWarp(id)) status = 'warping';
+    else if (kind === 'ship' && (this.world.InWarp(id) || this.world.Arriving(id))) status = 'warping';
     return status;
+  }
+
+  /**
+   * Gives every fleet member its groups' call (FleetTargets.Sync over the live fleet view) through SetShipTarget, then
+   * tells the OnPrimary listeners which primaries moved.
+   *
+   * @param boundary - At a tick boundary, its tick: locks are then asked for at boundary - 1, so they start at it like
+   *   the sweep's. Omitted after an edit or a tool call.
+   */
+  private SyncFleetTargets(boundary?: number): void {
+    const scene = this.LiveFleets()?.scene ?? this.scene;
+    if (!scene) return;
+    const { changes, primaries } = this.fleetTargets.Sync(scene, this.world.tick);
+    const requestedAt = boundary == null ? undefined : boundary - 1;
+    for (const { ship, target } of changes) this.SetShipTarget(ship, target, { requestedAt });
+    if (changes.length || primaries.length) this.onChange();
+    for (const change of primaries) {
+      for (const listener of [...this.primaryListeners]) {
+        try {
+          listener(change);
+        } catch (error) {
+          console.error(`a primary listener failed: ${ErrorText(error)}`);
+        }
+      }
+    }
   }
 
   /**
@@ -2724,6 +2941,7 @@ export class Director {
     this.moduleSpecs.delete(id);
     this.locks.Remove(id);
     this.engagements.delete(id);
+    this.fleetTargets.Forget(id);
     if (this.targets.Of(id) != null) {
       this.targets.Set(id, null);
       this.turrets?.Aim(id, null);
@@ -3194,7 +3412,8 @@ export class Director {
     propMod: Maybe<ShipPropModState>;
     fit: Maybe<ShipFitReport>;
     fitNote?: string;
-    target: Maybe<ShipTargetReport>;
+    target: Maybe<ShipTargetReport & { readonly source?: ShipTargetSource }>;
+    call?: ShipCallReport;
     shots?: number;
     defense: Maybe<ShipDefenseReport | DamageReport>;
     capacitor: Maybe<ShipCapacitorReport>;
@@ -3238,7 +3457,8 @@ export class Director {
       propMod: this.PropModState(doc, flight, motion),
       fit: fitting ? ShipFitReportOf(fitting, (module) => this.ModuleRowState(doc.id, module, motion)) : null,
       ...(fitNote ? { fitNote } : {}),
-      target: this.targets.Report(doc.id),
+      target: this.TargetState(doc.id),
+      ...this.CallState(doc.id),
       ...(shots ? { shots } : {}),
       defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
       capacitor: capacitor ? ShipCapacitorReportOf(capacitor, this.capacitor.Report(doc.id, this.world.tick)) : null,
@@ -3246,6 +3466,33 @@ export class Director {
       ...this.CombatState(doc.id),
       ...(boosters ? { boosters } : {})
     };
+  }
+
+  /**
+   * A ship's target for get_state, with where it came from: `called` when its group's call gave it, else `own`.
+   */
+  private TargetState(id: string): Maybe<ShipTargetReport & { readonly source?: ShipTargetSource }> {
+    const report = this.targets.Report(id);
+    const source = report ? this.fleetTargets.Source(id) : null;
+    return report ? { ...report, ...(source ? { source } : {}) } : null;
+  }
+
+  /**
+   * A fleet member's `call` for get_state: when a group of its chain calls targets, or it holds, stands down or
+   * responds to an order.
+   */
+  private CallState(id: string): { call?: ShipCallReport } {
+    const call = this.IsDead(id) ? null : this.fleetTargets.Report(id, this.world.tick);
+    return call ? { call } : {};
+  }
+
+  /**
+   * A fleet's, wing's or squad's `called` for get_state: its live primary and queue, the entries skipped with why, and
+   * how many members follow it; omitted when it calls no targets.
+   */
+  private CalledState(group: FleetGroup): { called?: FleetGroupCalledReport } {
+    const called = this.fleetTargets.GroupReport(group);
+    return called ? { called } : {};
   }
 
   /**

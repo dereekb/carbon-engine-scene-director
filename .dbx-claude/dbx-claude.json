@@ -283,7 +283,13 @@
               "fleet order",
               "fleet orders",
               "FleetOrders",
-              "WarpInFormation"
+              "WarpInFormation",
+              "called primary",
+              "called target",
+              "called targets",
+              "target queue",
+              "focus fire",
+              "primaries"
             ],
             "fuzzyWords": [
               "fleet composition"
@@ -297,7 +303,8 @@
               "apps/viewer/src/lib/steering",
               "hub/fleet-compositions",
               "store/composition-files",
-              "apps/viewer/src/lib/fleet-orders"
+              "apps/viewer/src/lib/fleet-orders",
+              "apps/viewer/src/lib/fleet-targets"
             ],
             "every": 12
           },

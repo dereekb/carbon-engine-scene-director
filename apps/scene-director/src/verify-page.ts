@@ -104,7 +104,8 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly propMod?: Maybe<ShipPropModState>;
   readonly fit?: Maybe<ShipFitState>;
   readonly fitNote?: string;
-  readonly target?: Maybe<{ readonly id: string; readonly kind: 'ship' | 'object'; readonly distance: Maybe<number> }>;
+  readonly target?: Maybe<{ readonly id: string; readonly kind: 'ship' | 'object'; readonly distance: Maybe<number>; readonly source?: 'own' | 'called' }>;
+  readonly call?: ShipCallState;
   readonly shots?: number;
   readonly defense?: Maybe<ShipDefenseState>;
   readonly capacitor?: Maybe<ShipCapacitorState>;
@@ -239,7 +240,7 @@ interface SwitchModulesResult {
 interface SetTargetResult {
   readonly tick: number;
   readonly target: Maybe<string>;
-  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly turrets: number; readonly retargeted: number; readonly lock?: Maybe<ShipLockState> }[];
+  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly previous?: string; readonly source?: 'own' | 'called'; readonly turrets: number; readonly retargeted: number; readonly lock?: Maybe<ShipLockState> }[];
   readonly skipped: { readonly id: string; readonly reason: string }[];
 }
 
@@ -486,6 +487,49 @@ interface StageEngagementResult extends Omit<SceneResult, 'scene'> {
 
 interface LogEntry {
   readonly message: string;
+}
+
+/**
+ * get_state's `call` on a fleet member (the viewer's fleet-targets.ts ShipCallReport).
+ */
+interface ShipCallState {
+  readonly state: string;
+  readonly group?: { readonly fleet: string; readonly kind: string; readonly id: string };
+  readonly primary?: string;
+  readonly respondsIn?: number;
+}
+
+/**
+ * get_state's `called` on a fleet, wing or squad (the viewer's fleet-targets.ts FleetGroupCalledReport).
+ */
+interface CalledState {
+  readonly primary: Maybe<string>;
+  readonly queue: string[];
+  readonly skipped?: { readonly id: string; readonly why: string }[];
+  readonly following: number;
+}
+
+/**
+ * get_state's fleet tree with each group's called targets (order_fleet targets).
+ */
+interface CalledTree {
+  readonly targets?: string[];
+  readonly called?: CalledState;
+  readonly wings: readonly { readonly id: string; readonly called?: CalledState; readonly squads: readonly { readonly id: string; readonly targets?: string[]; readonly called?: CalledState }[] }[];
+}
+
+/**
+ * An order_fleet targets order's answer (the viewer's director.ts FleetTargetsOrderResult).
+ */
+interface FleetTargetsOrderResult {
+  readonly tick: number;
+  readonly targets: string[];
+  readonly primary: Maybe<string>;
+  readonly queue: string[];
+  readonly ships: { readonly id: string; readonly target: Maybe<string>; readonly source?: string; readonly respondsIn?: number }[];
+  readonly skipped: { readonly id: string; readonly reason: string }[];
+  readonly delays?: Record<string, number>;
+  readonly warnings?: string[];
 }
 
 /**
@@ -1664,6 +1708,177 @@ try {
       return pending.length ? Show(pending.map((ship) => [ship.id, ship.status])) : null;
     });
     return `${ships.length} ships alive at full HP, no kills, fleet commanded by fc again; statuses ${Show(fleetFightShips.map((ship) => ShipIn(drawn, ship.id).status))}`;
+  });
+
+  // The fleet targeting lever: called primaries and a target queue. Tempest Fleet Issues take the long calls (they
+  // outlast the Punishers' guns); Rifters die fast.
+  const Tempest = (id: string, position: SceneVector) => ({ id, dna: 'mb2_t1:minmatarnavy:minmatar', type: 'Tempest Fleet Issue', position });
+  const CalledOf = (state: ViewerState, fleet = 'b'): Maybe<CalledTree> => state.fleets.find((candidate) => candidate.id === fleet) as Maybe<CalledTree>;
+  const Targets = (state: ViewerState, ids: readonly string[]): string => Show(Object.fromEntries(ids.map((id) => [id, ShipIn(state, id).target?.id ?? null])));
+  const OnCall = (state: ViewerState, ids: readonly string[], target: Maybe<string>): boolean => ids.every((id) => (target == null ? ShipIn(state, id).target == null : ShipIn(state, id).target?.id === target && ShipIn(state, id).target?.source === 'called'));
+  const Refusal = (args: Record<string, unknown>): Promise<string> =>
+    call('order_fleet', args).then(
+      () => 'taken',
+      (error: unknown) => String(error)
+    );
+
+  await Check("a called primary focuses a squad's fire and the next called target follows the kill", async () => {
+    const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Punisher('g1', [-1500, 0, 0]), Rifter('r1', [5000, 0, 0]), Rifter('r2', [5000, 0, 1500])];
+    const fleets = [
+      {
+        id: 'b',
+        commander: 'bfc',
+        wings: [
+          {
+            id: 'w',
+            squads: [
+              { id: 'dps', role: 'dps', members: ['p1', 'p2'] },
+              { id: 'g', role: 'logi', members: ['g1'] }
+            ]
+          }
+        ]
+      }
+    ];
+    await LoadCombatScene(ships, undefined, { fleets });
+    const shooters = ['bfc', 'p1', 'p2'];
+    const order = await call<FleetTargetsOrderResult>('order_fleet', { fleet: 'b', order: { type: 'targets', set: ['r1', 'r2'] } });
+    Expect(order.primary === 'r1' && Show(order.queue) === '["r2"]' && Show(order.targets) === '["r1","r2"]', Show(order));
+    const called = await WaitFor('the fleet locks r1 and pre-locks r2', 20, (polled) => {
+      const fleet = CalledOf(polled)?.called;
+      const g1 = ShipIn(polled, 'g1');
+      const preLocked = LockOf(polled, 'p1', 'r2') != null;
+      return OnCall(polled, shooters, 'r1') && g1.target == null && g1.call?.state === 'logi' && fleet?.primary === 'r1' && Show(fleet.queue) === '["r2"]' && preLocked ? null : Show({ targets: Targets(polled, [...shooters, 'g1']), g1: g1.call, fleet, p1: ShipIn(polled, 'p1').locks });
+    });
+    const firstDead = await WaitFor('r1 dies', 90, (polled) => (ShipIn(polled, 'r1').destroyed ? null : Show(ShipIn(polled, 'r1').defense)));
+    const killTick = ShipIn(firstDead, 'r1').destroyed?.tick ?? 0;
+    const switched = await WaitFor('every shooter switches to r2, called, and fires', 20, (polled) => {
+      const fired = shooters.every((id) => (ShipIn(polled, id).combat?.lastHits ?? []).some((row) => row.target === 'r2'));
+      return OnCall(polled, shooters, 'r2') && CalledOf(polled)?.called?.primary === 'r2' && fired ? null : Show({ targets: Targets(polled, shooters), called: CalledOf(polled)?.called });
+    });
+    const firstOnR2 = Math.min(...shooters.flatMap((id) => (ShipIn(switched, id).combat?.lastHits ?? []).filter((row) => row.target === 'r2').map((row) => row.tick)));
+    const slowest = Math.max(...shooters.flatMap((id) => ShipGuns(switched, id).map((gun) => gun.cycleTime ?? 0)));
+    Expect(firstOnR2 - killTick <= Math.ceil(slowest) + 2, `the first shot on r2 at tick ${firstOnR2}, ${firstOnR2 - killTick} ticks after the kill (slowest cycle ${slowest} s)`);
+    const doc = await call<{ fleets?: { targets?: string[] }[] }>('get_scene');
+    Expect(Show(doc.fleets?.[0]?.targets) === '["r1","r2"]', `the document's list after the kill: ${Show(doc.fleets?.[0]?.targets)}`);
+    await WaitFor('r2 dies', 90, (polled) => (ShipIn(polled, 'r2').destroyed ? null : Show(ShipIn(polled, 'r2').defense)));
+    const settled = await WaitFor('the call ends and the guns settle', 15, (polled) => {
+      const firing = shooters.flatMap((id) => ShipGuns(polled, id).filter((gun) => gun.state === 'active' || gun.state === 'stopping'));
+      return CalledOf(polled)?.called?.primary === null && OnCall(polled, shooters, null) && !firing.length ? null : Show({ called: CalledOf(polled)?.called, targets: Targets(polled, shooters), firing: firing.length });
+    });
+    return `bfc, p1, p2 on r1 (called), g1 logi, p1 pre-locked r2 at tick ${called.simulation.tick}; r1 killed at tick ${killTick}, first shot on r2 at ${firstOnR2} (+${firstOnR2 - killTick}, slowest cycle ${slowest} s); the document keeps ${Show(doc.fleets?.[0]?.targets)}; r2 dead, primary null, guns settled at tick ${settled.simulation.tick}`;
+  });
+
+  await Check("own targets win over the called targets, and a squad's call beats the fleet's", async () => {
+    const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Punisher('p3', [-1200, 0, 0]), Punisher('g1', [-1500, 0, 1500]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000]), Tempest('r3', [6000, 0, -3000])];
+    const fleets = [
+      {
+        id: 'b',
+        commander: 'bfc',
+        wings: [
+          {
+            id: 'w',
+            squads: [
+              { id: 'a', role: 'dps', members: ['p1', 'p2'] },
+              { id: 'c', role: 'dps', members: ['p3'] },
+              { id: 'lg', role: 'logi', members: ['g1'] }
+            ]
+          }
+        ]
+      }
+    ];
+    await LoadCombatScene(ships, { death: 'flag' }, { fleets });
+    await call('order_fleet', { fleet: 'b', order: { type: 'targets', set: ['r1'] } });
+    await call('order_fleet', { fleet: 'b', squad: 'c', order: { type: 'targets', primary: 'r2' } });
+    await call('order_fleet', { fleet: 'b', squad: 'lg', order: { type: 'targets', primary: 'r3' } });
+    const calls = await WaitFor('each takes its nearest call', 10, (polled) => (OnCall(polled, ['bfc', 'p1', 'p2'], 'r1') && OnCall(polled, ['p3'], 'r2') && ShipIn(polled, 'p3').call?.group?.id === 'c' && OnCall(polled, ['g1'], 'r3') ? null : Targets(polled, ['bfc', 'p1', 'p2', 'p3', 'g1'])));
+    const own = await call<SetTargetResult>('set_target', { ships: ['p1'], target: 'r3' });
+    const owned = await WaitFor('p1 is on its own target', 5, (polled) => (ShipIn(polled, 'p1').target?.id === 'r3' && ShipIn(polled, 'p1').target?.source === 'own' && ShipIn(polled, 'p1').call?.state === 'own-target' ? null : Show(ShipIn(polled, 'p1').target)));
+    const follows = await call<SetTargetResult>('set_target', { ships: ['p2'], target: null });
+    Expect(
+      follows.skipped.some((skip) => skip.id === 'p2' && /it has no own target: it follows fleet "b"'s call on "r1"/u.test(skip.reason)),
+      Show(follows)
+    );
+    const cleared = await call<SetTargetResult>('set_target', { ships: ['p1'], target: null });
+    Expect(
+      cleared.ships.some((row) => row.id === 'p1' && row.target === 'r1' && row.source === 'called'),
+      Show(cleared)
+    );
+    await call('order_fleet', { fleet: 'b', squad: 'c', order: { type: 'targets', clear: true } });
+    const back = await WaitFor('squad c falls back to the fleet call', 5, (polled) => (OnCall(polled, ['p1', 'p3'], 'r1') ? null : Targets(polled, ['p1', 'p3'])));
+    return `calls at tick ${calls.simulation.tick}: bfc, p1, p2 on r1, p3 on r2 (squad c), g1 on r3 (logi squad); set_target made p1 own on r3 (tick ${own.tick}, ${Show(ShipIn(owned, 'p1').call)}); p2's null skipped: "${follows.skipped[0]?.reason}"; p1's null handed it r1 (called); squad c clear: p3 on ${ShipIn(back, 'p3').target?.id}`;
+  });
+
+  await Check('cease_fire holds a called fleet until it calls again; a delayed call staggers the pilots', async () => {
+    const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Punisher('p3', [-1200, 0, 0]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000])];
+    const fleets = [{ id: 'b', commander: 'bfc', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['p1', 'p2', 'p3'] }] }] }];
+    const all = ['bfc', 'p1', 'p2', 'p3'];
+    await LoadCombatScene(ships, { death: 'flag' }, { fleets });
+    await call('order_fleet', { fleet: 'b', order: { type: 'targets', set: ['r1'] } });
+    await WaitFor('the fleet fires at r1', 30, (polled) => (all.every((id) => (ShipIn(polled, id).combat?.shots ?? 0) > 0) ? null : Show(all.map((id) => ShipIn(polled, id).combat?.shots ?? 0))));
+    const cease = await call<{ ships: { id: string; held?: string }[] }>('cease_fire', { fleet: 'b' });
+    Expect(cease.ships.length === 4 && cease.ships.every((row) => row.held === 'hold'), Show(cease));
+    const held = await WaitFor('the guns stop at their cycle end and the fleet holds r1', 10, (polled) => {
+      const firing = all.flatMap((id) => ShipGuns(polled, id).filter((gun) => gun.state === 'active' || gun.state === 'stopping'));
+      return !firing.length && all.every((id) => ShipIn(polled, id).target?.id === 'r1' && ShipIn(polled, id).call?.state === 'holding') ? null : Show({ firing: firing.length, calls: all.map((id) => ShipIn(polled, id).call?.state) });
+    });
+    const shotsOf = (state: ViewerState): number => all.reduce((sum, id) => sum + (ShipIn(state, id).combat?.shots ?? 0), 0);
+    const before = shotsOf(held);
+    await Delay(5000);
+    const quiet = await WaitFor('a get_state', 5, () => null);
+    Expect(shotsOf(quiet) === before, `shots while holding: ${before} → ${shotsOf(quiet)}`);
+    const order = await call<FleetTargetsOrderResult>('order_fleet', { fleet: 'b', delay: 1, order: { type: 'targets', primary: 'r2' } });
+    const delays = order.delays ?? {};
+    Expect(order.delays && order.ships.some((row) => row.respondsIn != null), Show(order));
+    const switchedAt = new Map<string, number>();
+    const staggered = await WaitFor(
+      'each pilot switches to r2 after its delay and fires',
+      20,
+      (polled) => {
+        for (const id of all) if (!switchedAt.has(id) && ShipIn(polled, id).target?.id === 'r2') switchedAt.set(id, polled.simulation.tick);
+        const fired = all.every((id) => (ShipIn(polled, id).combat?.lastHits ?? []).some((row) => row.target === 'r2'));
+        return switchedAt.size === all.length && fired ? null : Show({ switchedAt: Object.fromEntries(switchedAt), calls: all.map((id) => ShipIn(polled, id).call) });
+      },
+      1
+    );
+    const late = all.filter((id) => Math.abs((switchedAt.get(id) ?? 0) - order.tick - (delays[id] ?? 0)) > 1);
+    Expect(!late.length && (switchedAt.get('bfc') ?? -1) - order.tick <= 1, `switch ticks ${Show(Object.fromEntries(switchedAt))} vs order tick ${order.tick} + delays ${Show(delays)}`);
+    await call('cease_fire', { fleet: 'b', unlock: true });
+    await WaitFor('unlock stands the fleet down', 10, (polled) => (all.every((id) => ShipIn(polled, id).target == null && !ShipIn(polled, id).locks?.length && ShipIn(polled, id).call?.state === 'stood-down') ? null : Show(all.map((id) => [ShipIn(polled, id).call?.state, ShipIn(polled, id).locks?.length ?? 0]))));
+    const shots = shotsOf(staggered);
+    await call('order_fleet', { fleet: 'b', order: { type: 'targets', next: true } });
+    const rearmed = await WaitFor('next re-arms them onto r1', 30, (polled) => (OnCall(polled, all, 'r1') && shotsOf(polled) > shots ? null : Targets(polled, all)));
+    return `held at ${before} shots for 5 s; delay 1: switch ticks ${Show(Object.fromEntries(switchedAt))} (order at ${order.tick}, delays ${Show(delays)}); stood down, then next re-armed onto r1 (${shotsOf(rearmed)} shots)`;
+  });
+
+  await Check("removing a called target advances the document's queue; a load keeps the call; bad calls are refused", async () => {
+    const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000]), Rifter('r3', [4000, 0, -2000])];
+    const fleets = [{ id: 'b', commander: 'bfc', targets: ['r1', 'r2'], wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['p1', 'p2'] }] }] }];
+    const members = ['bfc', 'p1', 'p2'];
+    await LoadCombatScene(ships, { death: 'flag' }, { fleets });
+    await WaitFor('the loaded call fires with no order', 30, (polled) => (OnCall(polled, members, 'r1') && members.every((id) => (ShipIn(polled, id).combat?.lastHits ?? []).some((row) => row.target === 'r1')) ? null : Targets(polled, members)));
+    const removed = await call<{ warnings: string[] }>('patch_scene', { operations: [{ op: 'remove_ship', id: 'r1' }] });
+    Expect(
+      removed.warnings.some((warning) => /fleet "b" no longer calls "r1" \(it was removed\)/u.test(warning)),
+      Show(removed.warnings)
+    );
+    const doc = await call<{ fleets?: { targets?: string[] }[] }>('get_scene');
+    Expect(Show(doc.fleets?.[0]?.targets) === '["r2"]', Show(doc.fleets?.[0]));
+    await WaitFor('the members move to r2', 5, (polled) => (OnCall(polled, members, 'r2') ? null : Targets(polled, members)));
+    const refusals = {
+      by: await Refusal({ fleet: 'b', by: 'p1', order: { type: 'targets', primary: 'r3' } }),
+      own: await Refusal({ fleet: 'b', order: { type: 'targets', primary: 'p1' } }),
+      celestial: await Refusal({ fleet: 'b', order: { type: 'targets', primary: 'celestial:40009087' } }),
+      drop: await Refusal({ fleet: 'b', order: { type: 'targets', drop: ['r3'] } })
+    };
+    Expect(/command/u.test(refusals.by) && /cannot call one of its own ships/u.test(refusals.own) && /celestial/u.test(refusals.celestial) && /does not call "r3"/u.test(refusals.drop), Show(refusals));
+    await call<EngageResult>('engage', { ships: members, target: 'r3' });
+    await WaitFor('r3 dies', 90, (polled) => (ShipIn(polled, 'r3').destroyed ? null : Show(ShipIn(polled, 'r3').defense)));
+    const dead = await Refusal({ fleet: 'b', order: { type: 'targets', primary: 'r3' } });
+    Expect(/target "r3" was destroyed/u.test(dead), dead);
+    await call('order_fleet', { fleet: 'b', order: { type: 'targets', clear: true } });
+    const empty = await Refusal({ fleet: 'b', order: { type: 'targets', next: true } });
+    Expect(/calls no targets/u.test(empty), empty);
+    return `loaded call fired on r1; remove_ship r1 warned "${removed.warnings.find((warning) => /no longer calls/u.test(warning))}", list ${Show(doc.fleets?.[0]?.targets)}, members on r2; refused: ${Show({ ...refusals, dead, empty })}`;
   });
 
   // A Guardian with a thermal hardener, an AB and two remote armor reps, 3 km off a fitted TFI it reps.

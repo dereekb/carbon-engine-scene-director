@@ -28,6 +28,8 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/regroup/u);
       expect(orderFleet).toMatch(/by is the ship giving the order/u);
       expect(orderFleet).toMatch(/"targets"/u);
+      expect(orderFleet).toMatch(/locks and shoots the primary/u);
+      expect(client.getInstructions()).toMatch(/calls the group's primary and target queue/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/stage_engagement/u);

@@ -154,7 +154,7 @@ connected tab.
 | `set_target` | page | gives ships, a fleet, a wing or a squad a ship or object to lock, aim and fire their turrets at (null clears it) |
 | `engage` | page | arms ships' turrets on a target: they lock it and keep firing until `cease_fire` |
 | `cease_fire` | page | ends ships' engagements (their turrets stop at their cycle end); `unlock` drops the targets |
-| `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup |
+| `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, and called targets (a primary and a queue the group focuses fire on) |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 | `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |

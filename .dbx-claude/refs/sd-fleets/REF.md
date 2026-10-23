@@ -4,7 +4,8 @@
 > before touching `packages/scene/src/lib/fleets/`, the viewer's `following.ts` / `steering.ts`, `DestinyWorld.Steer`,
 > or `Director.FormationRadius`. Sub-docs (`{ ref: "sd-fleets", doc: "<key>" }`): **`orders`** (`order_fleet`: fleet,
 > wing and squad orders, groups apart, fleet warp in formation, break-off / regroup, pilot delay),
-> **`targets`** (called targets: each group's primary and target queue, the `targets` order, who takes which call) and
+> **`targets`** (called targets: each group's primary and target queue, the `targets` order, who takes which call, the
+> page's `FleetTargets` focus fire, own vs called targets, cease_fire holds, pre-locks, `OnPrimary`) and
 > **`compositions`** (the `cjs-fleet/1` fleet composition, its expansion, saved compositions and the TFIs example).
 > Adding ships into fleets from the staging tools is `sd-staging`.
 
@@ -23,6 +24,7 @@
 | `fleets/targets.ts` | called targets: the `targets` field, the `targets` order, removal pruning, `toFleetGroupCalls` / `toShipCallPlans` (sub-doc `targets`) |
 | `fleets/group.ts` | `FleetGroup`, `toFleetGroupKey`, `describeFleetGroup` (shared by `orders.ts` and `targets.ts`; `orders.ts` re-exports them) |
 | `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
+| `apps/viewer/src/lib/fleet-targets.ts` | `FleetTargets`: the targeting lever: members lock, pre-lock and shoot their groups' called primaries (node-tested; sub-doc `targets`) |
 | `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
 | `apps/viewer/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
 | `apps/viewer/src/lib/destiny.ts` | `Steer`, `Slot`, `Settle`, `AimAlong`, `Follow` / `Unfollow` / `FollowHold` |
@@ -166,6 +168,9 @@ its `order` is `keep-at-range` on the anchor, mode `goto` while steering, `stop`
 "Warp-in"), `propMods` counts, `modules` (every member's fitted module
 rows by live state: offline, online, activating, active, stopping, reactivating; `switch_modules` with `fleet` / `wing` /
 `squad` switches them, `sd-fittings`), and `command` on the fleet and every wing and squad (sub-doc `orders`). `changes.regrouped` counts membership changes.
+Called targets (sub-doc `targets`): a fleet, wing or squad that calls reports `targets` and `called` (`primary`,
+`queue`, `skipped` with why, `following`); a member reports `target.source` (`own` | `called`) and `call` (`state`:
+following, holding, stood-down, own-target, responding, in-warp, no-primary or logi; `group`, `primary`, `respondsIn`).
 A fleet that lost ships (`sd-combat`) lists only its live members and adds `destroyed` (their ids) and `actingFor` (the
 dead FC its commander stands in for); a fleet with nobody alive is not listed.
 
@@ -175,8 +180,10 @@ Each fleet, wing and squad may call targets: a `targets` list in kill order whos
 `order_fleet { order: { type: "targets", primary | queue | set | drop | next | clear } }` edits it (the order's
 authority: the FC for the fleet, a wing commander their wing, a squad commander their squad); removing a called ship or
 object prunes it; a kill never edits it. Each member takes the nearest call in its chain (squad, wing, fleet; the FC the
-fleet's only, logi their own squad's only). Status: the document and the order are in (T1); members locking and
-shooting the call is T2.
+fleet's only, logi their own squad's only): every member without its own target locks it, pre-locks the next two and
+fires, moving on at the boundary after the primary dies, warps off or is removed. Own targets (set_target, engage,
+switch_modules) win; cease_fire holds (unlock stands down) until the group calls again. Status: T2 in (the real-GPU look
+is T3).
 
 ## Arriving fleets (`warpIn`)
 

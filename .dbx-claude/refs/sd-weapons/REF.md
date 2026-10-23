@@ -148,7 +148,13 @@ Apocalypse, Tornado, Revelation and Caracal (`add_ships` by hull name), then the
 object (a document object with a Destiny ball). `celestial:<id>` is refused (`normalizeTargetCommand` and
 `switch_modules`; follow-up). Cleared: on load; when the target ship or object is removed ("its target is gone"); when
 either ship enters warp (EVE breaks the lock). `set_target` also starts the ship's lock (`ShipLocks`, `sd-combat`):
-turrets fire only at a locked target. No hostility check, no pilot delay (the Fleet targeting lever).
+turrets fire only at a locked target. No hostility check, and no pilot delay on `set_target` itself.
+
+- **Own or called.** A target from `set_target`, `engage` or `switch_modules` is the ship's **own**; a fleet member
+  without one takes its group's **called** primary (`order_fleet` targets, `FleetTargets`; `sd-fleets` doc `targets`),
+  whose turrets are kept firing like an engagement. An own target wins until it clears; get_state `target.source` says
+  which. A targets order's `delay` staggers each member's switch to the new call (it keeps shooting what it shot until
+  its response tick); kills, removals and patches move members on at once.
 
 - **`set_target { ships | fleet [, wing | squad], target | null }`** (page tool, `Director.SetTarget`): an unknown
   target is a SceneError; skipped with a reason: the target ship itself, a ship in warp, a target in warp. Returns
