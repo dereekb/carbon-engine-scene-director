@@ -1050,6 +1050,17 @@ export class DestinyWorld {
   }
 
   /**
+   * A ship's ball radius (its EVE radius, metres), as flown now.
+   *
+   * @param id - The ship id.
+   * @returns The radius; null for an unknown ship.
+   */
+  Radius(id: string): Maybe<number> {
+    const entry = this.ships.get(id);
+    return (entry ? this.master.GetBall(entry.ballId)?.radius : null) ?? null;
+  }
+
+  /**
    * The next ship ball id: the next free one, or after SetSceneEpoch the next whose low 16 bits are the ship's seed.
    * Never a used one.
    */

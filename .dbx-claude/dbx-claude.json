@@ -142,6 +142,7 @@
               "carbonenginejs-runtime.d.ts",
               "apps/viewer/esbuild.config",
               "apps/viewer/src/lib/engine.ts",
+              "apps/viewer/src/lib/stand-ins",
               "apps/viewer/src/lib/ships.ts",
               "apps/viewer/src/lib/environment.ts",
               "apps/viewer/src/lib/resources.ts",

@@ -305,6 +305,7 @@ import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, Rig
 import { ErrorText, ResourceValues } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
+import { OBJECT_STAND_IN_COLOR, StandInTeamColor, type StandInCube } from './stand-ins';
 import { CURRENT_KEY, type SceneStore } from './store';
 import { ShipScripts } from './ship-scripts';
 import { TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
@@ -2913,6 +2914,35 @@ export class Director {
       // pushes the boosters toward the runtime's cap of 2.
       DriveBoosters(live.ship, { speed, maxVelocity: this.flights.get(live.id)?.maxVelocity ?? DEFAULT_SHIP_PHYSICS.maxVelocity });
     }
+  }
+
+  /**
+   * Hands the engine a stand-in cube (stand-ins.ts) for every ship and object drawn without a model, most often for
+   * want of EVE data: a ship whose build failed on its ClientBall at `now`, coloured by team; a failed object at its
+   * document placement. Runs between world.Tick and engine.Frame, like DriveBoosters.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  DriveStandIns(now: number): void {
+    const engine = this.engine;
+    if (!engine) return;
+    const cubes: StandInCube[] = [];
+    for (const doc of this.scene?.ships ?? []) {
+      const curves = this.live.get(doc.id)?.status === 'failed' ? this.world.Curves(doc.id) : null;
+      if (!curves) continue;
+      cubes.push({
+        position: curves.translation.GetValueAt__Ticks(now, vec3.create()),
+        rotation: curves.rotation.GetValueAt__Ticks(now, quat.create()),
+        radius: this.world.Radius(doc.id) ?? UNBUILT_RADIUS,
+        color: StandInTeamColor(doc.team)
+      });
+    }
+    for (const doc of this.scene?.objects ?? []) {
+      const entry = this.objects.Entry(doc.id);
+      if (entry?.status !== 'failed') continue;
+      cubes.push({ position: doc.position, rotation: DocumentRotation(doc.rotation), radius: ObjectBallRadius({ radius: doc.radius, sofRadius: entry.sofRadius }).radius, color: OBJECT_STAND_IN_COLOR });
+    }
+    engine.SetStandIns(cubes);
   }
 
   /**

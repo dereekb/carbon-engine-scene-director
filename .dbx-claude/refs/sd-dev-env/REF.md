@@ -24,6 +24,12 @@ Set up and verified on a Mac on 2026-10-22: install, `nx build scene-director` a
 - Then `npm install` here, and check `npm ls @carbonenginejs/runtime` (deduped under the server) and the `CjsSchema.js`
   md5 (`sd-workspace`).
 - Node 24 works for install, build and tests (only tools-core needs Node 22).
+- **Without tools-core the page still runs** (checked on the Mac, 2026-10-24): the hub, the HUD, the Destiny simulation
+  (class flight numbers), orders, the camera, cinema shots, screenshots and the tools all work, on a chroma-green
+  backdrop with a cube per ship and object (team colours, the nose face pale; `sd-runtime` → Stand-ins). Enough for UI
+  and camera work. Missing: hull models, real stats and fits (so no default guns and no combat), locations, audio.
+  Mac Chrome has WebGPU, so tools-core on the Mac would draw everything; it downloads EVE's files itself and never
+  reads an installed client (not tried here yet).
 
 ## What needs what
 
@@ -31,7 +37,7 @@ Set up and verified on a Mac on 2026-10-22: install, `nx build scene-director` a
 |---|---|
 | offline tests (`dbx-claude-test`) | `node_modules` (runtime + server install-links copies built at their pins, see `sd-workspace` and "A second machine") |
 | build | the same |
-| page draws ships | tools-core on `127.0.0.1:5510` (every resource goes through the hub's `/resource` proxy to it) |
+| page draws ships | tools-core on `127.0.0.1:5510` (every resource goes through the hub's `/resource` proxy to it); without it, a green screen and a stand-in cube per ship and object (below) |
 | `ship_stats`, `/ship-stats`, SDE radii, hull names, `add_fleet_composition` without inline dna | a **prepared** SDE in tools-core |
 | locations (`search_map`, `get_system`, `set_location`, dressing) | tools-core's map routes over the SDE (a healthy map index) |
 | sounds (prop mods, modules, turrets) | tools-core's audio library, a user gesture in the tab (or autoplay allowed) |

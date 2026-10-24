@@ -15,6 +15,7 @@ import { TICKS_PER_MS } from './clock';
 import type { CinemaFrame } from './cinema';
 import { CountBackgroundQuads, EnvironmentReport, ReadRenderOptions, SceneDresser, type SceneDressing, type SceneEnvironmentReport } from './environment';
 import { ErrorText, ResourceValues } from './resources';
+import { GREEN_SCREEN, StandInPass, type StandInCube } from './stand-ins';
 import {
   addChild,
   blue,
@@ -111,6 +112,11 @@ export interface EngineStats {
    * advanced, whether the last frame held it, and the shaders' Time.
    */
   readonly animation: { readonly clock: 'scene' | 'real'; readonly seconds?: number; readonly frozen?: boolean; readonly shaderTime: number };
+  /**
+   * What the page draws without EVE data (stand-ins.ts): whether the backdrop is the green screen (the universe file
+   * did not load), and the cubes drawn last frame for ships and objects with no model.
+   */
+  readonly standIns: { readonly greenScreen: boolean; readonly cubes: number };
 }
 
 export interface EngineEnvironment extends SceneEnvironmentReport {
@@ -135,6 +141,11 @@ export interface EngineNebula {
 const NEBULA_FIELDS = { backgroundRenderingEnabled: false, nebulaIntensity: 1, reflectionIntensity: 1, fogStart: 0, fogEnd: 0, lowQualityNebulaResPath: '', lowQualityNebulaMixResPath: '' } as const;
 const NEBULA_ENV_MAPS = ['envMapResPath', 'envMap1ResPath', 'envMap2ResPath', 'envMap3ResPath'] as const;
 const DEFAULT_AMBIENT_COLOR = [0.25, 0.25, 0.25, 1];
+
+/**
+ * The clear colour behind the nebula.
+ */
+const SPACE_CLEAR_COLOR = [0.02, 0.03, 0.05, 1];
 
 export interface CameraPlacement {
   readonly focus?: ArrayLike<number>;
@@ -176,6 +187,7 @@ interface EngineParts {
   readonly renderTarget: CjsWebgpuRenderTarget;
   readonly al: CjsWebgpuRenderContextAL;
   readonly pump: FramePump;
+  readonly context: GPUCanvasContext;
   readonly format: GPUTextureFormat;
 }
 
@@ -205,6 +217,10 @@ export class Engine {
   nebula: EngineNebula = { path: null, source: 'universe', state: 'applied' };
   lastError: Maybe<string> = null;
   deviceLost: Maybe<string> = null;
+  /**
+   * The universe file did not load (no EVE data): the backdrop is GREEN_SCREEN instead of a nebula.
+   */
+  greenScreen = false;
   /**
    * Whether the last Frame drew into a swap-chain image (no error, not lost): a movie export captures only such a
    * frame (sd-export).
@@ -241,6 +257,11 @@ export class Engine {
   private cinematic: Maybe<CinemaFrame> = null;
   private readonly free = new FreeCamera();
   private drawn: Maybe<DrawnCamera> = null;
+  /**
+   * The cubes to draw for ships and objects with no model (stand-ins.ts), set by the director every frame.
+   */
+  private standIns: readonly StandInCube[] = [];
+  private standInPass: Maybe<StandInPass> = null;
 
   /**
    * Creates the device and an initialized, empty scene. The page's animation loop draws it through Frame.
@@ -323,6 +344,15 @@ export class Engine {
     if (fills) return this.canvas;
     this.compositor ??= new ExportCompositor(this.device, this.Parts().format);
     return this.compositor.Compose(presented, output, picture);
+  }
+
+  /**
+   * The cubes the next frames draw for ships and objects with no model (stand-ins.ts); empty draws none.
+   *
+   * @param cubes - The cubes, placed for the frame about to draw.
+   */
+  SetStandIns(cubes: readonly StandInCube[]): void {
+    this.standIns = cubes;
   }
 
   /**
@@ -480,7 +510,8 @@ export class Engine {
       lastFrameError: this.lastError,
       deviceLost: this.deviceLost,
       gpuErrors: { count: this.gpuErrors.count, messages: [...this.gpuErrors.messages] },
-      animation: { clock: this.animation ? 'scene' : 'real', ...this.animation?.Report(), shaderTime: Math.round(Tr2Renderer.GetAnimationTime() * 100) / 100 }
+      animation: { clock: this.animation ? 'scene' : 'real', ...this.animation?.Report(), shaderTime: Math.round(Tr2Renderer.GetAnimationTime() * 100) / 100 },
+      standIns: { greenScreen: this.greenScreen, cubes: this.standIns.length }
     };
   }
 
@@ -535,13 +566,20 @@ export class Engine {
     const scene = new EveSpaceScene();
     let universeValues: Maybe<CjsModelValues> = null;
     if (universe) {
-      // Applied as values: loading it as an object would run Initialize before the device exists.
-      const values = await ResourceValues(universe);
-      if (values._type !== 'EveSpaceScene') throw new Error(`${universe} is a ${values._type}, not an EveSpaceScene`);
-      CjsSchema.setValues(scene, values);
-      universeValues = values;
       this.universe = universe;
-      this.nebula = { path: universe, source: 'universe', state: 'applied' };
+      try {
+        // Applied as values: loading it as an object would run Initialize before the device exists.
+        const values = await ResourceValues(universe);
+        if (values._type !== 'EveSpaceScene') throw new Error(`${universe} is a ${values._type}, not an EveSpaceScene`);
+        CjsSchema.setValues(scene, values);
+        universeValues = values;
+        this.nebula = { path: universe, source: 'universe', state: 'applied' };
+      } catch (error) {
+        const message = `nebula ${universe}: ${ErrorText(error)}`;
+        console.warn(`${message}; drawing the green screen and stand-in cubes`);
+        this.nebula = { path: universe, source: 'universe', state: 'failed', error: message };
+        this.greenScreen = true;
+      }
     }
     vec3.copy(this.defaultSunDirection, scene.sunDirection);
     // The client's dynamic-lights setting (off by default in Carbon); without it
@@ -578,7 +616,7 @@ export class Engine {
     const driver = new EveSpaceSceneRenderDriver().SetBatchManager(batchManager);
     driver.SSAO = new Tr2SSAO();
     driver.enableDistortion = true;
-    driver.clearColor = [0.02, 0.03, 0.05, 1];
+    driver.clearColor = [...(this.greenScreen ? GREEN_SCREEN : SPACE_CLEAR_COLOR)];
     driver.scene = scene;
 
     const camera = new OrbitCamera(canvas);
@@ -607,7 +645,7 @@ export class Engine {
       // The scene clock's tick, the same value the Destiny parks were just evolved to (destiny.ts).
       driver.Execute([renderTarget], null, this.frameNow, this.frameNow, null, renderContext);
     });
-    this.parts = { scene, driver, camera, renderTarget, al, pump, format };
+    this.parts = { scene, driver, camera, renderTarget, al, pump, context, format };
     // The background effect setValues hydrated above draws black on the GPU (2026-10-22: no location, ?dress=off, or
     // a location whose region nebula is the universe), while one SetNebula swaps in draws. Apply the universe's nebula
     // the same way: a fresh effect, and the env map and low quality paths reloaded through OnModified.
@@ -644,7 +682,7 @@ export class Engine {
     if (this.deviceLost) return;
     this.frameNow = now;
     this.animation?.Frame(now);
-    const { camera, renderTarget, pump, al, format } = this.Parts();
+    const { camera, renderTarget, pump, al, context, format } = this.Parts();
     try {
       const resized = this.fixedSize ? HoldCanvasSize(this.canvas, this.fixedSize) : FitCanvasSize(this.canvas);
       if (resized) renderTarget.Configure({ width: this.canvas.width, height: this.canvas.height });
@@ -652,7 +690,10 @@ export class Engine {
       camera.Update(Math.round(timestamp * TICKS_PER_MS));
       // The orbit camera updates underneath a cinematic shot, so its release blend has a live target.
       this.drawn = this.cinematic ? this.free.Apply(camera, this.cinematic, this.Aspect()) : camera.Drawn();
+      // The runtime's batch count is cumulative: this frame's is the difference.
+      const batches = al.GetDrawnBatchCount?.() ?? 0;
       pump.Render();
+      this.DrawStandIns(camera, context, format, (al.GetDrawnBatchCount?.() ?? 0) - batches);
       this.CheckAnimationClock();
       this.capture.AfterFrame(this.presented, this.canvas.width, this.canvas.height, format);
       al.DrainTransitions?.();
@@ -671,6 +712,21 @@ export class Engine {
       this.fps.frames = 0;
       this.fps.since = timestamp;
     }
+  }
+
+  /**
+   * Draws the stand-in cubes over the frame just rendered, into its swap-chain image, before the capture reads it. With
+   * the green screen on and no batch drawn by the runtime this frame (without EVE's shaders it leaves the image black),
+   * the pass clears the image to the green first, cubes or none.
+   */
+  private DrawStandIns(camera: OrbitCamera, context: GPUCanvasContext, format: GPUTextureFormat, batches: number): void {
+    const cubes = this.standIns;
+    const backdrop = this.greenScreen && batches === 0 ? GREEN_SCREEN : null;
+    if (cubes.length === 0 && !backdrop) return;
+    // The wrapped getCurrentTexture records the image as presented, so the capture and an export read it.
+    const target = this.presented ?? context.getCurrentTexture();
+    this.standInPass ??= new StandInPass(this.device, format);
+    this.standInPass.Draw({ target, backdrop, cubes, eye: camera.Eye().position, view: camera.eve.GetViewMatrix().transform, projection: camera.eve.GetProjection().transform });
   }
 
   /**

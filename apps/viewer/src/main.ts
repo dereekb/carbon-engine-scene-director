@@ -158,7 +158,8 @@ class Overlay {
     let text: string;
     if (engine) {
       const frameError = engine.lastError ? ` · frame error: ${engine.lastError}` : '';
-      text = `${engine.adapterInfo} · ${engine.Stats().fps} fps${frameError}`;
+      const greenScreen = engine.greenScreen ? ' · no EVE data: green screen and cubes' : '';
+      text = `${engine.adapterInfo} · ${engine.Stats().fps} fps${greenScreen}${frameError}`;
     } else {
       text = director?.engineError?.message ?? this.state.renderer;
     }
@@ -377,6 +378,7 @@ async function Start(): Promise<void> {
       now = timeControl.Frame(timestamp);
     }
     liveDirector?.DriveBoosters(now);
+    liveDirector?.DriveStandIns(now);
     liveDirector?.fields.DriveLod();
     liveDirector?.TrackCamera(now);
     const shown = liveDirector?.Presentation() ?? { shot: {}, movie: null };

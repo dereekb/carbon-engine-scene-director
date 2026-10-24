@@ -1,0 +1,334 @@
+/**
+ * Stand-ins: what the page draws for a ship or object whose model did not build, most often because there is no EVE
+ * data (tools-core unreachable, a machine without the game files): a cube on its ball, coloured by team, with its nose
+ * face (local +Z) lit pale so the heading reads. Drawn in its own small WebGPU pass after the runtime's frame, on the
+ * engine's camera, so no EVE shader or model file is involved. Without the universe file the backdrop is GREEN_SCREEN
+ * (engine.ts): the runtime cannot draw into the canvas without EVE's shaders, so this pass clears the frame to it.
+ *
+ * Node-tested: only StandInPass touches WebGPU, and only once constructed.
+ */
+
+import type { Maybe } from '@dereekb/util';
+
+/**
+ * An sRGB colour, 0-1 per channel.
+ */
+export type StandInColor = readonly [number, number, number];
+
+/**
+ * The backdrop without EVE data: chroma-key green (sRGB 0, 177, 64).
+ */
+export const GREEN_SCREEN: readonly [number, number, number, number] = [0, 177 / 255, 64 / 255, 1];
+
+/**
+ * A ship with no team.
+ */
+export const NEUTRAL_STAND_IN_COLOR: StandInColor = [0.78, 0.78, 0.8];
+
+/**
+ * A static object (station, gate, structure, wreck).
+ */
+export const OBJECT_STAND_IN_COLOR: StandInColor = [0.45, 0.47, 0.52];
+
+/**
+ * Teams named after a colour; green is darkened to stay off the green screen.
+ */
+const NAMED_TEAM_COLORS: Readonly<Record<string, StandInColor>> = {
+  red: [0.86, 0.2, 0.18],
+  blue: [0.2, 0.42, 0.9],
+  yellow: [0.95, 0.8, 0.2],
+  orange: [0.95, 0.5, 0.15],
+  purple: [0.6, 0.3, 0.85],
+  pink: [0.95, 0.45, 0.7],
+  cyan: [0.2, 0.8, 0.9],
+  white: [0.95, 0.95, 0.95],
+  black: [0.12, 0.12, 0.14],
+  green: [0.05, 0.32, 0.12]
+};
+
+/**
+ * Any other team takes one of these by a hash of its name, so a team keeps its colour across loads.
+ */
+const TEAM_PALETTE: readonly StandInColor[] = ['red', 'blue', 'yellow', 'purple', 'orange', 'pink', 'cyan'].map((name) => NAMED_TEAM_COLORS[name]);
+
+/**
+ * Floats per cube in the instance buffer: its model matrix (eye-relative) and colour.
+ */
+export const STAND_IN_FLOATS = 20;
+
+/**
+ * One cube to draw.
+ */
+export interface StandInCube {
+  /**
+   * World position, metres: the ball's centre.
+   */
+  readonly position: ArrayLike<number>;
+  /**
+   * Unit quaternion [x, y, z, w]: the ball's heading (local +Z is the nose).
+   */
+  readonly rotation: ArrayLike<number>;
+  /**
+   * The ball's radius, metres: the cube's corners touch it, so cubes overlap on screen only when the balls do.
+   */
+  readonly radius: number;
+  readonly color: StandInColor;
+}
+
+/**
+ * A cube's colour by team: a team named after a colour takes it, any other a palette colour by its name's hash, no
+ * team neutral grey.
+ *
+ * @param team - The ship's team.
+ * @returns The colour.
+ */
+export function StandInTeamColor(team: Maybe<string>): StandInColor {
+  const name = team?.trim().toLowerCase() ?? '';
+  let color = NEUTRAL_STAND_IN_COLOR;
+  if (name) {
+    let hash = 0;
+    for (let index = 0; index < name.length; index++) hash = (hash * 31 + name.charCodeAt(index)) >>> 0;
+    color = NAMED_TEAM_COLORS[name] ?? TEAM_PALETTE[hash % TEAM_PALETTE.length];
+  }
+  return color;
+}
+
+/**
+ * Packs cubes for the instance buffer: per cube a column-major model matrix (rotation scaled to the half-extent, then
+ * the position relative to the eye, so float32 keeps its precision far from the origin) and its colour.
+ *
+ * @param cubes - The cubes.
+ * @param eye - The camera's eye, world metres.
+ * @param out - At least `cubes.length × STAND_IN_FLOATS` floats.
+ * @returns `out`.
+ */
+export function PackStandInCubes(cubes: readonly StandInCube[], eye: ArrayLike<number>, out: Float32Array): Float32Array {
+  cubes.forEach((cube, index) => {
+    const [x, y, z, w] = [cube.rotation[0], cube.rotation[1], cube.rotation[2], cube.rotation[3]];
+    const half = cube.radius / Math.sqrt(3);
+    const base = index * STAND_IN_FLOATS;
+    // gl-matrix fromQuat, each column scaled to the half-extent.
+    out.set(
+      [
+        (1 - 2 * (y * y + z * z)) * half,
+        2 * (x * y + z * w) * half,
+        2 * (x * z - y * w) * half,
+        0,
+        2 * (x * y - z * w) * half,
+        (1 - 2 * (x * x + z * z)) * half,
+        2 * (y * z + x * w) * half,
+        0,
+        2 * (x * z + y * w) * half,
+        2 * (y * z - x * w) * half,
+        (1 - 2 * (x * x + y * y)) * half,
+        0,
+        cube.position[0] - eye[0],
+        cube.position[1] - eye[1],
+        cube.position[2] - eye[2],
+        1,
+        cube.color[0],
+        cube.color[1],
+        cube.color[2],
+        1
+      ],
+      base
+    );
+  });
+  return out;
+}
+
+/**
+ * The view-projection for eye-relative positions: projection × the view's rotation (its translation dropped).
+ *
+ * @param view - The view matrix, column-major.
+ * @param projection - The projection matrix, column-major.
+ * @param out - 16 floats.
+ * @returns `out`.
+ */
+export function StandInViewProjection(view: ArrayLike<number>, projection: ArrayLike<number>, out: Float32Array): Float32Array {
+  for (let column = 0; column < 4; column++) {
+    for (let row = 0; row < 4; row++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) {
+        const rotation = column === 3 ? (k === 3 ? 1 : 0) : k === 3 ? 0 : view[column * 4 + k];
+        sum += projection[k * 4 + row] * rotation;
+      }
+      out[column * 4 + row] = sum;
+    }
+  }
+  return out;
+}
+
+/**
+ * Cube faces from the vertex index (6 faces × 2 triangles), instanced per cube; the nose face (local +Z, face 4) is
+ * lit pale. The light falls from above and to one side, with enough ambient that no face goes black.
+ */
+const STAND_IN_SHADER = /* wgsl */ `
+struct Frame {
+  viewProjection: mat4x4<f32>,
+  light: vec4<f32>,
+};
+
+struct Cube {
+  model: mat4x4<f32>,
+  color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var<storage, read> cubes: array<Cube>;
+
+var<private> NORMALS: array<vec3<f32>, 6> = array<vec3<f32>, 6>(
+  vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-1.0, 0.0, 0.0),
+  vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(0.0, -1.0, 0.0),
+  vec3<f32>(0.0, 0.0, 1.0), vec3<f32>(0.0, 0.0, -1.0)
+);
+
+var<private> QUAD: array<vec2<f32>, 6> = array<vec2<f32>, 6>(
+  vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0),
+  vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0)
+);
+
+struct Varyings {
+  @builtin(position) position: vec4<f32>,
+  @location(0) color: vec3<f32>,
+};
+
+@vertex
+fn vertexMain(@builtin(vertex_index) vertex: u32, @builtin(instance_index) instance: u32) -> Varyings {
+  let face = vertex / 6u;
+  let corner = QUAD[vertex % 6u];
+  let normal = NORMALS[face];
+  let tangent = normal.yzx;
+  let bitangent = cross(normal, tangent);
+  let cube = cubes[instance];
+  let world = cube.model * vec4<f32>(normal + corner.x * tangent + corner.y * bitangent, 1.0);
+  let worldNormal = normalize((cube.model * vec4<f32>(normal, 0.0)).xyz);
+  var color = cube.color.rgb;
+  if (face == 4u) {
+    color = mix(color, vec3<f32>(1.0), 0.65);
+  }
+  var out: Varyings;
+  out.position = frame.viewProjection * world;
+  out.color = color * (0.4 + 0.6 * max(dot(worldNormal, frame.light.xyz), 0.0));
+  return out;
+}
+
+@fragment
+fn fragmentMain(in: Varyings) -> @location(0) vec4<f32> {
+  return vec4<f32>(in.color, 1.0);
+}
+`;
+
+/**
+ * Where the light comes from (world, unit): above, and off to one side so neighbouring faces differ.
+ */
+const LIGHT_DIRECTION = [0.36, 0.83, 0.42] as const;
+
+/**
+ * The pass's inputs for one frame.
+ */
+export interface StandInFrame {
+  /**
+   * The frame's swap-chain image; the cubes draw over it.
+   */
+  readonly target: GPUTexture;
+  /**
+   * Clears the image to this colour first (the green screen, when the runtime drew nothing); null keeps what the
+   * runtime drew.
+   */
+  readonly backdrop: Maybe<readonly number[]>;
+  readonly cubes: readonly StandInCube[];
+  readonly eye: ArrayLike<number>;
+  readonly view: ArrayLike<number>;
+  readonly projection: ArrayLike<number>;
+}
+
+/**
+ * The WebGPU half: one pipeline, a uniform for the camera and light, a growing instance buffer and its own depth
+ * buffer (the runtime's is not shared, so cubes sort among themselves and draw over whatever the runtime drew).
+ */
+export class StandInPass {
+  private readonly device: GPUDevice;
+  private readonly pipeline: GPURenderPipeline;
+  private readonly frame: GPUBuffer;
+  private readonly frameData = new Float32Array(20);
+  private instances: Maybe<GPUBuffer> = null;
+  private instanceData = new Float32Array(0);
+  private bindGroup: Maybe<GPUBindGroup> = null;
+  private depth: Maybe<GPUTexture> = null;
+
+  constructor(device: GPUDevice, format: GPUTextureFormat) {
+    this.device = device;
+    const module = device.createShaderModule({ label: 'stand-in cubes', code: STAND_IN_SHADER });
+    this.pipeline = device.createRenderPipeline({
+      label: 'stand-in cubes',
+      layout: 'auto',
+      vertex: { module, entryPoint: 'vertexMain' },
+      fragment: { module, entryPoint: 'fragmentMain', targets: [{ format }] },
+      primitive: { topology: 'triangle-list', cullMode: 'none' },
+      depthStencil: { format: 'depth24plus', depthWriteEnabled: true, depthCompare: 'less' }
+    });
+    this.frame = device.createBuffer({ label: 'stand-in frame', size: this.frameData.byteLength, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+  }
+
+  /**
+   * Draws the cubes over the frame.
+   *
+   * @param frame - The target, the cubes and the camera.
+   */
+  Draw({ target, backdrop, cubes, eye, view, projection }: StandInFrame): void {
+    const { device } = this;
+    this.Reserve(cubes.length);
+    StandInViewProjection(view, projection, this.frameData);
+    this.frameData.set(LIGHT_DIRECTION, 16);
+    device.queue.writeBuffer(this.frame, 0, this.frameData);
+    PackStandInCubes(cubes, eye, this.instanceData);
+    device.queue.writeBuffer(this.instances as GPUBuffer, 0, this.instanceData, 0, cubes.length * STAND_IN_FLOATS);
+    const depth = this.Depth(target.width, target.height);
+    const encoder = device.createCommandEncoder({ label: 'stand-in cubes' });
+    const pass = encoder.beginRenderPass({
+      label: 'stand-in cubes',
+      colorAttachments: [backdrop ? { view: target.createView(), loadOp: 'clear', clearValue: { r: backdrop[0], g: backdrop[1], b: backdrop[2], a: 1 }, storeOp: 'store' } : { view: target.createView(), loadOp: 'load', storeOp: 'store' }],
+      depthStencilAttachment: { view: depth.createView(), depthClearValue: 1, depthLoadOp: 'clear', depthStoreOp: 'discard' }
+    });
+    if (cubes.length > 0) {
+      pass.setPipeline(this.pipeline);
+      pass.setBindGroup(0, this.bindGroup as GPUBindGroup);
+      pass.draw(36, cubes.length);
+    }
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+
+  /**
+   * Grows the instance buffer (and its bind group) to hold `count` cubes.
+   */
+  private Reserve(count: number): void {
+    if (this.instances && this.instanceData.length >= count * STAND_IN_FLOATS) return;
+    const capacity = Math.max(64, 2 ** Math.ceil(Math.log2(Math.max(1, count))));
+    this.instances?.destroy();
+    this.instanceData = new Float32Array(capacity * STAND_IN_FLOATS);
+    this.instances = this.device.createBuffer({ label: 'stand-in cubes', size: this.instanceData.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.bindGroup = this.device.createBindGroup({
+      label: 'stand-in cubes',
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: this.frame } },
+        { binding: 1, resource: { buffer: this.instances } }
+      ]
+    });
+  }
+
+  /**
+   * The depth buffer at the target's size, recreated when it changes.
+   */
+  private Depth(width: number, height: number): GPUTexture {
+    let depth = this.depth;
+    if (!depth || depth.width !== width || depth.height !== height) {
+      depth?.destroy();
+      depth = this.device.createTexture({ label: 'stand-in depth', size: { width, height }, format: 'depth24plus', usage: GPUTextureUsage.RENDER_ATTACHMENT });
+      this.depth = depth;
+    }
+    return depth;
+  }
+}

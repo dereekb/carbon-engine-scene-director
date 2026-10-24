@@ -93,6 +93,8 @@ What works today:
 - **Movie export**: the movie (or a time range) renders offline to an MP4 at a set size and fps on a fixed 1/fps
   scene clock, smooth however slowly the battle draws: H.264 or HEVC encoded in the page with WebCodecs and written
   by the hub (`export_movie`).
+- **No EVE data needed for UI work**: without tools-core the page still runs the simulation, orders, the camera and
+  cinema on a green-screen backdrop, each ship and object drawn as a cube in its team colour.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)

@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`, `time-control.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `animation-clock.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `stand-ins.ts` (only its `StandInPass` touches WebGPU), `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `animation-clock.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts`, `destiny-warp-in.spec.ts` and `destiny-missile.spec.ts` cover `destiny.ts`' tackle, accuracy, arrivals and missiles on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
@@ -59,6 +59,19 @@
 
 - `engine.ts`: WebGPU device, `EveSpaceScene` with its render driver, the frame loop, orbit camera, frame capture
   (ported from the runtime's Oct 3 WebGPU viewer). The scene initializes empty; ships are added and removed live.
+- **No EVE data still starts the renderer** (2026-10-24, Mac Chrome, no tools-core). A universe file that does not load
+  is a warning, not a failure: `Engine.greenScreen` turns on and the scene starts with no nebula. The runtime's frame
+  then runs cleanly at 60 fps but draws no batch and leaves the swap-chain image black (every effect, the final blit's
+  included, is an EVE file), so its `clearColor` never shows.
+- **Stand-ins** (`stand-ins.ts`): `Director.DriveStandIns` hands `Engine.SetStandIns` a cube for every ship whose build
+  `failed` (on its ClientBall at the frame's time, half-extent radius / √3 so the corners touch the ball, coloured by
+  team, the nose face +Z pale) and every `failed` object (its document placement and ball radius). `StandInPass` draws
+  them in its own WebGPU pass (WGSL inline, its own depth buffer, eye-relative positions) after `pump.Render()` and
+  before the capture, so `screenshot` and movie exports include them. It clears the image to `GREEN_SCREEN` (sRGB 0,
+  177, 64) first only when `greenScreen` is on and the runtime drew no batch that frame (`GetDrawnBatchCount()` is
+  cumulative: the frame's count is the difference), so it never wipes real drawing. A hull that fails with EVE data
+  present also draws as a cube, over the nebula. `get_state.renderer.standIns` reports `{ greenScreen, cubes }`; the HUD's
+  renderer line says "no EVE data: green screen and cubes".
 - **The scene needs the EVE client's dressing** (`environment.ts`): a sun environment template as the post process,
   with the client's tonemapping and dynamic exposure added when the template lacks them, plus the sun's lens flare. A
   universe file carries none of these. Without dynamic exposure the nebula (median texel ~0.01 linear) renders at
