@@ -204,7 +204,9 @@ field, a bad value); `action` defaults to `status`.
   `timeline restart { paused: true }`, waits frames while `preparing` (the prepare cap + 10 s), pauses the clock, plays
   the timeline (the origin is pinned, recording starts from the settled scene), then jumps from now to the t = 0 boundary
   (`NextBoundaryTime()`) + the remembered time, so t = 0's boundary runs inside the jump; the pause comes back. When the
-  scene did not settle (nothing recorded) it plays from t = 0 with a warning.
+  scene did not settle (nothing recorded) it plays from t = 0 with a warning. The movie owns the camera for that jump
+  although `startTick` is still null (`MovieOwnsCamera()` counts `playing`), so the camera cues it crosses drive the
+  cinema; an export's restart has the same shape (`sd-export`, E3).
 - **Two frames**: `play`, `seek`, `retake` and re-simulating edits await `NextFrames(2)` before returning (requestAnimationFrame,
   with a 1 s fallback for a tab the browser stopped drawing), so a `screenshot` right after shows the landing.
 - **The report** (`MovieReportOf`): `state`, `time` (fractional timeline seconds), `end`, `ended`, `look { letterbox, hud,

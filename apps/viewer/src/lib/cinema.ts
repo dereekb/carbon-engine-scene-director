@@ -240,6 +240,12 @@ export class CinemaRig {
    * frame).
    */
   private smoothed: Maybe<{ eye: SceneVector; look: SceneVector; target: Maybe<{ eye: SceneVector; look: SceneVector }> }> = null;
+  /**
+   * The shot a new blended play replaced, and the clock it was replaced at: the next frame frames it there once more, so
+   * the blend starts from its pose at that exact clock rather than the last frame drawn (the same at any frame rate,
+   * sd-export).
+   */
+  private handoff: Maybe<{ readonly run: ShotRun; readonly at: number }> = null;
   private lastTick: Maybe<number> = null;
   private note: Maybe<string> = null;
   private reportedAt = 0;
@@ -314,7 +320,8 @@ export class CinemaRig {
 
   /**
    * Plays a shot, or a sequence (`{ shots: [...] }` or an array), replacing whatever plays and forgetting any paused
-   * or stopped shot. A blend transition starts from the pose drawn last frame; a cut starts on the hardpoint.
+   * or stopped shot. A blend transition starts from the replaced shot's pose at `now` (framed on the next frame), or
+   * from idle from the pose drawn last frame; a cut starts on the hardpoint.
    *
    * @param input - The shot or sequence JSON (library references expand here).
    * @param now - The scene clock, in integer 100 ns ticks.
@@ -327,7 +334,10 @@ export class CinemaRig {
     const normalized = sequence ? normalizeCameraSequence(input) : normalizeCameraShot(input);
     const shots = 'sequence' in normalized ? (normalized.sequence?.shots ?? null) : normalized.shot ? [normalized.shot] : null;
     if (!shots?.length) throw new Error(`Invalid camera ${sequence ? 'sequence' : 'shot'}:\n- ${normalized.problems.join('\n- ')}`);
-    // A new play while one runs blends from its pose; from idle, a pause or a release it captures the drawn pose.
+    // A new play while one runs blends from its pose at `now` (the handoff, framed on the next frame); from idle, a
+    // pause or a release it captures the drawn pose.
+    const replaced = this.state === 'playing' ? this.run : null;
+    const trail = this.smoothed;
     if (this.state !== 'playing') this.last = null;
     this.shots = [...shots];
     this.index = 0;
@@ -338,6 +348,9 @@ export class CinemaRig {
     this.stopped = null;
     this.state = 'playing';
     this.StartShot(now);
+    this.handoff = replaced && this.shots[0].transition.type === 'blend' ? { run: replaced, at: now } : null;
+    // The replaced shot's lag trails on to the handoff clock first, toward its moving target: keep that target till then.
+    if (this.handoff) this.smoothed = trail;
     return { state: this.state, shots: this.shots, warnings: normalized.warnings };
   }
 
@@ -375,6 +388,7 @@ export class CinemaRig {
     this.stopped = forget || !run ? null : { shots: this.shots, index: this.index, elapsed: this.ShotNow(now) - run.start, anchor: run.anchor, seed: run.seed };
     const last = this.last;
     this.run = null;
+    this.handoff = null;
     this.smoothed = null;
     this.pausedAt = null;
     if (last && !cut) {
@@ -589,6 +603,21 @@ export class CinemaRig {
     let holding = false;
     // The frame's lag step still to take: a shot ending inside the frame takes its share up to its end.
     let step = seconds;
+    const handoff = this.handoff;
+    this.handoff = null;
+    if (handoff && run && !run.framed) {
+      // The shot a blended play replaced, framed at the play's clock with the lag's share up to it: the blend starts
+      // from that pose, not from the last frame drawn before it (sd-export). A replaced shot that cannot frame there
+      // keeps the drawn pose.
+      const toStart = Math.min(step, Math.max(0, step - (shotNow - handoff.at) / TICKS_PER_SECOND));
+      const prior = this.FrameRun(handoff.run, handoff.at, toStart, scene, true, handoff.at, false);
+      if (this.run !== run) return null;
+      if (prior) {
+        run.blendFrom = prior.pose;
+        if (this.smoothed) this.smoothed = { ...this.smoothed, target: null };
+        step -= toStart;
+      }
+    }
     // Advance the sequence on each shot's duration, from its exact end so the timing never drifts.
     while (run?.shot.duration != null && shotNow - run.start >= run.shot.duration * TICKS_PER_SECOND) {
       const last = this.index + 1 >= this.shots.length;
@@ -626,8 +655,9 @@ export class CinemaRig {
    * @param scene - The scene as drawn this frame.
    * @param holding - Whether the shot holds its last frame (its moves at their end values).
    * @param now - The scene clock a release starts at.
+   * @param release - Whether a shot that cannot frame releases the camera (not for a replaced shot's handoff).
    */
-  private FrameRun(run: ShotRun, shotNow: number, seconds: number, scene: CinemaScene, holding: boolean, now: number): Maybe<CinemaFrame> {
+  private FrameRun(run: ShotRun, shotNow: number, seconds: number, scene: CinemaScene, holding: boolean, now: number, release = true): Maybe<CinemaFrame> {
     const { shot } = run;
     const elapsed = (shotNow - run.start) / TICKS_PER_SECOND;
     const t = holding && shot.duration != null ? Math.min(elapsed, shot.duration) : elapsed;
@@ -643,7 +673,7 @@ export class CinemaRig {
       base = resolved.pose;
       subject = resolved.subject;
       if (!base) {
-        this.Release(now, { note: resolved.note ?? 'the hardpoint has no pose', forget: true });
+        if (release) this.Release(now, { note: resolved.note ?? 'the hardpoint has no pose', forget: true });
         return null;
       }
       this.note = resolved.note ?? null;
@@ -652,7 +682,7 @@ export class CinemaRig {
       const eye = resolveWaypoint(shot.pose.eye, context);
       const look = resolveWaypoint(shot.pose.look, context);
       if (!eye || !look) {
-        this.Release(now, { note: 'its subject left the scene', forget: true });
+        if (release) this.Release(now, { note: 'its subject left the scene', forget: true });
         return null;
       }
       // An eye riding the hull it looks at, at its centre: hold the last pose.

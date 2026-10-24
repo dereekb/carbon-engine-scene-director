@@ -82,9 +82,23 @@ declare module '@carbonenginejs/runtime/blue' {
     RegisterFileSystem(fileSystem: BlueResFileSystemRemote): void;
   }
 
+  /**
+   * IBlueOS's frameClock (Carbon's mFrameClock): the host's frame clock. PumpOS takes the frame's real and simulation
+   * time from Sample()[0] (Blue ticks on the runtime epoch). A runtime-called name.
+   */
+  export interface BlueFrameClock {
+    Sample(): ArrayLike<number>;
+  }
+
   export interface BlueOs {
     RegisterForTicks(target: object, cookie: string): void;
     PumpOS(): void;
+    /** The host's frame clock; null samples the actual time (the runtime's default). */
+    frameClock: BlueFrameClock | null;
+    /** Blue ticks now (the host's monotonic clock), on the runtime epoch. */
+    GetActualTime(): number;
+    /** The frame time PumpOS last set (Blue ticks): what controllers, bindings and the device's animation time read. */
+    GetCurrentFrameTime(): number;
   }
 
   export const blue: {
@@ -195,6 +209,8 @@ declare module '@carbonenginejs/runtime/trinity/core' {
   export class Tr2Renderer {
     static getSettings(): Tr2RendererSettings;
     static SetShaderModel(model: number): void;
+    /** The device's animation time, seconds (TriDevice.animationTime, recentred hourly): the shaders' per-frame Time. */
+    static GetAnimationTime(): number;
     /**
      * Draws a camera-space quad (the nebula) through the blitter; false when it
      * refused (no material, shader, prepared resources or mapped vertex buffer).

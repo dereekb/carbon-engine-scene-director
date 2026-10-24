@@ -620,14 +620,20 @@ describe('the cinema rig at any frame rate (sd-export)', () => {
    *
    * @returns The pose and the rig's state at each frame's clock, and the clocks where the shot or sequence index changed.
    */
-  function Drive(input: Parameters<CinemaRig['Play']>[0], fps: number, seconds: number) {
+  function Drive(input: Parameters<CinemaRig['Play']>[0], fps: number, seconds: number, then?: { readonly at: number; readonly input: Parameters<CinemaRig['Play']>[0] }) {
     const rig = new CinemaRig();
     rig.Play(input, 0);
     const poses = new Map<number, Maybe<CameraPose>>();
     const changes: string[] = [];
     let last = '';
+    let played = false;
     for (let index = 0; index <= seconds * fps; index++) {
       const now = Math.round((index * SECOND) / fps);
+      // A second play at its own clock (a cue on a tick boundary), before the frame that reaches it.
+      if (then && !played && now >= then.at * SECOND) {
+        rig.Play(then.input, then.at * SECOND);
+        played = true;
+      }
       const frame = rig.Frame(now, () => Flying(now));
       poses.set(now, frame?.pose ?? null);
       const report = rig.Report();
@@ -706,6 +712,19 @@ describe('the cinema rig at any frame rate (sd-export)', () => {
     for (const fps of [24, 30]) {
       const other = Drive(sequence, fps, 7);
       // The sequence's shot changes, the release and the hand-back fall on the same clocks (multiples of 1/6 s).
+      expect(other.changes).toEqual(at60.changes);
+      expect(Gap(other.poses, at60.poses).share, `${fps} fps`).toBeLessThan(1e-3);
+    }
+  });
+
+  it('blends a shot played over a running one from that shot at the play clock, not the last frame drawn', () => {
+    // E3 (real GPU): a cue's hero shot over a fast pull-out started 258 m apart at 30 and 60 fps, one frame of travel.
+    const chase = { hardpoint: { name: 'chase', ship: 'a' }, lag: { eye: 0.35, look: 0.15 } } as Parameters<CinemaRig['Play']>[0];
+    const hero = { hardpoint: { name: 'hero-port', ship: 'a' }, duration: 3, transition: { type: 'blend', duration: 1.5 } } as Parameters<CinemaRig['Play']>[0];
+    const then = { at: 2, input: hero };
+    const at60 = Drive(chase, 60, 5, then);
+    for (const fps of [24, 30]) {
+      const other = Drive(chase, fps, 5, then);
       expect(other.changes).toEqual(at60.changes);
       expect(Gap(other.poses, at60.poses).share, `${fps} fps`).toBeLessThan(1e-3);
     }

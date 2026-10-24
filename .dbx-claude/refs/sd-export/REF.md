@@ -9,11 +9,11 @@
 > fixed-step clock and the camera-timing specs → E2 the pipeline, the hub writer and `export_movie`, headless-verified →
 > E3 the real-GPU export).
 
-**Status: E1 and E2 have landed**: the fixed-step export clock, the frame grid and stepper, the camera-timing specs
+**Status: E3 landed** (2026-10-24): the fixed-step export clock, the frame grid and stepper, the camera-timing specs
 (E1); `export_movie`, the page's exporter with WebCodecs, the slate source, the wire, the hub's `Mp4Writer`, sessions
-and `/movies`, the locks, and verify-page `export:` headless (E2). **E3 is pending**: the real-GPU export in Windows
-Chrome (the scene source, the compositor, the M6 movie, a slow big fight), which needs the runtime's animation clock
-from the pause-fx item.
+and `/movies`, the locks, and verify-page `export:` headless (E2); the real-GPU export in Windows Chrome on the
+animation clock (`sd-time`): the M6 movie, a 60 fps range, a slow 300-ship fight, HEVC 4K and cancel, two camera fixes
+(E3, Evidence below).
 
 ## Files
 
@@ -130,6 +130,12 @@ state and tick, and the scripts' states are equal; the steps are the floor and c
   drive it at 24 / 30 / 60 fps fixed steps and compare at the shared clocks. A lag or ease toward a moving target uses
   `SmoothTrack` (or its closed form), never a step that holds the target still; a transition starts from the pose at
   its exact clock, not the last frame drawn.
+- **A blended `play_shot` over a running shot starts from that shot at the play's clock** (`CinemaRig` `handoff`: the
+  next frame frames the replaced run at the play's clock with the lag's share up to it, its lag trail kept till then),
+  never from the last frame drawn: E3 found a cue's hero shot starting 258 m apart at 30 and 60 fps.
+- **A restart's jump owns the movie camera before t = 0's tick**: `Director.MovieOwnsCamera()` counts a timeline
+  `playing` before its first tick as started, so an export's (or `movie retake`'s) restart-then-seek steps the camera
+  cues through the re-simulation (E3: a range export's camera stayed frozen until the next camera cue).
 - **Nothing in an export reads real time but the throttles** (`GetActualTime`, below): a new effect timer goes on the
   scene clock (the frame's `now`) or Blue's frame clock.
 
@@ -147,7 +153,12 @@ state and tick, and the scripts' states are equal; the steps are the floor and c
 - Video only. H.264 and HEVC only (AV1 / VP9 need av1C / vpcC built by the hub). Integer fps only.
 - A shot's own letterbox mid-export resizes the canvas; the first frame after it may show TAA history.
 - The runtime's drawn randomness (explosion sub-blasts, burst delays) is unseeded: two exports differ there, never in
-  the simulation or the camera.
+  the simulation. The camera can differ for a few frames near a death (E3: 610 m for 6 frames at red-fc's death, 2–6
+  frames in other runs; unexplained, likely clearance against a dying hull whose hide time is drawn).
+- A range's first frames after its silent seek settle the camera lag (44 m → 8 m within 0.3–0.6 s): inside the 2 s
+  preroll, never encoded.
+- The H.264 encoder rings into the one 8-pixel block row that straddles each letterbox edge (rows 137 and 942 at
+  1080p 2.39: up to 22/255); the compositor's bars are exact.
 
 ## One export, end to end
 
@@ -363,3 +374,56 @@ Two fixes the run found (2026-10-24): `time_control {}` threw `EXPORT_LOCKED_TEX
 director only reads for an empty command), and a held, ready timeline got the "prepares" refusal for `restart: false`
 instead of "needs a started timeline". A third, in E1's stepper: a grid without preroll started at index −0, so the
 first frame's timestamp was −0 (`0 - preroll` now).
+
+The regression batch after E2 (2026-10-24, dbxpc, the E2 commit's build, headless:
+`--only 'export:|movie:|time:|timeline:'`, ~25 min): 46 ok, 0 failed (timeline 14, time 14, movie 10, export 7 and the
+hub link); page errors 1, unexpected 0 (the renderer's missing adapter). Nothing needed fixing.
+
+## Real-GPU evidence (E3, 2026-10-24, dbxpc, Windows Chrome, NVIDIA Lovelace, tools-core SDE build 3646012)
+
+A private hub on 5533 (temp stores), the tab at 1600 × 900 (`?audio=off`), the animation clock on (`renderer.animation`
+`clock: scene`). A probe wrapped `engine.Frame` and logged per frame the scene clock, the animation clock's ticks,
+`shaderTime`, wall ms, the drawn eye, `gpuErrors`, the exporter's state and frame, and the canvas size. Drivers in
+`.scratch/movie-export-gpu/` (`export.mjs`, `stats.py`, M6's `drive.mjs setup`).
+
+| Run | Command | Frames | Wall | Export fps | Bytes (mean bitrate) | Notes |
+|---|---|---|---|---|---|---|
+| 1 M6 full | `{}` (1080p30 H.264 `avc1.640028`, letterbox 2.39) | 2,850 | 75.3 s (75.8 first pass) | 37.8 | 144,484,289 (12.17 Mbps vs 12.44 asked) | 48 keyframes; frame ms mean 26.1, max 175 |
+| 2 range | `{ from: 30, to: 45, fps: 60 }` | 120 preroll + 900 | 26.4 s | 38.6 | 47,044,778 (25.1 Mbps vs 24.9) | `avc1.64002A`; first encoded frame at timeline 30.000, preroll 28.000–29.983 |
+| 3 big fight | 150 Punishers vs 150 Rifters (brawler), CNAP, `auto_camera` at 1, `{ to: 20 }` | 600 | 180 s (prepare 4 s) | 3.5 (0.11× real time) | 34,900,262 (14.0 Mbps) | frame ms mean 288, max 1,480; live 1–6 fps |
+| 4 HEVC 4K | `{ codec: "hevc", width: 3840, height: 2160, to: 2 }` (the big fight) | 60 | 28 s | 3.45 | 7,760,760 | `hvc1.1.6.L150.B0`, 49.8 Mbps asked |
+| 5 cancel | `{}`, cancelled at frame 300 | 321 | 10.5 s | | | no `.part` left |
+
+- **Determinism**: both full M6 exports and every range fired the cues at 0, 5, 5, 19, 19, 20, 25, 25, 33, 33, 36, 41 and
+  killed blue-fc at 32, red-fc at 35 and red-dps-02 at 42 (timeline seconds), as M6's straight run.
+- **The clock**: every encoded frame stepped the scene by exactly 333,333 / 333,334 ticks at 30 fps (166,666 / 166,667 at
+  60), the animation clock by the same, and shader time by 1/fps (at 0.01 s rounding 0.03 / 0.04 in a 2 : 1 mix; 94.96 s
+  of shader time over 94.967 s of scene). So the runtime's own animations follow the export clock.
+- **The picture**: the canvas held 1920 × 804 on every frame (the compositor adds the bars); no frame undrawn, `gpuErrors`
+  0 and page errors 0 in every run. Decoded bars: rows 0–136 and 943–1079 at most 5/255; rows 137 and 942 up to 22/255
+  (codec ringing, Limits).
+- **Playback** at `/movies/<file>` in a second tab: M6 95 s 1920 × 1080, 3 s of play → 3.30 s, 89 frames presented, 4
+  dropped; the range 15 s, 179 frames, 9 dropped; the big fight 20 s, 91 frames, 5 dropped; HEVC 4K 2 s 3840 × 2160,
+  45 frames in 1.8 s, 2 dropped. Seeks land; the frames show the shots the live run shows (the overlook at 31 s, the
+  fight at 40 s, the big fight's station, laser fight and a close explosion).
+- **Slow and smooth** (run 3, timeline 2–20 s, cuts excluded): the export took 539 steps of exactly 1/30 s with 4 cuts;
+  the camera's speed changed 1.4 % a frame (median; p95 21.5 % at moves and eases). The same window live: 61 frames,
+  scene steps 0.03–1.0 s (sd 0.19 s), speed change 11.9 % a frame (p95 71 %).
+- **Cancel and back to live**: cancelled at frame 321, no part file, the canvas back at 1600 × 669, the clock paused at the
+  last frame with the animation clock frozen; play resumed at 40–41 fps with `renderer.animation.frozen` false.
+- **Watch list**: the compositor's edges exact (above); no picture resize mid-export in these movies (no shot letterbox);
+  the first frames after a seek settle inside the preroll; no effect on wall time (shader time on the clock); exposure
+  showed no per-frame jump in the files viewed (not measured); backpressure: the encoder queue peaked at 6 at 34 export
+  fps, never `waiting`.
+
+Two camera fixes the runs found (2026-10-24):
+
+1. **A range export's camera stayed frozen** at the establishing shot's eye from 28 s until the next camera cue (33 s):
+   the export's restart plays the timeline with the clock paused and jumps at once, before t = 0's tick, so
+   `MovieOwnsCamera()` read `startTick` null, the jump went silent for the cinema and the overlook cue was swallowed.
+   `movie retake` has the same shape. Fixed (Rules); after it the range's eye matches the full export's to 0.0 m from
+   29 s on.
+2. **A blended shot over a running one started from the last frame drawn**: the hero cue at 33 s began 258 m apart at 30
+   and 60 fps (the overlook moving ~15 km/s, one 1/60 s frame of travel), converging by 34.3 s. Fixed (Rules;
+   `cinema.spec.ts` "blends a shot played over a running one…", 1.8 % of the eye distance at 24 vs 60 fps before, under
+   1e-3 after); on the GPU the two exports now agree within 0.6 m across the cut.

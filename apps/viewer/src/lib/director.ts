@@ -3230,9 +3230,12 @@ export class Director {
    * Whether the timeline owns the camera (Movie mode M4, sd-cinema): its camera is on, it started, and its script has a
    * camera cue or a movie block. A jump then returns the camera to the movie's at the landing (the rig and the camera
    * director come back with the snapshot and play through the re-simulation) instead of rebasing the viewing camera.
+   * Started includes playing before its t = 0 tick: an export's or a retake's restart jumps forward with the clock paused
+   * right after Play, and the cues that tick fires must still drive the camera (sd-export).
    */
   MovieOwnsCamera(): boolean {
-    return this.timeline.camera && this.timeline.startTick != null && (this.timeline.cameraCues || this.authored?.timeline?.movie != null);
+    const started = this.timeline.startTick != null || this.timeline.state === 'playing';
+    return this.timeline.camera && started && (this.timeline.cameraCues || this.authored?.timeline?.movie != null);
   }
 
   /**

@@ -9,6 +9,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { blendPoses, DEFAULT_CAMERA_FOV, poseFromViewMatrix, poseViewMatrix, type CameraPose, type DressedSun } from '@scene-director/scene';
+import { AnimationClock } from './animation-clock';
 import { DriveEveCamera, OrbitFitDistance, PanMetresPerPixel } from './camera';
 import { TICKS_PER_MS } from './clock';
 import type { CinemaFrame } from './cinema';
@@ -57,6 +58,12 @@ import {
 const DEGREES = Math.PI / 180;
 
 /**
+ * `?anim=real` keeps Blue's own real-time frame clock: the runtime's animations then go on while paused; the A/B for
+ * the animation clock, sd-time.
+ */
+export const ANIMATION_ON_SCENE_CLOCK = new URLSearchParams(globalThis.location?.search ?? '').get('anim') !== 'real';
+
+/**
  * What the page puts in scene.objects besides ships: static objects, module effects (module-effects.ts) and ship-death
  * explosions (explosions.ts), drawn missiles and their impacts (missile-effects.ts).
  */
@@ -99,6 +106,11 @@ export interface EngineStats {
    * WebGPU's uncaptured errors (validation, out-of-memory, internal): every one counted, the first distinct ones kept.
    */
   readonly gpuErrors: { readonly count: number; readonly messages: string[] };
+  /**
+   * The clock the runtime's own animations run on (animation-clock.ts): scene, or real under ?anim=real; the seconds it
+   * advanced, whether the last frame held it, and the shaders' Time.
+   */
+  readonly animation: { readonly clock: 'scene' | 'real'; readonly seconds?: number; readonly frozen?: boolean; readonly shaderTime: number };
 }
 
 export interface EngineEnvironment extends SceneEnvironmentReport {
@@ -204,6 +216,11 @@ export class Engine {
    */
   private fixedSize: Maybe<{ readonly width: number; readonly height: number }> = null;
   private compositor: Maybe<ExportCompositor> = null;
+  /**
+   * Blue's frame clock while it follows the scene clock (ANIMATION_ON_SCENE_CLOCK), else null.
+   */
+  private animation: Maybe<AnimationClock> = null;
+  private animationChecked = false;
   private readonly fps = { frames: 0, since: performance.now(), value: 0 };
   private readonly gpuErrors = { count: 0, messages: [] as string[], capped: false };
   private dresser: Maybe<SceneDresser> = null;
@@ -462,7 +479,8 @@ export class Engine {
       drawnBatches: this.parts?.al.GetDrawnBatchCount?.() ?? null,
       lastFrameError: this.lastError,
       deviceLost: this.deviceLost,
-      gpuErrors: { count: this.gpuErrors.count, messages: [...this.gpuErrors.messages] }
+      gpuErrors: { count: this.gpuErrors.count, messages: [...this.gpuErrors.messages] },
+      animation: { clock: this.animation ? 'scene' : 'real', ...this.animation?.Report(), shaderTime: Math.round(Tr2Renderer.GetAnimationTime() * 100) / 100 }
     };
   }
 
@@ -577,6 +595,12 @@ export class Engine {
     this.dresser = dresser;
     void dresser.Dress(scene, null);
 
+    // Blue's frame clock follows the scene clock, so the runtime's own animations (controllers, lights, the shaders'
+    // Time) hold while paused and slow in slow motion (sd-time, sd-runtime → The clocks the runtime reads).
+    if (ANIMATION_ON_SCENE_CLOCK) {
+      this.animation = new AnimationClock(blue.os.GetActualTime());
+      blue.os.frameClock = this.animation;
+    }
     const pump = CreateFramePump(gTriDev.device, () => {
       al.SetRenderTarget(0, renderTarget);
       al.SetDepthStencil(null);
@@ -596,27 +620,30 @@ export class Engine {
   }
 
   /**
-   * Draws one frame. The page's animation loop (main.ts) calls it after evolving the Destiny parks to `now`, so the
-   * ships' ball curves are sampled on the clock the parks run on.
-   *
-   * @param timestamp - The animation frame's timestamp, in milliseconds.
-   * @param now - The scene clock, in integer 100 ns ticks.
-   */
-  /**
    * A time-control jump moved the scene clock (backwards, or far forwards): the update context takes the new time as
-   * its last, so the next frame's GetDeltaT is the small step from it and no runtime object sees a negative dt.
+   * its last, so the next frame's GetDeltaT is the small step from it and no runtime object sees a negative dt, and the
+   * animation clock steps from the landing, not across the jump.
    *
    * @param now - The scene clock after the jump, 100 ns ticks.
    */
   ResetSceneTime(now: number): void {
     this.scene.updateContext.SetTime(now);
     this.frameNow = now;
+    this.animation?.Rebase(now);
   }
 
+  /**
+   * Draws one frame. The page's animation loop (main.ts) calls it after evolving the Destiny parks to `now`, so the
+   * ships' ball curves are sampled on the clock the parks run on.
+   *
+   * @param timestamp - The animation frame's timestamp, in milliseconds.
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
   Frame(timestamp: number, now: number): void {
     this.lastFrameDrawn = false;
     if (this.deviceLost) return;
     this.frameNow = now;
+    this.animation?.Frame(now);
     const { camera, renderTarget, pump, al, format } = this.Parts();
     try {
       const resized = this.fixedSize ? HoldCanvasSize(this.canvas, this.fixedSize) : FitCanvasSize(this.canvas);
@@ -626,6 +653,7 @@ export class Engine {
       // The orbit camera updates underneath a cinematic shot, so its release blend has a live target.
       this.drawn = this.cinematic ? this.free.Apply(camera, this.cinematic, this.Aspect()) : camera.Drawn();
       pump.Render();
+      this.CheckAnimationClock();
       this.capture.AfterFrame(this.presented, this.canvas.width, this.canvas.height, format);
       al.DrainTransitions?.();
       this.lastError = null;
@@ -642,6 +670,17 @@ export class Engine {
       this.fps.value = Math.round((this.fps.frames * 1000) / (timestamp - this.fps.since));
       this.fps.frames = 0;
       this.fps.since = timestamp;
+    }
+  }
+
+  /**
+   * Once, after the first pump: a runtime that stopped reading blue.os.frameClock leaves its frame time off the clock.
+   */
+  private CheckAnimationClock(): void {
+    if (this.animationChecked || !this.animation) return;
+    this.animationChecked = true;
+    if (blue.os.GetCurrentFrameTime() !== this.animation.ticks) {
+      console.warn('the runtime ignores blue.os.frameClock: its own animations run on real time and keep moving while paused (sd-runtime → The clocks the runtime reads)');
     }
   }
 }

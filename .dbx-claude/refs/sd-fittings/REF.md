@@ -552,6 +552,8 @@ Running modules draw what the EVE client draws and play its sounds. Not drawn: w
 sound are `sd-ship-stats`'), siege, command bursts, cap boosters and anything else whose default effect guid is not in
 `MODULE_EFFECTS`.
 
+- **Paused**: every module effect holds still with the animation clock (`sd-time`); a beam or overlay replayed at a
+  paused landing holds its first frame until play resumes.
 - **Catalog** (`fitting/effects.ts`, by the default effect's `guid`; paths and events checked against build 3632936's
   res index and audio library):
 

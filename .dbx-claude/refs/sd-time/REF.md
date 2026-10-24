@@ -34,7 +34,8 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 | `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
 | T3 planners (node-tested) | `damage.ts` `ImpactsHealed`; `explosion-plan.ts` `ExplosionReplays`; `module-fx.ts` `RunningModuleFxCommands` over `ShipModules.RunningEffects`; `warp-fx.ts` `WarpFlashReplays`, `WARP_IN_FLASH_SECONDS` / `WARP_OUT_FLASH_SECONDS`; `missile-flights.ts` `InFlightAt`; `missile-effects.ts` `Launch(…, { midFlight })`; `arrivals.ts` `AwaitsBuild` |
 | `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`) |
-| `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context, `sd-runtime`), `CinemaRig.Rebase(delta)` and (M4) `Snapshot()` / `Restore()` (`sd-cinema`), `PageAudio.ReleaseAll()` |
+| `apps/viewer/src/lib/animation-clock.ts` | `AnimationClock` (`Frame(now)`, `Rebase(now)`, `Sample()`, `Report()`, `ticks`), `MAX_ANIMATION_STEP_TICKS` (1 s): Blue's frame clock on the scene clock. Node-tested, no runtime |
+| `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context and the animation clock's rebase, `sd-runtime`), the animation clock's install (`ANIMATION_ON_SCENE_CLOCK`, `?anim=real`), `CinemaRig.Rebase(delta)` and (M4) `Snapshot()` / `Restore()` (`sd-cinema`), `PageAudio.ReleaseAll()` |
 | `camera-director.ts` | M4: `CameraDirector.Snapshot()` / `Restore()` (wiring `port`, `cost` reset) |
 | `apps/viewer/src/lib/state-capture.ts` | `CaptureFields` / `RestoreFields` / `CloneState` / `EstimateBytes`: the generic per-tick state capture every owner's `Snapshot()` / `Restore()` is a one-liner over. Node-tested |
 | `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark` (stream + scalar overlay), `CaptureScalars` / `OverlayScalars`, `STRUCTURAL_BALL_FIELDS` / `STRUCTURAL_PARK_FIELDS`, `ParkSnapshotBytes`, `WARMUP_TICKS` 3, `WARMUP_SAMPLES_PER_TICK` 30. `runtime-sim` only |
@@ -71,7 +72,18 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 ## Pause and rate
 
 - `clock.paused`: `Next` adds nothing, so no tick runs; the drivers still run at the frozen `now` (a cinema shot holds:
-  its stamps are scene ticks; the orbit camera moves on real time; ClientBalls return their cached samples).
+  its stamps are scene ticks; the orbit camera moves on real time; ClientBalls return their cached samples), so paused
+  polls give identical poses.
+- **The rule: everything drawn runs on the scene clock.** The update context always did (`GetTime` / `GetDeltaT`, curve
+  sets, emitters, turrets, explosions, missiles). Blue's frame clock (controllers, dynamic bindings, lights, booster
+  behaviors, and `TriDevice.animationTime`, the shaders' `Time`, booster flicker and blinking lights) is the engine's
+  `AnimationClock`, installed as `blue.os.frameClock`: each `engine.Frame(timestamp, now)` advances it by
+  `clamp(now − last now, 0, 1 s)`, so it holds while paused or held, gains the rate's share in slow motion and
+  fast-forward, never runs backwards, and rebases at a jump (`ResetSceneTime`). Beams (`EveStretch3` / `EveStretch`), the
+  web, overlays, turret streaks and barrels, missiles, explosions, warp flashes, boosters, hull lights and glows and the
+  dressing all hold with it; no per-effect gate. TAA still jitters by frame number (sampling noise on a paused frame,
+  not animation). get_state `renderer.animation { clock, seconds, frozen, shaderTime }`; `?anim=real` keeps the
+  runtime's real-time frame clock (the A/B). The pause-fx item records the real-GPU numbers here.
 - `clock.rate` ∈ [1/16, 32] (a `RangeError` outside). Both are viewing preferences: they persist across loads and reset
   on a tab reload. The scripted load's `Hold` is separate (`sd-timeline`); held and paused together add nothing either.
 - **Audio** (the port's `Presentation({ paused, muted })`, sent on attach and on change only):
@@ -219,7 +231,7 @@ restore runs again the tape entries from the snapshot's tick on (`ReplaysAfter`;
   (`ImpactsHealed`: `SetImpactDamageState` adds armor impacts at once, but takes them off only over time: holes
   above the goal shrink over size × 10 s, and the fires go out 5 s after armor ≥ 50 % and structure 100 %; measured
   live in sd-cinema → Battle-damaged looks. So a jump back to full HP kept the dying hull's holes and fires, drawn as
-  big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)` and the camera director's `Clear`, unless the movie owns the camera (below); `Mute(rate > 2)`; `onChange`.
+  big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)` (the update context, and the animation clock rebases to the landing); `cinema.Rebase(delta)` and the camera director's `Clear`, unless the movie owns the camera (below); `Mute(rate > 2)`; `onChange`.
 - **The camera director** (`auto_camera`, `sd-cinema`) steps every boundary (fast-forward included, holds in scene
   time) and is not journaled. A viewing camera (the movie does not own it): it steps nothing during a jump's silent
   re-simulation (`Silent()`), and `EndJump` clears its memory with `Clear({ keep: 'settings' })` so its first picks
@@ -394,6 +406,8 @@ stay unneeded.
 ## Rules
 
 - Nothing but `TimeControl` advances the clock or calls `world.Tick` in the page.
+- A drawn animation runs on the update context's scene time or Blue's frame clock (the animation clock), never on
+  `performance.now` or the rAF timestamp (the orbit camera excepted).
 - **New per-tick state in the director joins `CaptureSim` / `RestoreSim` (`DirectorSimFields`); a new owner joins
   `SimOwners`; a new live lever joins `JOURNALED_TOOLS` and `Replay`; journaled handlers do their work synchronously.**
 - **A new async input that changes the simulation calls `SimInput(why)`; a new diff field the simulation reads joins

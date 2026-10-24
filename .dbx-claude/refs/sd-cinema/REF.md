@@ -42,8 +42,10 @@
 | `resume_shot` | page | continue a paused shot or replay the last stopped one; returns `cinema` |
 | `list_shots` | **hub** | the library: `{ shots: [{ name, description, subject, options, duration?, end, example, expanded }] }`, with no tab |
 
-- **A play** (driver `claude`) replaces whatever plays (a blend starts from the drawn pose) and forgets any paused or
-  stopped shot. A free placement is `play_shot { pose }`: it holds until stopped, and its eye and look are waypoints.
+- **A play** (driver `claude`) replaces whatever plays and forgets any paused or stopped shot. A blend over a playing
+  shot starts from that shot framed at the play's clock (the rig's `handoff`, framed on the next frame with the lag's
+  share up to the clock, its lag trail kept till then), so it is the same at any frame rate (`sd-export`); from idle, a
+  pause or a release it starts from the drawn pose. A free placement is `play_shot { pose }`: it holds until stopped, and its eye and look are waypoints.
 - **`stop_shot` hands the camera back to the user** by default: `ReleaseCinema` with adopt (the orbit takes the
   shot's last eye and look and follows its ship when there is exactly one, the pointer takeover's path), then the 0.5 s
   release blend. `adopt: false` blends to the orbit's previous view; `cut: true` skips the blend.

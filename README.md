@@ -80,7 +80,7 @@ What works today:
   and fleet orders, called targets, prop mods, modules, engagements, camera shots,
   warp-in adds) and ships fly their own order lists, played on Destiny ticks once
   the scene is ready, reported in `get_state`, and replayed the same on a restart.
-- **Time control**: pause, slow motion and fast-forward on the scene clock (every
+- **Time control**: pause (everything drawn holds still), slow motion and fast-forward on the scene clock (every
   Destiny tick stepped, orders, steering, modules and combat included), and jumping
   back N seconds or to any time in the recorded window: the page snapshots both
   Destiny parks and its own per-tick state every few seconds, re-simulates from the

@@ -19,7 +19,7 @@ export { AudEventCurve, CjsAudioMan } from '@carbonenginejs/runtime/audio';
 export type { AudEmitter, AudManager, CjsAudioLibraryDocument, CjsAudioMediaProvider, CjsAudioMediaRead, CjsAudioMediaRecord, CjsWebAudioSoundEngine, CjsWebAudioVoice, CjsWwiseSourceEffectRtpcLane } from '@carbonenginejs/runtime/audio';
 
 export * from './runtime-sim';
-export { blue, BlueResFileSystemRemote, RemoteFileCache } from '@carbonenginejs/runtime/blue';
+export { blue, BlueResFileSystemRemote, RemoteFileCache, type BlueFrameClock } from '@carbonenginejs/runtime/blue';
 export { addChild, removeChild } from 'runtime-dist/global/blue/children.js';
 export { CjsSchema } from '@carbonenginejs/runtime/schema';
 export type { CjsModelValues } from '@carbonenginejs/runtime/schema';

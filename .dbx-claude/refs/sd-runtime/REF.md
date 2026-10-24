@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`, `time-control.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `animation-clock.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts`, `destiny-warp-in.spec.ts` and `destiny-missile.spec.ts` cover `destiny.ts`' tackle, accuracy, arrivals and missiles on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
@@ -105,7 +105,22 @@
 `EveSpaceScene.Update(realTime, simTime)` sets `updateContext.SetTime(simTime)`, and 42 runtime call sites read
 `GetDeltaT()` (current − last). A jump back would hand them a negative dt, so `Engine.ResetSceneTime(now)` calls
 `scene.updateContext.SetTime(now)` at the landing: the next frame's dt is its small step (`sd-time`; `GetTime` /
-`SetTime` are declared in the runtime `.d.ts`).
+`SetTime` are declared in the runtime `.d.ts`). It also rebases the animation clock (below).
+
+### The clocks the runtime reads
+
+| Clock | Set by | Readers |
+|---|---|---|
+| Scene time (the update context) | `Engine.Frame(timestamp, now)` → `driver.Execute(…, now, now)` → `EveSpaceScene.Update` | `GetTime` / `GetDeltaT`, curve sets, CPU emitters, turrets, explosions, missiles, the lens flare, the post process |
+| Blue's frame clock (`blue.os.GetCurrentFrameTime()`) | `CjsBlueOS.PumpOS()` once per frame, from `frameClock.Sample()[0]` (else the actual time) | `Tr2Controller` state machines and actions, `Tr2DynamicBinding`, lights, `BehaviorGroupBooster`, and `TriDevice.animationTime` (`OnTick` adds the frame time's delta, clamped 0–1 s): the shaders' `Time` (`Tr2Renderer.GetAnimationTime()`), booster flicker, blinking lights |
+| Real time (`GetActualTime`, `performance.now`) | the host | throttles (`EveThrottleable`; `controller.Update(0.5)` is a throttle, not a step), shot stamps, audio, the orbit camera |
+
+The engine installs an `AnimationClock` (`animation-clock.ts`) as `blue.os.frameClock` (`.d.ts`: `BlueFrameClock`,
+`BlueOs.frameClock` / `GetActualTime` / `GetCurrentFrameTime`, `Tr2Renderer.GetAnimationTime`), so the second row
+follows the scene clock (`sd-time` → Pause and rate); `?anim=real` skips it. After the first pump the engine warns once
+if `GetCurrentFrameTime()` is not the clock's ticks. **On a pin bump re-check**: `CjsBlueOS.PumpOS` still takes
+`frameClock.Sample()[0]`; `TriDevice.OnTick` still advances `animationTime` by the frame time's delta;
+`_EngineFrameState.animationTime` still comes from `Tr2Renderer.GetAnimationTime()`.
 
 ## Ships (`ships.ts`)
 
@@ -138,7 +153,9 @@ frame from `EveChildMesh.currentInstanceScreenSize` (declared in the `.d.ts` wit
 
 The running modules' client effects (what they are and when they play: `sd-fittings` → Module effects and sounds).
 `.d.ts` classes: `EveMeshOverlayEffect`, `EveStretch`, `EveStretch3`, `EveTransform`, `EveRootTransform`, `TriCurveSet`,
-and `EveShip2.isAnimated` / `overlayEffects` / `AddOverlayEffect` / `RemoveOverlayEffect`.
+and `EveShip2.isAnimated` / `overlayEffects` / `AddOverlayEffect` / `RemoveOverlayEffect`. Paused they hold with the
+animation clock (`sd-time`); an `update = false` gate would neither reach the shaders' `Time` nor resume cleanly
+(measured 2026-10-23).
 
 - **Hydration**: `ResourceValues` once per file, then `CjsSchema.from` on a `structuredClone` of the values inside
   `PageAudio.Detached`, a new object per use. `blue.resMan.LoadObject` builds run detached too (Audio), but

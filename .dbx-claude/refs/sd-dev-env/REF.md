@@ -119,6 +119,7 @@ provider). Do not sink time into headless GPU.
 | `?flare=off\|<name>` | lens flare under `res:/fisfx/lensflare/`; default the star's, else `yellow` |
 | `?dress=off\|all\|<nebula,sun,planets,objects>` | the location dressing's parts |
 | `?aa=off` | no TAA |
+| `?anim=real` | keeps the runtime's real-time frame clock: its shaders' `Time`, controllers, booster flicker and blinking lights then animate on real time, including while paused (the A/B for the animation clock, `sd-time`) |
 | `?fog=on` | keep the template's distance fog (dropped by default: it fogs planets as background, washes the frame, and a far camera sees a glowing disc) |
 | `?tier=lo\|hi` | shader tier (default `depth`) |
 | `?audio=off` | no audio |

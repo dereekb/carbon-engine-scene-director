@@ -130,7 +130,10 @@
               "post process",
               "dynamic exposure",
               "tonemapping",
-              "uncapturederror"
+              "uncapturederror",
+              "frameClock",
+              "GetCurrentFrameTime",
+              "animationTime"
             ]
           },
           {
@@ -813,10 +816,10 @@
         "tone": "hint",
         "triggers": [
           {
-            "words": ["time control", "time_control", "fast-forward", "fast forward", "slow motion", "slow-mo", "rewind", "jump back", "snapshot", "snapshots", "TimeControl", "re-simulate", "resimulate", "journal", "replay"]
+            "words": ["time control", "time_control", "fast-forward", "fast forward", "slow motion", "slow-mo", "rewind", "jump back", "snapshot", "snapshots", "TimeControl", "re-simulate", "resimulate", "journal", "replay", "animation clock", "frameClock"]
           },
           {
-            "pathContains": ["apps/viewer/src/lib/time-control", "apps/viewer/src/lib/state-capture", "apps/viewer/src/lib/destiny-snapshot", "packages/scene/src/lib/time/"],
+            "pathContains": ["apps/viewer/src/lib/time-control", "apps/viewer/src/lib/animation-clock", "apps/viewer/src/lib/state-capture", "apps/viewer/src/lib/destiny-snapshot", "packages/scene/src/lib/time/"],
             "every": 12
           },
           {
