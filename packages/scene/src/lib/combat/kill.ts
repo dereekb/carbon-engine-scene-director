@@ -30,6 +30,11 @@ export interface ShotOutcome {
    */
   readonly layers: Readonly<Record<DefenseLayerName, number>>;
   /**
+   * HP its target's immunity absorbed, at the immune layer's resists (omitted when none): the whole hit for an
+   * `immune` result, the rest of it for a hit that took some HP first.
+   */
+  readonly absorbed?: number;
+  /**
    * Why it did no damage when it hit (`takes no damage: no EVE dogma for its hull`).
    */
   readonly note?: string;

@@ -1,7 +1,8 @@
 # Combat: locks, turret hits, damage, kills, explosions
 
 > Fetch before touching `packages/scene/src/lib/combat/`, anything that locks, rolls a shot, applies damage or kills a
-> ship, the document's `combat`, or the `engage` / `cease_fire` tools. Turrets, targets and the shot hook this builds
+> ship, damage immunity (`ships[].immune`, `set_immunity`), the document's `combat`, or the `engage` / `cease_fire`
+> tools. Turrets, targets and the shot hook this builds
 > on: `sd-weapons`; dogma, activation (`ModuleCycle`) and the page's damage model: `sd-fittings`; the parks:
 > `sd-destiny`.
 
@@ -408,8 +409,8 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
 
 `{ "seed"?: <integer 0 … 2³² − 1>, "death"?: "explode" | "flag" }`, top level, omitted when empty; defaults seed 1,
 death `explode` (`sceneCombatOf`). Unknown keys warn and are dropped; `null` is absent. `{ op: "set_combat", seed?,
-death? }` merges, `null` resets a field. `diffScenes` flags `combat`. **Kills are live state** like HP, locks and
-targets: the document stays the setup, `load_scene` / `open_scene` revive everyone, `remove_ship` keeps an aftermath.
+death? }` merges, `null` resets a field. `diffScenes` flags `combat`. Damage immunity (`ships[].immune`) is document
+state too, a rule like the death mode. **Kills are live state** like HP, locks and targets: the document stays the setup, `load_scene` / `open_scene` revive everyone, `remove_ship` keeps an aftermath.
 `set_hp` sets HP live and writes nothing (Battle damage).
 
 ## The client's death explosion (`shipExplosionOf`)
@@ -533,6 +534,63 @@ hulls that look battle damaged for a shot, or a low-HP fight without waiting for
   - fps: holes cost nothing (28.1 vs 28.2 median healed). 12 burning TFIs took the 44-ship scene to 19.0. One 2 fps
     hitch came when the first fires loaded.
 
+## Damage immunity (`ships[].immune`, `set_immunity`)
+
+Plan: `~/.claude/plans/damage-immunity-and-a-generic-apply-to-fleet-apply-to-scene-targeting-layer.md`. **S1 is in**
+(the pure rule, the document field, the op and the command in `packages/scene`); S2 wires the page (`DamageModel`,
+`CombatRules.Land`, `Director.SetImmunity`, the `set_immunity` tool, get_state), S4 is the real-GPU look.
+
+- **The field**: `ships[].immune?: true | ("shield" | "armor" | "structure")[]` (`ShipImmunity`,
+  `combat/immunity.ts`). `true` is every layer; a list is normalized in layer order, deduplicated, case-insensitive,
+  and all three becomes `true`. `false`, `null` and `[]` drop the key. `"hull"` is refused with a hint (the hull layer
+  is structure).
+- **Saved, not live**: a rule of the scene like `combat.death` (it survives a load, an open, a tab reload and a saved
+  scene); HP, kills, locks and targets stay live. Edits: `{ op: "set_immunity", <selector without hull or state>,
+  immune }` replaces each selected ship's value (`false` deletes; unknown keys warn; composes after an op that adds the
+  ships), `update_ship set { immune }` (`null` clears), `remove_ship` takes it. The selector: `sd-selectors`.
+- **The rule** (`applyLayeredDamage(layers, damage, immune?)`, `combat/damage.ts`): a layer not immune behaves as
+  before. An immune layer **with HP** keeps it and stops the whole hit that reaches it: nothing passes on, and
+  `absorbed` is that hit's effective damage at **its** resonances, uncapped by its HP (`absorbedBy` the layer). An
+  immune layer **at 0 HP** stops nothing. So `["structure"]` lets shield and armor drain but the ship cannot die,
+  `["armor", "structure"]` lets only the shield drop, `true` lets nothing land. Without immunity the result is
+  identical to before (no `absorbed` key). Three 100 HP layers, resonances 1, a 150 HP hit:
+
+  | Immune | Taken (S / A / St) | Left | absorbed |
+  |---|---|---|---|
+  | none, or `["structure"]` | 100 / 50 / 0 | 0 / 50 / 100 | 0 |
+  | `["armor"]` | 100 / 0 / 0 | 0 / 100 / 100 | 50 (armor) |
+  | `true`, or `["shield"]` | 0 / 0 / 0 | 100 / 100 / 100 | 150 (shield) |
+  | `["shield"]`, shield at 0 | 0 / 100 / 50 | 0 / 0 / 50 | 0 |
+  | `["shield", "structure"]`, shield at 0 | 0 / 100 / 0 | 0 / 0 / 100 | 50 (structure) |
+
+- **Under fire nothing changes before the hit**: locks, lock times, called targets, turrets, engagements, `overkill`
+  and the hit roll run as usual, and a miss never consults immunity. A hit (or a vorton application) that took no HP
+  because of immunity reads `result: "immune"` (`ShotResult`), `damage: 0` and `absorbed` (`ShotOutcome.absorbed`);
+  one that took some HP keeps its tier and adds `absorbed`. `missed` stays `result === "misses"`, so an immune hit draws
+  as a hit, impact and impact sound included. The shooter's `shots` / `hits` count the roll (as `overkill` does);
+  `dealt` / `taken` stay HP really taken; the victim gains `combat.absorbed`.
+- **Every damage source obeys it**: the page enforces it inside `DamageModel.ApplyHit` (turrets, vortons, missiles,
+  all through `CombatRules.Land`, S2); no lever bypasses the damage model. Untouched: repairs, passive shield recharge,
+  webs, scrams, points, painters, neuts, nos, transmitters and the ship's own guns.
+- **The death rule**: `DamageModel.Destroyed` is false while structure is immune, so neither a shot nor set_hp's sweep
+  kills the ship; set_hp's `DestroyedShips` is built on `Destroyed`. Immunity revives nothing: a recorded kill stands,
+  and `set_immunity` on a dead ship only writes the document (immune from the next load).
+- **set_hp on an immune ship** sets HP as asked in both intents (immunity stops damage, not the director's own sets):
+  `set_hp` armor 20 % plus `immune: true` is a battered hero who takes no more. A gameplay set to 0 structure on an
+  immune structure leaves the ship alive at 0 (the `destroys` row notes it); once the immunity lifts, the next
+  boundary's sweep kills it (`cause: "set_hp"`).
+- **Warnings** (`immunityWarning(id, layers)`, for engage and order_fleet targets in S2): `"x" is immune to damage: the
+  guns lock, fire and hit, but it takes none`; `"x" cannot be destroyed: its armor and structure are immune (only its
+  shield drops)`; `"x" is immune on its armor: hits stop there while it has HP`. A called immune primary is shot for
+  ever (no auto-skip: a shot at an immune hero is often the point).
+- **The command**: `normalizeImmunityCommand(input, where = "set_immunity")` → `{ <selector>, immune: true | [layers] |
+  false }` (`immune` required, `null` lifts; unknown keys are problems): the plain object the tool runs and a timeline
+  cue can embed. `toSceneImmunity(scene)` is the id → layers index the page loads on every apply; `sameImmunity`
+  compares by layer; `diffScenes` lists kept ships whose immunity changed in `immunity` (no rebuild, no retune).
+- **Files**: `combat/immunity.ts` (field, op, command, warning), `combat/damage.ts` (the rule), `combat/accuracy.ts`
+  (`immune`), `combat/kill.ts` (`absorbed`), `scene.ts` (`SceneShip.immune`, `SceneDiff.immunity`). Specs:
+  `immunity.spec.ts`, `damage.spec.ts` (the table, real resonances, no mutation), `scene.spec.ts` (round trip, diff).
+
 ## Tools
 
 - **`ship_stats`** (K1): turret rows in `fit.modules` carry `damage` (per shot by type, before quality), `volley`,
@@ -542,7 +600,7 @@ hulls that look battle damaged for a shot, or a low-HP fight without waiting for
   missile`, or `NO_MISSILE_NOTE`); `stats`, `withPropMod` and `withActive.stats` carry `weapons: { turrets, launchers,
   volley, dps, damage }` (DPS by type; a siege module in `active` raises it). Spec:
   `ship-stats-tool.spec.ts` (a default-fit Rifter text gives the table's numbers; a TFI's empty guns load Barrage L).
-- **`patch_scene`**: `set_combat`.
+- **`patch_scene`**: `set_combat`, `set_immunity` (Damage immunity).
 - **`set_target`** starts the lock (its answer's `lock`: `{ state, lockTime?, readyIn?, note? }` or `{ refused }`); a
   null target ends the ship's engagement. **`switch_modules`** turrets wait for the lock on the ship's target; remote
   repairers for the lock on the switch's target (`SwitchModules` asks for it).
@@ -595,6 +653,9 @@ re-simulation rolls the same; explosions re-trigger from their kills' times. Mis
 - Battle damage: `OnKill` listeners get `shot: null` and `kill.cause: "set_hp"` for a set kill (the camera director and
   the timeline's kill events already take a kill without `by`). A timeline beat embeds `normalizeHpSetCommand`'s plain
   object and calls `Director.SetHp` (not wired yet: `set_hp` is no timeline action).
+- Damage immunity (S2): every hit lands through one `CombatRules.Land(target, damage)` helper over
+  `DamageModel.ApplyHit`, so turrets, vortons and missiles all read `result: "immune"` and `absorbed`; a new damage
+  source must land there too.
 - Missiles (M2a and M2b in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
   `applyLayeredDamage`, wired (M2b: Missiles in the page → The wiring); hits reach `OnShot` with `missile` set, kills
   `OnKill`; no launch hook yet.

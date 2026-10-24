@@ -58,7 +58,68 @@ describe('applyLayeredDamage', () => {
   it('never changes its input', () => {
     const before = structuredClone(RIFTER);
     applyLayeredDamage(RIFTER, { em: 5000, thermal: 5000, kinetic: 5000, explosive: 5000 });
+    applyLayeredDamage(RIFTER, { em: 5000, thermal: 5000, kinetic: 5000, explosive: 5000 }, ['armor', 'structure']);
     expect(RIFTER).toEqual(before);
+  });
+});
+
+describe('applyLayeredDamage with immune layers', () => {
+  const EVEN: DamageLayers = { shield: { hp: 100, resonances: OMNI }, armor: { hp: 100, resonances: OMNI }, structure: { hp: 100, resonances: OMNI } };
+  const HIT = { em: 150, thermal: 0, kinetic: 0, explosive: 0 };
+  const round = (value: number): number => Math.round(value * 1e9) / 1e9;
+  const run = (immune: readonly ('shield' | 'armor' | 'structure')[], layers: DamageLayers = EVEN) => {
+    const result = applyLayeredDamage(layers, HIT, immune);
+    const taken = { shield: round(result.taken.shield), armor: round(result.taken.armor), structure: round(result.taken.structure) };
+    return { taken, left: [result.layers.shield.hp, result.layers.armor.hp, result.layers.structure.hp].map(round), absorbed: round(result.absorbed ?? 0), by: result.absorbedBy };
+  };
+
+  it("follows the plan's worked table on three 100 HP layers and a 150 HP hit", () => {
+    expect(run([])).toEqual({ taken: { shield: 100, armor: 50, structure: 0 }, left: [0, 50, 100], absorbed: 0, by: undefined });
+    expect(run(['structure'])).toEqual({ taken: { shield: 100, armor: 50, structure: 0 }, left: [0, 50, 100], absorbed: 0, by: undefined });
+    expect(run(['armor'])).toEqual({ taken: { shield: 100, armor: 0, structure: 0 }, left: [0, 100, 100], absorbed: 50, by: 'armor' });
+    expect(run(['shield', 'armor', 'structure'])).toEqual({ taken: { shield: 0, armor: 0, structure: 0 }, left: [100, 100, 100], absorbed: 150, by: 'shield' });
+    expect(run(['shield'])).toEqual({ taken: { shield: 0, armor: 0, structure: 0 }, left: [100, 100, 100], absorbed: 150, by: 'shield' });
+    const noShield: DamageLayers = { ...EVEN, shield: { ...EVEN.shield, hp: 0 } };
+    expect(run(['shield'], noShield)).toEqual({ taken: { shield: 0, armor: 100, structure: 50 }, left: [0, 0, 50], absorbed: 0, by: undefined });
+    expect(run(['shield', 'structure'], noShield)).toEqual({ taken: { shield: 0, armor: 100, structure: 0 }, left: [0, 0, 100], absorbed: 50, by: 'structure' });
+  });
+
+  it('every layer immune at full: the shield absorbs the effective damage, nothing is taken', () => {
+    const damage = { em: 50, thermal: 0, kinetic: 100, explosive: 0 };
+    const result = applyLayeredDamage(RIFTER, damage, ['shield', 'armor', 'structure']);
+    expect(result.taken).toEqual({ shield: 0, armor: 0, structure: 0 });
+    expect(result.total).toBe(0);
+    expect(result.layers).toEqual(RIFTER);
+    expect(result.absorbed).toBe(110);
+    expect(result.absorbedBy).toBe('shield');
+  });
+
+  it('armor and structure immune, shield at 30 HP: the shield empties, armor absorbs the rest at its resonances', () => {
+    const layers: DamageLayers = { ...RIFTER, shield: { ...RIFTER.shield, hp: 30 } };
+    const damage = { em: 60, thermal: 0, kinetic: 100, explosive: 0 };
+    const result = applyLayeredDamage(layers, damage, ['armor', 'structure']);
+    // The shield takes 60 + 60 = 120 against its 30 HP: it absorbs 1/4 of the raw damage, 3/4 reaches the armor.
+    expect(result.taken).toEqual({ shield: 30, armor: 0, structure: 0 });
+    expect(result.absorbed).toBeCloseTo(60 * 0.75 * 0.4 + 100 * 0.75 * 0.75, 9);
+    expect(result.absorbedBy).toBe('armor');
+    expect(result.layers.armor).toEqual(RIFTER.armor);
+    expect(result.layers.structure).toEqual(RIFTER.structure);
+  });
+
+  it('structure immune: shield and armor drain, the spill into structure is absorbed', () => {
+    const result = applyLayeredDamage(RIFTER, { em: 5000, thermal: 5000, kinetic: 5000, explosive: 5000 }, ['structure']);
+    expect(result.taken).toMatchObject({ shield: 562.5, armor: 562.5, structure: 0 });
+    expect(result.structure).toBe(437.5);
+    expect(result.absorbedBy).toBe('structure');
+    expect(result.absorbed).toBeGreaterThan(0);
+  });
+
+  it('no immunity is exactly the old result, with no absorbed key', () => {
+    const damage = { em: 300, thermal: 400, kinetic: 0, explosive: 200 };
+    const plain = applyLayeredDamage(RIFTER, damage);
+    expect(applyLayeredDamage(RIFTER, damage, [])).toEqual(plain);
+    expect('absorbed' in plain).toBe(false);
+    expect('absorbedBy' in plain).toBe(false);
   });
 });
 

@@ -63,9 +63,18 @@ export interface LayeredDamage {
    */
   readonly total: number;
   /**
-   * The structure HP left; at 0 the ship is destroyed.
+   * The structure HP left; at 0 the ship is destroyed (unless its structure is immune).
    */
   readonly structure: number;
+  /**
+   * The effective damage an immune layer stopped, at that layer's resonances and uncapped by its HP; omitted when
+   * none was.
+   */
+  readonly absorbed?: number;
+  /**
+   * The immune layer that stopped it.
+   */
+  readonly absorbedBy?: DefenseLayerName;
 }
 
 /**
@@ -73,18 +82,34 @@ export interface LayeredDamage {
  * its HP it absorbs the share `hp / effective` of the raw damage and goes to 0, and the rest of the raw damage moves on
  * to the next layer, which takes it through its own resonances.
  *
+ * An immune layer (combat/immunity.ts) that still has HP keeps it and stops the whole hit that reaches it: nothing
+ * passes on, and `absorbed` is that hit's effective damage at its resonances. An immune layer at 0 HP has nothing to
+ * protect and stops nothing. So `["structure"]` lets the shield and armor drain but never the structure, and every
+ * layer immune lets nothing land.
+ *
  * @param layers - The layers' HP and resonances.
  * @param damage - The raw damage by type.
- * @returns The layers after, what each took, and the structure left.
+ * @param immune - The ship's immune layers (none when omitted).
+ * @returns The layers after, what each took, the structure left, and what an immune layer absorbed.
  */
-export function applyLayeredDamage(layers: DamageLayers, damage: DamageVector): LayeredDamage {
+export function applyLayeredDamage(layers: DamageLayers, damage: DamageVector, immune?: Iterable<DefenseLayerName>): LayeredDamage {
+  const immuneLayers = new Set(immune ?? []);
   let raw: DamageVector = damage;
+  let absorbed = 0;
+  let absorbedBy: DefenseLayerName | undefined;
   const after: Partial<Record<DefenseLayerName, DamageLayerState>> = {};
   const taken: Record<DefenseLayerName, number> = { shield: 0, armor: 0, structure: 0 };
   for (const name of DEFENSE_LAYERS) {
     const layer = layers[name];
     const effective = DAMAGE_TYPES.reduce((total, type) => total + raw[type] * layer.resonances[type], 0);
-    if (effective <= layer.hp) {
+    if (immuneLayers.has(name) && layer.hp > 0) {
+      after[name] = { ...layer };
+      if (effective > 0) {
+        absorbed = effective;
+        absorbedBy = name;
+      }
+      raw = NO_DAMAGE;
+    } else if (effective <= layer.hp) {
       taken[name] = effective;
       after[name] = { ...layer, hp: layer.hp - effective };
       raw = NO_DAMAGE;
@@ -96,7 +121,7 @@ export function applyLayeredDamage(layers: DamageLayers, damage: DamageVector): 
     }
   }
   const result = after as DamageLayers;
-  return { layers: result, taken, total: taken.shield + taken.armor + taken.structure, structure: result.structure.hp };
+  return { layers: result, taken, total: taken.shield + taken.armor + taken.structure, structure: result.structure.hp, ...(absorbedBy ? { absorbed, absorbedBy } : {}) };
 }
 
 export interface PassiveRechargeInput {

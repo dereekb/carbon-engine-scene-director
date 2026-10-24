@@ -75,9 +75,10 @@ export const HIT_RESULTS = ['grazes', 'glances off', 'hits', 'penetrates', 'smas
 export type HitResult = (typeof HIT_RESULTS)[number];
 
 /**
- * What a shot did: a miss, a hit tier, or `overkill` (its target was already dead: no roll, no damage).
+ * What a shot did: a miss, a hit tier, `overkill` (its target was already dead: no roll, no damage), or `immune` (it
+ * hit, and its target's immunity absorbed all of it: see combat/immunity.ts).
  */
-export type ShotResult = 'misses' | HitResult | 'overkill';
+export type ShotResult = 'misses' | HitResult | 'overkill' | 'immune';
 
 /**
  * The tier of a hit's damage quality: grazes below 0.625, glances off below 0.75, hits below 1, penetrates below 1.25,

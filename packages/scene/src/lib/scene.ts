@@ -14,6 +14,7 @@ import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneOb
 import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
 import { applyCombatOperation, COMBAT_OPERATIONS, normalizeSceneCombat, type SceneCombat } from './combat/document';
+import { applyImmunityOperation, IMMUNITY_OPERATIONS, normalizeShipImmunity, sameImmunity, type ShipImmunity } from './combat/immunity';
 import { fitTextOf, normalizeSceneFits, normalizeShipFit } from './fitting/fit';
 import { keepSceneArrivals, readWarpIn, type SceneArrival, toArrivalLane } from './arrivals/arrival';
 import { applyPersonalityOperation, normalizeScenePersonalities, PERSONALITY_OPERATIONS } from './personalities/document';
@@ -100,6 +101,12 @@ export interface SceneShip {
    * order_ship's stance order then sets it live. Omitted: its groups' stance, else it holds formation.
    */
   stance?: ShipStance;
+  /**
+   * The layers it ignores incoming damage on (combat/immunity.ts): `true` for every layer, or a list of `shield`,
+   * `armor` and `structure`. An immune layer that has HP keeps it and stops the hit; the guns still lock and fire at
+   * the ship. A rule of the scene, saved like combat.death; omitted when not immune.
+   */
+  immune?: ShipImmunity;
 }
 
 /**
@@ -245,6 +252,11 @@ export interface SceneDiff {
    * Ships present before and after whose `orders` changed: the page restarts their scripts.
    */
   readonly orders: SceneShip[];
+  /**
+   * Ships present before and after whose `immune` changed: the damage model's immune layers follow (no rebuild, no
+   * retune).
+   */
+  readonly immunity: SceneShip[];
 }
 
 /**
@@ -253,7 +265,7 @@ export interface SceneDiff {
 type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
 
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'asteroidFields', 'fits', 'personalities', 'combat', 'timeline']);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders', 'stance']);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders', 'stance', 'immune']);
 
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -373,9 +385,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  * Operations:
  *   { op: "add_ship", ship, warpIn? }   warpIn (true, or { stagger?, together? }): it lands from warp at its placement,
  *                                       along its rotation's yaw (the result's arrivals; the page plans it)
- *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot?, stance? } }
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot?, stance?, immune? } }
  *                                       each key replaces the ship's value (stats, propMod, orders and stance as a
- *                                       whole); null clears type, stats, propMod, fit, pilot, orders and stance
+ *                                       whole); null clears type, stats, propMod, fit, pilot, orders, stance and immune
  *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused) and off
  *                                       every fleet's, wing's and squad's called targets, with a warning
  *   { op: "set_camera", camera }            merged into the current camera
@@ -402,6 +414,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_prop_mods", ships | fleet [, wing | squad], active?, module? }
  *                                       merged into each selected ship's propMod: active false and module null remove
  *                                       the key (see prop-mods/operation.ts)
+ *   { op: "set_immunity", ships | fleet [, wing | squad] | all, role?, team?, sample?, immune: true | false | [layers] }
+ *                                       replaces each selected ship's immune; false deletes it (see combat/immunity.ts;
+ *                                       hull and state filters need the set_immunity tool)
  *   { op: "add_ships", dna, hull?, radius?, count?, formation?, spacing?, position? | near?, heading? | facing?, team?,
  *     name?, prefix?, stats?, propMod?, fleet?, radii?, warpIn? }
  *                                       count ships of one hull, free in a formation, as a new fleet, or into a fleet's
@@ -525,6 +540,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (ASTEROID_FIELD_OPERATIONS.has(String(operation['op']))) applyAsteroidFieldOperation(operation, context);
       else if (FIT_OPERATIONS.has(String(operation['op']))) applyFitOperation(operation, context);
       else if (COMBAT_OPERATIONS.has(String(operation['op']))) applyCombatOperation(operation, context);
+      else if (IMMUNITY_OPERATIONS.has(String(operation['op']))) applyImmunityOperation(operation, context);
       else if (PERSONALITY_OPERATIONS.has(String(operation['op']))) applyPersonalityOperation(operation, context);
       else if (TIMELINE_OPERATIONS.has(String(operation['op']))) applyTimelineOperation(operation, context);
       else problems.push(`${where}: unknown op "${String(operation['op'])}"`);
@@ -536,8 +552,9 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
  *
  * @param before - The document the page currently shows, or null on a first load.
  * @param after - The document to show.
- * @returns The ships to add, remove, rebuild, move, relabel, retune, switch, regroup and restart the scripts of, whether
- *   the environment, camera, fleets or location changed, and what changed in the objects.
+ * @returns The ships to add, remove, rebuild, move, relabel, retune, switch, regroup, restart the scripts of and
+ *   re-index the immunity of, whether the environment, camera, fleets or location changed, and what changed in the
+ *   objects.
  */
 export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): SceneDiff {
   const previous = new Map((before?.ships ?? []).map((ship) => [ship.id, ship]));
@@ -558,7 +575,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     objects: diffSceneObjects(before?.objects ?? [], after.objects ?? []),
     asteroidFields: diffAsteroidFields(before?.asteroidFields ?? [], after.asteroidFields ?? []),
     combat: !sameJson(before?.combat ?? null, after.combat ?? null),
-    orders: []
+    orders: [],
+    immunity: []
   };
   const membershipsBefore = toFleetMemberships(before ?? {});
   const membershipsAfter = toFleetMemberships(after);
@@ -578,6 +596,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     if (old && !sameJson(membershipsBefore.get(id), membershipsAfter.get(id))) diff.regrouped.push(ship);
     if (old && (old.propMod?.active === true) !== (ship.propMod?.active === true)) diff.switched.push(ship);
     if (old && !sameJson(old.orders ?? null, ship.orders ?? null)) diff.orders.push(ship);
+    if (old && !sameImmunity(old.immune, ship.immune)) diff.immunity.push(ship);
   }
   return diff;
 }
@@ -699,5 +718,8 @@ function normalizeShip(input: unknown, where: string, context: NormalizeShipCont
   if (pilot.pilot != null) ship.pilot = pilot.pilot;
   const stance = readSceneStance(input['stance'], { where: `${where}.stance`, problems, warnings, level: 'ship' });
   if (stance) ship.stance = stance;
+  const immune = normalizeShipImmunity({ input: input['immune'], where: `${where}.immune` });
+  problems.push(...immune.problems);
+  if (immune.immune != null) ship.immune = immune.immune;
   return ship;
 }

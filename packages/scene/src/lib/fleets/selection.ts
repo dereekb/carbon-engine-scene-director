@@ -1,6 +1,7 @@
 /**
- * Selecting ships by id or by their place in a fleet: the whole fleet, one wing, or one squad. Prop mod switches
- * use it now; fleet commands and fleet targeting will select the same way.
+ * Selecting ships by id or by their place in a fleet: the whole fleet, one wing, or one squad. Fleet commands, called
+ * targets, cinema subjects and following select this way; the ship selector (selectors/, the sd-selectors ref) builds
+ * on it, adding the whole scene and its filters.
  */
 
 import { ID_PATTERN, isPlainObject, type JsonObject } from '../json';
@@ -39,10 +40,25 @@ export const FLEET_SELECTION_KEYS: readonly (keyof FleetSelection)[] = ['ships',
  * @returns The selection as given (empty when invalid).
  */
 export function readFleetSelection(record: JsonObject, where: string, problems: string[]): FleetSelection {
+  const before = problems.length;
+  if ((record['ships'] == null) === (record['fleet'] == null)) problems.push(`${where} needs exactly one of ships (ship ids) and fleet (a fleet id, optionally with wing or squad)`);
+  const selection = readFleetSelectionParts(record, where, problems);
+  return problems.length > before ? {} : selection;
+}
+
+/**
+ * Reads a selection's four keys without the rule on which scope to give (readFleetSelection's, or the ship
+ * selector's, which adds `all`): `ships` a non-empty array of ids, `fleet`, `wing` and `squad` ids; `wing` and `squad`
+ * need `fleet` and exclude each other.
+ *
+ * @param record - The command or operation.
+ * @param where - Where it sits, for messages.
+ * @param problems - Receives every problem found.
+ * @returns The keys that read well.
+ */
+export function readFleetSelectionParts(record: JsonObject, where: string, problems: string[]): FleetSelection {
   const { ships, fleet, wing, squad } = record;
   const selection: { ships?: string[]; fleet?: string; wing?: string; squad?: string } = {};
-  const before = problems.length;
-  if ((ships == null) === (fleet == null)) problems.push(`${where} needs exactly one of ships (ship ids) and fleet (a fleet id, optionally with wing or squad)`);
   if (ships != null) {
     if (Array.isArray(ships) && ships.length > 0 && ships.every((id) => typeof id === 'string' && ID_PATTERN.test(id))) selection.ships = [...(ships as string[])];
     else problems.push(`${where}.ships must be a non-empty array of ship ids`);
@@ -58,7 +74,7 @@ export function readFleetSelection(record: JsonObject, where: string, problems: 
   }
   if ((wing != null || squad != null) && fleet == null) problems.push(`${where}: wing and squad select within a fleet; give fleet too`);
   if (wing != null && squad != null) problems.push(`${where}: give wing or squad, not both`);
-  return problems.length > before ? {} : selection;
+  return selection;
 }
 
 export interface SelectedFleetShips {

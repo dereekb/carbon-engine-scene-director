@@ -43,7 +43,9 @@ files you touch and the scene-director tools you call. Fetch before designing or
 - `sd-weapons`: turrets on every ship (the fit's or default guns), mounting, targets, firing on the weapon cycle,
   impacts, and the shot hook Combat rules builds on
 - `sd-combat`: locks, turret hits through Destiny's `GetAccuracy`, damage into the damage model, kills, explosions and
-  removal, `engage` / `cease_fire`
+  removal, `engage` / `cease_fire`, damage immunity
+- `sd-selectors`: the ship selector every fleet lever takes: ships, fleet, wing, squad or all, filtered by role, team,
+  hull, state and sample
 - `sd-logi`: logi auto-repair: the `autoRepair` field, repair-target selection, the page's `AutoRepair`, `auto_repair`,
   remote reps locking
 - `sd-personalities`: fleet personalities: the `cjs-fleet-personality/1` templates, the hub library and embedding,

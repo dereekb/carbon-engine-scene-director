@@ -17,7 +17,7 @@
 | `fleets/normalize.ts` | validation (`normalizeFleets`) |
 | `fleets/operations.ts` | the fleet patch ops (`FLEET_OPERATIONS`, `applyFleetOperation`, `removeShipFromFleets`) |
 | `fleets/membership.ts` | **`toFleetMemberships`: the one place anchors are resolved** |
-| `fleets/selection.ts` | selecting ships by ids or fleet / wing / squad (prop mod switches, fleet orders) |
+| `fleets/selection.ts` | selecting ships by ids or fleet / wing / squad (fleet orders, called targets, following; `readFleetSelectionParts` reads the four keys for both); the ship selector the levers move onto, with `all` and its filters (`role` reads the squads), is `sd-selectors` |
 | `fleets/formation.ts` | the at-rest formation: `layoutFleetFormation`, `toFleetFormationSlots`, `toFleetGroupOffsets`, `FORMATION_SPACING` 1.5, `FORMATION_GAP` 100, `DEFAULT_FORMATION_RADIUS` 500 |
 | `fleets/following.ts` | follow plans (`toFleetFollowPlans`; `toFleetGroupFollowPlans` for a group apart), `FOLLOW_TOLERANCE*` |
 | `fleets/orders.ts` | the `order_fleet` request, who may give it, the group's leader, the document ops, `toPilotDelays` (sub-doc `orders`) |

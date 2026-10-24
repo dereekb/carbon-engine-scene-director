@@ -700,7 +700,12 @@
               "set_combat",
               "set_hp",
               "battle damage",
-              "HP set"
+              "HP set",
+              "immune",
+              "immunity",
+              "set_immunity",
+              "invulnerable",
+              "plot armor"
             ]
           },
           {
@@ -720,6 +725,33 @@
               "mcp__scene-director__set_target",
               "mcp__scene-director__set_hp"
             ]
+          }
+        ]
+      },
+      {
+        "name": "sd-selectors",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": [
+              "selector",
+              "selectors",
+              "ShipSelector",
+              "readShipSelector",
+              "selectShips",
+              "SelectShips",
+              "apply-to-scene",
+              "apply to scene",
+              "scene-wide"
+            ]
+          },
+          {
+            "pathContains": [
+              "packages/scene/src/lib/selectors/",
+              "packages/scene/src/lib/fleets/selection"
+            ],
+            "every": 12
           }
         ]
       },

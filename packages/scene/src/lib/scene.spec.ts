@@ -132,6 +132,37 @@ describe('scene documents', () => {
   });
 });
 
+describe('ship immunity', () => {
+  it('round-trips immune through normalizeScene', () => {
+    const scene = normalizeScene({
+      ...duel,
+      ships: [
+        { ...duel.ships[0], immune: ['Structure'] },
+        { ...duel.ships[1], immune: true }
+      ]
+    }).scene;
+    expect(scene.ships.map((ship) => ship.immune)).toEqual([['structure'], true]);
+    expect(normalizeScene(scene).scene).toEqual(scene);
+    expect(normalizeScene({ ...duel, ships: [{ ...duel.ships[0], immune: false }, duel.ships[1]] }).scene.ships[0]).not.toHaveProperty('immune');
+    expect(catchSceneError(() => normalizeScene({ ...duel, ships: [{ ...duel.ships[0], immune: ['hull'] }, duel.ships[1]] })).problems).toEqual(['ships[0].immune: "hull" is not a layer (the hull layer is structure)']);
+  });
+
+  it('diffScenes names a kept ship whose immunity changed, without a rebuild or a retune', () => {
+    const before = normalizeScene(duel).scene;
+    const after = applySceneOperations(before, [
+      { op: 'set_immunity', ships: ['a'], immune: true },
+      { op: 'add_ship', ship: { id: 'c', dna: 'mf1_t1:minmatarbase:minmatar', position: [0, 0, 9000], immune: true } }
+    ]).scene;
+    const diff = diffScenes(before, after);
+    expect(diff.immunity.map((ship) => ship.id)).toEqual(['a']);
+    expect(diff.added.map((ship) => ship.id)).toEqual(['c']);
+    expect(diff.rebuilt).toEqual([]);
+    expect(diff.retuned).toEqual([]);
+    expect(diffScenes(after, applySceneOperations(after, [{ op: 'set_immunity', ships: ['a'], immune: ['shield', 'armor', 'structure'] }]).scene).immunity).toEqual([]);
+    expect(diffScenes(null, after).immunity).toEqual([]);
+  });
+});
+
 describe('ship flight fields', () => {
   const guardian = { id: 'g', dna: 'ac3_t2:carthum:amarr' };
 

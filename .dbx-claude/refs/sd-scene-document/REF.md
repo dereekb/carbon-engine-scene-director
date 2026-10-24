@@ -27,7 +27,8 @@
   of `fits`: `sd-fittings`), `pilot?` (`{ command?, reaction? }` in [0, 1], higher better: FC ability and how fast
   it answers fleet orders, `personalities/pilots.ts`; a pilot name and other keys are reserved, stored with a warning;
   stored for fleet personalities, not acted on yet), `orders?` (the ship's own script: order_ship steps with `after` /
-  `duration`, `timeline/steps.ts`, `sd-timeline`).
+  `duration`, `timeline/steps.ts`, `sd-timeline`), `immune?` (`true` or a list of `shield` / `armor` / `structure`: the
+  ship ignores incoming damage there; `sd-combat` → Damage immunity).
 - Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?` (`fleets[].personality?` names a built-in
   or a `personalities` key), `objects?`, `fits?` (EFT text by key; omitted when empty), `personalities?` (custom
   `cjs-fleet-personality/1` templates by key, never a built-in name; each resolves through `extends` to `line`;
@@ -61,7 +62,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 
 | Op family | Ops | Where |
 |---|---|---|
-| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`, `orders`; `stats` and `orders` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list and from the timeline's cues and ship steps, with a warning; `remove_object`, `remove_fleet`, `remove_wing` and `remove_squad` prune the same) | `scene.ts` |
+| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`, `orders`, `immune`; `stats` and `orders` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list and from the timeline's cues and ship steps, with a warning; `remove_object`, `remove_fleet`, `remove_wing` and `remove_squad` prune the same) | `scene.ts` |
 | scene | `set_camera`, `set_environment` (merged), `rename`, `set_location` (whole), `clear_location` | `scene.ts` |
 | fleets | `add_/update_/remove_fleet`, `..._wing`, `..._squad`, `move_to_squad`, `remove_from_fleet`, `set_anchor`; `update_fleet` / `_wing` / `_squad` `set { targets }` edits a group's called targets and `set { autoRepair }` its logi auto-repair (`null` clears) | `fleets/operations.ts`, `fleets/targets.ts` (`sd-fleets`, doc `targets`), `logi/auto-repair.ts` (`sd-logi`) |
 | compositions | `add_fleet_composition` | `compositions/operation.ts` (`sd-fleets` → `compositions`) |
@@ -70,6 +71,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | fits | `set_fits { fits: { key: text \| null } }` (merged; `null` deletes a key no ship uses) | `fitting/operation.ts` (`sd-fittings`) |
 | personalities | `set_personalities { personalities: { key: template \| null } }` (merged; `null` deletes a key no fleet uses; a fleet picks one with `update_fleet set { personality }`) | `personalities/document.ts` |
 | combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
+| immunity | `set_immunity { <selector: ships \| fleet [+ wing \| squad] \| all, role?, team?, sample?>, immune: true \| false \| [layers] }` (replaces each selected ship's `immune`; `false` deletes; `hull` / `state` need the `set_immunity` tool) | `combat/immunity.ts` (`sd-combat`, `sd-selectors`) |
 | timeline | `add_cue { cue }` / `update_cue { id, set }` (an action replaces the cue's and clears `adds`) / `remove_cue { id }` / `set_timeline { timeline \| null }` / `clear_timeline` | `timeline/operations.ts` (`sd-timeline`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
 | asteroid fields | `add_asteroid_field` (flat; every ore needs `rocks`; place as `add_objects`, `near` range to the field's edge) / `update_asteroid_field { id, set }` (`ores` replaced whole; `null` clears `name`, `innerRadius`, `thickness`, `arc`; position / rotation is a move) / `remove_asteroid_field` (clears `camera.target`) | `asteroids/operations.ts` (`sd-asteroid-fields`) |
@@ -130,6 +132,7 @@ Without a timeline in it, normalizing it never projects, and cue-added ids never
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 | `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |
+| `immunity` | kept ships whose `immune` changed: the damage model's immune layers follow (no rebuild, no retune; S2 indexes them on every apply) |
 | `orders` | kept ships whose `orders` changed: their scripts restart (T2, `sd-timeline`); timeline edits need no diff field. A script edit on a started timeline (M3) bypasses the diff: changed steps swap in place or re-simulate |
 
 `load_scene` / `open_scene` restart every ship at rest at its document placement; a patch touches only what it changes.
@@ -142,7 +145,8 @@ edit of only the timeline and ships' `orders`, while a started timeline records,
 scene re-simulates from the latest snapshot before the edit's first difference, or takes it at once when it changes
 only the future; the patch result carries `resimulated`.
 Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP, `set_hp`'s HP sets and kills) is **never written to the document**, so a
-save or reload starts from the document's placements.
+save or reload starts from the document's placements. Damage immunity is document state (a rule of the scene, like
+`combat.death`); the HP it protects stays live.
 
 ## Camera
 

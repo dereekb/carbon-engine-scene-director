@@ -256,6 +256,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Fittings: EFT fits on ships, the parser, fit keys | [`sd-fittings`](.dbx-claude/refs/sd-fittings/REF.md) |
 | Weapons: default guns, turret slots, charges, the weapon route, targets, firing, shots, impacts | [`sd-weapons`](.dbx-claude/refs/sd-weapons/REF.md) |
 | Combat: locks, hit chance, damage, kills, explosions | [`sd-combat`](.dbx-claude/refs/sd-combat/REF.md) |
+| Ship selectors: scopes and filters every fleet lever takes | [`sd-selectors`](.dbx-claude/refs/sd-selectors/REF.md) |
 | Logi auto-repair: the `autoRepair` field, repair-target selection, `auto_repair` | [`sd-logi`](.dbx-claude/refs/sd-logi/REF.md) |
 | Fleet personalities: templates, the library, pilot traits, the FC brain | [`sd-personalities`](.dbx-claude/refs/sd-personalities/REF.md) |
 | The timeline and ship orders: cues, steps, validation, the timeline ops | [`sd-timeline`](.dbx-claude/refs/sd-timeline/REF.md), with [Movie mode](.dbx-claude/refs/sd-timeline/references/movie.md) |
