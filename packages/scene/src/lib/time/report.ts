@@ -140,5 +140,13 @@ export interface TimeJumpReport {
   readonly snapshot: number;
   readonly resimulated: number;
   readonly ms: number;
+  /**
+   * What made it: a time_control jump, or a script edit re-simulating from before it (Movie mode M3; from = to = now).
+   */
+  readonly cause?: 'jump' | 'edit';
+  /**
+   * A script edit's: how many cues and ships' orders it changed.
+   */
+  readonly edit?: { readonly cues: number; readonly ships: number };
   readonly warnings?: readonly string[];
 }

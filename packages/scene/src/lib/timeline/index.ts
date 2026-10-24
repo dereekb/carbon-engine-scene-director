@@ -7,3 +7,4 @@ export * from './normalize';
 export * from './operations';
 export * from './prune';
 export * from './report';
+export * from './script-edit';

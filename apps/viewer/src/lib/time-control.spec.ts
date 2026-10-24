@@ -478,3 +478,124 @@ describe('TimeControl jumps (T2b)', () => {
     expect(TimeText(rig.control.Report())).toMatch(/^paused at 0\.25× · back \d+ s · 3 s recorded ahead$/);
   });
 });
+
+describe('TimeControl script edits (Movie mode M3)', () => {
+  /**
+   * The ring's snapshot ticks by state, for an accept test that reads a snapshot's tick.
+   */
+  const TickOf = (rig: ReturnType<typeof Rig>) => new Map(rig.control.ring.map((snapshot) => [snapshot.state, snapshot.tick]));
+
+  it('Resimulate restores the latest passing snapshot, drops the later ones, replays the tape after it and lands at now', () => {
+    const fresh = Rig({ every: 2 });
+    fresh.RunTo(10);
+    fresh.world.Order('late', GOTO);
+    fresh.RunTo(12);
+    fresh.Frames(10);
+    fresh.Live('fc', TURN);
+    fresh.RunTo(20);
+
+    const rig = Rig({ every: 2 });
+    rig.RunTo(12);
+    rig.Frames(10);
+    rig.Live('fc', TURN);
+    rig.RunTo(20);
+    rig.Frames(5);
+    const now = rig.clock.now;
+    const later = rig.control.ring.filter(({ tick }) => tick > 10);
+    const tickOf = TickOf(rig);
+    const restored: unknown[] = [];
+    const run = rig.control.Resimulate({
+      accept: (state) => (tickOf.get(state) ?? Infinity) <= 10,
+      restored: (state) => {
+        restored.push(tickOf.get(state));
+        rig.world.Order('late', GOTO);
+      },
+      edit: { cues: 1, ships: 0 }
+    });
+    expect(run?.snapshot.tick).toBe(10);
+    expect(run?.report).toMatchObject({ from: SceneSeconds(now), to: SceneSeconds(now), snapshot: 10, resimulated: 10, cause: 'edit', edit: { cues: 1, ships: 0 } });
+    expect(restored).toEqual([10]);
+    expect(rig.world.tick).toBe(20);
+    expect(rig.clock.now).toBe(now);
+    expect(rig.replayed.map(({ tick }) => tick)).toEqual([12]);
+    expect(BallStates(rig.world, 'master', BALLS)).toEqual(BallStates(fresh.world, 'master', BALLS));
+    // The old run's later snapshots went; the re-simulation took its own on the grid.
+    expect(rig.control.ring.map(({ tick }) => tick)).toEqual([2, 4, 6, 8, 10, 12, 14, 16, 18, 20]);
+    for (const snapshot of rig.control.ring.filter(({ tick }) => tick > 10)) expect(later).not.toContain(snapshot);
+    expect(rig.control.Report().jump).toEqual(run?.report);
+  });
+
+  it('Resimulate prefers a snapshot WARMUP_TICKS back, returns null when none passes, refuses like a jump and undoes a failure', () => {
+    const rig = Rig({ every: 2 });
+    rig.RunTo(20);
+    const tickOf = TickOf(rig);
+    // The latest passing (20 is now) is 18, within the warm-up; 16 is the latest at least 3 ticks back.
+    expect(rig.control.Resimulate({ accept: () => true, restored: () => undefined })?.snapshot.tick).toBe(16);
+    expect(rig.control.Resimulate({ accept: (state) => tickOf.get(state) === 2, restored: () => undefined })?.snapshot.tick).toBe(2);
+    expect(rig.control.Resimulate({ accept: () => false, restored: () => undefined })).toBeNull();
+    rig.clock.Hold();
+    expect(() => rig.control.Resimulate({ accept: () => true, restored: () => undefined })).toThrow(/holds the clock/);
+    rig.clock.Release();
+    const before = { tick: rig.world.tick, clock: rig.clock.now, states: BallStates(rig.world, 'master', BALLS), ring: rig.control.ring.map(({ tick }) => tick) };
+    rig.calls.failRestore = true;
+    expect(() => rig.control.Resimulate({ accept: () => true, restored: () => undefined })).toThrow('the re-simulation failed and the scene is as it was: injected restore failure');
+    expect({ tick: rig.world.tick, clock: rig.clock.now, states: BallStates(rig.world, 'master', BALLS), ring: rig.control.ring.map(({ tick }) => tick) }).toEqual(before);
+    const empty = Rig({ settledFrom: 100 });
+    empty.RunTo(4);
+    expect(() => empty.control.Resimulate({ accept: () => true, restored: () => undefined })).toThrow(/nothing is recorded yet/);
+  });
+
+  it('the origin is pinned through the window and a byte budget of one snapshot, a cut drops it, and it starts recording when settled', () => {
+    const rig = Rig({ every: 2, window: 10 });
+    rig.RunTo(3);
+    rig.Frames(10);
+    expect(rig.control.MarkOrigin()).toBe(true);
+    expect(rig.control.ring.find(({ pinned }) => pinned)).toMatchObject({ tick: 3, clock: rig.boundaryOf.get(3) });
+    rig.RunTo(30);
+    expect(rig.control.ring.map(({ tick }) => tick)).toEqual([3, 20, 22, 24, 26, 28, 30]);
+    rig.control.Configure({ budgetBytes: 1 });
+    expect(rig.control.ring.map(({ tick }) => tick)).toEqual([3, 30]);
+    expect(rig.control.Report().earliest).toBe(SceneSeconds(rig.boundaryOf.get(3) ?? 0));
+    // A jump to 5 restores the origin, 27 ticks back.
+    expect(rig.control.Jump(rig.boundaryOf.get(5) ?? 0)).toMatchObject({ snapshot: 3, resimulated: 2 });
+    rig.control.Cut('a scene was loaded');
+    expect(rig.control.ring).toHaveLength(0);
+    // Off and settled: the origin starts recording at once.
+    expect(rig.control.MarkOrigin()).toBe(true);
+    expect(rig.control.Report().recording).toMatchObject({ on: true });
+    expect(rig.control.ring.map(({ tick, pinned }) => [tick, pinned])).toEqual([[5, true]]);
+    const settling = Rig({ settledFrom: 100 });
+    settling.RunTo(4);
+    expect(settling.control.MarkOrigin()).toBe(false);
+  });
+
+  it('restoring the origin replays only the tape entries of its tick made after it', () => {
+    const rig = Rig({ every: 2 });
+    rig.RunTo(5);
+    rig.Frames(5);
+    rig.Live('fc', TURN);
+    rig.control.MarkOrigin();
+    rig.Frames(5);
+    rig.Live('late', GOTO);
+    rig.RunTo(12);
+    // Landing at 8: the latest snapshot at least 3 ticks back is the origin at 5.
+    expect(rig.control.Jump(rig.boundaryOf.get(8) ?? 0)).toMatchObject({ snapshot: 5 });
+    expect(rig.replayed.map(({ tick, args }) => [tick, (args as { id: string }).id])).toEqual([[5, 'late']]);
+  });
+
+  it('AbandonFuture drops the snapshots and the tape after now, and the recorded end becomes now', () => {
+    const rig = Rig({ every: 2 });
+    rig.RunTo(12);
+    rig.Frames(10);
+    rig.Live('late', GOTO);
+    rig.RunTo(24);
+    rig.control.Jump(rig.boundaryOf.get(9) ?? 0);
+    expect(rig.control.Report().replay).toMatchObject({ pending: 1 });
+    rig.control.AbandonFuture();
+    expect(rig.control.ring.every(({ tick }) => tick <= 9)).toBe(true);
+    expect(rig.control.journal).toHaveLength(0);
+    const report = rig.control.Report();
+    expect(report.replay).toBeUndefined();
+    expect(report.latest).toBe(report.seconds);
+  });
+});

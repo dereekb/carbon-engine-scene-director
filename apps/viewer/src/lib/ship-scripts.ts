@@ -188,6 +188,30 @@ export class ShipScripts {
     return [...this.scripts.values()].every((script) => ShipScriptSettled(script.state));
   }
 
+  /**
+   * A ship's script record as it stands (read it, never change it), or null without one.
+   */
+  Record(id: string): Maybe<Readonly<ShipScriptRecord>> {
+    return this.scripts.get(id) ?? null;
+  }
+
+  /**
+   * Swaps a running script's steps in place (a script edit that only changes steps it has not reached, Movie mode M3):
+   * its step, state and startAt stay, and the next step's `after` is read from the new steps. Step then sees the same
+   * key and does not restart it.
+   *
+   * @param id - The ship id.
+   * @param steps - Its new `orders`, as the live scene holds them.
+   * @returns True when the ship had a script with other steps.
+   */
+  Swap(id: string, steps: readonly SceneShipStep[]): boolean {
+    const script = this.scripts.get(id);
+    const key = JSON.stringify(steps);
+    if (!script || script.key === key) return false;
+    this.scripts.set(id, { ...script, key, steps: steps.map((step) => ({ ...step })) });
+    return true;
+  }
+
   Snapshot(): Record<string, ShipScriptRecord> {
     return structuredClone(Object.fromEntries(this.scripts));
   }

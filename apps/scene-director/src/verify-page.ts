@@ -830,6 +830,10 @@ interface CueResult {
   readonly cue: SceneCue & { readonly patch_scene?: { readonly operations: { readonly composition?: { readonly commander?: { readonly dna?: string } } }[] } };
   readonly state: Maybe<string>;
   readonly warnings: string[];
+  /**
+   * A script edit's re-simulation (Movie mode M3): timeline seconds from and to; null when it changed only the future.
+   */
+  readonly resimulated?: Maybe<{ readonly from: number; readonly to: number; readonly ticks: number; readonly ms: number }>;
 }
 
 /**
@@ -4267,7 +4271,7 @@ try {
     return `fired at +1; b1 ${Show(ShipIn(called, 'b1').target?.source)}, b2 ${Show(ShipIn(called, 'b2').target?.source)}`;
   });
 
-  await Check('timeline: edits while playing: missed, retimed, pruned, refused, live only', async () => {
+  await Check('timeline: edits while playing: re-simulated, retimed, pruned, refused, live only', async () => {
     await LoadTimeline({
       ships: [Scripted('a', [0, 0, 0]), Scripted('b', [0, 0, 4000])],
       timeline: [
@@ -4279,7 +4283,8 @@ try {
       ]
     });
     const at = (await Played('the timeline reaches 4 s', 30, 4).then(TimelineOf))?.time ?? 4;
-    await call('patch_scene', { operations: [{ op: 'add_cue', cue: { id: 'past', at: 1, ...Direction('a', [1, 0, 0]) } }] });
+    const past = await call<{ readonly resimulated?: CueResult['resimulated'] }>('patch_scene', { operations: [{ op: 'add_cue', cue: { id: 'past', at: 1, ...Direction('a', [1, 0, 0]) } }] });
+    Expect(past.resimulated != null && past.resimulated.from <= 1, `past: ${Show(past.resimulated)}`);
     await call('patch_scene', { operations: [{ op: 'update_cue', id: 'later', set: { at: at + 3, ...Direction('a', [0, 1, 0]) } }] });
     const pruned = await call<{ readonly warnings: string[] }>('patch_scene', { operations: [{ op: 'remove_ship', id: 'b' }] });
     const refused = await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'a' }] }).then(() => null, ErrorMessage);
@@ -4287,7 +4292,7 @@ try {
     await WaitTimeline('the retimed cue fires', 20, (timeline) => (timeline?.last?.some((cue) => cue.id === 'later' && cue.state === 'fired') ? null : Show({ last: timeline?.last, failed: timeline?.failed })));
     const report = await TimelineTool();
     const state = (id: string) => report.list.find((cue) => cue.id === id)?.state;
-    Expect(state('past') === 'missed', `past: ${state('past')}`);
+    Expect(state('past') === 'fired', `past: ${state('past')}`);
     Expect(state('later') === 'fired' && !report.list.some((cue) => cue.id === 'b-go'), `later ${state('later')}; ${report.list.map((cue) => cue.id).join(', ')}`);
     Expect(
       pruned.warnings.some((warning) => warning.includes('b-go')),
@@ -4298,7 +4303,7 @@ try {
       liveOnly.warnings.some((warning) => warning.startsWith('applies live only')),
       Show(liveOnly.warnings)
     );
-    return `missed, retimed to ${at + 3} s and fired; pruned "${pruned.warnings[0]}"; refused "${refused?.slice(0, 80)}"`;
+    return `past re-simulated from ${past.resimulated?.from} s and fired, retimed to ${at + 3} s and fired; pruned "${pruned.warnings[0]}"; refused "${refused?.slice(0, 80)}"`;
   });
 
   await Check('timeline: pause holds the cues and scripts; play resumes them later', async () => {
@@ -4470,8 +4475,8 @@ try {
     const fired = FiredAt(report);
     Expect(fired['go'] === 3 && fired['cue-1'] === 4 && fired['shot'] === 2, Show(fired));
     const late = await call<CueResult>('order_ship', { id: 'b2', order: { type: 'stop' }, at: 1 });
-    Expect(late.state === 'missed' && late.warnings.some((warning) => warning.includes('behind the timeline')), Show(late));
-    return `cues ${[go, mwd, shot].map((result) => result.cue.id).join(', ')} pending while stopped; fired at ${Show(fired)}; a cue at 1 s added at ${report.time} s: ${late.state}`;
+    Expect(late.state === 'fired' && late.resimulated != null && !late.warnings.some((warning) => warning.includes('behind the timeline')), Show(late));
+    return `cues ${[go, mwd, shot].map((result) => result.cue.id).join(', ')} pending while stopped; fired at ${Show(fired)}; a cue at 1 s added at ${report.time} s: ${late.state}, re-simulated from ${late.resimulated?.from} s`;
   });
 
   await Check('timeline: add_fleet_composition with at stores the resolved warp-in as a cue that lands at its time', async () => {
@@ -5324,6 +5329,56 @@ try {
     const events = EventSeconds(report, ['wr-engage', 'avenge']);
     Expect(fired['wr-engage'] === (events['wr-engage'] ?? -9) + 1 && fired['avenge'] === (events['avenge'] ?? -9) + 1, Show({ fired, events }));
     return `engage arms ${engage.cue.arms} and add_ships arms ${avenge.cue.arms}, both waiting; fired at +${fired['wr-engage']} (landed at ${events['wr-engage']}) and +${fired['avenge']} (r1 killed at ${events['avenge']})`;
+  });
+
+  // Movie mode M3: script edits re-simulate from the last snapshot before them.
+  const Apart = (a: Maybe<SceneVector>, b: Maybe<SceneVector>) => (a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : Infinity);
+
+  await Check("movie: an edit in the past re-simulates: the run is the edited script's, recording stays on", async () => {
+    const c0 = { type: 'direction', direction: [1, 0, 0], duration: 60 };
+    try {
+      await LoadTimeline({
+        ships: [Scripted('a', [0, 0, 0]), Scripted('b', [0, 0, 4000]), Scripted('c', [4000, 0, 0], { orders: [c0, { type: 'stop' }] })],
+        timeline: [{ id: 'go', at: 1, ...Direction('a', [0, 0, 1]) }]
+      });
+      await Played('the timeline reaches 12 s', 40, 12);
+      await TimeControl({ pause: true });
+      const before = TimeOf(await call<ViewerState>('get_state'));
+      const edit = await call<CueResult>('order_ship', { id: 'b', order: { type: 'direction', direction: [1, 0, 0] }, at: 4, cue: 'b-go' });
+      Expect(edit.resimulated != null && edit.resimulated.from <= 4 && edit.state === 'fired', Show(edit));
+      const after = await call<ViewerState>('get_state');
+      const time = TimeOf(after);
+      Expect(time?.recording.on === true && time.recording.why === before?.recording.why && time.jump?.cause === 'edit', Show({ before: before?.recording, after: time?.recording, jump: time?.jump }));
+      const edited = ShipIn(after, 'b').position;
+      // A fresh run of the edited script to the same time.
+      await TimelineTool({ action: 'restart' });
+      await Playing();
+      await Played('the restart plays', 60, 1);
+      await TimeControl({ seek: { timeline: time?.timeline ?? 12 }, pause: true });
+      const fresh = await call<ViewerState>('get_state');
+      Expect(Apart(edited, ShipIn(fresh, 'b').position) < 1, `edited ${Show(edited)}, fresh ${Show(ShipIn(fresh, 'b').position)} at ${TimeOf(fresh)?.timeline} s`);
+      const retimed = await call<CueResult>('patch_scene', { operations: [{ op: 'update_cue', id: 'go', set: { at: 6 } }] });
+      Expect(retimed.resimulated != null && retimed.resimulated.from <= 1, `retime: ${Show(retimed.resimulated)}`);
+      const removed = await call<CueResult>('patch_scene', { operations: [{ op: 'remove_cue', id: 'go' }] });
+      const rest = await call<ViewerState>('get_state');
+      Expect(removed.resimulated != null && Apart(ShipIn(rest, 'a').position, [0, 0, 0]) < 1, `remove: ${Show(removed.resimulated)}; a at ${Show(ShipIn(rest, 'a').position)}`);
+      const step = await call<CueResult>('patch_scene', { operations: [{ op: 'update_ship', id: 'c', set: { orders: [c0, { type: 'direction', direction: [0, 1, 0] }] } }] });
+      const script = ScriptOf(await call<ViewerState>('get_state'), 'c');
+      Expect(step.resimulated === null && script?.state === 'flying' && script.step === 0 && !/restarted/u.test(script.note ?? ''), Show({ resimulated: step.resimulated, script }));
+      return `b-go at 4 re-simulated from ${edit.resimulated?.from} s (${edit.resimulated?.ticks} ticks, ${edit.resimulated?.ms} ms), b ${Apart(edited, ShipIn(fresh, 'b').position).toFixed(3)} m from a fresh run; go retimed and removed re-simulated (a at rest); c's step 1 swapped without one`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('movie: an edit in the future does not re-simulate and drops the recorded future', async () => {
+    await Played('the timeline plays on', 40, 8);
+    const back = await TimeControl({ back: 5 });
+    Expect((back.latest ?? 0) - back.seconds >= 4, `after back 5: ${Show({ seconds: back.seconds, latest: back.latest })}`);
+    const future = await call<CueResult>('order_ship', { id: 'a', order: { type: 'stop' }, at: 40, cue: 'a-stop' });
+    const time = TimeOf(await call<ViewerState>('get_state'));
+    Expect(future.resimulated === null && future.state === 'pending' && time != null && Math.abs((time.latest ?? 0) - time.seconds) < 0.5, Show({ resimulated: future.resimulated, state: future.state, seconds: time?.seconds, latest: time?.latest }));
+    return `a cue at 40 s after back 5: pending, not re-simulated; latest ${time?.latest} = now ${time?.seconds}`;
   });
 
   const errors = await call<LogEntry[]>('page_log', { level: 'error', limit: 20 });

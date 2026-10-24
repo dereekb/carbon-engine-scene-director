@@ -130,13 +130,17 @@ Without a timeline in it, normalizing it never projects, and cue-added ids never
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 | `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |
-| `orders` | kept ships whose `orders` changed: their scripts restart (T2, `sd-timeline`); timeline edits need no diff field |
+| `orders` | kept ships whose `orders` changed: their scripts restart (T2, `sd-timeline`); timeline edits need no diff field. A script edit on a started timeline (M3) bypasses the diff: changed steps swap in place or re-simulate |
 
 `load_scene` / `open_scene` restart every ship at rest at its document placement; a patch touches only what it changes.
 **Edits cut the time-control window** (`sd-time`): `Director.Apply` cuts on a load and on any diff that changes the
 simulation (`SimulationChange`: ships added, removed, rebuilt, moved, retuned, switched, regrouped, re-teamed or
 re-scripted, objects, fleets, location, environment, combat); a camera-only or name-only edit keeps the window. Patch cues
-(`ApplyNow` directly) do not cut.
+(`ApplyNow` directly) do not cut. **Script edits re-simulate instead** (Movie mode M3, `sd-timeline` doc `movie`): an
+edit of only the timeline and ships' `orders`, while a started timeline records, never reaches `Apply`
+(`Director.ScriptEdit` in `EditNow`): the live scene's ships take the new orders directly (`withScriptOrders`) and the
+scene re-simulates from the latest snapshot before the edit's first difference, or takes it at once when it changes
+only the future; the patch result carries `resimulated`.
 Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP and kills) is **never written to the document**, so a
 save or reload starts from the document's placements.
 

@@ -14,7 +14,9 @@ live commands, `Jump` (restore + silent re-simulation + warm-up + landing, with 
 director's sim port, `back` / `seek` / `every` / `window`, the `←` key. T3: the effects playing at a landing are drawn
 again (explosions, missiles in flight, module beams and overlays, warp flashes), timeline time (`time.timeline`,
 `seek { timeline }`), a jump across a timeline warp-in cue, and the real-GPU check. No smooth reverse playback (user,
-2026-10-22).
+2026-10-22). **Movie mode M3** (`sd-timeline` doc `movie`): the timeline's pinned origin, `AbandonFuture`, script
+edits re-simulating through `Resimulate` (over `Run`, the jump's core) instead of cutting, and `AfterRestore` (below,
+"Script edits re-simulate").
 
 ## Files
 
@@ -23,7 +25,7 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 | `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek` (scene seconds, or `TimeSeek` `{ timeline }`), `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
 | `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`, `timeline` included) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
 | `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`; `Advance` = `Set(Next())` for the specs |
-| `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift), `TimeSimPort` / `TapeEntry` / `JumpLanding`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
+| `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift; M3: `MarkOrigin`, `AbandonFuture`, `Resimulate`, the private `Run`), `TimeSimPort` (M3: `AfterRestore`) / `TapeEntry` / `JumpLanding` / `TimeResimulateOptions` / `TimeResimulation`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
 | `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`), `BoundaryTime(boundary)` (any boundary on the grid: the timeline's t = 0) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
 | `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
@@ -34,7 +36,7 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 | `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark` (stream + scalar overlay), `CaptureScalars` / `OverlayScalars`, `STRUCTURAL_BALL_FIELDS` / `STRUCTURAL_PARK_FIELDS`, `ParkSnapshotBytes`, `WARMUP_TICKS` 3, `WARMUP_SAMPLES_PER_TICK` 30. `runtime-sim` only |
 | `apps/viewer/src/lib/destiny.ts` | `Snapshot()` / `Restore()` (`DestinySnapshot`), getter-backed `master` / `replica`, `SampleCurves(time)` |
 | owners | `Snapshot(memo?)` / `Restore(state, memo?)` on `ShipModules`, `DamageModel`, `CapacitorModel`, `ShipLocks`, `CombatRules`, `ShipTargets`, `FleetTargets`, `FleetCommanders`, `AutoRepair`, `MissileFlights`, `ShotQueue`, `TurretSoundQueue`, `WarpFx`, `FleetFollowing`, `FleetOrders`, `Arrivals` (each with a `*_CAPTURE` options constant naming its wiring) |
-| specs | `time/command.spec.ts`, `clock.spec.ts`, `time-control.spec.ts` (T2b: `Rig`, a fake sim port over a real world), `state-capture.spec.ts` (also `FirstDifference`), `cinema.spec.ts` (`Rebase`), `destiny-snapshot.spec.ts` (the audit, determinism, warm-up, the `SD_BENCH` bench), a `<Owner> snapshots (sd-time)` round trip in each owner's spec over `state-capture.spec-helper.ts` `RoundTrip`; verify-page `time:` |
+| specs | `time/command.spec.ts`, `clock.spec.ts`, `time-control.spec.ts` (T2b: `Rig`, a fake sim port over a real world; M3: `Resimulate`, the origin, `AbandonFuture`), `movie.spec.ts` (M3: the edit-resimulate determinism oracle, `sd-timeline` doc `movie`), `state-capture.spec.ts` (also `FirstDifference`), `cinema.spec.ts` (`Rebase`), `destiny-snapshot.spec.ts` (the audit, determinism, warm-up, the `SD_BENCH` bench), a `<Owner> snapshots (sd-time)` round trip in each owner's spec over `state-capture.spec-helper.ts` `RoundTrip`; verify-page `time:` |
 
 ## The stepping loop
 
@@ -85,7 +87,7 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 - get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping, timeline?, effectiveRate?, held?, audio?:
   muted | suspended, back, earliest?, latest?, window: { seconds, every, window, snapshots, bytes, budget, capture? },
   recording: { on, since?, why?, cutAt?, waiting? }, replay?: { pending, next?: { tool, seconds } }, drift?: { count,
-  tick?, summary? }, jump?: { from, to, snapshot, resimulated, ms, warnings? } }` (`seconds` and `tick` equal
+  tick?, summary? }, jump?: { from, to, snapshot, resimulated, ms, cause: jump | edit, edit?: { cues, ships }, warnings? } }` (`seconds` and `tick` equal
   `simulation`'s; scene seconds throughout). The HUD row adds `back 63 s`, `N s recorded ahead` or `recording waits: 3
   builds`.
 
@@ -102,9 +104,22 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
   edits, and its estimated bytes (`ParkSnapshotBytes` × 2 + `EstimateBytes` of the rest). A capture slower than
   `CAPTURE_SLOW_MS` (15) doubles the spacing (reported in `window.every`).
 - **The ring trims** after each snapshot and on `Configure`: snapshots older than `window` seconds before the latest
-  go, then the oldest past the byte budget (one always stays), then the tape before the earliest snapshot.
+  go, then the oldest past the byte budget (the latest always stays), then the tape before the earliest snapshot. The
+  pinned origin is never trimmed (its bytes count toward the budget).
+- **The timeline's origin** (Movie mode M3, `TimeControl.MarkOrigin`): when a timeline starts playing before its t = 0
+  boundary (`Director.MarkTimelineOrigin`: a prepare ending in `playing`, `timeline play` from `ready` or `stopped`),
+  the director pins a snapshot of that state on the grid (tick = `world.tick`, the boundary t = 0 will see; clock = the
+  last evolve's `master.time`). Recording starts there when it is off and the scene is settled (`Settled`); when it is
+  on, the recorded future goes first (`AbandonFuture`) and a snapshot at the same tick is replaced. It carries
+  `doneThrough` (the tape's seq then): restoring it does not run again the tape entries of its tick made before it (its
+  state holds them). A newer origin replaces it, a `Cut` drops it, and a prepare that hit its 60 s cap unsettled has
+  none. So the window always reaches t = 0: `back` and `seek { timeline: 0 }` can go there whatever `window` is, and
+  every script edit can re-simulate. A paused load (`ready`) takes it at `timeline play`, so the restored player plays.
 - **Cuts** (`TimeControl.Cut(why)`: the ring, the tape and the drift count go; recording waits to settle again;
-  `recording.why` / `cutAt` name it):
+  `recording.why` / `cutAt` name it). A **script edit** (only cues, the movie block and ships' orders, while a started
+  timeline records) never cuts: it re-simulates ("Script edits re-simulate"); mixed with anything else it takes the cut
+  below, warned `this edit changed the scene too, so the time window was cut: timeline restart replays the script with
+  it`:
   - `Director.Apply` on a load (`a scene was loaded`) and on any edit whose diff `SimulationChange` names (ships added,
     removed, rebuilt, moved, retuned, switched, regrouped, re-teamed or re-scripted, objects, fleets, location,
     environment, combat). Camera-only and name-only edits keep the window. This covers `patch_scene`, every hub scene
@@ -123,8 +138,8 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
   so a cued call is not journaled): `Mark()` before, `Record(mark, tool, args)` after success (a promise's success for
   `order_fleet`). Record does nothing while recording is off, during a jump, or when a cut happened during the call (a
   document order's `Apply`).
-- **A new live command abandons the recorded future**: the entries not run yet and the snapshots after the current tick
-  go, and the recorded end becomes now.
+- **A new live command abandons the recorded future** (`AbandonFuture`, also a script edit's first step): the entries
+  not run yet and the snapshots after the current tick go, and the recorded end becomes now.
 - **Replay**: `TimeControl` registers `world.OnBeforeBoundary` in its constructor (before the director's timeline
   listener), and at boundary k runs every entry of tick k not yet run (`done` false), marking it run, through
   `Director.Replay` (the unwrapped lever, synchronously; `Manual` as the hub call). During live play every entry is
@@ -151,7 +166,11 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 6. Any throw: `Restore(undo)`, the clock, the ring, the tape's done flags and the recording state put back,
    `EndJump({ delta: 0, failed })`, and the error re-thrown as "the jump failed and the scene is as it was: …".
 
-The window is untouched by a jump: the snapshots after the target are the recorded future.
+The window is untouched by a jump: the snapshots after the target are the recorded future. Steps 3–6 are the private
+`Run(plan)`, shared with `Resimulate`: after the restore it calls the sim port's `AfterRestore(state)` (never for the
+undo point), then the plan's `restored`; a re-simulation's plan also drops the snapshots after the restored one. A
+restore runs again the tape entries from the snapshot's tick on (`ReplaysAfter`; the origin's `doneThrough` excepted).
+`time.jump.cause` is `jump`.
 
 ## Presentation across a jump (T2b)
 
@@ -217,6 +236,31 @@ adds them again (balls, arrival, retune from cached lookups) and `FinishApply` r
 landing ticks repeat, and the builds landing are no simulation input (`BuildIsSimInput`): they neither cut nor hold the
 recording's settle check at a snapshot tick. A cue-added ship without an
 SDE radius still cuts when its build lands (its formation radius comes from the build).
+
+## Script edits re-simulate (Movie mode M3)
+
+The divergence test, the edit path and the oracle are `sd-timeline` doc `movie`; time control's part:
+
+- **`AbandonFuture()`**: the edit's recorded future belongs to the old script. The director then truncates the event
+  log at its cursor (`TimelinePlayer.AbandonFuture`).
+- **`Resimulate({ accept, restored, edit })`**: refused as a jump is (another jump, the clock held, nothing recorded:
+  `Ready()`). The snapshot is the latest one before now whose state `accept`s, at least `WARMUP_TICKS` back when one is
+  (the test is downward-closed: walking down, the first passing one is the latest), else the latest passing one (the
+  origin a tick or two back). Null when none passes. Then `Run` to now (`goal = clock.now`, landing tick = `world.tick`):
+  undo point, `BeginJump`, restore, `AfterRestore`, `restored` (the player's `Rescript`, the live orders swapped), the
+  snapshots after it dropped, the tape after it replaying at its ticks (they are the user's live commands in this
+  history), new snapshots on the grid, warm-up, landing. `time.jump` is `{ from = to = now, snapshot, resimulated (ticks),
+  ms, cause: 'edit', edit: { cues, ships } }`. A failure restores the undo point and throws `the re-simulation failed and
+  the scene is as it was: …`; the director then commits nothing.
+- **`AfterRestore(state)`** (`Director.ScriptAfterRestore`): a jump back to a snapshot taken before a later script
+  edit (a future-only one taken at once, or the snapshots before a re-simulation's restore point) restores the old
+  script's player records and live orders. The snapshot holds the authored document it was taken under
+  (`SimState.authored`, by reference, never restored), so the restored player and live scene take the current script:
+  `Rescript` when the state `Accepts` it (it always does for those), else the player's `Edit` (a fallback edit's cue
+  behind it is `missed` again). Without it a jump back after a cue edit dropped the cue.
+- **Cost**: one synchronous task, as a jump. Headless (dbxpc, 2026-10-24) 3 Rifters, a cue added at 4 s from 12 s: 13
+  ticks from the origin in 7.8 ms. The plan's real-GPU estimate: ~3 ms a tick at 54 ships, so 5 minutes from the
+  origin ~0.9 s, ~3.3 s at 500 ships (chunking it is a follow-up).
 
 ## Drift (T2b)
 
@@ -325,6 +369,9 @@ stay unneeded.
 - **A new async input that changes the simulation calls `SimInput(why)`; a new diff field the simulation reads joins
   `SimulationChange`.**
 - Nothing in a jump may `Retire` a scene ship or `Retune` / `Reconcile` (the hull and the radius are simulation reads).
+- **A restore never reverts the user's script**: what a snapshot copies from the authored document (the player's cues,
+  the live scene's orders) is brought up to the current one in `AfterRestore`; a new copy of document data in a
+  snapshot needs the same.
 - Never call `world.Tick` with a time more than one interval past `master.time` in page code: step boundaries with
   `NextBoundaryTime`, or the master's backlog drop and the one-evolve assumption break.
 - **A report never changes captured state**: get_state runs at no fixed tick, so a report-time prune or memo makes a
@@ -380,7 +427,10 @@ stay unneeded.
 - A replayed explosion starts over at the target (it does not resume mid-blast), and in a re-simulation a kill's
   explosion starts on the boundary after its killing shot was due (above).
 - A timeline cue that adds a ship without an SDE radius cuts the window when its build lands (`sd-timeline`).
-- Fleet toggles (`auto_repair`, anchors, personalities) are document edits and cut; journaling them is a follow-up.
+- Fleet toggles (`auto_repair`, anchors, personalities) as live calls are document edits and cut; journaling them is a
+  follow-up (it can re-apply their ops through `Resimulate`). As timeline cues they are script edits and re-simulate.
+- A re-simulation from far back (the origin minutes ago, hundreds of ships) freezes the tab for its length (one task).
+- `timeline pause` / `play` of the cursor is not on the tape: a jump or re-simulation does not re-apply it.
 - Missiles relaunched at a landing whose target's hull is being rebuilt (it died after the target) fly undrawn: the
   rebuild is async (84 ms for a Punisher) and `ShipMissiles.Start` skips a flight with no drawn target (a follow-up).
 - A missile drawn mid-flight starts with an identity launch transform: on its ball (no launcher streak), but its

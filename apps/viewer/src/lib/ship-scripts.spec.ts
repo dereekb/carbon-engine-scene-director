@@ -207,6 +207,24 @@ describe('ShipScripts', () => {
     expect(scripts.Report('a', 4)).toBeNull();
   });
 
+  it('swaps the steps it has not reached in place: no restart, and the next step follows the new after (Movie mode M3)', () => {
+    const { port, scripts, Run, ships } = Setup([
+      { type: 'direction', direction: [0, 0, 1], speed: 1, duration: 3 },
+      { type: 'stop', after: 1 }
+    ]);
+    Run(0, 1);
+    const swapped: SceneShipStep[] = [ships[0].orders[0], { type: 'warp', point: [0, 0, 400_000], after: 4 } as SceneShipStep];
+    expect(scripts.Swap('a', swapped)).toBe(true);
+    expect(scripts.Swap('a', swapped)).toBe(false);
+    expect(scripts.Swap('ghost', swapped)).toBe(false);
+    ships[0].orders = swapped;
+    Run(2, 3);
+    expect(scripts.Report('a', 3)).toMatchObject({ state: 'waiting', step: 1, steps: 2, startsIn: 4, order: 'warp' });
+    expect(scripts.Report('a', 3)?.note).toBeUndefined();
+    Run(4, 7);
+    expect(port.given.map(({ order }) => order.type)).toEqual(['direction', 'warp']);
+  });
+
   it('snapshots and restores into a fresh instance that continues the same', () => {
     const first = Setup([
       { type: 'direction', direction: [0, 0, 1], speed: 1, duration: 3 },

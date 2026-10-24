@@ -12,10 +12,11 @@ lever tool authors a cue with `at`.
 **Movie mode** (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`,
 slices M1 the document → M2 the page plays event cues → M3 edit-resimulate → M4 the movie camera across jumps → M5 the
 `movie` tool → M6 verify-page and the real-GPU movie): the movie *is* this timeline, plus event cues, a `movie` block
-and script edits that re-simulate. **M1 and M2 have landed**: event cues and the movie block in the document (below),
-and the page playing event cues on their events. Sub-doc (`{ ref: "sd-timeline", doc: "movie" }`): **`movie`** (the
-page's event cues: the record, the event second rule, the five sources, the event log and its cursor, `latest`, the
-reports, `when` on the tools; later edit-resimulate, the movie camera pointer and the `movie` tool).
+and script edits that re-simulate. **M1, M2 and M3 have landed**: event cues and the movie block in the document
+(below), the page playing event cues on their events, and script edits re-simulating instead of `missed`. Sub-doc
+(`{ ref: "sd-timeline", doc: "movie" }`): **`movie`** (the page's event cues: the record, the event second rule, the
+five sources, the event log and its cursor, `latest`, the reports, `when` on the tools; edit-resimulate: the divergence
+test, the edit path, the prefetch, the oracle; later the movie camera pointer and the `movie` tool).
 
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
@@ -30,6 +31,7 @@ reports, `when` on the tools; later edit-resimulate, the movie camera pointer an
 | `operations.ts` | `TIMELINE_OPERATIONS` + `applyTimelineOperation` (wired into `applyOperation`'s `default:`) |
 | `prune.ts` | `removeTimelineReferences`, called by `remove_ship`, `remove_object`, `remove_fleet`, `remove_wing`, `remove_squad` |
 | `report.ts` | `TIMELINE_STATES`, `CUE_STATES`, `SHIP_SCRIPT_STATES` and the report shapes (get_state, the `timeline` tool) |
+| `script-edit.ts` | Movie mode M3: `scriptEditOf` (an edit of only the cues, the movie block and ships' orders, or null), `scriptEditIsEmpty`, `scriptChanged`, `firstChangedStep`, `withScriptOrders` (the live scene's ships take edited orders); `script-edit.spec.ts` |
 
 The page (`apps/viewer/src/lib/`, node-tested, no runtime): `timeline.ts` (`TimelinePlayer` over a `TimelinePort`,
 `TimelineText` for the HUD; `timeline.spec.ts`), `ship-scripts.ts` (`ShipScripts` over a `ShipScriptsPort`;
@@ -260,10 +262,17 @@ not its effects, and a restart replays it. Details, user edits while live edits 
 Apply split: `sd-scene-document` "The authored document and the live scene". The live scene normalizes ship steps that
 target cue-added ships as names; the user sees the authored document's warnings, never the live normalize's.
 
-- **Timeline edits while it plays** (`TimelinePlayer.Edit`): a new or retimed cue whose due second is still ahead is
-  pending; one in the past is `missed` ("added after its time: it plays from the next restart"); a fired cue keeps its
-  record (an edit notes "edited after it fired: the edit plays on a restart"; a removal keeps it in the log, "removed
-  after it fired"). A scene that loses every cue and step goes `idle`.
+- **Timeline edits while it plays** re-simulate (Movie mode M3, doc `movie`): an edit of only the cues, the movie block
+  and ships' orders, on a started timeline while time control records, is taken at once when it changes only the
+  future (`TimelinePlayer.Accepts` / `Rescript`: new cues pending, changed steps swapped in place with no restart),
+  else the scene re-simulates from the latest snapshot before its first difference back to now
+  (`TimeControl.Resimulate`), so a cue added or retimed into the past, or a fired cue edited or removed, comes back as
+  the edited script plays it. Nothing cuts. **The fallback** (`TimelinePlayer.Edit`), when no snapshot reaches back, the
+  edit mixes in other changes, or the timeline is not started or not recording: a new or retimed cue whose due second
+  is still ahead is pending; one in the past is `missed` ("added after its time: it plays from the next restart"); a
+  fired cue keeps its record (an edit notes "edited after it fired: the edit plays on a restart"; a removal keeps it in
+  the log, "removed after it fired"), warned `the time window does not reach back to before this edit's first change
+  (…): timeline restart replays the script with it`. A scene that loses every cue and step goes `idle`.
 
 ## Reporting
 
@@ -293,11 +302,13 @@ Every cueable tool takes `at` (seconds, `AT_ARGUMENT`), `when` (an event, `WHEN_
   name? (patch_scene's), [action]: the rest }` (`patch_scene: { operations }`) and runs `EditNow([{ op: 'add_cue', cue }])`
   in the edit queue. So it validates exactly as a document edit (against the scene as projected to the cue's time) and
   the player takes it as any timeline edit. No lever is taken now (`Manual`): the cue takes it when it fires.
-- **The result**: `{ cue (as stored, `adds` derived), state (its record: pending, or missed), timeline (get_state's
-  summary), warnings }`. The warnings are the document's that name the cue (`"<id>"`: a name target, "may fail when it
-  fires", a re-pin), plus `cue "x" at 1 s is behind the timeline (4 s played): it is missed, and plays from the next
-  restart` while it plays, and `the timeline is stopped: timeline play starts it …; timeline restart replays it from
-  the placements` on a stopped one (a live scene's first cue).
+- **The result**: `{ cue (as stored, `adds` derived), state (its record: pending, fired after a re-simulation, or
+  missed in the fallback), timeline (get_state's summary), resimulated (M3, on a started timeline: `{ from, to, ticks,
+  ms, cues, ships }` in timeline seconds, null when it changed only the future), warnings }`. The warnings are the
+  document's that name the cue (`"<id>"`: a name target, "may fail when it fires", a re-pin), plus `cue "x" at 1 s is
+  behind the timeline (4 s played): it is missed, and plays from the next restart` in the fallback, and `the timeline
+  is stopped: timeline play starts it …; timeline restart replays it from the placements` on a stopped one (a live
+  scene's first cue).
 - **Hub tools** (`add_fleet_composition`, `add_ships`, `stage_engagement`, `add_objects`): resolve as without `at`, on
   `get_scene { at: ceil(at) }`, then dry-run the ops and wrap them in one `add_cue` with `patch_scene` (`ScenePlaces`,
   `sd-staging`), named `add_ships 2 Guardian`, `add_fleet_composition red`, `stage_engagement red vs blue`,
@@ -351,8 +362,10 @@ A cue's warp-in plans on flight numbers (`waitForBuild: false`), so its builds l
 the group lands again on the same ticks (T3, verify-page `time:`). Limit: a cue-added ship's build landing still cuts the
 window when the hub has no SDE radius for it (the build gives its formation radius). `SceneClock.Hold` and Time
 control's pause (`clock.paused`, `sd-time`) both stop the clock; they are independent. An event cue's record resolves on the page's events (doc `movie`): its
-`matched`, `due` and `event` and the player's `logCursor` and `lastShot` are in the snapshot, the event log is not;
-Movie mode replaces `missed` with re-simulation (M3).
+`matched`, `due` and `event` and the player's `logCursor` and `lastShot` are in the snapshot, the event log is not.
+Since M3 a timeline starting pins the window's origin (t = 0 stays recorded), script edits re-simulate through
+`Resimulate`, and a jump back to a snapshot from before a script edit brings the edited script in (`AfterRestore`:
+before M3 a jump back after a cue edit dropped the cue).
 
 ## verify-page (`--only timeline:`, headless, real tools-core)
 
@@ -361,7 +374,7 @@ SDE). Run 2026-10-23 on dbxpc: a load showed `preparing (held)`, t = 0 after the
 the MWD active since t + 3; a script ran `0:flying → 1:flying → 2:waiting → 2:flying → 3:flying → 4:done` with its after
 and duration on the tick; a patch cue's `late` was live but not authored, saved files had 1 ship and 2 cues, and a
 restart removed it until 2 s; a targets cue fired at +1 and both members took `called` targets; edits while playing gave
-`missed`, a retimed cue fired, `remove_ship b` pruned its cue, `remove_ship a` was refused naming the patch cue that
+`missed` (since M3 the `past` cue re-simulates and fires), a retimed cue fired, `remove_ship b` pruned its cue, `remove_ship a` was refused naming the patch cue that
 moves it, and an edit of the cue-added ship applied live only; a 5-tick pause shifted a 4 s cue to +9; camera cues
 drove the cinema as `timeline`, the stop cue made it idle and camera off skipped the next; bad timelines were refused
 with every problem (reading problems in one load, unknown ids in another: a cue that fails to read skips the
@@ -375,7 +388,7 @@ commander still catches up, it slows by design; 1 run in 5 on HEAD, the same num
 T4 (2026-10-23, dbxpc): (l) `order_fleet` (`cue: "go"`, at 3), `switch_prop_mods` (at 4, id `cue-1`) and a pose
 `play_shot` (at 2) on an unscripted fleet scene returned pending cues and the stopped warning, changed nothing for
 2.5 s (no order, prop mod off, cinema idle; timeline `stopped`, 3 pending), then `timeline play` fired them at +2, +3,
-+4, and an `order_ship` at 1 s added at 4 s came back `missed`. (m) (SDE) `add_fleet_composition` of an inline Rifter
++4, and an `order_ship` at 1 s added at 4 s came back `missed` (since M3: `fired`, re-simulated from 0 s). (m) (SDE) `add_fleet_composition` of an inline Rifter
 composition by hull name with `warpIn`, at 5: the cue's op had dna filled and adds `wr-fc`, `wr-s-01`, `wr-s-02`, fleet
 `wr`; nothing was added; it fired at +5 and `arrivals` reported group `wr`. (n) A paused load with a patch cue at 5:
 `get_scene { at: 4 }` lacked `rw-fc`, `{ at: 5 }` held it (no timeline); `add_ships` near `rw-fc` at 4 was refused (`no

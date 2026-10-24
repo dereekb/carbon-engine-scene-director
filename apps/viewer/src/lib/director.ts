@@ -209,6 +209,10 @@ import {
   cueActionOf,
   sceneAtTimelineTime,
   timelinePatchScenes,
+  scriptChanged,
+  scriptEditIsEmpty,
+  scriptEditOf,
+  withScriptOrders,
   type SceneCue,
   type SceneCueAdds,
   type KillTimelineEvent,
@@ -717,8 +721,19 @@ interface SimState {
   };
   readonly timeline: TimelineSnapshot;
   readonly scene: Maybe<SceneDocument>;
+  /**
+   * The authored document when it was taken, by reference and never restored (a jump keeps the user's document): a
+   * script edit's re-simulation reads which orders the live scene followed (Movie mode M3).
+   */
+  readonly authored: Maybe<SceneDocument>;
   readonly liveEdits: readonly LiveEdit[];
 }
+
+/**
+ * How long a script edit waits for the lookups of the ships its edited patch cues add before it re-simulates anyway
+ * (Movie mode M3), seconds.
+ */
+export const SCRIPT_EDIT_PREFETCH_SECONDS = 20;
 
 /**
  * Where a replay differs from the recorded run at a snapshot tick (time-control drift, sd-time): the master park
@@ -2594,6 +2609,7 @@ export class Director {
     time.AttachSim({
       Capture: () => this.CaptureSim(),
       Restore: (state) => this.RestoreSim(state as SimState),
+      AfterRestore: (state) => this.ScriptAfterRestore(state as SimState),
       Settled: () => this.SceneSettled({ simulation: true }),
       Drift: (recorded, fresh) => SimDrift(recorded as SimState, fresh as SimState),
       Replay: (entry) => this.Replay(entry),
@@ -2696,7 +2712,7 @@ export class Director {
     // Replaced, never mutated: one level is enough.
     const shared = { flights: new Map(this.flights), fittings: new Map(this.fittings), unaffectedFlights: new Map(this.unaffectedFlights), defaultWeapons: new Map(this.defaultWeapons) };
     const timeline = this.timeline.Snapshot();
-    const state: SimState = { world, owners, director, shared, timeline, scene: this.scene, liveEdits: [...this.liveEdits] };
+    const state: SimState = { world, owners, director, shared, timeline, scene: this.scene, authored: this.authored, liveEdits: [...this.liveEdits] };
     const bytes = ParkSnapshotBytes(world.master) + ParkSnapshotBytes(world.replica) + EstimateBytes({ fields: world.fields, ships: world.ships, owners, director, timeline });
     return { state, bytes };
   }
@@ -2969,7 +2985,19 @@ export class Director {
   DriveTimeline(): void {
     const before = this.timeline.state;
     this.timeline.Frame();
-    if (this.timeline.state !== before) this.onChange();
+    if (this.timeline.state === before) return;
+    this.MarkTimelineOrigin(before);
+    this.onChange();
+  }
+
+  /**
+   * A timeline that just started playing, before its t = 0 boundary, pins the time-control origin (Movie mode M3): every
+   * later script edit can re-simulate, from t = 0 at worst.
+   *
+   * @param before - The player's state before the change.
+   */
+  private MarkTimelineOrigin(before: string): void {
+    if (before !== 'playing' && this.timeline.state === 'playing' && this.timeline.startTick == null) this.time?.MarkOrigin();
   }
 
   /**
@@ -2989,8 +3017,11 @@ export class Director {
       if (!camera) this.cameraDirector.TimelineCameraOff(this.SceneSeconds(this.world.tick));
     }
     let load: Maybe<Record<string, unknown>> = null;
-    if (action === 'play') this.timeline.Play();
-    else if (action === 'pause') this.timeline.Pause();
+    if (action === 'play') {
+      const before = this.timeline.state;
+      this.timeline.Play();
+      this.MarkTimelineOrigin(before);
+    } else if (action === 'pause') this.timeline.Pause();
     else if (action === 'restart') {
       if (!this.authored) throw new Error('no scene is loaded');
       load = (await this.Load(this.authored, { paused: paused === true })) as Record<string, unknown>;
@@ -3005,10 +3036,11 @@ export class Director {
    * A lever tool given `at` or `when` (and `cue`, its id): instead of running now, the call becomes the timeline cue
    * `{ id?, at?, when?, [action]: its arguments }`, added to the authored timeline through the edit queue (patch_scene's
    * `name` names the cue; an event cue's `arms` is derived there). The player takes it as any timeline edit: behind a
-   * playing timeline it is `missed` until a restart.
+   * playing timeline it re-simulates the scene from before it (Movie mode M3), and is `missed` until a restart only when
+   * the time window cannot reach back.
    *
-   * @returns The cue as stored, its state, get_state's timeline report, and the warnings naming the cue (plus a missed
-   *   cue's and a stopped timeline's).
+   * @returns The cue as stored, its state, get_state's timeline report, `resimulated` (a script edit's: null when it
+   *   changed only the future), and the warnings naming the cue (plus a missed cue's and a stopped timeline's).
    * @throws {SceneError} When the cue does not check out against the scene as it will be at its time.
    */
   private AddCue(action: TimelineActionName, args: Record<string, unknown>): Promise<object> {
@@ -3020,7 +3052,7 @@ export class Director {
     const cue = { ...(id != null ? { id } : {}), ...(at != null ? { at } : {}), ...(when != null ? { when } : {}), ...(name ? { name } : {}), [action]: action === 'patch_scene' ? { operations: rest['operations'] } : rest };
     return this.Serialize(async () => {
       const known = new Set((this.authored?.timeline?.cues ?? []).map((candidate) => candidate.id));
-      const patch = (await this.EditNow([{ op: 'add_cue', cue }])) as { readonly warnings?: string[] };
+      const patch = (await this.EditNow([{ op: 'add_cue', cue }])) as { readonly warnings?: string[]; readonly resimulated?: unknown };
       const added = (this.authored?.timeline?.cues ?? []).find((candidate) => (id != null ? candidate.id === id : !known.has(candidate.id))) ?? null;
       const record = added ? [...(this.timeline.Report()?.list ?? [])].reverse().find((entry) => entry.id === added.id) : null;
       const summary = this.timeline.Summary();
@@ -3032,7 +3064,7 @@ export class Director {
             : `cue "${added.id}" at ${added.at} s is behind the timeline (${summary?.time ?? 0} s played): it is missed, and plays from the next restart (timeline restart)`
         );
       if (summary?.state === 'stopped') warnings.push('the timeline is stopped: timeline play starts it (t = 0 at the next tick, from the scene as it is now); timeline restart replays it from the placements');
-      return { cue: added, state: record?.state ?? null, timeline: this.TimelineSummary(), warnings };
+      return { cue: added, state: record?.state ?? null, timeline: this.TimelineSummary(), ...(patch.resimulated !== undefined ? { resimulated: patch.resimulated } : {}), warnings };
     });
   }
 
@@ -3297,13 +3329,139 @@ export class Director {
   }
 
   /**
-   * A document edit at its turn in the queue. Without live edits (the usual case) the authored document takes the
-   * operations and the live scene follows it. Once a cue changed the live scene, they apply to both (the timeline ops to
-   * the authored document only): live-only when only the live scene takes them and they name something the timeline
-   * added, authored-only when only the authored document takes them, each with a warning; otherwise the refusal is thrown
-   * (the live scene's when both refuse).
+   * A document edit at its turn in the queue: a script edit while the timeline plays re-simulates (ScriptEdit); any
+   * other edit takes the usual path (EditApply), warned when it changed the script too and so cut the time window.
    */
   private async EditNow(operations: unknown): Promise<object> {
+    const script = await this.ScriptEdit(operations);
+    if ('result' in script) return script.result;
+    const recording = this.time?.recordingOn === true;
+    const result = (await this.EditApply(operations)) as { readonly warnings?: string[] };
+    const warnings = [...script.warnings];
+    if (script.mixed && recording && !this.time?.recordingOn) warnings.push('this edit changed the scene too, so the time window was cut: timeline restart replays the script with it');
+    return warnings.length ? { ...result, warnings: [...new Set([...(result.warnings ?? []), ...warnings])] } : result;
+  }
+
+  /**
+   * A script edit while the timeline plays (Movie mode M3, sd-timeline doc `movie`): an edit of only the cues, the movie
+   * block and ships' orders, once the timeline started and time control records. It awaits the lookups of what its new
+   * or changed patch cues add, abandons the recorded future, then takes the edit at once when it changes only the
+   * future (TimelinePlayer.Accepts on the current state: Rescript, the live ships' orders swapped, nothing cut), or
+   * re-simulates from the latest snapshot before its first difference (TimeControl.Resimulate). The authored document is
+   * committed after the landing. Anything else mixed in, or no snapshot reaching back, takes the usual path.
+   *
+   * @returns The patch result (with `resimulated`), or the usual path's extra warnings and whether the edit mixed other
+   *   changes into a script change.
+   */
+  private async ScriptEdit(operations: unknown): Promise<{ readonly result: object } | { readonly warnings: string[]; readonly mixed: boolean }> {
+    const none = { warnings: [], mixed: false };
+    if (!this.ScriptEditable()) return none;
+    const before = this.Authored();
+    // A refusal takes the usual path, which throws it or applies the edit live only.
+    const authored = Attempt(() => applySceneOperations(before, operations)).value;
+    if (!authored) return none;
+    const edit = scriptEditOf(before, authored.scene);
+    if (!edit) return { warnings: [], mixed: scriptChanged(before, authored.scene) };
+    const cues = authored.scene.timeline?.cues ?? [];
+    if (scriptEditIsEmpty(edit) || !(cues.length || authored.scene.ships.some((doc) => (doc.orders?.length ?? 0) > 0))) return none;
+    const late = await this.PrefetchFor(authored.scene, [...edit.cues.added, ...edit.cues.changed]);
+    const extra = late ? [late] : [];
+    // Frames ran meanwhile: a cut or a restart (queued behind this edit, or a lookup landing) may have come.
+    const time = this.time;
+    if (!time || !this.ScriptEditable() || this.Authored() !== before) return { warnings: extra, mixed: false };
+    time.AbandonFuture();
+    this.timeline.AbandonFuture();
+    const counts = { cues: edit.cues.added.length + edit.cues.removed.length + edit.cues.changed.length, ships: edit.ships.length };
+    const live = this.Current();
+    const swapped = withScriptOrders(live, before, authored.scene);
+    let resimulated: Maybe<object> = null;
+    if (this.timeline.Accepts(cues, swapped.ships, { previous: live.ships })) {
+      this.SwapLiveScene(swapped);
+      this.timeline.Rescript(cues, swapped.ships);
+    } else {
+      const run = time.Resimulate({
+        accept: (state) => {
+          const sim = state as SimState;
+          return sim.scene != null && this.timeline.Accepts(cues, withScriptOrders(sim.scene, sim.authored ?? before, authored.scene).ships, { state: sim.timeline, previous: sim.scene.ships });
+        },
+        restored: (state) => {
+          this.SwapLiveScene(withScriptOrders(this.Current(), (state as SimState).authored ?? before, authored.scene));
+          this.timeline.Rescript(cues, this.Current().ships);
+        },
+        edit: counts
+      });
+      if (!run) {
+        const earliest = time.ring[0];
+        const window = earliest ? ` (it holds ${this.TimelineSeconds(earliest.clock)}–${this.TimelineSeconds(this.clock.now)} s of timeline time)` : '';
+        return { warnings: [...extra, `the time window does not reach back to before this edit's first change${window}: timeline restart replays the script with it`], mixed: false };
+      }
+      resimulated = { from: this.TimelineSeconds(run.snapshot.clock), to: this.TimelineSeconds(this.clock.now), ticks: run.report.resimulated, ms: run.report.ms, ...counts };
+    }
+    this.authored = authored.scene;
+    await this.store.Put(CURRENT_KEY, authored.scene);
+    this.onChange();
+    return { result: { scene: this.authored, ...(this.liveEdits.length ? { live: this.scene } : {}), warnings: [...new Set([...authored.warnings, ...extra])], resimulated } };
+  }
+
+  /**
+   * After a jump restored a snapshot taken before the script's last edits (Movie mode M3): the restored player and live
+   * scene take the authored script. An edit the snapshot is still before (a future-only one, or one re-simulated from
+   * earlier) goes in as Rescript; anything else as the player's usual Edit (a cue behind it missed).
+   *
+   * @param state - The restored snapshot.
+   */
+  private ScriptAfterRestore(state: SimState): void {
+    const authored = this.authored;
+    const scene = this.scene;
+    if (!authored || !scene || state.authored === authored) return;
+    const cues = authored.timeline?.cues ?? [];
+    const live = withScriptOrders(scene, state.authored ?? authored, authored);
+    if (this.timeline.Accepts(cues, live.ships, { previous: scene.ships })) {
+      this.SwapLiveScene(live);
+      this.timeline.Rescript(cues, live.ships);
+    } else this.timeline.Edit(cues, cues.length > 0 || authored.ships.some((doc) => (doc.orders?.length ?? 0) > 0));
+  }
+
+  /**
+   * Whether a script edit can re-simulate now: time control records, no jump runs, the clock is not held, and the
+   * timeline started (playing or paused past its t = 0).
+   */
+  private ScriptEditable(): boolean {
+    const time = this.time;
+    return Boolean(time?.recordingOn && !time.isJumping && !this.clock.held && this.timeline.startTick != null && (this.timeline.state === 'playing' || this.timeline.state === 'paused'));
+  }
+
+  /**
+   * Gives the live scene a script edit's orders (withScriptOrders). Only the ship scripts read orders, so no apply runs
+   * and nothing cuts.
+   *
+   * @param scene - The live scene with the new orders.
+   */
+  private SwapLiveScene(scene: SceneDocument): void {
+    if (scene === this.scene) return;
+    this.scene = scene;
+    this.liveFleets = null;
+  }
+
+  /**
+   * Timeline seconds at a scene clock (0 before t = 0, or without a started timeline).
+   *
+   * @param clock - 100 ns ticks.
+   */
+  private TimelineSeconds(clock: number): number {
+    const start = this.timeline.startTick;
+    const origin = start == null ? null : this.world.BoundaryTime(start);
+    return origin == null ? 0 : Math.max(0, Math.round(((clock - origin) / TICKS_PER_SECOND) * 100) / 100);
+  }
+
+  /**
+   * The usual edit path (EditNow). Without live edits (the usual case) the authored document takes the operations and
+   * the live scene follows it. Once a cue changed the live scene, they apply to both (the timeline ops to the authored
+   * document only): live-only when only the live scene takes them and they name something the timeline added,
+   * authored-only when only the authored document takes them, each with a warning; otherwise the refusal is thrown (the
+   * live scene's when both refuse).
+   */
+  private async EditApply(operations: unknown): Promise<object> {
     if (!this.liveEdits.length) return this.Apply(applySceneOperations(this.Authored(), operations));
     const liveOperations = (Array.isArray(operations) ? operations : []).filter((operation) => !IsTimelineOperation(operation));
     const authored = Attempt(() => applySceneOperations(this.Authored(), operations));
@@ -4734,23 +4892,60 @@ export class Director {
    * @param authored - The authored document.
    */
   private PrefetchCues(authored: SceneDocument): void {
+    for (const { cueId, doc, projected } of this.PrefetchTargets(authored)) {
+      this.prefetching += 1;
+      this.Prefetch(doc, projected)
+        .catch((error: unknown) => console.warn(`timeline cue "${cueId}": prefetching ship ${doc.id} failed: ${ErrorText(error)}`))
+        .finally(() => {
+          this.prefetching -= 1;
+          this.onChange();
+        });
+    }
+  }
+
+  /**
+   * A script edit's prefetch (Movie mode M3): awaits the lookups of every ship its new or changed patch cues add or
+   * change, capped at SCRIPT_EDIT_PREFETCH_SECONDS, so the re-simulation flies them as a fresh run would. Not counted
+   * by the settle check: recording goes on meanwhile.
+   *
+   * @param authored - The edited authored document.
+   * @param cueIds - The new and changed cues.
+   * @returns A warning when the cap passed, else null.
+   */
+  private async PrefetchFor(authored: SceneDocument, cueIds: readonly string[]): Promise<Maybe<string>> {
+    if (!cueIds.length) return null;
+    const wanted = new Set(cueIds);
+    const pending = this.PrefetchTargets(authored)
+      .filter(({ cueId }) => wanted.has(cueId))
+      .map(({ cueId, doc, projected }) => this.Prefetch(doc, projected).catch((error: unknown) => console.warn(`timeline cue "${cueId}": prefetching ship ${doc.id} failed: ${ErrorText(error)}`)));
+    if (!pending.length) return null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const capped = await Promise.race([Promise.all(pending).then(() => false), new Promise<boolean>((resolve) => (timer = setTimeout(() => resolve(true), SCRIPT_EDIT_PREFETCH_SECONDS * 1000)))]);
+    clearTimeout(timer);
+    return capped ? `the lookups of the ships the edited cues add did not answer in ${SCRIPT_EDIT_PREFETCH_SECONDS} s: the re-simulated run may differ` : null;
+  }
+
+  /**
+   * The ships a document's patch cues add or change (timelinePatchScenes), once per hull, fit and prop mod, skipping
+   * those the live scene holds as they are.
+   *
+   * @param authored - The authored document.
+   * @returns Each with its cue and the projected document (its fits).
+   */
+  private PrefetchTargets(authored: SceneDocument): { readonly cueId: string; readonly doc: SceneShip; readonly projected: SceneDocument }[] {
     const scene = this.scene;
     const keyOf = (doc: SceneShip, of: SceneDocument): string => `${HullStatsKey(doc)}|${doc.fit ? (fitTextOf(doc, of) ?? '') : ''}|${JSON.stringify(doc.propMod?.module ?? null)}`;
     const seen = new Set(scene ? scene.ships.map((doc) => keyOf(doc, scene)) : []);
+    const targets: { readonly cueId: string; readonly doc: SceneShip; readonly projected: SceneDocument }[] = [];
     for (const { cueId, scene: projected } of timelinePatchScenes(authored, applySceneOperations)) {
       for (const doc of projected.ships) {
         const key = keyOf(doc, projected);
         if (seen.has(key)) continue;
         seen.add(key);
-        this.prefetching += 1;
-        this.Prefetch(doc, projected)
-          .catch((error: unknown) => console.warn(`timeline cue "${cueId}": prefetching ship ${doc.id} failed: ${ErrorText(error)}`))
-          .finally(() => {
-            this.prefetching -= 1;
-            this.onChange();
-          });
+        targets.push({ cueId, doc, projected });
       }
     }
+    return targets;
   }
 
   /**

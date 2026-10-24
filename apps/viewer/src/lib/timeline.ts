@@ -25,6 +25,7 @@ import {
   describeCueTrigger,
   describeTimelineEvent,
   FIRE_QUIET_SECONDS,
+  firstChangedStep,
   MAX_TIMELINE_EVENTS,
   resolveCueTrigger,
   TIMELINE_ACTIONS,
@@ -400,6 +401,97 @@ export class TimelinePlayer {
     for (const cue of cues) kept.set(cue.id, cue);
     this.data.cues = [...kept.values()];
     this.data.records = records;
+  }
+
+  /**
+   * The divergence test of a script edit (Movie mode M3, sd-timeline doc `movie`): whether a player state, the current
+   * one or a time-control snapshot's, is still before the edited script makes any difference. Every processed cue
+   * (fired, failed, skipped) must be in the new script unchanged; every new or changed cue must not be due before the
+   * state's `played` (a timed cue by its at, an event cue resolved against the log up to the state's cursor, its latest
+   * included); and every scripted ship with other steps must not have reached the first changed one (a ship without a
+   * script record: none of its steps may have started, so either the timeline had not played a boundary or its orders
+   * did not change). Downward-closed: when a state passes, every earlier one does.
+   *
+   * @param cues - The edited timeline's cues.
+   * @param ships - The state's live ships with the edited orders (withScriptOrders).
+   * @param options - `state`: a snapshot's player (default the current one); `previous`: its live ships before the
+   *   edit.
+   * @returns True when the state can take the edit (Rescript) and play on as a fresh run of the new script would.
+   */
+  Accepts(cues: readonly SceneCue[], ships: readonly ScriptedShip[], { state, previous = [] }: { readonly state?: TimelineSnapshot; readonly previous?: readonly ScriptedShip[] } = {}): boolean {
+    const data = state ?? this.data;
+    // Only a playing (or paused) timeline: a snapshot from before it started has no timeline to swap the script into.
+    if (data.state !== 'playing' && data.state !== 'paused') return false;
+    const played = data.played;
+    const next = new Map(cues.map((cue) => [cue.id, cue]));
+    const records = new Map(data.records.filter((record) => !record.removed).map((record) => [record.id, record]));
+    for (const record of records.values()) {
+      if (!PROCESSED.has(record.state)) continue;
+      const cue = next.get(record.id);
+      if (!cue || JSON.stringify(cue) !== record.key) return false;
+    }
+    for (const cue of cues) {
+      if (records.get(cue.id)?.key === JSON.stringify(cue)) continue;
+      const due = cue.when ? resolveCueTrigger({ trigger: cue.when, arms: cue.arms ?? cue.at ?? 0 }, this.log, data.logCursor).due : cueDueSecond(cue.at ?? 0);
+      if (due != null && due < played) return false;
+    }
+    const scripts = state ? state.scripts : null;
+    const before = new Map(previous.map((ship) => [ship.id, JSON.stringify(ship.orders ?? null)]));
+    for (const ship of ships) {
+      const script = scripts ? scripts[ship.id] : this.scripts.Record(ship.id);
+      if (script) {
+        if (script.key === JSON.stringify(ship.orders)) continue;
+        const step = firstChangedStep(script.steps, ship.orders);
+        if (step != null && script.step >= step) return false;
+        continue;
+      }
+      if (!ship.orders?.length || played === 0) continue;
+      if (before.get(ship.id) !== JSON.stringify(ship.orders)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Takes an edited script on a state that Accepts it (Movie mode M3): kept cues keep their records, new and changed
+   * ones get fresh records (an event cue resolved against the log so far, never missed), and each running script whose
+   * steps changed swaps them in place (ShipScripts.Swap): no restart from step 0.
+   *
+   * @param cues - The edited timeline's cues.
+   * @param ships - The live scene's ships, with the edited orders.
+   */
+  Rescript(cues: readonly SceneCue[], ships: readonly ScriptedShip[]): void {
+    const started = this.data.startTick != null;
+    const previous = new Map(this.data.records.filter((record) => !record.removed).map((record) => [record.id, record]));
+    const records: CueRecord[] = [];
+    for (const cue of cues) {
+      const old = previous.get(cue.id);
+      previous.delete(cue.id);
+      if (old && old.key === JSON.stringify(cue)) {
+        records.push(old);
+        continue;
+      }
+      const record = NewRecord(cue);
+      if (started && record.when) this.Resolve(record);
+      records.push(record);
+    }
+    for (const old of previous.values()) {
+      if (!PROCESSED.has(old.state)) continue;
+      old.removed = true;
+      old.note = 'removed after it fired';
+      records.push(old);
+    }
+    const ids = new Set(cues.map((cue) => cue.id));
+    const removed = new Set(records.filter((record) => record.removed).map((record) => record.id));
+    this.data.cues = [...cues, ...this.data.cues.filter((cue) => removed.has(cue.id) && !ids.has(cue.id))];
+    this.data.records = records;
+    for (const ship of ships) if (ship.orders?.length) this.scripts.Swap(ship.id, ship.orders);
+  }
+
+  /**
+   * Drops the event log past the cursor: the recorded future of a script the user just edited (Movie mode M3).
+   */
+  AbandonFuture(): void {
+    this.log.length = Math.min(this.log.length, this.data.logCursor);
   }
 
   /**

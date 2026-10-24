@@ -17,6 +17,10 @@
  * goes on, checked against the snapshots it passes (drift); a new live command drops it. Anything that would make a
  * replay differ (an edit, a load, an async lookup landing) cuts the window (Cut).
  *
+ * Script edits (Movie mode M3): a timeline starting pins its origin (MarkOrigin), a snapshot before t = 0 that trimming
+ * never drops, and an edit of the cues or ships' orders that changes the past re-simulates from the latest snapshot it
+ * does not affect (Resimulate, over the same Run as a jump) instead of cutting the window.
+ *
  * Node-tested (time-control.spec.ts): it imports no runtime.
  */
 
@@ -127,6 +131,68 @@ export interface CapturedSim {
 export interface TimeSnapshot extends CapturedSim {
   readonly tick: number;
   readonly clock: number;
+  /**
+   * The timeline's origin (MarkOrigin): the state before t = 0's boundary, never trimmed (a cut drops it).
+   */
+  readonly pinned?: true;
+  /**
+   * The origin's: the tape entries of its tick up to this seq were made before it was taken (its state holds them), so a
+   * restore does not run them again.
+   */
+  readonly doneThrough?: number;
+}
+
+/**
+ * What a script edit's re-simulation needs (Resimulate).
+ */
+export interface TimeResimulateOptions {
+  /**
+   * Whether a snapshot's state is still before the edit makes a difference (TimelinePlayer.Accepts).
+   */
+  readonly accept: (state: unknown) => boolean;
+  /**
+   * Called right after the snapshot is restored, before the re-simulation: the edited script goes in.
+   */
+  readonly restored: (state: unknown) => void;
+  /**
+   * How many cues and ships' orders the edit changed, for the report.
+   */
+  readonly edit?: { readonly cues: number; readonly ships: number };
+}
+
+/**
+ * A script edit's re-simulation: the report (get_state time.jump, cause edit) and the snapshot it started from.
+ */
+export interface TimeResimulation {
+  readonly report: TimeJumpReport;
+  readonly snapshot: { readonly tick: number; readonly clock: number };
+}
+
+/**
+ * One run of the jump machinery (TimeControl.Run).
+ */
+interface RunPlan {
+  /**
+   * The scene clock to land at, and the world tick there.
+   */
+  readonly goal: number;
+  readonly landingTick: number;
+  /**
+   * The snapshot to restore, or null to simulate on from now.
+   */
+  readonly restore: Maybe<TimeSnapshot>;
+  /**
+   * After the restore, before the re-simulation.
+   */
+  readonly restored?: (state: unknown) => void;
+  /**
+   * Drop the snapshots after the restored one (a script edit: they hold the old script).
+   */
+  readonly dropAfter?: boolean;
+  /**
+   * The error's start: "the jump failed".
+   */
+  readonly failure: string;
 }
 
 /**
@@ -163,6 +229,11 @@ export interface TimeSimPort {
    * Puts a captured state back (Director.RestoreSim). Throws when it cannot; the jump then restores its undo point.
    */
   Restore(state: unknown): void;
+  /**
+   * After a jump or a re-simulation restored a snapshot (never the undo point): the restored state takes the script
+   * edited since it was taken (Movie mode M3), so a jump back never undoes an edit of the cues or orders.
+   */
+  AfterRestore?(state: unknown): void;
   /**
    * Whether the scene is settled: recording starts at the first settled boundary.
    */
@@ -397,6 +468,43 @@ export class TimeControl {
   }
 
   /**
+   * Pins the timeline's origin (Movie mode M3): a snapshot of the state before t = 0's boundary, taken when a timeline
+   * starts playing (the director calls it), on the tick grid at the last evolve's clock like every snapshot. Recording
+   * starts there when it is off and the scene is settled; when it is on, the recorded future goes (the timeline starting
+   * changes it). Trim never drops the origin (its bytes count), a cut does, and a newer origin replaces it. So a script
+   * edit can always re-simulate, from t = 0 at worst.
+   *
+   * @returns Whether the origin was taken (not before the first evolve, during a jump, or while the scene settles).
+   */
+  MarkOrigin(): boolean {
+    const sim = this.sim;
+    if (!sim || this.jumping || this.world.NextBoundaryTime() == null) return false;
+    if (!this.recording.on && !sim.Settled().settled) return false;
+    const tick = this.world.tick;
+    if (this.recording.on) this.AbandonFuture();
+    else {
+      this.recording = { on: true, startTick: tick, since: this.clock.now };
+      this.end = this.clock.now;
+    }
+    const captured = sim.Capture();
+    const origin: TimeSnapshot = { tick, clock: Number(this.world.master.time), state: captured.state, bytes: captured.bytes, pinned: true, doneThrough: this.seq };
+    this.snapshots = [origin, ...this.snapshots.filter((snapshot) => !snapshot.pinned && snapshot.tick !== tick)].sort((a, b) => a.tick - b.tick);
+    this.Trim();
+    return true;
+  }
+
+  /**
+   * Drops the recorded future: the snapshots after now and the tape entries not run yet; the recorded end becomes now.
+   * A new live command does it (Record), and so does a script edit (the future belongs to the old script).
+   */
+  AbandonFuture(): void {
+    if (!this.recording.on) return;
+    this.tape = this.tape.filter((entry) => entry.done);
+    this.snapshots = this.snapshots.filter((snapshot) => snapshot.tick <= this.world.tick);
+    this.end = this.clock.now;
+  }
+
+  /**
    * Where a journaled live call starts: pass it to Record once the call succeeded.
    */
   Mark(): TapeMark {
@@ -414,9 +522,7 @@ export class TimeControl {
    */
   Record(mark: TapeMark, tool: string, args: Readonly<Record<string, unknown>>): void {
     if (!this.recording.on || this.jumping || mark.epoch !== this.epoch) return;
-    this.tape = this.tape.filter((entry) => entry.done);
-    this.snapshots = this.snapshots.filter((snapshot) => snapshot.tick <= this.world.tick);
-    this.end = this.clock.now;
+    this.AbandonFuture();
     this.seq += 1;
     this.tape.push({ seq: this.seq, tick: mark.tick, clock: mark.clock, tool, args: CloneState(args), done: true });
   }
@@ -431,12 +537,7 @@ export class TimeControl {
    * @throws {Error} When refused (another jump, the timeline holding the clock, nothing recorded) or failed.
    */
   Jump(target: number): TimeJumpReport {
-    const sim = this.sim;
-    if (!sim) throw new Error('time control is not attached yet: the page is still starting');
-    if (this.jumping) throw new Error('a jump is already running');
-    if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: jump once it plays');
-    const first = this.snapshots[0];
-    if (!first) throw new Error(`nothing is recorded yet: ${this.NotRecordingText()}`);
+    const first = this.Ready();
     const warnings: string[] = [];
     const before = this.clock.now;
     const interval = this.IntervalTicks();
@@ -451,7 +552,7 @@ export class TimeControl {
       goal = ahead;
     }
     if (goal === before) {
-      this.lastJump = { from: SceneSeconds(before), to: SceneSeconds(goal), snapshot: this.world.tick, resimulated: 0, ms: 0, warnings: [...warnings, 'already there: nothing to do'] };
+      this.lastJump = { from: SceneSeconds(before), to: SceneSeconds(goal), snapshot: this.world.tick, resimulated: 0, ms: 0, cause: 'jump', warnings: [...warnings, 'already there: nothing to do'] };
       return this.lastJump;
     }
     // The tick the world is at when the clock reads goal: snapshots sit on the tick grid.
@@ -459,6 +560,72 @@ export class TimeControl {
     const restore = [...this.snapshots].reverse().find((snapshot) => snapshot.tick <= landingTick - WARMUP_TICKS) ?? first;
     // Forward from now needs no restore when no snapshot is closer to the target.
     const fromNow = before <= goal && this.world.tick >= restore.tick;
+    const { startTick, ms } = this.Run({ goal, landingTick, restore: fromNow ? null : restore, failure: 'the jump failed' });
+    this.lastJump = { from: SceneSeconds(before), to: SceneSeconds(goal), snapshot: startTick, resimulated: landingTick - startTick, ms, cause: 'jump', ...(warnings.length ? { warnings } : {}) };
+    return this.lastJump;
+  }
+
+  /**
+   * Re-simulates a script edit that changes the past (Movie mode M3): restores the latest snapshot whose state still
+   * passes `accept` (at least WARMUP_TICKS before now when one is, the pinned origin included), drops the snapshots after
+   * it, puts the edited script in (`restored`), and re-simulates silently back to now, the tape after it replaying at its
+   * ticks and new snapshots taken on the way. One synchronous task, as a jump is; a failure puts the scene back and
+   * throws.
+   *
+   * @param options - The divergence test, the script swap and the edit's counts.
+   * @returns The report (get_state time.jump, cause edit) and the snapshot, or null when no snapshot passes.
+   * @throws {Error} When refused (another jump, the timeline holding the clock, nothing recorded) or failed.
+   */
+  Resimulate({ accept, restored, edit }: TimeResimulateOptions): Maybe<TimeResimulation> {
+    this.Ready();
+    const tick = this.world.tick;
+    let latest: Maybe<TimeSnapshot> = null;
+    let chosen: Maybe<TimeSnapshot> = null;
+    // The test is downward-closed: the first passing snapshot from the latest down is the latest that passes.
+    for (const snapshot of [...this.snapshots].reverse()) {
+      if (snapshot.tick >= tick || !accept(snapshot.state)) continue;
+      latest ??= snapshot;
+      if (snapshot.tick <= tick - WARMUP_TICKS) {
+        chosen = snapshot;
+        break;
+      }
+    }
+    chosen ??= latest;
+    if (!chosen) return null;
+    const now = this.clock.now;
+    const { startTick, ms } = this.Run({ goal: now, landingTick: tick, restore: chosen, restored, dropAfter: true, failure: 'the re-simulation failed' });
+    this.lastJump = { from: SceneSeconds(now), to: SceneSeconds(now), snapshot: startTick, resimulated: tick - startTick, ms, cause: 'edit', ...(edit ? { edit } : {}) };
+    return { report: this.lastJump, snapshot: { tick: chosen.tick, clock: chosen.clock } };
+  }
+
+  /**
+   * The refusals a jump and a re-simulation share.
+   *
+   * @returns The earliest snapshot.
+   * @throws {Error} Before the sim port is attached, during another jump, while the timeline holds the clock, and with
+   *   nothing recorded.
+   */
+  private Ready(): TimeSnapshot {
+    if (!this.sim) throw new Error('time control is not attached yet: the page is still starting');
+    if (this.jumping) throw new Error('a jump is already running');
+    if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: jump once it plays');
+    const first = this.snapshots[0];
+    if (!first) throw new Error(`nothing is recorded yet: ${this.NotRecordingText()}`);
+    return first;
+  }
+
+  /**
+   * The jump machinery (Jump, Resimulate): the undo point, BeginJump, the restore (or none: simulate on from now), the
+   * silent re-simulation tick by tick to the landing tick with the warm-up over its last ticks, the landing and
+   * EndJump. Any throw restores the undo point, the clock, the ring, the tape's done flags and the recording state.
+   *
+   * @returns The tick the re-simulation started from, and its real time.
+   */
+  private Run({ goal, landingTick, restore, restored, dropAfter = false, failure }: RunPlan): { startTick: number; ms: number } {
+    const sim = this.sim;
+    if (!sim) throw new Error('time control is not attached yet: the page is still starting');
+    const before = this.clock.now;
+    const interval = this.IntervalTicks();
     const undo = sim.Capture();
     const ring = [...this.snapshots];
     const done = this.tape.map((entry) => entry.done);
@@ -471,12 +638,15 @@ export class TimeControl {
     let floor = before;
     try {
       sim.BeginJump();
-      if (!fromNow) {
+      if (restore) {
         sim.Restore(restore.state);
         this.clock.Set(restore.clock);
         startTick = restore.tick;
         floor = restore.clock;
-        for (const entry of this.tape) if (entry.tick >= restore.tick) entry.done = false;
+        for (const entry of this.tape) if (ReplaysAfter(entry, restore)) entry.done = false;
+        if (dropAfter) this.snapshots = this.snapshots.filter((snapshot) => snapshot.tick <= restore.tick);
+        sim.AfterRestore?.(restore.state);
+        restored?.(restore.state);
       }
       while (this.world.tick < landingTick) {
         const boundary = this.world.NextBoundaryTime();
@@ -506,20 +676,12 @@ export class TimeControl {
       this.end = end;
       this.jumping = false;
       sim.EndJump({ from: before, to: before, delta: 0, failed: true });
-      throw new Error(`the jump failed and the scene is as it was: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
+      throw new Error(`${failure} and the scene is as it was: ${error instanceof Error ? error.message : String(error)}`, { cause: error });
     }
     this.jumping = false;
     if (this.recording.on) this.end = Math.max(this.end ?? goal, goal);
     sim.EndJump({ from: before, to: goal, delta: goal - before });
-    this.lastJump = {
-      from: SceneSeconds(before),
-      to: SceneSeconds(goal),
-      snapshot: fromNow ? startTick : restore.tick,
-      resimulated: landingTick - startTick,
-      ms: Math.round((this.realNow() - start) * 10) / 10,
-      ...(warnings.length ? { warnings } : {})
-    };
-    return this.lastJump;
+    return { startTick, ms: Math.round((this.realNow() - start) * 10) / 10 };
   }
 
   /**
@@ -750,22 +912,28 @@ export class TimeControl {
   }
 
   /**
-   * Drops snapshots older than the window before the latest, then the oldest past the byte budget (one always stays),
-   * then the tape before the earliest snapshot.
+   * Drops snapshots older than the window before the latest, then the oldest past the byte budget (the latest always
+   * stays), then the tape before the earliest snapshot. The pinned origin is never dropped, though its bytes count.
    */
   private Trim(): void {
     const last = this.snapshots.at(-1);
     if (!last) return;
     const oldest = last.clock - this.windowSeconds * TICKS_PER_SECOND;
-    let drop = 0;
-    while (drop < this.snapshots.length - 1 && this.snapshots[drop].clock < oldest) drop += 1;
+    const dropped = new Set<TimeSnapshot>();
     let bytes = this.Bytes();
-    for (let i = 0; i < drop; i++) bytes -= this.snapshots[i].bytes;
-    while (drop < this.snapshots.length - 1 && bytes > this.budgetBytes) {
-      bytes -= this.snapshots[drop].bytes;
-      drop += 1;
+    for (const snapshot of this.snapshots) {
+      if (snapshot === last || snapshot.clock >= oldest) break;
+      if (snapshot.pinned) continue;
+      dropped.add(snapshot);
+      bytes -= snapshot.bytes;
     }
-    if (drop) this.snapshots = this.snapshots.slice(drop);
+    for (const snapshot of this.snapshots) {
+      if (snapshot === last || bytes <= this.budgetBytes) break;
+      if (snapshot.pinned || dropped.has(snapshot)) continue;
+      dropped.add(snapshot);
+      bytes -= snapshot.bytes;
+    }
+    if (dropped.size) this.snapshots = this.snapshots.filter((snapshot) => !dropped.has(snapshot));
     const earliest = this.snapshots[0].tick;
     this.tape = this.tape.filter((entry) => entry.tick >= earliest);
   }
@@ -892,6 +1060,14 @@ export function SceneSeconds(ticks: number): number {
  */
 export function SceneTicks(seconds: number): number {
   return CLOCK_EPOCH_TICKS + Math.round(seconds * TICKS_PER_SECOND);
+}
+
+/**
+ * Whether a restore of a snapshot runs a tape entry again: every entry from its tick on, but the origin's state already
+ * holds the entries of its tick made before it was taken.
+ */
+function ReplaysAfter(entry: TapeEntry, snapshot: TimeSnapshot): boolean {
+  return entry.tick > snapshot.tick || (entry.tick === snapshot.tick && entry.seq > (snapshot.doneThrough ?? -Infinity));
 }
 
 function Round2(value: number): number {

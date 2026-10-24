@@ -363,3 +363,97 @@ describe('TimelinePlayer', () => {
     expect(new Set(fired.filter((line) => !line.startsWith('a@'))).size).toBe(2);
   });
 });
+
+describe('TimelinePlayer script edits (Movie mode M3)', () => {
+  const REJOIN = { type: 'rejoin' } as SceneShipStep;
+  const STOP = { type: 'stop', after: 3 } as SceneShipStep;
+  const WARP = { type: 'warp', point: [0, 0, 400_000] } as SceneShipStep;
+
+  it('accepts a timed or event cue edit only while the state is before its first difference', () => {
+    const cues = [OrderCue('go', 1), OrderCue('later', 10)];
+    const { port, player, Run } = Setup(cues);
+    port.settled = { settled: true, waiting: {} };
+    Run(1);
+    const early = player.Snapshot();
+    Run(2);
+    player.Event(Kill('r1'));
+    Run(2);
+    expect(player.Summary()).toMatchObject({ time: 4, cues: { fired: 1 } });
+    const accepts = (edited: SceneCue[]) => [player.Accepts(edited, []), player.Accepts(edited, [], { state: early })];
+    // A cue added behind now (due 4, played 5) changes the past; at 6 only the future.
+    expect(accepts([...cues, OrderCue('add', 4)])).toEqual([false, true]);
+    expect(accepts([...cues, OrderCue('add', 6)])).toEqual([true, true]);
+    // The fired cue retimed or removed; the pending one retimed.
+    expect(accepts([OrderCue('go', 2), cues[1]])).toEqual([false, true]);
+    expect(accepts([cues[1]])).toEqual([false, true]);
+    expect(accepts([cues[0], OrderCue('later', 7)])).toEqual([true, true]);
+    // r1 died in second 2: due at 3, behind now; with after 5 at 7, ahead; one that never came, due at its latest 4.
+    expect(accepts([...cues, EventCue('dies', { kill: { ship: 'r1' } })])).toEqual([false, true]);
+    expect(accepts([...cues, EventCue('dies', { kill: { ship: 'r1' }, after: 5 })])).toEqual([true, true]);
+    expect(accepts([...cues, EventCue('never', { kill: { ship: 'r9' }, latest: 4 })])).toEqual([false, true]);
+    expect(accepts([...cues, EventCue('never', { kill: { ship: 'r9' }, latest: 6 })])).toEqual([true, true]);
+  });
+
+  it("accepts a ship's orders edit while its script has not reached the first changed step", () => {
+    const orders = [REJOIN, STOP];
+    const { port, player, Run } = Setup([OrderCue('go', 1)], [{ id: 'a', orders }]);
+    port.settled = { settled: true, waiting: {} };
+    // Prepared and playing, before t = 0's boundary: the time-control origin's state.
+    player.Frame();
+    const before = player.Snapshot();
+    Run(1);
+    expect(player.Script('a')).toMatchObject({ state: 'waiting', step: 1 });
+    expect(player.Accepts([OrderCue('go', 1)], [{ id: 'a', orders }], { state: { ...before, state: 'stopped' } })).toBe(false);
+    const cues = [OrderCue('go', 1)];
+    const accepts = (ships: { id: string; orders?: SceneShipStep[] }[], previous = [{ id: 'a', orders }, { id: 'b' }]) => [player.Accepts(cues, ships, { previous }), player.Accepts(cues, ships, { state: before, previous })];
+    expect(accepts([{ id: 'a', orders: [REJOIN, STOP, WARP] }])).toEqual([true, true]);
+    expect(accepts([{ id: 'a', orders: [REJOIN, WARP] }])).toEqual([false, true]);
+    expect(accepts([{ id: 'a', orders: [STOP] }])).toEqual([false, true]);
+    expect(accepts([{ id: 'a' }])).toEqual([false, true]);
+    // b gains orders: only before the first boundary; unchanged, or a ship without a script, passes.
+    expect(
+      accepts([
+        { id: 'a', orders },
+        { id: 'b', orders: [STOP] }
+      ])
+    ).toEqual([false, true]);
+    expect(accepts([{ id: 'a', orders }, { id: 'b' }])).toEqual([true, true]);
+  });
+
+  it('Rescript takes the edit with no missed cue and swaps a running script without a restart', () => {
+    const cues = [OrderCue('go', 1), OrderCue('later', 10)];
+    const ships: { id: string; orders?: SceneShipStep[] }[] = [{ id: 'a', orders: [REJOIN, STOP] }];
+    const { port, player, Run } = Setup(cues, ships);
+    port.settled = { settled: true, waiting: {} };
+    Run(2);
+    player.Event(Kill('r1'));
+    ships[0] = { id: 'a', orders: [REJOIN, STOP, WARP] };
+    const edited = [...cues, OrderCue('new', 4), EventCue('dies', { kill: { ship: 'r1' }, after: 2 })];
+    expect(player.Accepts(edited, ships, { previous: [{ id: 'a', orders: [REJOIN, STOP] }] })).toBe(true);
+    player.Rescript(edited, ships);
+    expect(player.Report()?.list.map(({ id, state, due }) => [id, state, due])).toEqual([
+      ['go', 'fired', 1],
+      ['later', 'pending', 10],
+      ['new', 'pending', 4],
+      ['dies', 'pending', 3]
+    ]);
+    expect(player.Script('a')).toMatchObject({ state: 'waiting', step: 1, steps: 3 });
+    Run(3);
+    expect(port.fired.map((fired) => fired.split('@')[0])).toEqual(['go', 'dies', 'new']);
+    expect(port.log.filter((line) => line === 'step a rejoin')).toHaveLength(1);
+    expect(player.Script('a')?.note ?? '').not.toMatch(/restarted/);
+    expect(player.Summary()?.cues.missed).toBe(0);
+  });
+
+  it('AbandonFuture drops the log past the cursor', () => {
+    const { port, player, Run } = Setup([OrderCue('go', 0)]);
+    port.settled = { settled: true, waiting: {} };
+    Run(2);
+    const snapshot = player.Snapshot();
+    player.Event(Kill('r1'));
+    player.Restore(snapshot);
+    player.AbandonFuture();
+    player.Event(Kill('r2'));
+    expect(player.Events().map(({ text }) => text)).toEqual(['cue go fired', expect.stringContaining('r2')]);
+  });
+});
