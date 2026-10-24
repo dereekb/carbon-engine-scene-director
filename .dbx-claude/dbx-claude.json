@@ -25,6 +25,21 @@
       "fix"
     ]
   },
+  "queue": {
+    "gitHandoff": {
+      "machines": [
+        {
+          "name": "dbxpc",
+          "has": [
+            "tools-core",
+            "windows-chrome",
+            "gpu"
+          ],
+          "description": "WSL2 box with tools-core (the SDE) and Windows Chrome on a real GPU"
+        }
+      ]
+    }
+  },
   "references": {
     "project": [
       {
