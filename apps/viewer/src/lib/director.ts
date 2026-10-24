@@ -2488,8 +2488,8 @@ export class Director {
    * it tracks none), so the firing effects draw impacts on it: shield above 5 %, then armor, then hull.
    *
    * @param id - The ship or object id.
-   * @param clear - Take its impacts off first (a jump landed where it had healed: the overlay only ever adds armor
-   * impacts).
+   * @param clear - Take its impacts off first (a jump landed where it had healed: the overlay takes armor
+   * impacts off only over time).
    */
   SyncImpactState(id: string, clear = false): void {
     const drawn = this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null;

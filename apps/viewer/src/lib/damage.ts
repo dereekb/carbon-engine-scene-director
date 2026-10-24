@@ -387,9 +387,9 @@ function Round(value: number, digits: number): number {
 }
 
 /**
- * Whether a drawn hull's armor impacts went stale across a time-control jump (sd-time): the runtime's impact overlay only
- * ever adds them (SetImpactDamageState grows the holes and their fires toward the damage, never back), so a landing
- * where armor or structure stands higher than when the jump began clears them before re-arming.
+ * Whether a drawn hull's armor impacts went stale across a time-control jump (sd-time): the runtime's impact overlay adds
+ * them at once but takes them off only over time (holes shrink over size × 10 s, fires go out 5 s after a heal), so
+ * a landing where armor or structure stands higher than when the jump began clears them before re-arming.
  *
  * @param departed - The fractions when the jump began (null: untracked, full).
  * @param landed - The fractions at the landing (null: untracked, full).

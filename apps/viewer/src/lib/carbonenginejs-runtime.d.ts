@@ -415,7 +415,7 @@ declare module '@carbonenginejs/runtime/trinity' {
      */
     SetImpactDamageState(shield: number, armor: number, hull: number, doCreateArmorImpacts?: boolean): void;
     /**
-     * Removes every shield and armor impact (the armor holes SetImpactDamageState only ever adds, and their fires).
+     * Removes every shield and armor impact (the armor holes SetImpactDamageState adds, and their fires, at once instead of over time).
      */
     ClearImpactDamage(): void;
   }
@@ -609,7 +609,7 @@ declare module '@carbonenginejs/runtime/trinity' {
      */
     SetImpactDamageState(shield: number, armor: number, hull: number, doCreateArmorImpacts?: boolean): void;
     /**
-     * Removes every shield and armor impact (the armor holes SetImpactDamageState only ever adds, and their fires).
+     * Removes every shield and armor impact (the armor holes SetImpactDamageState adds, and their fires, at once instead of over time).
      */
     ClearImpactDamage(): void;
   }

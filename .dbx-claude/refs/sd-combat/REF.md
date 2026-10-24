@@ -24,9 +24,10 @@ fires, resolves and reports missiles, headless (`sd-weapons` → Launchers fire)
 draw, detonate on the drawn hull and kill there, checked on the real GPU (Missiles in the page → Drawn, below;
 `sd-weapons` → Launchers fire, drawn). The plan is delivered.
 
-**Battle damage** (`~/.claude/plans/ship-battle-damage-set-hp-by-percent-amount-random-or-layer.md`): **H1 and H2 are
-in** (2026-10-24): `set_hp`'s command and maths in `packages/scene`, the page half, get_state and verify-page (Battle
-damage, below). H3 (the real-GPU look and sd-cinema's recipes) is next.
+**Battle damage** (`~/.claude/plans/ship-battle-damage-set-hp-by-percent-amount-random-or-layer.md`): **done**
+(2026-10-24). H1 and H2 brought `set_hp`'s command and maths in `packages/scene`, the page half, get_state and
+verify-page (Battle damage, below). H3 brought the real-GPU look: the evidence is below, and the recipes are in
+sd-cinema → Battle-damaged looks.
 
 ## Files (K1)
 
@@ -507,6 +508,27 @@ hulls that look battle damaged for a shot, or a low-HP fight without waiting for
   264.6, 343.5]; a shield set to 0 read 5.8 HP after 10 boundaries (the curve's 5.758), then a Punisher's first hits
   landed on armor (281.3 → 145); six refusals with their texts and nothing changed; three fitted Slashers pending
   (`loading the fit's dogma`) took the set before the next boundary.
+- **Real GPU** (2026-10-24, H3, Windows Chrome NVIDIA, 1600 × 900; the TFIs at the Jita CNAP with a squad per tier;
+  `.scratch/hp-gpu/`). The look, its thresholds and recipes are in sd-cinema → Battle-damaged looks; the overlay counts
+  were read over CDP.
+  - The same seeded sets re-applied gave every ship the same HP.
+  - Hole goals matched `trunc(12 (1 − a) + 4 (1 − s))` and the flicker `clamp01((0.9 − s) / 0.8)` at every 10 %
+    structure step.
+  - The hull fires (`shipVisualDamage`) light below 100 % structure or 12.3 % armor, and go out 5 s after armor is
+    back to 50 % and structure to 100 %.
+  - Under fire, a pristine TFI took shield hits (`lastTaken` layer shield, a shield flash). A crippled Bhaalgorn took
+    structure hits and died in 10 ticks (`flag`).
+  - Two gameplay `structure: 0` sets on TFIs were killed at the result's tick with `cause: "set_hp"`. The long
+    explosion started within the next tick, its sound posted with `played: true`:
+    - 01a: wreck switch 5.7 s, total 47.7 s;
+    - 01c: wreck switch 10.5 s, total 34.5 s.
+    The hull hid at the wreck switch, and the ball left at `removesAt`.
+  - Throughout: `gpuErrors` 0, `renderer.moduleEffects.failed` 0, and `page_log` info only.
+  - Audio, with audio on: `gameObjects − emitters` stayed 1 (the listener) before the sets, and 6 s and 16 s after
+    them on burning hulls; `foreign` was absent. During the explosion it was 2 − 1: its emitter and the listener. The
+    fire copies stay inert, as with the audio-leak fix.
+  - fps: holes cost nothing (28.1 vs 28.2 median healed). 12 burning TFIs took the 44-ship scene to 19.0. One 2 fps
+    hitch came when the first fires loaded.
 
 ## Tools
 

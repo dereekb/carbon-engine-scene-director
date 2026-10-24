@@ -209,8 +209,10 @@ restore runs again the tape entries from the snapshot's tick on (`ReplaysAfter`;
   (presentation only: `BuildShipValues` → `HydrateShip` → curves → `AddShip` → `SyncTurrets` → aim → impacts; no
   retune, no re-plan, no cut; dropped if another jump lands first); every turret re-aims at `targets.Of`; impacts sync
   for every ship and object, cleared first on a hull whose armor or structure fraction rose across the jump
-  (`ImpactsHealed`: the runtime's `SetImpactDamageState` only ever adds armor impacts, so a jump back to full HP kept
-  the dying hull's holes and fires, drawn as big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)` and the camera director's `Clear`, unless the movie owns the camera (below); `Mute(rate > 2)`; `onChange`.
+  (`ImpactsHealed`: `SetImpactDamageState` adds armor impacts at once, but takes them off only over time: holes
+  above the goal shrink over size × 10 s, and the fires go out 5 s after armor ≥ 50 % and structure 100 %; measured
+  live in sd-cinema → Battle-damaged looks. So a jump back to full HP kept the dying hull's holes and fires, drawn as
+  big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)` and the camera director's `Clear`, unless the movie owns the camera (below); `Mute(rate > 2)`; `onChange`.
 - **The camera director** (`auto_camera`, `sd-cinema`) steps every boundary (fast-forward included, holds in scene
   time) and is not journaled. A viewing camera (the movie does not own it): it steps nothing during a jump's silent
   re-simulation (`Silent()`), and `EndJump` clears its memory with `Clear({ keep: 'settings' })` so its first picks

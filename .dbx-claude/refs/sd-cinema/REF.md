@@ -378,6 +378,61 @@ The canvas listeners are capture-phase, so they run before `OrbitCamera`'s own h
 - `camera.view`: `orbit` | `cinema`; `camera.drawn { eye, look, up, fov, near, far }` from the drawn matrices (null
   without a renderer). The orbit's existing fields stay.
 
+## Battle-damaged looks (`set_hp`)
+
+Damage hulls for a shot with `set_hp` (sd-combat → Battle damage). The look is the runtime's, driven by each layer's
+remaining fraction (`Director.SyncImpactState` → `SetImpactDamageState(shield, armor, structure)`, on every set):
+
+- **Armor holes** (`EveDamageOverlay`): a goal of `trunc(12 (1 − armor) + 4 (1 − structure))` glowing scorch decals at
+  the hull's damage locators, sized 0.2–0.8, placed by a seeded mt19937 per hull (the same spots every time). Two draws
+  on one locator make one hole, so fewer can draw: Rifter 10 of 15, TFI 10 of 12, Vindicator 14 of 15 (a Rifter has
+  18 locators, a TFI 42). When HP rises, the holes above the new goal shrink away over size × 10 s
+  (`armorImpactLifeTime`), so all are gone within 8 s.
+- **Hull flicker**: `clamp01((0.9 − structure) / 0.8)`: none at 90 % or more, full at 10 %; measured exactly at every
+  10 % step. It flickers over time, so a still shows a darker hull. It stops at once when structure rises.
+- **Hull fires**: the `shipVisualDamage` controller's `hull` state machine (the same data on the Rifter, TFI, Vindicator
+  and Bhaalgorn) plays `vds_trail_fire_01a` per damage locator, with smoke:
+  - `Start → addFires` on `ArmorDamage < 0.123 || HullDamage < 1.0`, and only at shader quality high (`== 2`). The
+    variables are the fractions left, so any structure loss lights them: 99 % already burns.
+  - `addFires → remove_due_to_health` only on `ArmorDamage >= 0.5 && HullDamage == 1.0`; the fires go out 5 s later.
+    A burning hull set to armor 40 % with structure 100 % keeps burning.
+- **Later hits** draw a shield ripple while shield > 5 %, armor impacts while armor > 5 %, else hull impacts.
+
+| Look | set_hp (one call per squad) | Holes (goal) | Flicker | Fires | What the GPU showed |
+|---|---|---|---|---|---|
+| pristine | none | 0 | none | none | a clean hull (`lit-tfis-fc-6s.png`) |
+| scarred | shield 0–20 %, armor 50–80 %, structure `"100%"` | 2–5 | none | none | a few small ember clusters (`held-tfis-dps-a-02-6s.png`) |
+| battered | shield 0 %, armor 10–40 %, structure 60–90 % normal | 8–12 | 0.07–0.35 | yes | hole clusters, two plumes in frame (`held-tfis-dps-b-08-6s.png`) |
+| crippled | shield 0 %, armor 0 %, structure 10–30 % | 14–15 | 0.76–1 | yes | glowing patches all over, a fire jet, a darkened hull (`held-tfis-ewar-04-6s.png`); the Bhaalgorn scorched pale (`fire-tfis-ewar-01-6s.png`) |
+
+Recipe rules:
+
+- **Structure 100 % means no fires.** Scarred stays fire-free only while structure is exactly full. Every other tier
+  burns.
+- **Turn the fleet's logi off first.** Logi squads auto-repair by default and top off calm members. The TFIs' Guardians
+  and FAX took a battered TFI's armor from 12 % to 94 %, and the crippled ships' from 0 % to 77–90 %, within 160 s,
+  shrinking the holes away. `auto_repair { fleet, on: false }` on the fleet and on its `logi` and `fax` squads holds
+  the look. Structure has no repairer there, and shields recharge from the set value either way.
+- **A cinematic set never kills, but shots still can.** 3 Ferox killed a crippled Bhaalgorn (29 % structure) 10 ticks
+  after `engage`. To keep a hero in frame under fire, use `combat.death: "flag"` (`patch_scene` `set_combat`; a
+  flagged ship flies on but takes no more hits, so no more impacts) or `cease_fire`.
+- **Fires cost frame time; holes do not.** The 44-ship TFIs under `flank-port`: 28.2 fps median healed, 28.1 with one
+  squad scarred, 19.0 with 12 hulls burning. Burn the hero and a few neighbours, and keep background ships scarred.
+  The first fires to load hitched one frame to 2 fps.
+- **Light the hulls.** With the fleet facing away from the star, the `hero` library shot framed backlit silhouettes. A
+  pose on the sun side shows the damage: eye = ship + 2.2 radii along `0.55 sun + 0.8 starboard + 0.3 up`, look the
+  ship, fov 40. Holes and fires glow, so they still read backlit.
+- **Healing**: `{ fleet, total: "100%" }` stops the flicker at once and puts the fires out after the 5 s state. The
+  crippled Vindicator's holes went 14 → 4 at +6 s → 0 at +13 s (`heal-0s/5s/12s.png`). A destroyed ship is skipped and
+  keeps its look.
+- **A gameplay death on camera**: frame it from at least 10 hull radii. At 3.5 radii (1.6 km off a TFI) the long
+  explosion's cloud filled the frame grey at +12 s (`death-12s.png`). From 13 radii (6 km) the wreck-switch flash read
+  (long 01c at 10.5 s, `death2-12s.png`).
+- **Evidence**: 2026-10-24, Windows Chrome (NVIDIA Lovelace), 1600 × 900, a private hub with temp stores, at the
+  Jita IV - Moon 4 CNAP (30 km). The artifacts are in `.scratch/hp-gpu/` on dbxpc (drivers, `probe.sh` reading holes,
+  flicker and fire state over CDP, 67 stills). Over the stills: 14–27 fps (median 17), `gpuErrors` 0,
+  `moduleEffects.failed` 0, and `page_log` info only.
+
 ## Real-GPU checks
 
 ### The director (`auto_camera`, 2026-10-24, Windows Chrome, NVIDIA, 1600 × 900, `?audio=off`)
