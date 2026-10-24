@@ -12,6 +12,7 @@ A dbx-claude git-handoff thread: a message-only branch (never merged) carrying o
 | seq | kind | from | at |
 | --- | --- | --- | --- |
 | 0001 | task | Michelles-MacBook-Air | 2026-10-24T21:14:45.355Z |
+| 0002 | note | Michelles-MacBook-Air | 2026-10-24T21:15:11.017Z |
 
 ## By hand
 
