@@ -1,8 +1,8 @@
 # Location dressing (sd-locations sub-doc)
 
 How the page dresses a scene from its location the way the client dresses a system. `packages/scene/src/lib/location/dressing.ts`
-plans it (`toLocationDressingPlan`, `toPlanetPassDistance`); `apps/viewer/src/lib/celestials.ts` is the pure half in the
-page (height map patch, `?dress=`, slot reconcile, report; node-tested); `apps/viewer/src/lib/location-dressing.ts`
+plans it (`toLocationDressingPlan`, `toPlanetPassDistance`); `packages/viewer-engine/src/lib/celestials.ts` is the pure half in the
+page (height map patch, `?dress=`, slot reconcile, report; node-tested); `packages/viewer-engine/src/lib/location-dressing.ts`
 (runtime) draws it. The base client dressing every scene gets (post process, exposure) is `environment.ts`: `sd-runtime`.
 
 ## What gets drawn

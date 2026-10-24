@@ -310,7 +310,10 @@ import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { DrawsAsCube, OBJECT_STAND_IN_COLOR, StandInTeamColor, type StandInCube } from './stand-ins';
 import { EVE_DATA_ON, EveDataReport, type PageEveData } from './eve-data';
-import { CURRENT_KEY, type SceneStore } from './store';
+import { IsWorkingCopyKey, type SceneStore } from './store';
+import type { FleetView } from './api';
+import { type FleetViewMember, toFleetView } from './fleet-view';
+import { IsUiKeyEvent } from './ui-focus';
 import { ShipScripts } from './ship-scripts';
 import { TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
 import { BeatReportOf, BeatTime, MovieLookApplies, MoviePresentation, MovieReportOf, SeekChunks, type FramePresentation } from './movie';
@@ -724,6 +727,10 @@ export interface DirectorOptions {
    * Why the page never turns audio on (`?audio=off`); null or absent: it may (with EVE data).
    */
   readonly audioOff?: Maybe<string>;
+  /**
+   * Whether the page's keys (C, D) drive the camera; on by default. Either way they skip events in the UI (ui-focus.ts).
+   */
+  readonly keys?: boolean;
 }
 
 interface ApplyOptions {
@@ -1253,6 +1260,11 @@ export class Director {
     return this.silent ? null : this.explosionsDrawn;
   }
 
+  /**
+   * Whether C and D drive the camera (DirectorOptions.keys).
+   */
+  private readonly keys: boolean;
+
   private get warpEffects(): Maybe<WarpEffects> {
     return this.silent ? null : this.warpEffectsDrawn;
   }
@@ -1270,9 +1282,11 @@ export class Director {
     fits = new FitLookup({ eveData }),
     weapons = new WeaponLookup({ eveData }),
     missileGraphics = new MissileLookup({ eveData }),
-    audioOff = null
+    audioOff = null,
+    keys = true
   }: DirectorOptions) {
     this.eveData = eveData;
+    this.keys = keys;
     this.hullStats = hullStats;
     this.propMods = propMods;
     this.fitLookup = fits;
@@ -4114,7 +4128,7 @@ export class Director {
   async Save(name: unknown): Promise<{ saved: string; ships: number }> {
     const scene = this.Authored();
     const key = RequireName(name ?? scene.name);
-    if (key === CURRENT_KEY) throw new Error(`"${CURRENT_KEY}" is reserved`);
+    if (IsWorkingCopyKey(key)) throw new Error(`"${key}" is reserved`);
     await this.store.Put(key, { ...scene, name: key });
     return { saved: key, ships: scene.ships.length };
   }
@@ -4319,7 +4333,7 @@ export class Director {
       resimulated = { from: this.TimelineSeconds(run.snapshot.clock), to: this.TimelineSeconds(this.clock.now), ticks: run.report.resimulated, ms: run.report.ms, ...counts };
     }
     this.authored = authored.scene;
-    await this.store.Put(CURRENT_KEY, authored.scene);
+    await this.store.Put(this.store.currentKey, authored.scene);
     this.onChange();
     return { result: { scene: this.authored, ...(this.liveEdits.length ? { live: this.scene } : {}), warnings: [...new Set([...authored.warnings, ...extra])], resimulated } };
   }
@@ -4457,7 +4471,7 @@ export class Director {
     // live instead (Engine.SetNebula, location-dressing.ts).
     if (this.engine && target && this.engine.universe !== target.scene.environment.universe) {
       if (this.recordingMovie) throw new Error(`a live recording is running: changing environment.universe (to ${target.scene.environment.universe}) reloads the tab, which would fail it (record_movie { action: "stop" } ends it first)`);
-      await this.store.Put(CURRENT_KEY, authored?.scene ?? this.Authored());
+      await this.store.Put(this.store.currentKey, authored?.scene ?? this.Authored());
       setTimeout(() => location.reload(), 200);
       return { reloading: true, note: 'The environment changed, so the viewer is reloading with the new scene. Call get_state in a few seconds.', warnings };
     }
@@ -4475,7 +4489,7 @@ export class Director {
       if (restart && scripted) this.PrefetchCues(authored.scene);
     }
     if (restart) this.liveEdits = [];
-    if (authored) await this.store.Put(CURRENT_KEY, authored.scene);
+    if (authored) await this.store.Put(this.store.currentKey, authored.scene);
     const report = applied ? await this.FinishApply(applied) : { changes: null };
     return {
       scene: this.authored,
@@ -6751,9 +6765,9 @@ export class Director {
     addEventListener('keydown', (event) => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       const key = event.key.toLowerCase();
-      const typing = event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable]') != null;
+      if (!this.keys || IsUiKeyEvent(event.target, document.activeElement)) return;
       if (key === 'c') this.ChangeCamera({ mode: this.cameraFollow.mode === 'chase' ? 'orbit' : 'chase' });
-      else if (key === 'd' && !typing) this.ToggleDirector();
+      else if (key === 'd') this.ToggleDirector();
     });
   }
 
@@ -6959,6 +6973,48 @@ export class Director {
   private PilotState(id: string): { pilot?: ShipPilotReport } {
     const pilot = this.commanders.PilotOf(id);
     return pilot ? { pilot: { ...(pilot.command != null ? { command: Round(pilot.command, 2) } : {}), ...(pilot.reaction != null ? { reaction: Round(pilot.reaction, 2) } : {}), source: pilot.source } } : {};
+  }
+
+  /**
+   * Every fleet in the scene as a panel view (api.ts FleetView, fleet-view.ts): ViewerApi.Fleets, the battle console's
+   * fleet cards. Members are the document's (the destroyed included, so a view counts them); the FC is the live one.
+   */
+  FleetViews(): FleetView[] {
+    const scene = this.scene;
+    if (!scene) return [];
+    const tick = this.world.tick;
+    const stances = this.StanceStates();
+    const teams = new Map(scene.ships.map((doc) => [doc.id, doc.team]));
+    const live = new Map((this.LiveFleets()?.scene.fleets ?? []).map((fleet) => [fleet.id, fleet]));
+    return toFleetReports(scene).map((report) => {
+      const group: FleetGroup = { fleet: report.id, kind: 'fleet', id: report.id };
+      return toFleetView({
+        fleet: { ...report, commander: live.get(report.id)?.commander ?? report.commander },
+        members: report.ships.map((id) => this.FleetViewMember(id, teams.get(id))),
+        fc: this.commanders.Report(report.id, tick),
+        called: this.fleetTargets.GroupReport(group),
+        freeFire: this.commanders.FreeFireOf(group),
+        targets: this.commanders.Targets(report.id),
+        stances: this.FleetStanceCounts(report.ships, stances).stances,
+        formation: this.following.FleetReport(report),
+        autoRepair: this.autoRepair.FleetReport(report.id, tick)
+      });
+    });
+  }
+
+  /**
+   * A fleet member for its fleet's view: alive, arriving, its HP over every layer, its motion.
+   */
+  private FleetViewMember(id: string, team: Maybe<string>): FleetViewMember {
+    const alive = !this.IsDead(id);
+    const motion = alive ? this.world.Motion(id) : null;
+    let hp = 0;
+    let max = 0;
+    for (const layer of Object.values(this.damage.Health(id) ?? {})) {
+      hp += layer.hp;
+      max += layer.max;
+    }
+    return { id, ...(team != null ? { team } : {}), alive, arriving: alive && this.world.Arriving(id), hp, max, ...(motion ? { position: motion.position, velocity: motion.velocity } : {}) };
   }
 
   /**

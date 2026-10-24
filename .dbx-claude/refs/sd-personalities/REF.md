@@ -44,7 +44,7 @@
 | `.../personalities/targeting.ts` | `rankFleetTargets`, `toFleetCall`, `toFleetEngaged`, `pickFreeFireTarget` |
 | `.../personalities/movement.ts` | `toFleetMove` (stances), `isFleetMoveChange`, `toFleetPropMods` |
 | `.../personalities/brain.ts` | `stepFleetBrain`, the levers, memory (pending decisions, the decisions log) |
-| `apps/viewer/src/lib/fleet-commanders.ts` | the page's command state: call book, free fire, acting commanders (overlay), and the brain: `Step`, `CommanderDown`, `TakeLevers`, `AfterOperations`, `Report`, `PilotOf`; node-tested over `FleetBrainPort` |
+| `packages/viewer-engine/src/lib/fleet-commanders.ts` | the page's command state: call book, free fire, acting commanders (overlay), and the brain: `Step`, `CommanderDown`, `TakeLevers`, `AfterOperations`, `Report`, `PilotOf`; node-tested over `FleetBrainPort` |
 | `packages/scene/src/lib/fleets/live.ts` | `LiveFleetOverlay.commanders`: the acting commander replaces the default successor, or takes the command from a flagged FC |
 
 ## The template

@@ -22,10 +22,10 @@ flies class numbers), `ship_stats` needs all four `stats`, and `/ship-stats` and
 | `prop-mods/switch.ts` | `normalizePropModSwitch`: the live switch (and what a timeline beat will embed) |
 | `apps/scene-director/src/lib/hub/ship-data.ts` | `ShipData`: hull + module values from tools-core's SDE, cached per hub; `PropModByName` |
 | `hub/ship-stats-tool.ts` | the `ship_stats` tool and `GET /ship-stats` |
-| `apps/viewer/src/lib/flight.ts` | the page's flight numbers (same pipeline as `ship_stats`) |
-| `apps/viewer/src/lib/prop-mods.ts` | which module a ship fits and its numbers, `/prop-mod` lookups |
-| `apps/viewer/src/lib/prop-mod-audio.ts` | the engine stems a switch posts (node-tested) |
-| `apps/viewer/src/lib/audio.ts` | `PageAudio` over `CjsAudioMan` (`sd-runtime`) |
+| `packages/viewer-engine/src/lib/flight.ts` | the page's flight numbers (same pipeline as `ship_stats`) |
+| `packages/viewer-engine/src/lib/prop-mods.ts` | which module a ship fits and its numbers, `/prop-mod` lookups |
+| `packages/viewer-engine/src/lib/prop-mod-audio.ts` | the engine stems a switch posts (node-tested) |
+| `packages/viewer-engine/src/lib/audio.ts` | `PageAudio` over `CjsAudioMan` (`sd-runtime`) |
 
 ## The math (`computeShipStats`)
 

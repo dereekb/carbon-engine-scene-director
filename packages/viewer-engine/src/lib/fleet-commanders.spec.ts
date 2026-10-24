@@ -305,6 +305,9 @@ describe('FleetCommanders: the FC brain', () => {
     expect(sharp.runs.map((run) => [run.tick, run.tool, run.args])).toEqual([[1, 'order_fleet', CallArgs('fc', ['r1', 'r2'])]]);
     expect(sharp.commanders.Report(FLEET, 3)).toMatchObject({ personality: 'sharp', ship: 'fc', ability: 1, state: 'commanding', engaged: true, hostiles: 2, readyAt: 1, manual: [], pending: [] });
     expect(sharp.commanders.Report(FLEET, 3)?.decisions).toEqual([expect.objectContaining({ tick: 1, lever: 'call', tool: 'order_fleet', args: CallArgs('fc', ['r1', 'r2']) })]);
+    // The console's target list: every hostile of the last picture, ranked, and the reach the brain calls within.
+    expect(sharp.commanders.Targets(FLEET)?.ranked.map((ship) => ship.id)).toEqual(['r1', 'r2']);
+    expect(sharp.commanders.Targets(FLEET)?.reach).toBeGreaterThan(0);
 
     const slow = BrainRig(BrainScene('slow'));
     slow.Steps(1, 1);

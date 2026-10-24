@@ -22,7 +22,7 @@
 | `apps/scene-director/src/lib/hub/map-data.ts` | `MapData`: tools-core's map routes (search, one system, its celestials, one celestial by id) |
 | `hub/locations.ts` | `search_map`, `get_system`, `set_location`, `/map/system` |
 | `hub/map-data.testing.ts` | tools-core stand-in: Jita, Perimeter, Niyabainen (SDE 3632936, captured 2026-10-22) |
-| `apps/viewer/src/lib/location.ts` | `LocationLookup`: fetches `/map/system`, builds `get_state.location` (node-tested) |
+| `packages/viewer-engine/src/lib/location.ts` | `LocationLookup`: fetches `/map/system`, builds `get_state.location` (node-tested) |
 
 ## The document field
 

@@ -3,7 +3,7 @@
 What a fleet, wing or squad shoots at, called the way an EVE FC calls it. Code: `packages/scene/src/lib/fleets/targets.ts`
 (the document field, the order, the call rules), `fleets/group.ts` (`FleetGroup`, `toFleetGroupKey`,
 `describeFleetGroup`, shared by `orders.ts` and `targets.ts`), `fleets/orders.ts` (the `targets` order type), the
-page lever `apps/viewer/src/lib/fleet-targets.ts` (`FleetTargets`, node-tested) and its Director wiring. Plan: `~/.claude/plans/fleet-targeting-lever-called-primaries-and-a-target-queue-per-fleet-wing-or-squa.md`.
+page lever `packages/viewer-engine/src/lib/fleet-targets.ts` (`FleetTargets`, node-tested) and its Director wiring. Plan: `~/.claude/plans/fleet-targeting-lever-called-primaries-and-a-target-queue-per-fleet-wing-or-squa.md`.
 
 **Status: delivered** (the document, the order, the call rules; the page lever: members lock, pre-lock and shoot the
 call, own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary`; the real-GPU look, below). **Free
@@ -49,7 +49,7 @@ The document's `targets` are the **opening calls** a load starts with. `order_fl
 document: it edits a live call book, synchronously, as moves and warps fly at once (the old route, `Serialize` → async
 `Apply` → IndexedDB, landed at tick T+1 or later, unusable for a per-tick FC brain). A reload replays the same fight.
 
-- **`FleetCommanders`** (`apps/viewer/src/lib/fleet-commanders.ts`, node-tested): group key → list. `SetCall(group,
+- **`FleetCommanders`** (`packages/viewer-engine/src/lib/fleet-commanders.ts`, node-tested): group key → list. `SetCall(group,
   list)`, `CallOf(group)`, `AfterEdit(before, after)`, `Overlay()`, `version` (bumped on every change), `Clear()`.
   `[]` **shadows** the document's list: the group calls nothing.
 - **The overlay**: `toLiveFleetScene(scene, gone, { calls })` splices each live list over its group's document list
@@ -162,7 +162,7 @@ or the group's removal ends it), never the document. `readFreeFireOrder`: `on` m
   `orders.spec.ts` "reads free fire". verify-page: `free fire: members with no call pick …` (bfc, p1 with reaction 0,
   p2, logi g1 vs two teamed Tempests; passes on tools-core, below).
 
-## The page lever: `FleetTargets` (`apps/viewer/src/lib/fleet-targets.ts`)
+## The page lever: `FleetTargets` (`packages/viewer-engine/src/lib/fleet-targets.ts`)
 
 Node-tested, plain-data state: `own` (marked ships), `called` (ship → `{ target, group }` the lever gave), `free`
 (ship → its free-fire pick) and `picksAt` (ship → the tick its next pick is due),
@@ -327,7 +327,7 @@ default weapons fits (42 turret sets mounted, failed 0, unplaced 0), death `expl
 
 ## Specs
 
-`apps/viewer/src/lib/fleet-targets.spec.ts` (precedence, the FC and logi rules, the fall-back, own wins and rejoins, hold /
+`packages/viewer-engine/src/lib/fleet-targets.spec.ts` (precedence, the FC and logi rules, the fall-back, own wins and rejoins, hold /
 stand-down / re-arm, a delayed response, a warping and a dead target with pre-locks, primary changes, Forget, Clear,
 determinism), `fleets/targets.spec.ts` (normalize, edits, diff, pruning, group calls, ship plans on the TWO_WINGS shape),
 `fleets/orders.spec.ts` "targets orders" (reading, authority and own-ship refusal, each action's op, `next` with and

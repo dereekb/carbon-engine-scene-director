@@ -1,6 +1,6 @@
 # Boosters (sd-destiny sub-doc)
 
-Code: `apps/viewer/src/lib/boosters.ts` (pure, node-tested), driven by `Director.DriveBoosters(now)` each frame after
+Code: `packages/viewer-engine/src/lib/boosters.ts` (pure, node-tested), driven by `Director.DriveBoosters(now)` each frame after
 `world.Tick` and before drawing.
 
 ## Why the page drives them

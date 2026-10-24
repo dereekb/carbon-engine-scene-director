@@ -9,10 +9,10 @@
 
 | File | Role |
 |---|---|
-| `apps/viewer/src/lib/runtime.ts` | **every** runtime symbol the page uses, one file to fix on an API change. Re-exports `runtime-sim.ts` |
-| `apps/viewer/src/lib/runtime-sim.ts` | the light half: math, the Blue curve bases, the Destiny server. Node-tested modules import only this |
-| `apps/viewer/src/lib/carbonenginejs-runtime.d.ts` | types for the runtime imports (the runtime ships no `.d.ts`) |
-| `apps/viewer/src/lib/carbonenginejs-server.d.ts` | types for the Destiny server imports (missiles M2a: `DSTBALL_MISSILE`, `LaunchMissile`, `MissileFollow`, and the `@carbonenginejs/server/destiny/geometry` module's `CollideTwoSpheres`, which `runtime-sim.ts` re-exports; time control: `CjsDestinyStream`, the park's `balls`, `time` setter, `WriteFullStateToStream`, `ReadFullStateFromStream`, `ClearAll`) |
+| `packages/viewer-engine/src/lib/runtime.ts` | **every** runtime symbol the page uses, one file to fix on an API change. Re-exports `runtime-sim.ts` |
+| `packages/viewer-engine/src/lib/runtime-sim.ts` | the light half: math, the Blue curve bases, the Destiny server. Node-tested modules import only this |
+| `packages/viewer-engine/src/lib/carbonenginejs-runtime.d.ts` | types for the runtime imports (the runtime ships no `.d.ts`) |
+| `packages/viewer-engine/src/lib/carbonenginejs-server.d.ts` | types for the Destiny server imports (missiles M2a: `DSTBALL_MISSILE`, `LaunchMissile`, `MissileFollow`, and the `@carbonenginejs/server/destiny/geometry` module's `CollideTwoSpheres`, which `runtime-sim.ts` re-exports; time control: `CjsDestinyStream`, the park's `balls`, `time` setter, `WriteFullStateToStream`, `ReadFullStateFromStream`, `ClearAll`) |
 
 - **Add a member to the `.d.ts` when the page starts using it; never reach for `any`.**
 - A runtime-called method we implement either extends a runtime class or implements an interface declared in the
@@ -26,7 +26,14 @@
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
   alias, which vitest does not have. A new node-tested module joins this list.
 
-## Bundling (`apps/viewer/esbuild.config.mjs`)
+## Bundling (`packages/viewer-engine/esbuild.config.mjs`)
+
+The engine lives in its own library (`packages/viewer-engine`, `sd-workspace`), and both of its bundles use this one
+config: the viewer page (`apps/viewer` `build`, which bundles the library from source through the
+`@scene-director/viewer-engine` path) and the library's `engine` target, which writes
+`dist/packages/viewer-engine/engine.js`, one ESM module exporting `StartViewer` (`src/engine.ts`). The battle console's
+Angular builder takes no esbuild plugins and cannot apply these rules, so it loads that module through an import map
+instead of re-bundling the runtime; its types are `src/lib/api.ts`'s, which name no runtime type.
 
 - **`ignoreAnnotations: true` is mandatory.** The bundle must ignore the runtime package.json's `sideEffects` list:
   many listed files register classes on import, and without them Black reading fails with

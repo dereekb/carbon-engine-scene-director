@@ -44,19 +44,19 @@ skills at once with the mode's note (no request), so a fitted ship flies its hul
 | `apps/scene-director/src/lib/hub/sde-client.ts` | `SdeClient`: build pin, `GetJson` / `PostJson`, `Cached`, `Type`, `TypeDogma` (with the default effect), failure mapping, readers; `ShipData` delegates to it |
 | `apps/scene-director/src/lib/hub/dogma-data.ts` | `DogmaData` (`TypeByName`, `Bundle`, `Skills`), `FIXED_ATTRIBUTE_IDS`, `MAX_DOGMA_TYPE_IDS` |
 | `apps/scene-director/src/lib/hub/dogma-data.testing.ts` | `DogmaFixture`, `DogmaRoutes` (tools-core routes rebuilt from the fixture), `MakeRoutedDogmaData`, `MakeFakeDogmaData` |
-| `apps/viewer/src/lib/fittings.ts` | the page's fit lookups (`FitLookup`), `ResolveShipFitting`, the get_state reports (`ShipFitReportOf`, `ShipDefenseReportOf`, `ShipCapacitorReportOf`, `FleetModuleCountsOf`); node-tested over the fixture (`fittings.spec.ts`) |
-| `apps/viewer/src/lib/flight.ts` / `director.ts` | `ResolveFlight`'s `dogma` path; the director's `ResolveFitting`, `LookupFit`, `PropModModule` / `FitsPropMod`, get_state's `fit` / `defense` / `capacitor` and fleet `modules`; `SwitchModules`, `SyncModules`, `LiveDogma`, `ModuleEvents` (activation, below) |
+| `packages/viewer-engine/src/lib/fittings.ts` | the page's fit lookups (`FitLookup`), `ResolveShipFitting`, the get_state reports (`ShipFitReportOf`, `ShipDefenseReportOf`, `ShipCapacitorReportOf`, `FleetModuleCountsOf`); node-tested over the fixture (`fittings.spec.ts`) |
+| `packages/viewer-engine/src/lib/flight.ts` / `director.ts` | `ResolveFlight`'s `dogma` path; the director's `ResolveFitting`, `LookupFit`, `PropModModule` / `FitsPropMod`, get_state's `fit` / `defense` / `capacitor` and fleet `modules`; `SwitchModules`, `SyncModules`, `LiveDogma`, `ModuleEvents` (activation, below) |
 | `fitting/switch.ts` | `normalizeModuleSwitch` (the `switch_modules` arguments, a plain object a `switch_modules` timeline cue embeds), `MODULE_SWITCH_STATES` |
 | `fitting/activation.ts` | `moduleActivationOf` (how a module activates: refusal, targeted, warp safe, cycle, reactivation, reach, repair, group limits, `flight`, `note`), `UNACTIVATABLE_GROUPS`, `EFFECTLESS_CATEGORIES`, `falloffEffectiveness`, `moduleReach` |
-| `apps/viewer/src/lib/module-cycle.ts` | `ModuleCycle` (one module's state machine), `CycleEnd` (moved from destiny.ts, which re-exports it) |
-| `apps/viewer/src/lib/modules.ts` | `ShipModules`: the activation layer over a world port (`SurfaceDistance`, `InWarp`, `HasShip`, `tickSeconds`); `Targeting(target)` / `TargetIndex()` (the running targeted modules on a ship, each with `applied`), `CapacitorLandings(events)` |
-| `apps/viewer/src/lib/damage.ts` | `DamageModel`: current / max HP per layer, resonances, repairs and incoming repairs |
+| `packages/viewer-engine/src/lib/module-cycle.ts` | `ModuleCycle` (one module's state machine), `CycleEnd` (moved from destiny.ts, which re-exports it) |
+| `packages/viewer-engine/src/lib/modules.ts` | `ShipModules`: the activation layer over a world port (`SurfaceDistance`, `InWarp`, `HasShip`, `tickSeconds`); `Targeting(target)` / `TargetIndex()` (the running targeted modules on a ship, each with `applied`), `CapacitorLandings(events)` |
+| `packages/viewer-engine/src/lib/damage.ts` | `DamageModel`: current / max HP per layer, resonances, repairs and incoming repairs |
 | `fitting/target-effects.ts` | `moduleTargetEffectOf` (what a module does to its target, from the shooter's evaluation), `incomingModifiersOf`, `scaleModifierAmount`, `incomingSourceLabel`, `warpScrambleNoteOf`, `microwarpdriveBlockNoteOf`, `TARGET_EFFECT_ATTRIBUTES`, `HIGH_SPEED_MANEUVERING` (3454); the evaluator's side is `dogma.ts`' `incoming`, `dogmaResistanceOf`, `applyIncomingModifiers` |
-| `apps/viewer/src/lib/capacitor.ts` | `CapacitorModel`: the live capacitor level of every fitted ship (`Set`, `Level`, `Drain`, `Give`, `Nos`, `Report`), recharged lazily on EVE's curve; node-tested |
+| `packages/viewer-engine/src/lib/capacitor.ts` | `CapacitorModel`: the live capacitor level of every fitted ship (`Set`, `Level`, `Drain`, `Give`, `Nos`, `Report`), recharged lazily on EVE's curve; node-tested |
 | `fitting/effects.ts` | `MODULE_EFFECTS` (the client effect per default dogma effect guid), `moduleEffectOf`, `moduleEffectSounds`, `nearestSoundDuration`, `MODULE_EFFECT_SOUND_DURATIONS` |
-| `apps/viewer/src/lib/module-fx.ts` | `ModuleFxCommands`: module events → `start` / `cycle` / `stop` effect commands keyed `<ship>\|<module>` (node-tested) |
-| `apps/viewer/src/lib/module-audio.ts` | `ModuleAudioPost`: a command → the hull-sized sound events and stops on the module's ship (node-tested) |
-| `apps/viewer/src/lib/module-effects.ts` | `ModuleEffects` (runtime): loads, hydrates, attaches, places and tears down the drawn effects |
+| `packages/viewer-engine/src/lib/module-fx.ts` | `ModuleFxCommands`: module events → `start` / `cycle` / `stop` effect commands keyed `<ship>\|<module>` (node-tested) |
+| `packages/viewer-engine/src/lib/module-audio.ts` | `ModuleAudioPost`: a command → the hull-sized sound events and stops on the module's ship (node-tested) |
+| `packages/viewer-engine/src/lib/module-effects.ts` | `ModuleEffects` (runtime): loads, hydrates, attaches, places and tears down the drawn effects |
 
 ## Fits in the document
 

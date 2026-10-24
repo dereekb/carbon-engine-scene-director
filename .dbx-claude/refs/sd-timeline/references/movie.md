@@ -12,24 +12,24 @@
 | File | Holds |
 |---|---|
 | `packages/scene/src/lib/timeline/events.ts` | the triggers, `TimelineEvent` facts, `cueTriggerMatches`, `cueEventDueSecond`, `resolveCueTrigger`, the texts (pure; `events.spec.ts`) |
-| `apps/viewer/src/lib/timeline.ts` | `TimelinePlayer.Event`, the event second rule, the log and its cursor, `latest`, the reports (`timeline.spec.ts`) |
-| `apps/viewer/src/lib/arrivals.ts` | `Arrivals.Transitions(boundary)`: the arrival phases (`arrivals.spec.ts`) |
-| `apps/viewer/src/lib/fleet-targets.ts` | `FleetTargets.PrimaryGroupsOf(ship)`: a kill's `primaryOf` (`fleet-targets.spec.ts`) |
-| `apps/viewer/src/lib/director.ts` | the five sources (`TimelineEvent`, `KillEvent`, `EventParty`), `AddCue` with `when` |
+| `packages/viewer-engine/src/lib/timeline.ts` | `TimelinePlayer.Event`, the event second rule, the log and its cursor, `latest`, the reports (`timeline.spec.ts`) |
+| `packages/viewer-engine/src/lib/arrivals.ts` | `Arrivals.Transitions(boundary)`: the arrival phases (`arrivals.spec.ts`) |
+| `packages/viewer-engine/src/lib/fleet-targets.ts` | `FleetTargets.PrimaryGroupsOf(ship)`: a kill's `primaryOf` (`fleet-targets.spec.ts`) |
+| `packages/viewer-engine/src/lib/director.ts` | the five sources (`TimelineEvent`, `KillEvent`, `EventParty`), `AddCue` with `when` |
 | `packages/scene/src/lib/tools.ts` | `WHEN_ARGUMENT` on every cueable tool, the `CUE_TEXT` clause, `SCENE_FORMAT`'s event cue text |
 | `apps/scene-director/src/lib/hub/scene-places.ts` | `ReadCueTarget` with `when`, `CueTargetSecond`, `CueApply` passing it (`staging.spec.ts`) |
 | `packages/scene/src/lib/timeline/script-edit.ts` | M3: `scriptEditOf`, `scriptEditIsEmpty`, `scriptChanged`, `firstChangedStep`, `withScriptOrders` (pure; `script-edit.spec.ts`) |
-| `apps/viewer/src/lib/timeline.ts` / `ship-scripts.ts` | M3: `TimelinePlayer.Accepts` / `Rescript` / `AbandonFuture`; `ShipScripts.Swap` / `Record` (`timeline.spec.ts`, `ship-scripts.spec.ts`) |
-| `apps/viewer/src/lib/time-control.ts` | M3: `MarkOrigin`, `AbandonFuture`, `Resimulate` over `Run`, the port's `AfterRestore` (`time-control.spec.ts`; `sd-time`) |
-| `apps/viewer/src/lib/director.ts` | M3: `ScriptEdit` in `EditNow`, `PrefetchFor`, `MarkTimelineOrigin`, `ScriptAfterRestore`, `SimState.authored`, `AddCue`'s `resimulated` |
-| `apps/viewer/src/lib/movie.spec.ts` | M3: the determinism oracle (`TimelineRig`) |
-| `apps/viewer/src/lib/cinema.ts` / `camera-director.ts` | M4: `CinemaRig.Snapshot` / `Restore`, `CameraDirector.Snapshot` / `Restore` (`cinema.spec.ts`, `camera-director.spec.ts`) |
-| `apps/viewer/src/lib/director.ts` / `timeline.ts` | M4: `MovieOwnsCamera`, `movieCamera`, `SimState.camera`, the camera director port's `Silent()` / `Settled()`; `TimelinePlayer.cameraCues` |
+| `packages/viewer-engine/src/lib/timeline.ts` / `ship-scripts.ts` | M3: `TimelinePlayer.Accepts` / `Rescript` / `AbandonFuture`; `ShipScripts.Swap` / `Record` (`timeline.spec.ts`, `ship-scripts.spec.ts`) |
+| `packages/viewer-engine/src/lib/time-control.ts` | M3: `MarkOrigin`, `AbandonFuture`, `Resimulate` over `Run`, the port's `AfterRestore` (`time-control.spec.ts`; `sd-time`) |
+| `packages/viewer-engine/src/lib/director.ts` | M3: `ScriptEdit` in `EditNow`, `PrefetchFor`, `MarkTimelineOrigin`, `ScriptAfterRestore`, `SimState.authored`, `AddCue`'s `resimulated` |
+| `packages/viewer-engine/src/lib/movie.spec.ts` | M3: the determinism oracle (`TimelineRig`) |
+| `packages/viewer-engine/src/lib/cinema.ts` / `camera-director.ts` | M4: `CinemaRig.Snapshot` / `Restore`, `CameraDirector.Snapshot` / `Restore` (`cinema.spec.ts`, `camera-director.spec.ts`) |
+| `packages/viewer-engine/src/lib/director.ts` / `timeline.ts` | M4: `MovieOwnsCamera`, `movieCamera`, `SimState.camera`, the camera director port's `Silent()` / `Settled()`; `TimelinePlayer.cameraCues` |
 | `packages/scene/src/lib/timeline/movie.ts` | M5: `MOVIE_ACTIONS`, `BEAT_LANES`, `CAMERA_BEAT_ACTIONS`, `beatLaneOf`, `movieLookOf`, `DEFAULT_MOVIE_LEAD_SECONDS`, `normalizeMovieCommand` (every problem at once), `MovieReport` / `MovieBeatReport` / `MovieEditResult` (pure; `movie.spec.ts`) |
 | `packages/scene/src/lib/tools.ts` | M5: the `movie` entry after `time_control` (hub `SLOW_TOOLS`); `play_shot`'s live-preview sentence |
-| `apps/viewer/src/lib/movie.ts` | M5: `MovieReportOf`, `BeatReportOf`, `BeatTime`, `SeekChunks`, `MovieLookApplies`, `MoviePresentation`, `FramePresentation` (no runtime; `movie.spec.ts` "the movie report") |
-| `apps/viewer/src/lib/time-control.ts` | M5: `StopAt(clock, onStop)`, `stopsAt`, `recordedEnd` (`time-control.spec.ts` "StopAt"; `sd-time`) |
-| `apps/viewer/src/lib/director.ts` / `main.ts` | M5: `Movie` (the handler) and its `MovieEdit`, `MoviePlay`, `MovieSeek`, `MovieRetake`, `MovieJump` / `MovieJumpTo`, `MovieReport`, `ArmMovieEnd`, `NextFrames`, `Presentation()`; `TimelinePlayer.Records()`; main.ts's `Presentation.Apply(director.Presentation())` with the L / H run override |
+| `packages/viewer-engine/src/lib/movie.ts` | M5: `MovieReportOf`, `BeatReportOf`, `BeatTime`, `SeekChunks`, `MovieLookApplies`, `MoviePresentation`, `FramePresentation` (no runtime; `movie.spec.ts` "the movie report") |
+| `packages/viewer-engine/src/lib/time-control.ts` | M5: `StopAt(clock, onStop)`, `stopsAt`, `recordedEnd` (`time-control.spec.ts` "StopAt"; `sd-time`) |
+| `packages/viewer-engine/src/lib/director.ts` / `main.ts` | M5: `Movie` (the handler) and its `MovieEdit`, `MoviePlay`, `MovieSeek`, `MovieRetake`, `MovieJump` / `MovieJumpTo`, `MovieReport`, `ArmMovieEnd`, `NextFrames`, `Presentation()`; `TimelinePlayer.Records()`; main.ts's `Presentation.Apply(director.Presentation())` with the L / H run override |
 
 ## The record
 

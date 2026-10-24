@@ -37,7 +37,7 @@ retake, the report, the look and the end).
 | `movie.ts` | Movie mode M5: the `movie` tool's command (`MOVIE_ACTIONS`, `normalizeMovieCommand`), the beat lanes (`beatLaneOf`), `movieLookOf`, `DEFAULT_MOVIE_LEAD_SECONDS`, the report shapes; `movie.spec.ts` |
 | `script-edit.ts` | Movie mode M3: `scriptEditOf` (an edit of only the cues, the movie block and ships' orders, or null), `scriptEditIsEmpty`, `scriptChanged`, `firstChangedStep`, `withScriptOrders` (the live scene's ships take edited orders); `script-edit.spec.ts` |
 
-The page (`apps/viewer/src/lib/`, node-tested, no runtime): `timeline.ts` (`TimelinePlayer` over a `TimelinePort`,
+The page (`packages/viewer-engine/src/lib/`, node-tested, no runtime): `timeline.ts` (`TimelinePlayer` over a `TimelinePort`,
 `TimelineText` for the HUD; `timeline.spec.ts`), `ship-scripts.ts` (`ShipScripts` over a `ShipScriptsPort`;
 `ship-scripts.spec.ts`), `clock.ts` (`Hold` / `Release`), `destiny.ts` (`OnBeforeBoundary`; `destiny-timeline.spec.ts`).
 The director is both ports.

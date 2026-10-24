@@ -18,6 +18,8 @@ below); **M3 is in** (2026-10-23: missiles draw, fly and detonate with the clien
 Launchers fire, drawn, below); the plan is delivered. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
+**No-EVE-data mode** (`sd-dev-env`): no turrets or missiles are built, so nothing mounts or fires.
+
 ## Files
 
 | File | Role |
@@ -32,18 +34,18 @@ Launchers fire, drawn, below); the plan is delivered. Research: the dbx-claude n
 | `fitting/categories.ts` | `WEAPON_KIND_EFFECTS` (42 turret, 40 launcher), `weaponKindOf`; `typeEftFit` sets `FittedModule.weapon` when the bundle has the module's effects |
 | `apps/scene-director/src/lib/hub/weapon-data.ts` | `WeaponData` (`Weapon(typeID)`) over `SdeClient`, cached per hub |
 | `hub/weapon-data.testing.ts` | `WeaponRoutes` (weapons, ammunition, projectiles), `MissileFixture`, `MakeRoutedWeaponData`, `MakeFakeWeaponData` over the captured records |
-| `apps/viewer/src/lib/weapon-lookup.ts` | `WeaponLookup`: the page's `/weapon` lookups (node-tested) |
-| `apps/viewer/src/lib/turret-plan.ts` | `TurretMountsOf`, `TurretMountsKey`, `HighIndexOf`, `TurretFiles`, `TurretFileFacts`, the mount report types (node-tested) |
-| `apps/viewer/src/lib/turrets.ts` | `ShipTurrets` (runtime): mount, remount, the animated-hull rebind, report |
+| `packages/viewer-engine/src/lib/weapon-lookup.ts` | `WeaponLookup`: the page's `/weapon` lookups (node-tested) |
+| `packages/viewer-engine/src/lib/turret-plan.ts` | `TurretMountsOf`, `TurretMountsKey`, `HighIndexOf`, `TurretFiles`, `TurretFileFacts`, the mount report types (node-tested) |
+| `packages/viewer-engine/src/lib/turrets.ts` | `ShipTurrets` (runtime): mount, remount, the animated-hull rebind, report |
 | `weapons/target.ts` | `normalizeTargetCommand` (`set_target`), `CELESTIAL_TARGET_REFUSAL` |
 | `weapons/shots.ts` | `WeaponShot` (the Combat rules hook's event), `ShotTargetKind` |
-| `apps/viewer/src/lib/targets.ts` | `ShipTargets`: each ship's target, cleared on removal, warp and load (node-tested) |
-| `apps/viewer/src/lib/shots.ts` | `WeaponShotsOf`, `ShotQueue`: shots from cycle events, the cycle-exact draw time, counts, settle (node-tested) |
-| `apps/viewer/src/lib/missile-lookup.ts` | `MissileLookup`, `MISSILE_LOOKUP_TIMEOUT_MS`, `MISSILE_LOOKUP_RETRY_DELAYS_MS`: the page's `/missile` lookups (node-tested) |
-| `apps/viewer/src/lib/missile-plan.ts` | `MissileFileFacts`, `MissileFiles`, `MissileDrawPlan`, `MISSILES_LIVE_MAX` (256), `MISSILE_IMPACTS_LIVE_MAX` (64), `MISSILE_FALLBACK_TICKS` (2), `MISSILE_IMPACT_DEFAULT_DURATION` (6 s): the drawn missiles' files and schedule (node-tested) |
-| `apps/viewer/src/lib/missile-effects.ts` | `ShipMissiles` (runtime): pooled `EveMissile` / impact roots, launch, arrive, vanish, detonate, `renderer.missiles` |
-| `apps/viewer/src/lib/turret-audio.ts` | `TurretAudioPosts`, `TurretSoundQueue`: which emitter posts which turret sound when (node-tested) |
-| `apps/viewer/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `SetTarget`, `OnShot`, `SyncImpactState`, `DriveTurrets` |
+| `packages/viewer-engine/src/lib/targets.ts` | `ShipTargets`: each ship's target, cleared on removal, warp and load (node-tested) |
+| `packages/viewer-engine/src/lib/shots.ts` | `WeaponShotsOf`, `ShotQueue`: shots from cycle events, the cycle-exact draw time, counts, settle (node-tested) |
+| `packages/viewer-engine/src/lib/missile-lookup.ts` | `MissileLookup`, `MISSILE_LOOKUP_TIMEOUT_MS`, `MISSILE_LOOKUP_RETRY_DELAYS_MS`: the page's `/missile` lookups (node-tested) |
+| `packages/viewer-engine/src/lib/missile-plan.ts` | `MissileFileFacts`, `MissileFiles`, `MissileDrawPlan`, `MISSILES_LIVE_MAX` (256), `MISSILE_IMPACTS_LIVE_MAX` (64), `MISSILE_FALLBACK_TICKS` (2), `MISSILE_IMPACT_DEFAULT_DURATION` (6 s): the drawn missiles' files and schedule (node-tested) |
+| `packages/viewer-engine/src/lib/missile-effects.ts` | `ShipMissiles` (runtime): pooled `EveMissile` / impact roots, launch, arrive, vanish, detonate, `renderer.missiles` |
+| `packages/viewer-engine/src/lib/turret-audio.ts` | `TurretAudioPosts`, `TurretSoundQueue`: which emitter posts which turret sound when (node-tested) |
+| `packages/viewer-engine/src/lib/fittings.ts` / `director.ts` | the default-fit fallback and cargo charges (`ResolveShipFitting`); `DefaultWeaponsOf`, `SyncTurrets`, `WeaponMount`, `SetTarget`, `OnShot`, `SyncImpactState`, `DriveTurrets` |
 
 ## Default weapons (`defaultWeaponsOf`)
 

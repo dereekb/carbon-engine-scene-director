@@ -1,7 +1,7 @@
 # Destiny in the page: parks, clock, orders, placement
 
 > Every document ship flies as a Destiny ball (`@carbonenginejs/server`), and the ball drives the drawn ship's
-> translation and rotation curves. Fetch before touching `apps/viewer/src/lib/destiny.ts`, `clock.ts`, `main.ts`'s
+> translation and rotation curves. Fetch before touching `packages/viewer-engine/src/lib/destiny.ts`, `clock.ts`, `main.ts`'s
 > loop, `flight.ts`, `packages/scene/src/lib/orders.ts`, or anything that moves a ship. Sub-docs (`dbx-claude-ref`
 > `{ ref: "sd-destiny", doc: "<key>" }`): **`warp`** (warp orders, phases, refusals) and **`boosters`** (the per-frame
 > booster drive). Formation steering is `sd-fleets`; prop mod physics is `sd-ship-stats`.
@@ -10,17 +10,17 @@
 
 | File | Role |
 |---|---|
-| `apps/viewer/src/lib/destiny.ts` | `DestinyWorld`: the **only** code that touches the parks. Ships, static object balls, orders, warp, following, prop mod state |
-| `apps/viewer/src/lib/clock.ts` | the scene clock: one integer 100 ns tick count both parks and the renderer sample; its `rate` and `paused` (`sd-time`) |
-| `apps/viewer/src/lib/time-control.ts` | `TimeControl`: the frame's tick stepping, pause and rate (`sd-time`) |
-| `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark`: a park as its native full-state stream plus a scalar overlay (`sd-time`) |
-| `apps/viewer/src/main.ts` | the single rAF loop |
-| `apps/viewer/src/lib/flight.ts` | each ship's flight numbers (Ship stats from the hub's `/ship-stats`) |
-| `apps/viewer/src/lib/warp.ts` | warp factor, landing, Destiny's warp-profile math |
-| `apps/viewer/src/lib/boosters.ts` | the booster drive |
-| `apps/viewer/src/lib/steering.ts` | Follow the FC's steering math (`sd-fleets`) |
+| `packages/viewer-engine/src/lib/destiny.ts` | `DestinyWorld`: the **only** code that touches the parks. Ships, static object balls, orders, warp, following, prop mod state |
+| `packages/viewer-engine/src/lib/clock.ts` | the scene clock: one integer 100 ns tick count both parks and the renderer sample; its `rate` and `paused` (`sd-time`) |
+| `packages/viewer-engine/src/lib/time-control.ts` | `TimeControl`: the frame's tick stepping, pause and rate (`sd-time`) |
+| `packages/viewer-engine/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark`: a park as its native full-state stream plus a scalar overlay (`sd-time`) |
+| `packages/viewer-engine/src/lib/start-viewer.ts` | the single rAF loop (`StartViewer`) |
+| `packages/viewer-engine/src/lib/flight.ts` | each ship's flight numbers (Ship stats from the hub's `/ship-stats`) |
+| `packages/viewer-engine/src/lib/warp.ts` | warp factor, landing, Destiny's warp-profile math |
+| `packages/viewer-engine/src/lib/boosters.ts` | the booster drive |
+| `packages/viewer-engine/src/lib/steering.ts` | Follow the FC's steering math (`sd-fleets`) |
 | `packages/scene/src/lib/orders.ts` | `order_ship` request normalization (`normalizeShipOrderRequest`) |
-| `apps/viewer/src/lib/carbonenginejs-server.d.ts` | the server's types |
+| `packages/viewer-engine/src/lib/carbonenginejs-server.d.ts` | the server's types |
 | specs | `destiny.spec.ts` (1.4k lines), `destiny-ship.spec.ts`, `destiny-tackle.spec.ts`, `destiny-warp-in.spec.ts` (arrivals), `destiny-missile.spec.ts` (missiles), `destiny-snapshot.spec.ts` (snapshots), `clock.spec.ts`, `warp.spec.ts`, `boosters.spec.ts`, `flight.spec.ts` (node, `runtime-sim` only). New DestinyWorld specs share `destiny.spec-helper.ts` (`Harness` with `Ticks` / `Until` / `Sample`, the Rifter, Guardian and TFI fixtures, `BallStates` for lockstep) |
 
 ## The two parks (must stay in lockstep)

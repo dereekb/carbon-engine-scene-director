@@ -1,6 +1,9 @@
 /**
  * Saved scenes in IndexedDB. One object store keyed by name; the working copy
  * the page restores on reload lives under a reserved key that listings hide.
+ * Pages on one origin share the database, so each keeps its working copy under
+ * its own prefix (the viewer none, the battle console its own): a reload never
+ * restores the other page's scene.
  *
  * Node-tested (FromSceneRecord): it imports no runtime.
  */
@@ -51,8 +54,33 @@ export interface SavedSceneSummary {
   readonly ships: number;
 }
 
+/**
+ * Whether a key names a page's working copy (any prefix): reserved, and hidden from listings.
+ *
+ * @param name - A record key.
+ * @returns True for `<prefix>__current__`.
+ */
+export function IsWorkingCopyKey(name: string): boolean {
+  return name.endsWith(CURRENT_KEY);
+}
+
+export interface SceneStoreOptions {
+  /**
+   * The working copy's key prefix; none (the viewer's `__current__`) by default.
+   */
+  readonly prefix?: string;
+}
+
 export class SceneStore {
   private db: Maybe<Promise<IDBDatabase>> = null;
+  /**
+   * The key this page's working copy lives under.
+   */
+  readonly currentKey: string;
+
+  constructor({ prefix = '' }: SceneStoreOptions = {}) {
+    this.currentKey = `${prefix}${CURRENT_KEY}`;
+  }
 
   async Put(name: string, scene: SceneDocument): Promise<void> {
     const record: SceneRecord = { name, scene, savedAt: new Date().toISOString(), version: SCENE_RECORD_VERSION };
@@ -76,7 +104,7 @@ export class SceneStore {
   async List(): Promise<SavedSceneSummary[]> {
     const records = (await this.Run('readonly', (store) => store.getAll())) as SceneRecord[];
     return records
-      .filter((record) => record.name !== CURRENT_KEY)
+      .filter((record) => !IsWorkingCopyKey(record.name))
       .map((record) => ({ name: record.name, savedAt: record.savedAt, ships: record.scene?.ships?.length ?? 0 }))
       .sort((a, b) => b.savedAt.localeCompare(a.savedAt));
   }

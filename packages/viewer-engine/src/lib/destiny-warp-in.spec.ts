@@ -124,7 +124,11 @@ describe('DestinyWorld arrivals', () => {
     expect(Gap(events[0].position, from)).toBeLessThan(0.01);
     expect(Gap(events[0].direction, LANE)).toBeLessThan(1e-9);
 
-    harness.Until(() => RequireMotion(world, 'r').arrival?.state === 'landed', 40, () => ExpectLockstep(world, 1));
+    harness.Until(
+      () => RequireMotion(world, 'r').arrival?.state === 'landed',
+      40,
+      () => ExpectLockstep(world, 1)
+    );
     expect(world.tick).toBe(exitTick);
     expect(events.map((event) => [event.kind, event.tick, event.arrival])).toEqual([
       ['enter', at + 1, true],
@@ -251,7 +255,11 @@ describe('DestinyWorld arrivals', () => {
       expect(m0.arrival).toBeUndefined();
       expect(m0.order).toEqual({ type: 'keep-at-range', target: 'fc', range: 1000, speed: 1 });
       expect(world.FollowHold('m0')).toBeNull();
-      harness.Until(() => (RequireMotion(world, 'm0').slotError ?? Infinity) <= toFollowTolerance({ slotRange: 1000, anchorSpeed: RequireMotion(world, 'fc').speed }), 60, () => ExpectLockstep(world, 2));
+      harness.Until(
+        () => (RequireMotion(world, 'm0').slotError ?? Infinity) <= toFollowTolerance({ slotRange: 1000, anchorSpeed: RequireMotion(world, 'fc').speed }),
+        60,
+        () => ExpectLockstep(world, 2)
+      );
     });
 
     it('holds a chained logi that landed for its lead, and a present member for an arriving FC', () => {

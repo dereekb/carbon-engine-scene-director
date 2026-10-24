@@ -4,7 +4,7 @@
  * for these imports live beside this file in carbonenginejs-runtime.d.ts.
  *
  * Most come from the package's public subpaths. The `runtime-dist/` specifier
- * (resolved by apps/viewer/esbuild.config.mjs) reaches files the package does
+ * (resolved by packages/viewer-engine/esbuild.config.mjs) reaches files the package does
  * not export: the WebGPU abstraction-layer context, which the runtime keeps
  * internal by design, and the child-list helpers. Both resolve to the same
  * files the public subpaths load, so there is still one copy of each class.

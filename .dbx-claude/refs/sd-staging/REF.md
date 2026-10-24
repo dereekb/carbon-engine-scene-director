@@ -160,7 +160,7 @@ off-grid and land from warp at their placements (Destiny's EntityWarpIn: `sd-des
   `arrivals` reports through.
 - **Joins** (`fleet: { id, squad }`) land at their **live** formation slots: `landing: formation`, group
   `<fleet>/<squad>`, leader = the fleet's FC (not in `ships`); the page reads the FC's live position and heading.
-- **The page** (`apps/viewer/src/lib/arrivals.ts`, node-tested; `Director.arrivals`): `Arrivals.Add` parks each ship
+- **The page** (`packages/viewer-engine/src/lib/arrivals.ts`, node-tested; `Director.arrivals`): `Arrivals.Add` parks each ship
   right after its ball exists and before any build (`ARRIVAL_PARK_DISTANCE` 4,000 km back along the lane, `at: null`),
   so a hull never shows at its landing. `Boundary(tick)` (on `world.OnBoundary`, and once after an Apply's builds)
   plans a group when every ship's `/ship-stats` answer and SOF build have settled (`Director.ArrivalReady`; a join

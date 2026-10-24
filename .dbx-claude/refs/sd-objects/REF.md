@@ -23,8 +23,8 @@ takes them by `dna` only, and `search_objects` refuses.
 | `apps/scene-director/src/lib/hub/object-data.ts` | `ObjectData`: a type name or id → type id, name, group, category, SOF DNA and ball radius (the SDE's; the SOF hull's bounding radius where the SDE has none or gives a wreck its 14 m placeholder); `IsWreckType`; the name search |
 | `hub/objects.ts` | `ObjectTools`: `add_objects`, `search_objects` |
 | `hub/scene-places.ts` | `ScenePlaces`, shared with `Staging` (`sd-staging`) |
-| `apps/viewer/src/lib/objects.ts` | the pure half (node-tested): `ObjectBallRadius`, `ObjectReach`, `NearestShips`, `TargetedBy`, `ObjectStateRow`, `ObjectsText`, `PlanCelestialTargetSync` |
-| `apps/viewer/src/lib/scene-objects.ts` | `SceneObjects` (runtime): one SOF build per object through `BuildStaticObject` (`ships.ts`, shared with the location dressing) on fixed curves; a move re-places the curves, a DNA change rebuilds; no renderer → `validated` |
+| `packages/viewer-engine/src/lib/objects.ts` | the pure half (node-tested): `ObjectBallRadius`, `ObjectReach`, `NearestShips`, `TargetedBy`, `ObjectStateRow`, `ObjectsText`, `PlanCelestialTargetSync` |
+| `packages/viewer-engine/src/lib/scene-objects.ts` | `SceneObjects` (runtime): one SOF build per object through `BuildStaticObject` (`ships.ts`, shared with the location dressing) on fixed curves; a move re-places the curves, a DNA change rebuilds; no renderer → `validated` |
 | specs | `objects/*.spec.ts`, `extent.spec.ts`, `hub/object-data.spec.ts`, `hub/objects.spec.ts`, viewer `objects.spec.ts`, `destiny.spec.ts` (object balls); verify-page `--only object` (ten checks) |
 
 ## The tools

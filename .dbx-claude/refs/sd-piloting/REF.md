@@ -3,7 +3,7 @@
 > How a ship decides its own range and maneuvering from both sides' numbers, and the stances that tell it to. The
 > plan is `~/.claude/plans/i-want-to-work-woolly-flame.md` (slices P1-P6). **Status: P1 (the pure math in
 > `packages/scene/src/lib/piloting/`), P2 (stances in the document and as live orders), P3 (`get_overview`, the
-> ship-relative overview), P4 (the page's pilots fly their stances, `apps/viewer/src/lib/pilots.ts`) and P5 (the
+> ship-relative overview), P4 (the page's pilots fly their stances, `packages/viewer-engine/src/lib/pilots.ts`) and P5 (the
 > outside program: the controller sub-doc and the `pilot-loop` example driver) have landed.** The dbxpc evidence (P6:
 > verify-page, the real-GPU look, fps with 50 loose pilots, `BrainFacts`' cost) is still to come. Sub-doc
 > (`{ ref: "sd-piloting", doc: "<key>" }`): **`controller`** (the hub's WebSocket protocol for a program outside the
@@ -51,8 +51,8 @@ tackle `tackle`, logi `support`). A ship's own stance flies that ship alone.
 | `overview.ts` | `toShipOverview` (get_overview), `toPilotContact` (page facts → a picture contact), `overviewRelationOf` |
 | `piloting.spec-helper.ts` | fixture profiles (Rifter, Punisher, Caracal, Megathron: max skills, default weapons, baked MWD) |
 
-Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbitOf` against the parks;
-`apps/viewer/src/lib/pilot-facts.ts` builds the page's side of the facts (`CombatProfileOf`, `TackleOn`,
+Viewer: `packages/viewer-engine/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbitOf` against the parks;
+`packages/viewer-engine/src/lib/pilot-facts.ts` builds the page's side of the facts (`CombatProfileOf`, `TackleOn`,
 `RemainingEhpOf`, `IncomingRepsOf`, `HeadingVectorOf`).
 
 ## Stances in the document and as live orders (P2)
@@ -122,7 +122,7 @@ Viewer: `apps/viewer/src/lib/destiny-orbit-model.spec.ts` calibrates `legacyOrbi
   (checks the args, then `toShipOverview` over `BrainFacts` with `ResolvedStances().get(ship)`); read-only, not
   journaled. verify-page: "get_overview measures the fight from one ship".
 
-## The page's pilots (P4, `apps/viewer/src/lib/pilots.ts`)
+## The page's pilots (P4, `packages/viewer-engine/src/lib/pilots.ts`)
 
 - **`ShipPilots`** over `ShipPilotsPort` (node-tested, imports nothing from ./runtime), stepped by
   `Director.StepPilots(boundary)` in the `OnBoundary` listener right after `SyncFleetTargets` (it sees this boundary's

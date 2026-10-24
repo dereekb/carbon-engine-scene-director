@@ -23,13 +23,13 @@
 | `fleets/orders.ts` | the `order_fleet` request, who may give it, the group's leader, the document ops, `toPilotDelays` (sub-doc `orders`) |
 | `fleets/targets.ts` | called targets: the `targets` field (the opening calls), the `targets` order (`toFleetTargetList`), removal pruning, `toFleetGroupCalls` / `toShipCallPlans` (sub-doc `targets`) |
 | `fleets/group.ts` | `FleetGroup`, `toFleetGroupKey`, `describeFleetGroup` (shared by `orders.ts` and `targets.ts`; `orders.ts` re-exports them) |
-| `apps/viewer/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
-| `apps/viewer/src/lib/fleet-succession.ts` | the heir of a dead FC flies on with its order (`CaptureFleetHeirs`, `HeirOrderOf`, `InheritFleetOrders`; node-tested) |
-| `apps/viewer/src/lib/fleet-commanders.ts` | `FleetCommanders`: the live call book order_fleet's targets order edits, spliced over the document by `toLiveFleetScene`, and each group's free fire (node-tested; sub-doc `targets`) |
-| `apps/viewer/src/lib/fleet-targets.ts` | `FleetTargets`: the targeting lever: members lock, pre-lock and shoot their groups' called primaries (node-tested; sub-doc `targets`) |
-| `apps/viewer/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
-| `apps/viewer/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
-| `apps/viewer/src/lib/destiny.ts` | `Steer`, `Slot`, `Settle`, `AimAlong`, `Follow` / `Unfollow` / `FollowHold` |
+| `packages/viewer-engine/src/lib/following.ts` | `FleetFollowing`: document fleets reconciled into `DestinyWorld.Follow`, detach / rejoin, groups apart (`BreakAway` / `Regroup`) |
+| `packages/viewer-engine/src/lib/fleet-succession.ts` | the heir of a dead FC flies on with its order (`CaptureFleetHeirs`, `HeirOrderOf`, `InheritFleetOrders`; node-tested) |
+| `packages/viewer-engine/src/lib/fleet-commanders.ts` | `FleetCommanders`: the live call book order_fleet's targets order edits, spliced over the document by `toLiveFleetScene`, and each group's free fire (node-tested; sub-doc `targets`) |
+| `packages/viewer-engine/src/lib/fleet-targets.ts` | `FleetTargets`: the targeting lever: members lock, pre-lock and shoot their groups' called primaries (node-tested; sub-doc `targets`) |
+| `packages/viewer-engine/src/lib/fleet-orders.ts` | `FleetOrders`: `order_fleet`'s live half (moves, warps, regroups) and each group's command report (node-tested) |
+| `packages/viewer-engine/src/lib/steering.ts` | heading frame, goto-lag lead, each member's goto point (runtime-free) |
+| `packages/viewer-engine/src/lib/destiny.ts` | `Steer`, `Slot`, `Settle`, `AimAlong`, `Follow` / `Unfollow` / `FollowHold` |
 | spec helpers | `fleets/fleets.spec-helper.ts` (`TFI`, `GUARDIAN` DNA, `TFI_FLEET_SCENE`) |
 
 ## The model
@@ -118,7 +118,7 @@ ids.
   fleet with nobody alive drops. The page's `FleetFollowing`, `FleetOrders`, memberships and
   fleets report read that view, so the members re-form on the acting FC (the same re-plan an `update_fleet` causes); a
   load revives everyone and the document's fleets come back.
-- **The FC dies, the fleet flies on** (`apps/viewer/src/lib/fleet-succession.ts`, node-tested, wired in
+- **The FC dies, the fleet flies on** (`packages/viewer-engine/src/lib/fleet-succession.ts`, node-tested, wired in
   `Director.Destroy`). `DestinyWorld.Destroy` halts every ship anchored or framed on the dead FC, the heir included, and
   the re-plan leaves the heir following nobody, so the heir **inherits** the FC's order (`HeirOrderOf`): its pending
   order, else its applied one, the pending order's `respondsIn` carried as the delay; a `stop` inherits nothing; an

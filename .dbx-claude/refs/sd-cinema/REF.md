@@ -24,8 +24,8 @@
 | `packages/scene/src/lib/tools.ts` | the six tool entries after `frame_camera`, and get_state's `cinema` sentence |
 | `apps/scene-director/src/lib/hub/hub.ts` | `list_shots` (a hub tool: the library is static, so it answers with no tab) |
 | `packages/scene/src/lib/waypoints/waypoints.ts` | `Waypoint`, `resolveWaypoint`, `readWaypoints`, `measureWaypointPath`, `pathPointAt` / `pathTangentAt` / `pathDistanceAt`, `catmullRom` |
-| `apps/viewer/src/lib/cinema.ts` | `CinemaRig` (`Play`, `Stop`, `Release`, `Frame`, `Report`, `Presentation`, `Subjects`), `CinemaReleases`, `LetterboxRect`; node-tested |
-| `apps/viewer/src/lib/cinema-moves.ts` | `EvaluateMoves`, `Ease`, `TrackLag`, `Smooth`, `SmoothTrack` (the lag, exact for a target moving over the step), the seeded `Noise` / `ShakeEnvelope`; node-tested |
+| `packages/viewer-engine/src/lib/cinema.ts` | `CinemaRig` (`Play`, `Stop`, `Release`, `Frame`, `Report`, `Presentation`, `Subjects`), `CinemaReleases`, `LetterboxRect`; node-tested |
+| `packages/viewer-engine/src/lib/cinema-moves.ts` | `EvaluateMoves`, `Ease`, `TrackLag`, `Smooth`, `SmoothTrack` (the lag, exact for a target moving over the step), the seeded `Noise` / `ShakeEnvelope`; node-tested |
 | `engine.ts` | `FreeCamera`, `Engine.SetCinematicFrame` / `DrawnCamera` / `Aspect`, `OrbitCamera.Drawn` |
 | `director.ts` | `cinema`, `TrackCamera`, the tool handlers (`ListHardpoints`, `PlayShot`, `StopShot`, `ResumeShot`), `CinemaScene` (+ `CinemaWarp`), `ReleaseCinema` / `TakeOverCinema`, the `CinemaReleases` call in `Apply` |
 | `main.ts` | `Presentation`: `?letterbox=`, `?hud=off`, the L and H keys, a shot's overrides |
@@ -93,7 +93,7 @@ append after the library's. Every library move is scale-free (an allow-list spec
 
 The camera directs itself: cuts between hardpoints and library shots by an interest score over live events. Pure and
 node-tested in `packages/scene/src/lib/cinema/director/` (camelCase; deterministic for a picture, event stream and
-seed); the page's `apps/viewer/src/lib/camera-director.ts` (`CameraDirector` over a `CameraDirectorPort`) collects
+seed); the page's `packages/viewer-engine/src/lib/camera-director.ts` (`CameraDirector` over a `CameraDirectorPort`) collects
 events and plays the picks through the rig as driver `director`.
 
 | File | Holds |

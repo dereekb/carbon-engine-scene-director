@@ -168,7 +168,7 @@ describe('MissileDrawPlan', () => {
     expect(plan.Report()).toMatchObject({ forced: 1, detonated: 1 });
   });
 
-  it("freezes a live missile whose ball left: silent without a hit, with its impact once a hit is known", () => {
+  it('freezes a live missile whose ball left: silent without a hit, with its impact once a hit is known', () => {
     const plan = new MissileDrawPlan({ tickSeconds: 1 });
     const probe = Probe({ balls: new Set(['a', 'b']) });
     plan.Launch('a', 0, 6);

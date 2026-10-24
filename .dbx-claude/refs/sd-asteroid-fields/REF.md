@@ -2,7 +2,7 @@
 
 > The document's `asteroidFields`, the seeded expansion into rocks, the three ops, ore names resolved to SOF rock sets,
 > and `add_asteroid_field`. Fetch before touching `packages/scene/src/lib/asteroids/`, `hub/asteroid-data.ts`,
-> `hub/asteroid-fields.ts`, `apps/viewer/src/lib/asteroid-fields.ts` / `scene-fields.ts`, or before adding a field with
+> `hub/asteroid-fields.ts`, `packages/viewer-engine/src/lib/asteroid-fields.ts` / `scene-fields.ts`, or before adding a field with
 > the tools. The document and the diff: `sd-scene-document`;
 > `near` / `facing` and `ScenePlaces`: `sd-staging`; belts and other celestials of the location: `sd-locations`;
 > authored objects (the pattern this copies): `sd-objects`. Plan:
@@ -27,9 +27,9 @@ and draw nothing; `add_asteroid_field` takes only `{ rocks: [dna, …] }` ores, 
 | `staging/draft.ts` | `StagingDraft.fields`: field ids are taken ids for every generated ship, object, composition and field id |
 | `apps/scene-director/src/lib/hub/asteroid-data.ts` | `AsteroidData`: an ore name → asteroid type and group → SOF faction; a faction → its rock DNAs from the SDE `graphics` table |
 | `hub/asteroid-fields.ts` | `AsteroidFieldTools`: `add_asteroid_field` |
-| `apps/viewer/src/lib/asteroid-fields.ts` | pure, node-tested: `FieldDrawPlan` (groups per model and cell), `PackInstance`, `FIELD_INSTANCE_LAYOUT`, `RockTemplateOf`, `FieldRootValues` (the instanced root's values), `FieldSphere`, `FieldReach`, `AsteroidFieldStateRow`, `AsteroidFieldsText`; spec fixture `asteroid-fields.spec-helper.ts` |
-| `apps/viewer/src/lib/scene-fields.ts` | `SceneFields`: Apply / Build / Retire, the per-DNA template cache, hydrate-then-swap, `?fields=` |
-| `apps/viewer/src/lib/director.ts` | `this.fields`, `SceneryRoots()`, the Apply wiring, `FieldRows()`, field camera targets |
+| `packages/viewer-engine/src/lib/asteroid-fields.ts` | pure, node-tested: `FieldDrawPlan` (groups per model and cell), `PackInstance`, `FIELD_INSTANCE_LAYOUT`, `RockTemplateOf`, `FieldRootValues` (the instanced root's values), `FieldSphere`, `FieldReach`, `AsteroidFieldStateRow`, `AsteroidFieldsText`; spec fixture `asteroid-fields.spec-helper.ts` |
+| `packages/viewer-engine/src/lib/scene-fields.ts` | `SceneFields`: Apply / Build / Retire, the per-DNA template cache, hydrate-then-swap, `?fields=` |
+| `packages/viewer-engine/src/lib/director.ts` | `this.fields`, `SceneryRoots()`, the Apply wiring, `FieldRows()`, field camera targets |
 | `apps/scene-director/src/verify-page.ts` | `--only field`: six checks |
 | `hub/scene-places.ts` | `ResolvePlace({ beltCentred })` and `ResolvedPlace.celestial` (shared with staging and objects) |
 | specs | `asteroids/*.spec.ts` (the pinned digest is in `expand.spec.ts`), `hub/asteroid-data.spec.ts` (fixture `asteroid-data.testing.ts`, ids captured live), `hub/asteroid-fields.spec.ts`, `hub.spec.ts` |

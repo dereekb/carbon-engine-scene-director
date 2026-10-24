@@ -1,0 +1,36 @@
+{
+  "name": "viewer-engine",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/viewer-engine/src",
+  "projectType": "library",
+  "tags": [],
+  "targets": {
+    "engine": {
+      "executor": "@nx/esbuild:esbuild",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/packages/viewer-engine",
+        "main": "packages/viewer-engine/src/engine.ts",
+        "tsConfig": "packages/viewer-engine/tsconfig.lib.json",
+        "bundle": true,
+        "thirdParty": true,
+        "platform": "browser",
+        "format": ["esm"],
+        "target": "es2022",
+        "sourcemap": true,
+        "generatePackageJson": false,
+        "esbuildConfig": "packages/viewer-engine/esbuild.config.mjs"
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "outputs": [],
+      "options": {
+        "command": "tsc --noEmit -p packages/viewer-engine/tsconfig.spec.json"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint"
+    }
+  }
+}

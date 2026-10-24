@@ -181,7 +181,7 @@ save or reload starts from the document's placements. Damage immunity is documen
 | Store | Where | Notes |
 |---|---|---|
 | `disk` (default for saving) | `SceneFileStore` (`apps/scene-director/src/lib/store/scene-files.ts` over `document-files.ts`) in the hub's scenes dir: `--scenes <dir>` / `SCENE_DIRECTOR_SCENES`, default `scene-director/scenes` in the per-user data dir | validated on write and read; works with no tab |
-| `browser` | the tab's IndexedDB (`apps/viewer/src/lib/store.ts`); the working copy lives under a reserved key listings hide | needs a connected tab; records carry `version` (`SCENE_RECORD_VERSION` 2) |
+| `browser` | the tab's IndexedDB (`packages/viewer-engine/src/lib/store.ts`); the working copy lives under a reserved key listings hide | needs a connected tab; records carry `version` (`SCENE_RECORD_VERSION` 2) |
 
 - **Browser records from before the honoured fov** (no `version`) all carry the old default fov 45, which normalizing
   wrote in: `store.ts` `FromSceneRecord` reads 45 as 90, the look they were drawn with, and keeps any other fov.

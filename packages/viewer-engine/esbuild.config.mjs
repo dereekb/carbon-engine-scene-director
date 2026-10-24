@@ -1,8 +1,10 @@
 /**
- * esbuild options for the viewer bundle; @nx/esbuild merges them with the build target in project.json.
+ * esbuild options for every bundle of the engine: the viewer page (apps/viewer build) and the engine module the
+ * battle console imports (this library's `engine` target, dist/packages/viewer-engine/engine.js). @nx/esbuild merges
+ * them with the target in project.json.
  *
  * The runtime's built modules import each other by `#` subpath specifiers, which a browser cannot resolve,
- * so the page ships as one bundle.
+ * so each page ships the engine as one bundle.
  */
 
 import { createRequire } from 'node:module';

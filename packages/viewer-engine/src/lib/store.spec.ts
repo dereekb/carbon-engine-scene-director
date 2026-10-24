@@ -1,6 +1,6 @@
 import { createEmptyScene, DEFAULT_CAMERA_FOV, type SceneDocument } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
-import { FromSceneRecord, SCENE_RECORD_VERSION } from './store';
+import { CURRENT_KEY, FromSceneRecord, IsWorkingCopyKey, SCENE_RECORD_VERSION, SceneStore } from './store';
 
 function Scene(fov: number): SceneDocument {
   const scene = createEmptyScene('stored');
@@ -21,5 +21,16 @@ describe('FromSceneRecord', () => {
     expect(FromSceneRecord({ scene: Scene(45), version: SCENE_RECORD_VERSION }).camera.fov).toBe(45);
     const scene = Scene(60);
     expect(FromSceneRecord({ scene, version: SCENE_RECORD_VERSION })).toBe(scene);
+  });
+});
+
+describe('SceneStore working copies', () => {
+  it('keeps each page its own working copy key, every one reserved', () => {
+    expect(new SceneStore().currentKey).toBe(CURRENT_KEY);
+    const page = new SceneStore({ prefix: 'console:' });
+    expect(page.currentKey).toBe(`console:${CURRENT_KEY}`);
+    expect(IsWorkingCopyKey(page.currentKey)).toBe(true);
+    expect(IsWorkingCopyKey(CURRENT_KEY)).toBe(true);
+    expect(IsWorkingCopyKey('my scene')).toBe(false);
   });
 });

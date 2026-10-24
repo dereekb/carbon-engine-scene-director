@@ -11,12 +11,12 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
                           hub: http://127.0.0.1:5520    apps/scene-director/src/lib/hub/hub.ts
                             │ WebSocket /ws
                             ▼
-                       viewer tab (Chrome/Edge, WebGPU) apps/viewer/src/main.ts
+                       viewer tab (Chrome/Edge, WebGPU) apps/viewer/src/main.ts → StartViewer (packages/viewer-engine)
                        tools-core :5510 ◀── every resource, SDE and map request (through the hub)
 ```
 
 - **The page owns the scene.** The hub serves the page, proxies resources (`/resource/<path>`), routes tool calls and
-  keeps saved files on disk. A reload restores the working scene from IndexedDB (`apps/viewer/src/lib/store.ts`).
+  keeps saved files on disk. A reload restores the working scene from IndexedDB (`packages/viewer-engine/src/lib/store.ts`).
 - **`where: 'hub' | 'page'`** on each entry of `packages/scene/src/lib/tools.ts` (the one tool list, advertised by the
   MCP server and implemented by the page) says who answers. Hub tools work with no tab open; page tools are forwarded
   to the **newest** connected tab (so a running verify-page takes them from the user's tab).
@@ -51,7 +51,8 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 |---|---|---|---|
 | `scene` (`@scene-director/scene`) | `packages/scene` | `@nx/js:tsc` | the `cjs-scene/1` schema, patch ops, diff, tool list, stats, fleets, compositions, location, staging, orders, prop mods. **No runtime imports**: hub, page and tests share it |
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | hub, MCP server, CLI (`serve`, `mcp`, `call`), `verify-page.ts`. Building it builds the viewer (implicit dependency) |
-| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: engine, director, ships, Destiny world, clock, camera, following, location dressing, audio. Has a node `test` target |
+| `viewer-engine` (`@scene-director/viewer-engine`) | `packages/viewer-engine` | node `test` and `typecheck`; an `engine` target (`@nx/esbuild`, browser) | the engine every page runs: director, ships, Destiny world, clock, camera, following, location dressing, audio, time control, the hub link, the stores; `StartViewer` (the boot and the loop, `start-viewer.ts`), the runtime-free `ViewerApi` / `FleetView` facade (`api.ts`, `fleet-view.ts`), the shared `esbuild.config.mjs`. The `engine` target bundles it once into `dist/packages/viewer-engine/engine.js` (ESM exporting `StartViewer`) for a host that cannot apply the runtime's esbuild rules (the battle console) |
+| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the read-only page: the canvas, the status overlay, `StartViewer` from the engine library (bundled from source with the library's esbuild config) |
 
 `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
@@ -61,7 +62,7 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 
 ## Naming (house style is split on purpose)
 
-- **Apps** (`apps/scene-director`, `apps/viewer`) follow the CarbonEngineJS runtime's style: PascalCase functions and
+- **Apps** (`apps/scene-director`, `apps/viewer`) and the engine library (`packages/viewer-engine`) follow the CarbonEngineJS runtime's style: PascalCase functions and
   methods (`Hub.Start`, `DestinyWorld.Order`, `ReadNumber`, `MakeFakeShipData`), dbx verb prefixes in that case
   (`IsShipResource`); camelCase properties, parameters, locals; PascalCase types; UPPER_SNAKE exported constants.
 - **`packages/scene`** is camelCase (`toFleetMemberships`, `computeShipStats`).
@@ -76,7 +77,7 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 | Do | With |
 |---|---|
 | build (scene + viewer + CLI) | `dbx-claude-build` `project: scene-director` (or `npx nx build scene-director`) |
-| tests | `dbx-claude-test` `project: scene` / `viewer` / `scene-director`. The MCP spec spawns the built CLI, so `test` depends on `build` |
+| tests | `dbx-claude-test` `project: scene` / `viewer-engine` / `scene-director`. The MCP spec spawns the built CLI, so `test` depends on `build` |
 | lint | `dbx-claude-lint-run`. Config is the dbx library config (`eslint.config.library.mjs`); warnings allowed, errors block |
 | format | `npx oxfmt --write .` |
 | commit | `dbx-claude-commit` (gates lint, build, typecheck, affected tests) |

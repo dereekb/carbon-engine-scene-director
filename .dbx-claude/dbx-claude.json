@@ -115,7 +115,7 @@
               "ship-data.testing",
               "hub/tools-core",
               ".claude/skills/windows-chrome",
-              "apps/viewer/src/lib/eve-data",
+              "packages/viewer-engine/src/lib/eve-data",
               "hub/eve-data",
               "packages/scene/src/lib/eve-data"
             ],
@@ -161,15 +161,15 @@
           },
           {
             "pathContains": [
-              "apps/viewer/src/lib/runtime",
+              "packages/viewer-engine/src/lib/runtime",
               "carbonenginejs-runtime.d.ts",
-              "apps/viewer/esbuild.config",
-              "apps/viewer/src/lib/engine.ts",
-              "apps/viewer/src/lib/stand-ins",
-              "apps/viewer/src/lib/ships.ts",
-              "apps/viewer/src/lib/environment.ts",
-              "apps/viewer/src/lib/resources.ts",
-              "apps/viewer/src/lib/audio.ts",
+              "packages/viewer-engine/esbuild.config",
+              "packages/viewer-engine/src/lib/engine.ts",
+              "packages/viewer-engine/src/lib/stand-ins",
+              "packages/viewer-engine/src/lib/ships.ts",
+              "packages/viewer-engine/src/lib/environment.ts",
+              "packages/viewer-engine/src/lib/resources.ts",
+              "packages/viewer-engine/src/lib/audio.ts",
               "carbon-engine-runtime/",
               "carbonenginejs/runtime/"
             ],
@@ -203,9 +203,9 @@
             "pathContains": [
               "packages/scene/src/lib/scene.ts",
               "packages/scene/src/lib/json.ts",
-              "apps/viewer/src/lib/director.ts",
-              "apps/viewer/src/lib/camera.ts",
-              "apps/viewer/src/lib/store.ts",
+              "packages/viewer-engine/src/lib/director.ts",
+              "packages/viewer-engine/src/lib/camera.ts",
+              "packages/viewer-engine/src/lib/store.ts",
               "hub/saved-scenes",
               "store/scene-files",
               "store/document-files"
@@ -255,12 +255,12 @@
           },
           {
             "pathContains": [
-              "apps/viewer/src/lib/destiny",
-              "apps/viewer/src/lib/clock",
-              "apps/viewer/src/lib/warp",
-              "apps/viewer/src/lib/boosters",
-              "apps/viewer/src/lib/flight",
-              "apps/viewer/src/main.ts",
+              "packages/viewer-engine/src/lib/destiny",
+              "packages/viewer-engine/src/lib/clock",
+              "packages/viewer-engine/src/lib/warp",
+              "packages/viewer-engine/src/lib/boosters",
+              "packages/viewer-engine/src/lib/flight",
+              "packages/viewer-engine/src/lib/start-viewer",
               "packages/scene/src/lib/orders",
               "carbonenginejs-server.d.ts",
               "carbon-engine-server/",
@@ -326,12 +326,12 @@
             "pathContains": [
               "packages/scene/src/lib/fleets/",
               "packages/scene/src/lib/compositions/",
-              "apps/viewer/src/lib/following",
-              "apps/viewer/src/lib/steering",
+              "packages/viewer-engine/src/lib/following",
+              "packages/viewer-engine/src/lib/steering",
               "hub/fleet-compositions",
               "store/composition-files",
-              "apps/viewer/src/lib/fleet-orders",
-              "apps/viewer/src/lib/fleet-targets"
+              "packages/viewer-engine/src/lib/fleet-orders",
+              "packages/viewer-engine/src/lib/fleet-targets"
             ],
             "every": 12
           },
@@ -413,8 +413,8 @@
               "packages/scene/src/lib/extent",
               "hub/object-data",
               "hub/objects",
-              "apps/viewer/src/lib/objects",
-              "apps/viewer/src/lib/scene-objects"
+              "packages/viewer-engine/src/lib/objects",
+              "packages/viewer-engine/src/lib/scene-objects"
             ],
             "every": 12
           },
@@ -453,8 +453,8 @@
               "packages/scene/src/lib/asteroids/",
               "hub/asteroid-data",
               "hub/asteroid-fields",
-              "apps/viewer/src/lib/asteroid-fields",
-              "apps/viewer/src/lib/scene-fields"
+              "packages/viewer-engine/src/lib/asteroid-fields",
+              "packages/viewer-engine/src/lib/scene-fields"
             ],
             "every": 12
           },
@@ -504,7 +504,7 @@
             "pathContains": [
               "packages/scene/src/lib/cinema/",
               "packages/scene/src/lib/waypoints/",
-              "apps/viewer/src/lib/cinema"
+              "packages/viewer-engine/src/lib/cinema"
             ],
             "every": 12
           }
@@ -545,9 +545,9 @@
             "pathContains": [
               "packages/scene/src/lib/stats/",
               "packages/scene/src/lib/prop-mods/",
-              "apps/viewer/src/lib/prop-mod",
-              "apps/viewer/src/lib/flight",
-              "apps/viewer/src/lib/audio",
+              "packages/viewer-engine/src/lib/prop-mod",
+              "packages/viewer-engine/src/lib/flight",
+              "packages/viewer-engine/src/lib/audio",
               "hub/ship-data",
               "hub/ship-stats-tool"
             ],
@@ -591,13 +591,13 @@
               "hub/sde-client",
               "hub/ship-stats-tool",
               "packages/scene/src/lib/stats/ship-stats",
-              "apps/viewer/src/lib/fittings",
-              "apps/viewer/src/lib/modules",
-              "apps/viewer/src/lib/module-cycle",
-              "apps/viewer/src/lib/damage",
-              "apps/viewer/src/lib/module-fx",
-              "apps/viewer/src/lib/module-audio",
-              "apps/viewer/src/lib/module-effects"
+              "packages/viewer-engine/src/lib/fittings",
+              "packages/viewer-engine/src/lib/modules",
+              "packages/viewer-engine/src/lib/module-cycle",
+              "packages/viewer-engine/src/lib/damage",
+              "packages/viewer-engine/src/lib/module-fx",
+              "packages/viewer-engine/src/lib/module-audio",
+              "packages/viewer-engine/src/lib/module-effects"
             ],
             "every": 12
           },
@@ -638,8 +638,8 @@
               "packages/scene/src/lib/location/",
               "hub/locations",
               "hub/map-data",
-              "apps/viewer/src/lib/location",
-              "apps/viewer/src/lib/celestials"
+              "packages/viewer-engine/src/lib/location",
+              "packages/viewer-engine/src/lib/celestials"
             ],
             "every": 12
           },
@@ -683,10 +683,10 @@
             "pathContains": [
               "packages/scene/src/lib/weapons/",
               "hub/weapon-data",
-              "apps/viewer/src/lib/weapon-lookup",
-              "apps/viewer/src/lib/turret",
-              "apps/viewer/src/lib/targets",
-              "apps/viewer/src/lib/shots"
+              "packages/viewer-engine/src/lib/weapon-lookup",
+              "packages/viewer-engine/src/lib/turret",
+              "packages/viewer-engine/src/lib/targets",
+              "packages/viewer-engine/src/lib/shots"
             ],
             "every": 12
           },
@@ -735,9 +735,9 @@
           {
             "pathContains": [
               "packages/scene/src/lib/combat/",
-              "apps/viewer/src/lib/combat",
-              "apps/viewer/src/lib/locks",
-              "apps/viewer/src/lib/explosion",
+              "packages/viewer-engine/src/lib/combat",
+              "packages/viewer-engine/src/lib/locks",
+              "packages/viewer-engine/src/lib/explosion",
               "packages/scene/src/lib/fleets/live"
             ],
             "every": 12
@@ -802,7 +802,7 @@
           {
             "pathContains": [
               "packages/scene/src/lib/logi/",
-              "apps/viewer/src/lib/auto-repair"
+              "packages/viewer-engine/src/lib/auto-repair"
             ]
           },
           {
@@ -858,7 +858,7 @@
             "words": ["timeline", "cue", "cues", "add_cue", "update_cue", "remove_cue", "set_timeline", "clear_timeline", "ship orders", "TimelinePlayer", "ShipScripts", "OnBeforeBoundary", "liveEdits", "play start", "movie", "movie mode", "event cue", "event cues", "beat", "beats", "set_movie"]
           },
           {
-            "pathContains": ["packages/scene/src/lib/timeline/", "apps/viewer/src/lib/timeline", "apps/viewer/src/lib/ship-scripts"],
+            "pathContains": ["packages/scene/src/lib/timeline/", "packages/viewer-engine/src/lib/timeline", "packages/viewer-engine/src/lib/ship-scripts"],
             "every": 12
           },
           {
@@ -875,7 +875,7 @@
             "words": ["time control", "time_control", "fast-forward", "fast forward", "slow motion", "slow-mo", "rewind", "jump back", "snapshot", "snapshots", "TimeControl", "re-simulate", "resimulate", "journal", "replay", "animation clock", "frameClock", "frame lock", "frame-locked", "beat", "play beat"]
           },
           {
-            "pathContains": ["apps/viewer/src/lib/time-control", "apps/viewer/src/lib/frame-lock", "apps/viewer/src/lib/animation-clock", "apps/viewer/src/lib/state-capture", "apps/viewer/src/lib/destiny-snapshot", "packages/scene/src/lib/time/"],
+            "pathContains": ["packages/viewer-engine/src/lib/time-control", "packages/viewer-engine/src/lib/frame-lock", "packages/viewer-engine/src/lib/animation-clock", "packages/viewer-engine/src/lib/state-capture", "packages/viewer-engine/src/lib/destiny-snapshot", "packages/scene/src/lib/time/"],
             "every": 12
           },
           {
@@ -892,7 +892,7 @@
             "words": ["stance", "stances", "ideal range", "piloting", "pilot brain", "kite", "kiting", "spiral", "burn out", "disengage", "legacyOrbitOf", "orbitOrderFor", "idealRangeOf", "stepShipPilot", "get_overview", "overview", "transversal", "angular velocity", "range dictation", "pilot-loop", "controller protocol"]
           },
           {
-            "pathContains": ["packages/scene/src/lib/piloting/", "apps/viewer/src/lib/destiny-orbit-model", "apps/viewer/src/lib/pilots", "apps/scene-director/src/pilot-loop"],
+            "pathContains": ["packages/scene/src/lib/piloting/", "packages/viewer-engine/src/lib/destiny-orbit-model", "packages/viewer-engine/src/lib/pilots", "apps/scene-director/src/pilot-loop"],
             "every": 12
           }
         ]
@@ -906,7 +906,7 @@
             "words": ["movie export", "export_movie", "export mode", "FrameTo", "BeginExport", "ExportStepper", "WebCodecs", "VideoEncoder", "VideoFrame", "mp4", "encode", "record_movie", "live recording", "record lock", "MovieRecording", "BeginRecording"]
           },
           {
-            "pathContains": ["apps/viewer/src/lib/export-", "apps/viewer/src/lib/movie-export", "packages/scene/src/lib/export/", "apps/scene-director/src/lib/hub/movie-exports", "apps/scene-director/src/lib/hub/mp4", "apps/scene-director/src/lib/store/movie-files", "apps/viewer/src/lib/movie-record", "apps/viewer/src/lib/movie-sink"],
+            "pathContains": ["packages/viewer-engine/src/lib/export-", "packages/viewer-engine/src/lib/movie-export", "packages/scene/src/lib/export/", "apps/scene-director/src/lib/hub/movie-exports", "apps/scene-director/src/lib/hub/mp4", "apps/scene-director/src/lib/store/movie-files", "packages/viewer-engine/src/lib/movie-record", "packages/viewer-engine/src/lib/movie-sink"],
             "every": 12
           },
           {

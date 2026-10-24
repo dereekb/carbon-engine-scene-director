@@ -13,7 +13,7 @@
   with the `retarget` switch option (the beam restarts on the new target), and every repair landing is tallied in
   `CombatRules` (get_state `combat.repairs`, scene `combat.repaired`). The accessors the controller needs are built
   (Seams). The lock gate, `LockAims` and the retarget: `sd-fittings` (Targeted modules); the tallies: `sd-combat`.
-- **L3 in** (2026-10-23): the page's `AutoRepair` controller (`apps/viewer/src/lib/auto-repair.ts`, node-tested) runs
+- **L3 in** (2026-10-23): the page's `AutoRepair` controller (`packages/viewer-engine/src/lib/auto-repair.ts`, node-tested) runs
   every boundary, the `auto_repair` tool, get_state `autoRepair` per member and per fleet, `switch_modules` taking a
   logi over, and the four verify-page `logi:` checks (evidence below).
 - **L4 in, delivered** (2026-10-23): the real-GPU look (TFIs against 10 Ferox; evidence below). Known gaps, filed as
@@ -27,8 +27,8 @@
 | `packages/scene/src/lib/logi/auto-repair.ts` | `SceneAutoRepair`, `AUTO_REPAIR_POLICIES`, `REMOTE_REPAIRER_CATEGORIES`, `readSceneAutoRepair` (normalize), `resolveAutoRepair`, `autoRepairOf`, the command (`normalizeAutoRepairCommand`, `toAutoRepairOperations`) |
 | `packages/scene/src/lib/logi/selection.ts` | `chooseRepairTargets`, `repairModuleHps`, `repairChoiceWhy`, the `REPAIR_*` constants |
 | `packages/scene/src/lib/fleets/fleet.ts`, `normalize.ts` | the field on `SceneFleet` / `SceneWing` / `SceneSquad`, read by `readSceneAutoRepair` |
-| `apps/viewer/src/lib/auto-repair.ts` | `AutoRepair` (the page controller, `AutoRepairPort`), `AutoRepairReport` / `AutoRepairFleetReport`, `AUTO_REPAIR_STATES`; node-tested (`auto-repair.spec.ts`, a fake port) |
-| `apps/viewer/src/lib/director.ts` | the port, `SyncAutoRepair`, `AutoRepairCondition`, `SetAutoRepair` (the tool), the `SwitchModules` takeover, get_state |
+| `packages/viewer-engine/src/lib/auto-repair.ts` | `AutoRepair` (the page controller, `AutoRepairPort`), `AutoRepairReport` / `AutoRepairFleetReport`, `AUTO_REPAIR_STATES`; node-tested (`auto-repair.spec.ts`, a fake port) |
+| `packages/viewer-engine/src/lib/director.ts` | the port, `SyncAutoRepair`, `AutoRepairCondition`, `SetAutoRepair` (the tool), the `SwitchModules` takeover, get_state |
 
 `fleets/normalize.ts` imports the reader; nothing in `logi/` imports `normalize.ts` (the same cycle-safe shape as
 `fleets/targets.ts`).

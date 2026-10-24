@@ -2,7 +2,7 @@
 
 `{ "type": "warp", "point": [x, y, z], "range"? }` or `{ "type": "warp", "target": "<ship id>", "range"? }` (`range`
 default 0; no `speed`: a warp always aligns at full speed). Code: `DestinyWorld` (`ApplyOrder`, `TrackWarps`,
-`MarkAligning`, `InProperWarp`, `WarpReport`, `OnWarp`) in `apps/viewer/src/lib/destiny.ts`; math in `warp.ts`.
+`MarkAligning`, `InProperWarp`, `WarpReport`, `OnWarp`) in `packages/viewer-engine/src/lib/destiny.ts`; math in `warp.ts`.
 
 ## How it runs
 

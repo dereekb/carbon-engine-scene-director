@@ -35,6 +35,7 @@ import {
   type FleetGroup,
   groupStanceOf,
   type FleetPicturePropMods,
+  type FleetPictureShip,
   type FleetPilotTraitSource,
   type FleetReachNumbers,
   type FleetShipFacts,
@@ -51,9 +52,11 @@ import {
   type ShipOrder,
   type ShipStance,
   pruneStanceOn,
+  rankFleetTargets,
   stanceEdited,
   stepFleetBrain,
   toFleetGroupKey,
+  toFleetTargetingReach,
   toFleetMemberships,
   toFleetPicture,
   toFleetPilotTraits,
@@ -298,6 +301,11 @@ interface FleetBrain {
   hostiles: number;
   reach: FleetReachNumbers;
   team: Maybe<string>;
+  /**
+   * Every hostile in the brain's last picture, ranked by its targeting (in reach or not), and the reach it calls within:
+   * the battle console's target list (Targets).
+   */
+  targets?: { readonly ranked: readonly FleetPictureShip[]; readonly reach: number };
   note?: string;
 }
 
@@ -818,6 +826,17 @@ export class FleetCommanders {
    * @param tick - The master tick.
    * @returns Its report; null for a fleet with no personality.
    */
+  /**
+   * A personality fleet's hostiles from its brain's last picture, ranked by its targeting, and the reach it calls
+   * within; null before its first picture.
+   *
+   * @param fleet - The fleet id.
+   * @returns The ranked hostiles and the reach in metres.
+   */
+  Targets(fleet: string): Maybe<{ readonly ranked: readonly FleetPictureShip[]; readonly reach: number }> {
+    return this.brains.get(fleet)?.targets ?? null;
+  }
+
   Report(fleet: string, tick: number): Maybe<FleetCommandReport> {
     const port = this.port;
     const book = this.Book();
@@ -914,6 +933,7 @@ export class FleetCommanders {
     brain.team = picture.team;
     brain.hostiles = picture.hostiles.length;
     brain.reach = picture.reach;
+    brain.targets = { ranked: rankFleetTargets({ hostiles: picture.hostiles, targeting: personality.targeting, reach: Number.POSITIVE_INFINITY }), reach: toFleetTargetingReach(personality.targeting.reach, picture.reach) };
     // A stance flown by the acting FC moves it and runs the prop mods; the brain still calls targets and free fire.
     const piloted = fc != null && port.Piloted?.(fc.ship) === true;
     const manual = piloted ? [...new Set<FleetBrainLever>([...brain.manual, ...FLEET_PILOTED_LEVERS])] : [...brain.manual];
