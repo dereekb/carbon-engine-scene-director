@@ -10,10 +10,11 @@
  *                        For save_fleet_composition and add_fleet_composition --in fills "composition"
  *                        instead (`call save_fleet_composition --in tfis.json`), and --out writes the
  *                        composition get_fleet_composition returns
- * scene-director https-cert [--https-dir <dir>]
- *                        makes the HTTPS listener's files (https-cert.ts): a local CA (made once and kept; a device
- *                        trusts it once), a certificate for this machine's names and private LAN addresses (made
- *                        again each run) and an access token (kept)
+ * scene-director https-cert [--https-dir <dir>] [--https-ca <file>|none] [--san <name|ip>,...]
+ *                        makes the HTTPS listener's files (https-cert.ts): a certificate for this machine's names, its
+ *                        private LAN addresses and --san's (made again each run), signed by the shared CA
+ *                        (apps/scene-director/https/ca.crt beside this bundle, whose ca.key is copied into --https-dir
+ *                        by hand; or a local CA, made once, with --https-ca none), and an access token (kept)
  *
  * Options: --port <n> (5520), --host <addr> (127.0.0.1), --tools-core <url> (http://127.0.0.1:5510),
  *          --eve-data tools-core|off (SCENE_DIRECTOR_EVE_DATA; tools-core by default; off is no-EVE-data mode: the hub
@@ -56,7 +57,7 @@ import { defaultFleetPersonalitiesDirectory, FleetPersonalityFileStore } from '.
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
 const USAGE =
-  'usage: scene-director serve|mcp|call <tool> [json]|https-cert [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--https-port <n>] [--https-host 0.0.0.0] [--https-dir <dir>] [--in scene.json] [--out file]\n';
+  'usage: scene-director serve|mcp|call <tool> [json]|https-cert [--https-ca <file>|none] [--san <name|ip>,...] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--https-port <n>] [--https-host 0.0.0.0] [--https-dir <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -89,6 +90,10 @@ const personalities = new FleetPersonalityFileStore(Option('--personalities', pr
 const movies = new MovieFileStore(Option('--movies', process.env['SCENE_DIRECTOR_MOVIES'] || DefaultMoviesDirectory()));
 const audioCache = new AudioBankCache({ directory: Option('--audio-cache', process.env['SCENE_DIRECTOR_AUDIO_CACHE'] || DEFAULT_AUDIO_CACHE_DIRECTORY), log: LogToStderr });
 const httpsDirectory = Option('--https-dir', process.env['SCENE_DIRECTOR_HTTPS_DIR'] || DefaultHttpsDirectory());
+/**
+ * The shared CA certificate, copied beside this bundle from apps/scene-director/https by the build.
+ */
+const DEFAULT_SHARED_CA = path.resolve(import.meta.dirname, 'https/ca.crt');
 
 /**
  * The HTTPS listener's options, when --https-port (or SCENE_DIRECTOR_HTTPS_PORT) asks for one. A bad port or missing
@@ -221,11 +226,19 @@ async function CallOnce(name: string): Promise<void> {
  */
 async function HttpsCert(): Promise<void> {
   try {
-    const report = await MakeHttpsCertificate({ directory: httpsDirectory });
+    const sharedCa = Option('--https-ca', process.env['SCENE_DIRECTOR_HTTPS_CA'] || (existsSync(DEFAULT_SHARED_CA) ? DEFAULT_SHARED_CA : 'none'));
+    const extraNames = (Option('--san', null) ?? '')
+      .split(',')
+      .map((name) => name.trim())
+      .filter(Boolean);
+    const report = await MakeHttpsCertificate({ directory: httpsDirectory, sharedCa: sharedCa === 'none' ? null : sharedCa, extraNames });
     const name = report.names[1] ?? 'localhost';
+    let caState = 'kept: devices that trust it need nothing new';
+    if (report.caShared) caState = `the shared CA (${report.caShared}), signed with the key copied here: a device that trusts it needs nothing new`;
+    else if (report.caCreated) caState = 'new: every device must trust it (below)';
     const lines = [
       `HTTPS files in ${report.directory}`,
-      `- CA "${report.caName}": ${report.caCreated ? 'new: every device must trust it (below)' : 'kept: devices that trust it need nothing new'}`,
+      `- CA "${report.caName}": ${caState}`,
       `- certificate for ${report.names.join(', ')} (${HTTPS_CERT_DAYS} days; run this again when the machine's LAN address changes)`,
       ...(report.skipped.length ? [`- left out (not a private address the CA may sign for): ${report.skipped.join(', ')}`] : []),
       `- access token: ${report.tokenCreated ? 'new' : 'kept'}`,

@@ -150,8 +150,17 @@ verify-page are unchanged. No Tailscale, proxy or Docker is involved. The assess
 - **Files**: `scene-director https-cert` (`hub/https-cert.ts`, the `openssl` command; LibreSSL on macOS works) writes
   them to `--https-dir <dir>` / `SCENE_DIRECTOR_HTTPS_DIR`, by default `scene-director/https` in the per-user data
   directory (`~/Library/Application Support/scene-director/https` on the Mac):
-  - `ca.crt` / `ca.key`: a local CA, made once and kept, so a device trusts it once. It is name-constrained to
-    `.local`, localhost and the private IPv4 ranges: its key can sign nothing else a device would trust.
+  - `ca.crt` / `ca.key`: the CA a device trusts once. It is name-constrained to `.local`, localhost and the private
+    IPv4 ranges: its key can sign nothing else a device would trust.
+    - **The shared CA is committed**, at `apps/scene-director/https/ca.crt`. The build copies it beside the CLI. It
+      is "scene-director dev CA (Michelles-MacBook-Air.local)", made on the Mac on 2026-10-24 and trusted on the
+      iPad, and every machine signs with it.
+    - **Its `ca.key` is never committed**: the repo is public, and the key would let anyone mint certificates the
+      iPad trusts on any LAN. Copy it by hand into a machine's HTTPS directory, chmod 600. The Mac has it.
+    - `https-cert` refuses when the key is missing or belongs to another CA, and never quietly makes a CA beside the
+      shared one.
+    - `--https-ca <file>|none` / `SCENE_DIRECTOR_HTTPS_CA` picks another CA file. `none` makes a local CA once and
+      keeps it.
   - `cert.pem` / `key.pem`: made again each run, for `localhost`, `<host>.local`, 127.0.0.1 and the private LAN
     addresses. It follows Apple's rules (RSA 2048, SHA-256, names in the SAN, serverAuth, 800 days, under 825).
     Run it again when the LAN address changes. `<host>.local` keeps working without that, since the iPad resolves it
@@ -176,18 +185,38 @@ verify-page are unchanged. No Tailscale, proxy or Docker is involved. The assess
   the profile, or AirDrop `ca.crt`. Then Settings → General → VPN & Device Management → install it. Then Settings →
   General → About → Certificate Trust Settings → full trust for "scene-director dev CA (<host>.local)". Then open the
   link with the token.
-- **dbxpc**: WSL2 is in NAT mode, so the LAN can't reach a hub inside WSL. It needs mirrored networking or a
-  `netsh portproxy` for 5521, plus a Windows firewall rule. Not set up.
+- **dbxpc** (where the EVE data is; not set up yet). WSL2 is in NAT mode, so the LAN can't reach a hub inside WSL,
+  and WSL can't see Windows' LAN address.
+  1. Copy `ca.key`, and `token` to keep the same access token, from the Mac to `~/.local/share/scene-director/https/`
+     and `chmod 600` them. `https-cert` keeps a token it finds. The Mac's HTTPS folder has a `DBXPC-SETUP.txt` with
+     these steps written for a session on dbxpc.
+  2. Run `node dist/apps/scene-director/main.js https-cert --san <Windows LAN IPv4>`. Add `,dbxpc.local` only if
+     the iPad resolves that name. Check `ipconfig` on Windows for the IP, and re-run when it changes.
+  3. Serve with `--https-port 5521` (or `SCENE_DIRECTOR_HTTPS_PORT=5521` in the profile Claude Code starts from).
+  4. In an elevated PowerShell, forward and open the port:
+     `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=5521 connectaddress=<wsl ip>
+     connectport=5521`, where `<wsl ip>` is `hostname -I` in WSL (it changes when WSL restarts), and
+     `New-NetFirewallRule -DisplayName "scene-director https" -Direction Inbound -Protocol TCP -LocalPort 5521
+     -Action Allow -Profile Private`.
+
+  Mirrored networking would avoid the portproxy, but it changes how the `windows-chrome` interop reaches WSL, so it
+  isn't the default. The iPad trusts the same CA, so it only needs dbxpc's token link once (cookies are per host).
 - **Checked (Mac, 2026-10-24)**: curl with `--cacert` over `Michelles-MacBook-Air.local` and 10.0.0.187 (the name
   constraints pass); no CA fails TLS. Playwright Chromium over the token link: a 302, then `isSecureContext` true,
   `navigator.gpu` present, the cookie set, and the page's `wss://` link connected (the hub counted the tab). The
   headless shell then loses its GPU device as usual.
-- **Not yet checked: an iPad.** What's open: Safari's acceptance of the CA (its name constraints included), WebKit's
-  WebGPU on the runtime's shaders and limits, `new VideoFrame(canvas)` and H.264 WebCodecs, and per-tab memory. The
-  probe is in the plan above.
-  - **Stage A**: no EVE data. `get_state.renderer`, `screenshot`, then `record_movie { action: "start", duration: 5,
-    codec: "h264", width: 1280, height: 720, fps: 30 }`, and check the MP4 with `ReadMp4`.
-  - **Stage B**: EVE data, which needs tools-core.
+- **iPad findings (2026-10-24, Stage A, no EVE data)**: Safari over `https://Michelles-MacBook-Air.local:5521/`
+  (the warning was clicked through before full trust was on, and WebGPU still came up).
+  - Renderer: adapter `apple apple apple`, with `texture-compression-bc` (+ `-sliced-3d`), `float32-filterable` and
+    `depth-clip-control`. A 2752×1800 canvas (iPad Pro 13" landscape).
+  - Drawing: 60 fps, `gpuErrors` 0. `screenshot` (the GPU readback) works.
+  - Recording: `record_movie` H.264 1280×720 at 30 fps for 5 s gave 150 frames in real time (30.02 fps, frame ms
+    mean 33 / max 53, 0 GPU errors). `new VideoFrame(canvas)` and WebCodecs H.264 work in WebKit, and the MP4 landed
+    on the Mac.
+  - A fight: `stage_engagement` TFIs vs TFIs (88 stand-ins, brawler vs kiter) with `auto_camera` ran at 57–60 fps,
+    tracers and kills included.
+  - Still open: Stage B (real EVE content: WebKit on the runtime's WGSL and CORTAO's storage-texture limits),
+    per-tab memory on a long or big scene, and HEVC.
   - Close the desktop tabs first: page tools go to the newest tab.
 
 ## verify-page (everything but drawing)

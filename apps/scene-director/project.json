@@ -20,6 +20,7 @@
         "format": ["esm"],
         "target": "node22",
         "sourcemap": true,
+        "assets": [{ "input": "apps/scene-director/https", "glob": "ca.crt", "output": "https" }],
         "esbuildOptions": {
           "banner": {
             "js": "#!/usr/bin/env node"
