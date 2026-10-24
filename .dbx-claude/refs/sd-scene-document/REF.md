@@ -141,7 +141,7 @@ edit of only the timeline and ships' `orders`, while a started timeline records,
 (`Director.ScriptEdit` in `EditNow`): the live scene's ships take the new orders directly (`withScriptOrders`) and the
 scene re-simulates from the latest snapshot before the edit's first difference, or takes it at once when it changes
 only the future; the patch result carries `resimulated`.
-Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP and kills) is **never written to the document**, so a
+Live state (orders, prop mod switches, camera follow from `frame_camera`, and from Combat rules locks, HP, `set_hp`'s HP sets and kills) is **never written to the document**, so a
 save or reload starts from the document's placements.
 
 ## Camera

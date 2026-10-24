@@ -11,12 +11,15 @@
  *   the kill).
  * - Recharge runs the passive shield recharge on every ship at each tick boundary (passiveRecharge, the capacitor's
  *   curve: peak at 25 %). Armor and structure do not regenerate.
+ * - SetHp is how set_hp changes HP (the director resolves the values with the package's resolveHpSet); the latest set's
+ *   record lives with the HP, so a ship that leaves the model drops both. A set can leave a live ship at 0 structure
+ *   (gameplay): DestroyedShips lists them for combat.ts' sweep.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
 
 import type { Maybe } from '@dereekb/util';
-import { applyLayeredDamage, DAMAGE_TYPES, DEFENSE_LAYERS, type DamageLayers, type DamageType, type DamageVector, type DefenseLayerName, passiveRecharge, type ShipDefense } from '@scene-director/scene';
+import { applyLayeredDamage, DAMAGE_TYPES, DEFENSE_LAYERS, type DamageLayers, type DamageType, type DamageVector, type DefenseLayerName, type HpSetIntent, type HpSetTarget, type HpSetValue, passiveRecharge, type ShipDefense } from '@scene-director/scene';
 import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
@@ -57,6 +60,38 @@ interface ShipDamage {
    */
   repairs: Readonly<Record<DefenseLayerName, number>>;
   incoming: readonly IncomingRepair[];
+  /**
+   * The latest set_hp that landed on it.
+   */
+  hpSet?: HpSetRecord;
+}
+
+/**
+ * The latest set_hp on a ship, get_state's hpSet.
+ */
+export interface HpSetRecord {
+  /**
+   * The tick the set was asked at, and the tick it landed (later for a set that waited for the ship's fit).
+   */
+  readonly tick: number;
+  readonly appliedAt: number;
+  readonly intent: HpSetIntent;
+  /**
+   * The seed its draws used (only when a value is random).
+   */
+  readonly seed?: number;
+  /**
+   * The values as given (normalized).
+   */
+  readonly values: Partial<Record<HpSetTarget, HpSetValue>>;
+  /**
+   * The HP each target was set to.
+   */
+  readonly hp: Partial<Record<HpSetTarget, number>>;
+  /**
+   * Why a value moved: above the max, the cinematic floor.
+   */
+  readonly clamped?: readonly string[];
 }
 
 /**
@@ -182,6 +217,39 @@ export class DamageModel {
     if (!ship) return null;
     const layer = (name: DefenseLayerName): { readonly hp: number; readonly max: number } => ({ hp: ship.layers[name].hp, max: ship.layers[name].max });
     return { shield: layer('shield'), armor: layer('armor'), structure: layer('structure') };
+  }
+
+  /**
+   * Sets a ship's HP per layer, each clamped to [0, max], and records the set: the only way set_hp changes HP.
+   *
+   * @param id - The ship id.
+   * @param hp - Each layer's HP.
+   * @param record - The set, for get_state.
+   * @returns False when the model does not track the ship.
+   */
+  SetHp(id: string, hp: Readonly<Record<DefenseLayerName, number>>, record: HpSetRecord): boolean {
+    const ship = this.ships.get(id);
+    if (!ship) return false;
+    for (const name of DEFENSE_LAYERS) {
+      const layer = ship.layers[name];
+      layer.hp = Math.min(layer.max, Math.max(0, hp[name]));
+    }
+    ship.hpSet = record;
+    return true;
+  }
+
+  /**
+   * The latest set_hp that landed on a ship since it joined the model.
+   */
+  HpSet(id: string): Maybe<HpSetRecord> {
+    return this.ships.get(id)?.hpSet ?? null;
+  }
+
+  /**
+   * The tracked ships at 0 structure, by id (combat.ts' sweep records the ones a set left there).
+   */
+  DestroyedShips(): string[] {
+    return [...this.ships.keys()].filter((id) => this.Destroyed(id)).sort();
   }
 
   /**

@@ -35,19 +35,29 @@ export interface ShotOutcome {
   readonly note?: string;
 }
 
+/**
+ * What killed a ship when no shot did: a gameplay set_hp that left its structure at 0.
+ */
+export type ShipKillCause = 'set_hp';
+
 export interface ShipKill {
   /**
    * The destroyed ship.
    */
   readonly ship: string;
   /**
-   * The ship whose shot killed it, its module key and weapon name.
+   * The ship whose shot killed it, its module key and weapon name; absent for a set_hp kill.
    */
-  readonly by: string;
-  readonly module: string;
-  readonly weapon: string;
+  readonly by?: string;
+  readonly module?: string;
+  readonly weapon?: string;
   /**
-   * The master tick boundary of the killing shot, and its exact fractional tick.
+   * Set when no shot killed it (`set_hp`); absent for a shot.
+   */
+  readonly cause?: ShipKillCause;
+  /**
+   * The master tick boundary of the killing shot (a set_hp kill: the boundary that swept it), and its exact
+   * fractional tick.
    */
   readonly tick: number;
   readonly at: number;
@@ -65,8 +75,9 @@ export interface ShipKillReport {
   readonly ship: string;
   readonly name?: Maybe<string>;
   readonly team?: Maybe<string>;
-  readonly by: string;
-  readonly module: string;
-  readonly weapon: string;
+  readonly by?: string;
+  readonly module?: string;
+  readonly weapon?: string;
+  readonly cause?: ShipKillCause;
   readonly tick: number;
 }

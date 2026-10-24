@@ -24,6 +24,10 @@ fires, resolves and reports missiles, headless (`sd-weapons` → Launchers fire)
 draw, detonate on the drawn hull and kill there, checked on the real GPU (Missiles in the page → Drawn, below;
 `sd-weapons` → Launchers fire, drawn). The plan is delivered.
 
+**Battle damage** (`~/.claude/plans/ship-battle-damage-set-hp-by-percent-amount-random-or-layer.md`): **H1 and H2 are
+in** (2026-10-24): `set_hp`'s command and maths in `packages/scene`, the page half, get_state and verify-page (Battle
+damage, below). H3 (the real-GPU look and sd-cinema's recipes) is next.
+
 ## Files (K1)
 
 | File | Holds |
@@ -32,12 +36,14 @@ draw, detonate on the drawn hull and kill there, checked on the real GPU (Missil
 | `combat/missile-numbers.ts` | `MISSILE_COMBAT_ATTRIBUTES`, `MissileCombatNumbers`, `missileCombatNumbersOf(ship, bundle, key)`, `missileFlightTime`, `missileRange` (`MissileRange`), `NO_MISSILE_NOTE`, `MISSILE_TICK_SECONDS` |
 | `combat/damage.ts` | `DamageVector`, `NO_DAMAGE`, `shotDamage`, `damageTotal`, `applyLayeredDamage` (pure), `passiveRecharge` (the closed form) |
 | `combat/locks.ts` | `lockTime`, `LOCK_TIME_CONSTANT` (40000), `pilotLockLimit`, `shipLockLimit`, the two Target Management skills |
-| `combat/random.ts` | `combatRoll(seed, key)`, `combatHash` (cyrb53), `combatPick`, `combatShuffle`, `CombatRollKey` |
+| `combat/random.ts` | `combatRoll(seed, key)`, `combatHash` (cyrb53), `combatUnit(seed, key)` (the picks, shuffles and set_hp's draws roll on it), `combatPick`, `combatShuffle`, `CombatRollKey` |
 | `combat/weapon-numbers.ts` | `TurretCombatNumbers`, `turretCombatNumbersOf(ship, bundle, key)`, `ShipWeapons` (`turrets`, `launchers`), `shipWeaponsOf` (turrets and launchers summed), `TURRET_COMBAT_ATTRIBUTES`, `NO_CHARGE_DAMAGE_NOTE` |
 | `combat/explosions.ts` | `SHIP_EXPLOSIONS`, `SHIP_EXPLOSION_TIMINGS` (captured), `explosionDurationBound`, `shipExplosionOf`, `MAX_LOCAL_BLASTS` (8), `EXPLOSION_REFERENCE_RADII`, `TITAN_EXPLOSION_REFERENCE_RADIUS` |
 | `combat/document.ts` | `SceneCombat`, `COMBAT_DEATH_MODES`, `DEFAULT_COMBAT_SEED` (1), `DEFAULT_COMBAT_DEATH` (`explode`), `normalizeSceneCombat`, `sceneCombatOf`, `COMBAT_OPERATIONS` / `applyCombatOperation` (`set_combat`) |
 | `combat/commands.ts` | `normalizeEngageCommand` (`{ selection, target, modules = DEFAULT_ENGAGE_MODULES ["turret", "launcher"] }`, a celestial refused), `normalizeCeaseFireCommand` (`{ selection, unlock }`) |
-| `combat/kill.ts` | `ShotOutcome`, `ShipKill`, `ShipKillReport`: the plain data the page will report and the timeline, time control and automatic camera read |
+| `combat/kill.ts` | `ShotOutcome`, `ShipKill`, `ShipKillReport`: the plain data the page will report and the timeline, time control and automatic camera read; `by` / `module` / `weapon` are absent and `cause: "set_hp"` (`ShipKillCause`) set for a set_hp kill |
+| `combat/hp-set.ts` | set_hp: `normalizeHpSetCommand`, `HP_SET_INTENTS` (`cinematic` default, `gameplay`), `CINEMATIC_MIN_STRUCTURE_HP` (1), `HP_SET_TARGETS`, `readHpAmount`, `hpSetHasRandom`, `hpSetValuesOf`, `hpSetRoll`, `drainTotalHp`, `resolveHpSet` (Battle damage, below) |
+| `combat/distributions.ts` | `HP_DISTRIBUTIONS` (`uniform` default, `normal`, `triangular`), `DEFAULT_NORMAL_SD_SPANS` (4), `uniformQuantile`, `triangularQuantile`, `normalCdf`, `normalQuantile`, `truncatedNormalQuantile`, `distributionQuantile` |
 | `hub/ship-stats-tool.ts` | turret rows' `damage` / `volley` / `dps` / `tracking` / `signatureResolution` / `explosion` / `spool`, and `weapons` on the stats |
 
 ## EVE's rules (checked 2026-10-23)
@@ -168,6 +174,9 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 | `viewer/director.ts` | `Destroy`, `Hide`, `RemoveDead` (the linger), `Revive`, `LiveFleets`, `DriveExplosions`, `ExplosionStarts`, `PostExplosionSound`, `IsDead` skips |
 
 ## Death (`combat.death`)
+
+A gameplay `set_hp` that leaves structure at 0 dies the same way at the next boundary (Battle damage → Intent), its kill
+`cause: "set_hp"` with no shooter; `explode` then starts its explosion at once (no shot draws it).
 
 - **`flag`**: the kill is recorded (`Killed`: targets on it clear, `OnKill` runs) and the ship flies on at 0 structure,
   taking no more damage until a load.
@@ -365,7 +374,8 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
   lastReceived }` once a ship received or gave one, so a logi that only repairs gets a `combat` block. `Clear` and
   `Remove` forget them.
 - **Director wiring**: one `OnBoundary` listener, in order: `RemoveDead(boundary)`, `combat.Recharge(tick s)` (impact
-  overlays re-armed when the shield moved > 0.1 %), `SyncFleetTargets(boundary)` (the fleet targeting lever: members
+  overlays re-armed when the shield moved > 0.1 %), `combat.SweepDestroyed(boundary, not in warp and not arriving)`
+  (set_hp's gameplay kills), `SyncFleetTargets(boundary)` (the fleet targeting lever: members
   take their groups' next live called targets, locks asked at `boundary − 1`; `sd-fleets` doc `targets`),
   `SyncAutoRepair(boundary)` (logi auto-repair: each fleet's logi pick their targets and switch their remote repairers
   with `retarget`; `sd-logi`), `locks.Boundary(boundary, WantedLocks())` (wanted: `LockAims` (weapons and remote
@@ -399,6 +409,7 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
 death `explode` (`sceneCombatOf`). Unknown keys warn and are dropped; `null` is absent. `{ op: "set_combat", seed?,
 death? }` merges, `null` resets a field. `diffScenes` flags `combat`. **Kills are live state** like HP, locks and
 targets: the document stays the setup, `load_scene` / `open_scene` revive everyone, `remove_ship` keeps an aftermath.
+`set_hp` sets HP live and writes nothing (Battle damage).
 
 ## The client's death explosion (`shipExplosionOf`)
 
@@ -429,6 +440,74 @@ shared part, a `globalExplosion` container, timing values). The client picks one
   550, XL 1,500 (the Triglavian dreadnought's file); the titan files `TITAN_EXPLOSION_REFERENCE_RADIUS` 7,000; the
   titan fallback (a long file) L's 550. A hull under its class's reference plays the authored size.
 
+## Battle damage (`set_hp`)
+
+A page tool (`where: 'page'`) that sets the live shield, armor and structure HP of ships, a fleet, a wing or a squad:
+hulls that look battle damaged for a shot, or a low-HP fight without waiting for guns. Every value is the HP a layer is
+**left with**.
+
+- **Values**: HP (a number ≥ 0), a percent of the layer's max (`"40%"`, 0–100; trimmed, `"40 %"` → `"40%"`), or a seeded
+  random draw `{ min, max, distribution?, mean?, sd?, mode? }`. A range's amounts share one unit (all HP or all percent;
+  a percent `sd` is points of the max), so it validates without a ship. One command mixes HP and percent across layers.
+- **Targets**: `shield` / `armor` / `structure` (each named layer set; the others keep their **current** HP; no spill
+  between them), or `total` (not with the layers): the HP left across the three, resolved against Σ max, and the deficit
+  taken **off a full ship** through `applyLayeredDamage` at unit resonances (shield first, then armor, then structure,
+  the damage spill; resists do not apply to an HP amount). From full, not from the current HP, so the same call gives the
+  same HP. Rifter (Σ 1,562.5): `"40%"` → 0 / 187.5 / 437.5, `1000` → 0 / 562.5 / 437.5.
+- **Above the max**: an HP value or a range bound above a ship's layer max is set to the max (each ship's max differs,
+  so not refused), with a `clamped` note (`armor 9999 HP is above its max 562.5: set to 562.5`; a range: `drawn up to`).
+- **Draws**: one uniform `u = combatUnit(seed, "hp|<ship>|<target>")` per ship and target (cyrb53, keyed like shot rolls:
+  the same in any selection order, however many ships), mapped through the distribution's quantile on the range in HP
+  for that ship, then clamped into [min, max]. `uniform`; `triangular` (mode default the middle); `normal` (mean the
+  middle, sd range ÷ 4) **truncated by its inverse CDF** (`μ + σ Φ⁻¹(Φ(α) + u (Φ(β) − Φ(α)))`; a range wholly above the
+  mean is drawn mirrored for precision), so no draw piles on a bound as clamping would (4.6 % at the default sd). Φ is
+  `0.5 erfc(−x/√2)` with Numerical Recipes' Chebyshev erfc (fractional error < 1.2e-7, tails included), Φ⁻¹ Acklam's
+  (< 1.2e-9). The seed is the command's `seed`, else the document's combat seed; two calls with one seed reuse a ship's
+  `u`. Moments pinned in `distributions.spec.ts` (100,000 keyed draws): normal 10–90 mean 50 / sd 17.59; normal 0–100 at
+  μ 70 σ 25 mean 64.72 / sd 20.41; triangular 0–100 mode 80 mean 60.
+- **Intent**: `cinematic` (default) never kills: structure the set **writes** (`structure`, or a `total` that drains it)
+  is held at `CINEMATIC_MIN_STRUCTURE_HP` (1; `min(1, max)`) with `structure held at 1 HP: a cinematic set never kills`.
+  `gameplay` plays EVE's rule: a set that leaves structure at exactly 0 is swept into a kill at the **next boundary**
+  (`CombatRules.SweepDestroyed`, right after the recharge, before the calls, locks, repairs and shots; ids sorted), as
+  `combat.death` says (explode: `Destroy`, the explosion started at once; flag: recorded, it flies on). A ship in warp
+  or still arriving dies once it is out and landed (`mayDie`). Any value above 0 keeps it alive (0.04 HP: a shot ends
+  it). Refusing 0 was rejected: it would fail a fleet-wide random set for one ship.
+- **Live only**: no document field; a load restores full HP, `remove_ship` drops the HP and the set. After a set the
+  normal rules run from the new HP: shields recharge on EVE's curve (from 0: 5 % at 0.0506 τ, 25 % at 0.139 τ; a Rifter
+  23.7 s / 65 s), repairs land on it, armor and structure hold until repaired, shot, a load, or a refit through the table
+  path (back at full HP, as combat damage); a max change keeps the fraction (`SetDefense`). The hull shows it at once
+  (`SyncImpactState`; `rechargeSynced` gets the new shield).
+- **Pending**: a ship the damage model does not track yet (its fit or default fit resolving) keeps the set in
+  `Director.pendingHp` (a newer set replaces it) and takes it in `SetFlight` right after `SetDefense`; a gameplay death
+  still comes from the next sweep. `HpWait` skips a ship that never has HP (`it has no HP: no EVE dogma for its hull`:
+  no EVE type, or its type failed). A load clears them; a removal or death drops the ship's. `load_scene` returns once
+  default fits resolve, so pending is seen with an EFT fit the hub still resolves.
+- **Validation** (`normalizeHpSetCommand`, one `SceneError` with every problem): unknown keys (`hull` hints
+  `structure`), no value, `total` with a layer, intent, seed (integer 0 … 2³² − 1), the selection (`readFleetSelection`);
+  amounts (negative / non-finite HP, non-percent strings, percents outside 0–100); ranges (unknown key, no min / max,
+  mixed units, min > max, unknown distribution, `mean` / `sd` without normal, `mode` without triangular, mean or mode
+  outside, sd ≤ 0). The page throws unknown ships, fleets, wings and squads (`selectFleetShips` on the document, as
+  engage) and skips destroyed or dead ships (`it was destroyed (a load revives it)`).
+- **Result**: `{ tick, intent, seed? (a random set), ships: [{ id, shield | armor | structure: { hp, max, was },
+  clamped? }], destroys? ([{ id, mode, note? }]), pending? ([{ id, note }]), skipped }`. `tick` is `world.tick`, the
+  boundary to come, so a gameplay kill lands at that tick.
+- **get_state**: `defense` (each layer's current and max, unchanged); `hpSet` (omitted until a set since the load):
+  `{ state: applied | pending, tick, appliedAt?, intent, seed?, values (as given, normalized), hp? (each target's HP to
+  0.1), clamped?, note? }` (only the latest set; `DamageModel` keeps it beside the HP); `destroyed` and `combat.kills`
+  carry `cause: "set_hp"` and no `by`, `module`, `weapon`.
+- **Files**: `combat/hp-set.ts`, `combat/distributions.ts`, `combat/random.ts` `combatUnit` (above); viewer `damage.ts`
+  `SetHp` / `HpSet` / `DestroyedShips` / `HpSetRecord`; `combat.ts` `SweepDestroyed` (onKill's shot is `Maybe`);
+  `director.ts` `SetHp`, `ApplyHpSet`, `ApplyPendingHp`, `HpWait`, `HpSetState`, `pendingHp`, `SET_HP_NO_DOGMA`,
+  `KillerOf`; `set_hp` joins `JOURNALED_TOOLS`.
+- **Verify-page** (2026-10-24, SDE 3632936, headless; `--only set_hp`): Rifter maxes 562.5 / 562.5 / 437.5; `{ shield:
+  "0%", armor: 200, structure: "50%" }` → 0 / 200 / 218.8, `total: "40%"` → 0 / 187.5 / 437.5, `armor: 9999` → 562.5
+  with the note; cinematic `total: 0` → 0 / 0 / 1; gameplay `structure: 0` killed at the result's tick (cause set_hp, no
+  by), `ecx_generic_explosive_short_individual_01b` 1 tick and `_global_01b` 3 ticks later; a flagged set kill flies on;
+  a 5-Rifter fleet normal 10–90 % armor: seed 1 [193.1, 178.9, 336.1, 227.5, 339.5] twice, seed 7 [343.3, 266.8, 101,
+  264.6, 343.5]; a shield set to 0 read 5.8 HP after 10 boundaries (the curve's 5.758), then a Punisher's first hits
+  landed on armor (281.3 → 145); six refusals with their texts and nothing changed; three fitted Slashers pending
+  (`loading the fit's dogma`) took the set before the next boundary.
+
 ## Tools
 
 - **`ship_stats`** (K1): turret rows in `fit.modules` carry `damage` (per shot by type, before quality), `volley`,
@@ -454,6 +533,7 @@ shared part, a `globalExplosion` container, timing values). The client picks one
   `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, paperDps, repairs? }` (once it
   fired, was shot or was repaired), `destroyed` `{ tick, by, module, weapon, mode }`; weapon rows `combat` `{ damage,
   volley, dps }` and the lock note while held; scene `combat` `{ seed, death, shots, hits, repaired, kills }`.
+- **`set_hp`**: Battle damage, above.
 - **`Director.OnKill(listener)`**: for the fleet targeting lever and the automatic camera.
 
 ## Snapshot in time control (`sd-time`)
@@ -464,7 +544,8 @@ wreck switch stays hidden, and ships destroyed after the landing are drawn again
 
 Time control's snapshots (`Director.CaptureSim`, `sd-time`) hold all of it, and a jump back replays the same fight (verify-page `time:`: the same kill tick, killer and module, no drift). Plain data in its owners: `ShipLocks` (locks, keeps), `DamageModel` (HP), `CombatRules` (tallies with the repair
 tallies, kills, destroyed, spools, the scene's repaired total), a remote repairer's pending `retarget`, the
-`ModuleCycle` activation counters, `Director.engagements`, `AutoRepair` (owned modules with the target asked, incumbent
+`ModuleCycle` activation counters, `Director.engagements`, `set_hp`'s records (in `DamageModel`) and
+`Director.pendingHp` (sets waiting for a fit; `set_hp` is journaled, so a jump back replays it at its tick), `AutoRepair` (owned modules with the target asked, incumbent
 targets with their since tick, manual marks, pending adoptions, last resolved settings, pre-locks; `sd-logi`),
 `FleetTargets` (own marks, called targets, holds, responses,
 the last calls and primaries: `sd-fleets` doc `targets`), the live call book `FleetCommanders` (group key → list, free fire, acting commanders, and each personality fleet's
@@ -486,6 +567,9 @@ re-simulation rolls the same; explosions re-trigger from their kills' times. Mis
   included), `ShipLocks.Lockers(target)` (yellow boxes: outside the fleet and team), `ShipModules.RemoteRepairers(id)`
   and `Incoming(id)`, and switches through `ShipModules.Switch` with `retarget`. It runs in the boundary listener after
   `SyncFleetTargets` and before the lock sweep; its landings are tallied by `RecordRepair` as manual reps are.
+- Battle damage: `OnKill` listeners get `shot: null` and `kill.cause: "set_hp"` for a set kill (the camera director and
+  the timeline's kill events already take a kill without `by`). A timeline beat embeds `normalizeHpSetCommand`'s plain
+  object and calls `Director.SetHp` (not wired yet: `set_hp` is no timeline action).
 - Missiles (M2a and M2b in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared
   `applyLayeredDamage`, wired (M2b: Missiles in the page → The wiring); hits reach `OnShot` with `missile` set, kills
   `OnKill`; no launch hook yet.

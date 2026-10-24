@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { type CombatRollKey, combatHash, combatPick, combatRoll, combatShuffle } from './random';
+import { type CombatRollKey, combatHash, combatPick, combatRoll, combatShuffle, combatUnit } from './random';
 
 const KEY: CombatRollKey = { ship: 'rifter', module: 'high-0', activation: 1, cycle: 3, target: 'punisher' };
 
@@ -61,5 +61,22 @@ describe('combatPick and combatShuffle', () => {
     expect(shuffled).not.toEqual(items);
     expect(combatShuffle(2, 'blasts|rifter', items)).not.toEqual(shuffled);
     expect(items).toEqual(Array.from({ length: 18 }, (_, index) => index));
+  });
+});
+
+describe('combatUnit', () => {
+  it('is keyed by seed and key, in [0, 1)', () => {
+    const unit = combatUnit(1, 'hp|r1|armor');
+    expect(combatUnit(1, 'hp|r1|armor')).toBe(unit);
+    expect(unit).toBeGreaterThanOrEqual(0);
+    expect(unit).toBeLessThan(1);
+    expect(combatUnit(2, 'hp|r1|armor')).not.toBe(unit);
+    expect(combatUnit(1, 'hp|r2|armor')).not.toBe(unit);
+    expect(combatUnit(1, 'hp|r1|shield')).not.toBe(unit);
+  });
+
+  it('is what the picks and shuffles roll on', () => {
+    expect(combatPick(1, 'explosion|rifter', 3)).toBe(Math.floor(combatUnit(1, 'explosion|rifter') * 3));
+    expect(combatUnit(1, 'explosion|rifter')).toBe(combatHash('1|explosion|rifter') / 2 ** 53);
   });
 });

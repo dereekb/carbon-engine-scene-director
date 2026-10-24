@@ -150,7 +150,7 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 ## The tape (T2b)
 
 - **Journaled tools** (`JOURNALED_TOOLS` in director.ts): `order_ship`, `order_fleet` (its live orders), `switch_prop_mods`,
-  `switch_modules`, `set_target`, `engage`, `cease_fire`. `Handlers()` wraps each (inside the timeline's `at` wrapper,
+  `switch_modules`, `set_target`, `engage`, `cease_fire`, `set_hp`. `Handlers()` wraps each (inside the timeline's `at` wrapper,
   so a cued call is not journaled): `Mark()` before, `Record(mark, tool, args)` after success (a promise's success for
   `order_fleet`). Record does nothing while recording is off, during a jump, or when a cut happened during the call (a
   document order's `Apply`).

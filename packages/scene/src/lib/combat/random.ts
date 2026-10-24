@@ -67,6 +67,18 @@ export function combatRoll(seed: number, key: CombatRollKey): number {
 }
 
 /**
+ * A keyed uniform number: the hash of `seed|key` over 2⁵³. The picks, the shuffles and set_hp's draws (`hp|<ship>|<target>`)
+ * roll on it.
+ *
+ * @param seed - The combat seed.
+ * @param key - What the roll is for.
+ * @returns A uniform number in [0, 1).
+ */
+export function combatUnit(seed: number, key: string): number {
+  return unitOf(`${seed}|${key}`);
+}
+
+/**
  * A keyed pick among `count` choices (an explosion variant).
  *
  * @param seed - The combat seed.
@@ -75,7 +87,7 @@ export function combatRoll(seed: number, key: CombatRollKey): number {
  * @returns An index in [0, count); 0 when count is under 1.
  */
 export function combatPick(seed: number, key: string, count: number): number {
-  return count >= 1 ? Math.min(count - 1, Math.floor(unitOf(`${seed}|${key}`) * Math.floor(count))) : 0;
+  return count >= 1 ? Math.min(count - 1, Math.floor(combatUnit(seed, key) * Math.floor(count))) : 0;
 }
 
 /**
@@ -89,7 +101,7 @@ export function combatPick(seed: number, key: string, count: number): number {
 export function combatShuffle<T>(seed: number, key: string, items: readonly T[]): T[] {
   const result = [...items];
   for (let index = result.length - 1; index > 0; index -= 1) {
-    const swap = Math.floor(unitOf(`${seed}|${key}|${index}`) * (index + 1));
+    const swap = Math.floor(combatUnit(seed, `${key}|${index}`) * (index + 1));
     [result[index], result[swap]] = [result[swap], result[index]];
   }
   return result;

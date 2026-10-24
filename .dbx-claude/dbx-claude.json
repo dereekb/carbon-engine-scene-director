@@ -694,7 +694,10 @@
               "explode",
               "engage",
               "cease_fire",
-              "set_combat"
+              "set_combat",
+              "set_hp",
+              "battle damage",
+              "HP set"
             ]
           },
           {
@@ -711,7 +714,8 @@
             "toolNames": [
               "mcp__scene-director__engage",
               "mcp__scene-director__cease_fire",
-              "mcp__scene-director__set_target"
+              "mcp__scene-director__set_target",
+              "mcp__scene-director__set_hp"
             ]
           }
         ]

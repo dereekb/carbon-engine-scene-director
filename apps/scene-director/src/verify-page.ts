@@ -126,11 +126,16 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly engaged?: { readonly modules: string[] };
   readonly combat?: ShipCombatState;
   readonly missiles?: { readonly launched: number; readonly inFlight: number };
+  readonly hpSet?: HpSetState;
   readonly destroyed?: {
     readonly tick: number;
-    readonly by: string;
-    readonly module: string;
-    readonly weapon: string;
+    /**
+     * Absent for a set_hp kill (cause "set_hp").
+     */
+    readonly by?: string;
+    readonly module?: string;
+    readonly weapon?: string;
+    readonly cause?: string;
     readonly mode: string;
     readonly explosion?: { readonly state: string; readonly file: string; readonly removesAt: number; readonly gone: boolean };
   };
@@ -254,6 +259,34 @@ interface ShipRepairsState {
 /**
  * engage's answer (the viewer's director.ts EngageResult).
  */
+/**
+ * set_hp's answer (the viewer's director.ts SetHpResult).
+ */
+interface SetHpResult {
+  readonly tick: number;
+  readonly intent: string;
+  readonly seed?: number;
+  readonly ships: ({ readonly id: string; readonly clamped?: string[] } & Record<'shield' | 'armor' | 'structure', { readonly hp: number; readonly max: number; readonly was: number }>)[];
+  readonly destroys?: { readonly id: string; readonly mode: string; readonly note?: string }[];
+  readonly pending?: { readonly id: string; readonly note: string }[];
+  readonly skipped: { readonly id: string; readonly reason: string }[];
+}
+
+/**
+ * A ship's latest set_hp in get_state.
+ */
+interface HpSetState {
+  readonly state: 'applied' | 'pending';
+  readonly tick: number;
+  readonly appliedAt?: number;
+  readonly intent: string;
+  readonly seed?: number;
+  readonly values: Record<string, unknown>;
+  readonly hp?: Record<string, number>;
+  readonly clamped?: string[];
+  readonly note?: string;
+}
+
 interface EngageResult {
   readonly tick: number;
   readonly target: string;
@@ -514,7 +547,7 @@ interface ViewerState {
   readonly asteroidFields?: SceneAsteroidFieldStateReport[];
   readonly scene?: Maybe<{ readonly asteroidFields?: number }>;
   readonly cinema?: CinemaStateReport;
-  readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly repaired?: number; readonly kills: { readonly ship: string; readonly by: string; readonly module: string; readonly weapon: string; readonly tick: number }[] };
+  readonly combat?: { readonly seed: number; readonly death: string; readonly shots: number; readonly hits: number; readonly repaired?: number; readonly kills: { readonly ship: string; readonly by?: string; readonly module?: string; readonly weapon?: string; readonly cause?: string; readonly tick: number }[] };
   readonly missiles?: MissilesState;
 }
 
@@ -1879,7 +1912,7 @@ try {
     const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
     const dead = await WaitFor('the kill', 60, (polled) => (ShipIn(polled, 'rifter').destroyed ? null : Show(ShipIn(polled, 'rifter').defense)));
     const kill = ShipIn(dead, 'rifter').destroyed;
-    Expect(kill?.mode === 'explode' && ['p1', 'p2'].includes(kill.by) && dead.combat?.kills.some((row) => row.ship === 'rifter'), Show({ kill, kills: dead.combat?.kills }));
+    Expect(kill?.mode === 'explode' && ['p1', 'p2'].includes(kill.by ?? '') && dead.combat?.kills.some((row) => row.ship === 'rifter'), Show({ kill, kills: dead.combat?.kills }));
     const stopped = await WaitFor('the guns on it stop, the orbiter stops', 10, (polled) => {
       const guns = ['p1', 'p2'].flatMap((id) => ShipGuns(polled, id).filter((gun) => gun.state === 'active' || gun.state === 'stopping'));
       const orbiter = ShipIn(polled, 'orbiter');
@@ -1910,6 +1943,147 @@ try {
     // Headless draws no hull, so no damage controller loads the hull's fires: only the real GPU sees that leak.
     const drawn = gone.renderer.available ? '' : " (no renderer: the hull's damage effects never load)";
     return `killed by ${kill?.by} (${kill?.module}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(stopped, 'orbiter').orderNote}; order_ship refused (${refused}); sounds ${Show(sounds)}; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} ball gone at tick ${gone.simulation.tick} (removesAt ${ShipIn(gone, 'rifter').destroyed?.explosion?.removesAt}); gameObjects − emitters ${after}${drawn}`;
+  });
+
+  // Battle damage (set_hp, sd-combat → Battle damage): HP set live on default-fit Rifters (562.5 / 562.5 / 437.5 on SDE
+  // 3632936). Each check loads its own scene; --only set_hp runs them alone.
+  const LAYERS = ['shield', 'armor', 'structure'] as const;
+  const HpOf = (state: ViewerState, id: string): number[] => LAYERS.map((layer) => ShipIn(state, id).defense?.[layer].hp ?? Number.NaN);
+  const MaxOf = (state: ViewerState, id: string): number[] => LAYERS.map((layer) => ShipIn(state, id).defense?.[layer].max ?? Number.NaN);
+  const Near = (a: number, b: number, within = 0.11): boolean => Math.abs(a - b) <= within;
+  const HpNear = (got: readonly number[], want: readonly number[], within = 0.11): boolean => got.length === want.length && got.every((value, index) => Near(value, want[index], within));
+  const HpRefusal = (args: Record<string, unknown>): Promise<string> =>
+    call('set_hp', args).then(
+      () => 'taken',
+      (error: unknown) => (ErrorProblems(error) ?? []).join('; ') || ErrorMessage(error)
+    );
+
+  await Check('set_hp sets layers by HP and percent and the total shield first; get_state reports the set', async () => {
+    const loaded = await LoadCombatScene([Rifter('r1', [0, 0, 0]), Rifter('r2', [0, 0, 3000]), Rifter('r3', [0, 0, -3000])], { death: 'flag' });
+    const [shieldMax, armorMax, structureMax] = MaxOf(loaded, 'r1');
+    const one = await call<SetHpResult>('set_hp', { ships: ['r1'], shield: '0%', armor: 200, structure: '50%' });
+    const row = one.ships.find((ship) => ship.id === 'r1');
+    Expect(row && row.shield.hp === 0 && row.armor.hp === 200 && Near(row.structure.hp, structureMax / 2) && row.shield.was === shieldMax && row.armor.was === armorMax && one.intent === 'cinematic' && one.seed == null, Show(one));
+    const total = await call<SetHpResult>('set_hp', { ships: ['r2'], total: '40%' });
+    const three = await call<SetHpResult>('set_hp', { ships: ['r3'], armor: 9999 });
+    const state = await call<ViewerState>('get_state');
+    Expect(HpNear(HpOf(state, 'r1'), [0, 200, structureMax / 2]), `r1 ${Show(HpOf(state, 'r1'))}`);
+    const set = ShipIn(state, 'r1').hpSet;
+    Expect(set?.state === 'applied' && set.intent === 'cinematic' && set.appliedAt === one.tick && set.tick === one.tick && Show(set.values) === Show({ shield: '0%', armor: 200, structure: '50%' }) && set.hp?.['armor'] === 200, Show(set));
+    // 40 % of Σ max left: the deficit empties the shield first, then takes the rest off armor.
+    const sum = shieldMax + armorMax + structureMax;
+    const r2 = [0, armorMax - (0.6 * sum - shieldMax), structureMax];
+    Expect(HpNear(HpOf(state, 'r2'), r2), `r2 ${Show(HpOf(state, 'r2'))} vs ${Show(r2)} (${Show(total)})`);
+    Expect(HpOf(state, 'r3')[1] === armorMax && /armor 9999 HP is above its max/u.test(three.ships[0]?.clamped?.join() ?? '') && ShipIn(state, 'r3').hpSet?.clamped?.length === 1, Show(three));
+    return `r1 ${Show(HpOf(state, 'r1'))}; r2 total 40 % → ${Show(HpOf(state, 'r2'))}; r3 armor 9999 → ${HpOf(state, 'r3')[1]} (${three.ships[0]?.clamped?.join()}); maxes ${Show([shieldMax, armorMax, structureMax])}`;
+  });
+
+  await Check('set_hp cinematic holds 1 HP of structure; gameplay at 0 destroys under combat.death', async () => {
+    await LoadCombatScene([Rifter('a', [0, 0, 0]), Rifter('b', [3000, 0, 0])]);
+    const held = await call<SetHpResult>('set_hp', { ships: ['a'], total: 0 });
+    Expect(HpNear([held.ships[0].shield.hp, held.ships[0].armor.hp, held.ships[0].structure.hp], [0, 0, 1]) && /never kills/u.test(held.ships[0].clamped?.join() ?? ''), Show(held));
+    const killed = await call<SetHpResult>('set_hp', { ships: ['b'], structure: 0, intent: 'gameplay' });
+    Expect(killed.destroys?.length === 1 && killed.destroys[0].id === 'b' && killed.destroys[0].mode === 'explode', Show(killed));
+    const dead = await WaitFor('the set kill', 10, (polled) => (ShipIn(polled, 'b').destroyed ? null : Show(ShipIn(polled, 'b').defense)));
+    const kill = ShipIn(dead, 'b').destroyed;
+    const row = dead.combat?.kills.find((entry) => entry.ship === 'b');
+    // world.tick is the boundary to come: the sweep kills there.
+    Expect(kill?.cause === 'set_hp' && kill.by == null && kill.mode === 'explode' && row?.cause === 'set_hp' && row.by == null && kill.tick >= killed.tick && kill.tick <= killed.tick + 1, Show({ kill, row, at: killed.tick }));
+    Expect(!ShipIn(dead, 'a').destroyed, `a died: ${Show(ShipIn(dead, 'a').destroyed)}`);
+    const heard = await WaitFor('the explosion posts its local and global sounds', 15, (polled) => {
+      const events = (polled.audio?.posted ?? []).filter((entry) => entry.ship === 'b' && entry.tick >= killed.tick && /^ecx_generic_explosive_short_/u.test(entry.event)).map((entry) => entry.event);
+      return events.some((event) => /individual/u.test(event)) && events.some((event) => /global/u.test(event)) ? null : Show(events);
+    });
+    const sounds = [...new Set((heard.audio?.posted ?? []).filter((entry) => entry.ship === 'b' && /^ecx_/u.test(entry.event)).map((entry) => `${entry.event}@${entry.tick - killed.tick}`))];
+    const again = await call<SetHpResult>('set_hp', { ships: ['b'], armor: '50%' });
+    Expect(again.skipped.some((skip) => skip.id === 'b' && /was destroyed/u.test(skip.reason)) && !again.ships.length, Show(again));
+    await LoadCombatScene([Rifter('c', [0, 0, 0])], { death: 'flag' });
+    await call<SetHpResult>('set_hp', { ships: ['c'], total: 0, intent: 'gameplay' });
+    const flagged = await WaitFor('the flagged set kill', 10, (polled) => (ShipIn(polled, 'c').destroyed ? null : Show(ShipIn(polled, 'c').defense)));
+    const c = ShipIn(flagged, 'c');
+    Expect(c.destroyed?.mode === 'flag' && c.destroyed.cause === 'set_hp' && c.position != null, Show({ destroyed: c.destroyed, position: c.position }));
+    return `a total 0 → ${Show([held.ships[0].shield.hp, held.ships[0].armor.hp, held.ships[0].structure.hp])}; b killed at the boundary +${(kill?.tick ?? 0) - killed.tick} (cause ${kill?.cause}), sounds ${Show(sounds)}; c flagged at tick ${c.destroyed?.tick}, flies on`;
+  });
+
+  await Check('set_hp random draws replay with the seed and differ with another seed', async () => {
+    const ids = ['m1', 'm2', 'm3', 'm4', 'm5'];
+    const fleets = [{ id: 'f', commander: 'm1', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ids.slice(1) }] }] }];
+    const Draw = async (seed?: number): Promise<{ result: SetHpResult; hp: number[] }> => {
+      await LoadCombatScene(ids.map((id, index) => Rifter(id, [index * 2000, 0, 0])), { death: 'flag' }, { fleets });
+      const result = await call<SetHpResult>('set_hp', { fleet: 'f', armor: { min: '10%', max: '90%', distribution: 'normal' }, ...(seed == null ? {} : { seed }) });
+      const state = await call<ViewerState>('get_state');
+      return { result, hp: ids.map((id) => HpOf(state, id)[1]) };
+    };
+    const first = await Draw();
+    const max = first.result.ships[0]?.armor.max ?? Number.NaN;
+    Expect(first.result.ships.length === 5 && first.hp.every((hp) => hp >= 0.1 * max - 0.1 && hp <= 0.9 * max + 0.1) && new Set(first.hp).size > 1 && first.result.seed === 1, Show(first));
+    const again = await Draw();
+    Expect(Show(again.hp) === Show(first.hp), `replayed ${Show(again.hp)} vs ${Show(first.hp)}`);
+    const other = await Draw(7);
+    Expect(Show(other.hp) !== Show(first.hp) && other.result.seed === 7, Show(other));
+    return `seed 1: ${Show(first.hp)} (twice); seed 7: ${Show(other.hp)}; armor max ${max}`;
+  });
+
+  await Check('set_hp shields recharge from the set HP and hits land on the armor it left', async () => {
+    await LoadCombatScene([Rifter('r', [0, 0, 0]), Punisher('p', [2000, 0, 0])], { death: 'flag' });
+    const set = await call<SetHpResult>('set_hp', { ships: ['r'], shield: 0, armor: '50%' });
+    const armor = set.ships[0].armor.hp;
+    const max = set.ships[0].shield.max;
+    const recharged = await WaitFor('ten boundaries of recharge', 20, (polled) => (polled.simulation.tick - set.tick >= 10 ? null : `tick ${polled.simulation.tick}`));
+    const defense = ShipIn(recharged, 'r').defense;
+    const tau = defense?.shieldRecharge ?? Number.NaN;
+    const elapsed = recharged.simulation.tick - set.tick;
+    const curve = (n: number): number => max * (1 - Math.exp((-5 * n) / tau)) ** 2;
+    const shield = defense?.shield.hp ?? Number.NaN;
+    Expect([elapsed - 1, elapsed, elapsed + 1].some((n) => Near(shield, curve(n), 0.06)) && defense?.armor.hp === armor, `shield ${shield} after ${elapsed} boundaries: curve ${Show([elapsed - 1, elapsed, elapsed + 1].map((n) => Math.round(curve(n) * 100) / 100))}; armor ${defense?.armor.hp} vs ${armor}`);
+    await call<EngageResult>('engage', { ships: ['p'], target: 'r' });
+    const hit = await WaitFor('the first hits', 20, (polled) => ((ShipIn(polled, 'r').combat?.lastTaken ?? []).length ? null : Show(ShipIn(polled, 'r').defense)));
+    const rows = ShipIn(hit, 'r').combat?.lastTaken ?? [];
+    Expect(rows.filter((taken) => taken.damage > 0).every((taken) => taken.layer === 'armor') && (ShipIn(hit, 'r').defense?.armor.hp ?? armor) <= armor, Show({ rows, defense: ShipIn(hit, 'r').defense }));
+    return `shield ${shield} HP after ${elapsed} boundaries (τ ${tau} s; curve ${Math.round(curve(elapsed) * 1000) / 1000}); first hits on ${Show([...new Set(rows.map((taken) => taken.layer))])}, armor ${armor} → ${ShipIn(hit, 'r').defense?.armor.hp}`;
+  });
+
+  await Check('set_hp refuses bad values and changes nothing', async () => {
+    const loaded = await LoadCombatScene([Rifter('r', [0, 0, 0])]);
+    const full = HpOf(loaded, 'r');
+    const refusals = [
+      [{ ships: ['r'], armor: '120%' }, /percentages run from 0% to 100%/u],
+      [{ ships: ['r'], armor: { min: 80, max: 10 } }, /min is above max/u],
+      [{ ships: ['r'], armor: { min: 10, max: '80%' } }, /use one unit/u],
+      [{ ships: ['r'], total: '50%', armor: 0 }, /give total, or shield/u],
+      [{ ships: ['nobody'], armor: 0 }, /nobody/u],
+      [{ fleet: 'none', armor: 0 }, /none/u]
+    ] as const;
+    const texts: string[] = [];
+    for (const [args, why] of refusals) {
+      const text = await HpRefusal(args);
+      Expect(why.test(text), `${Show(args)}: ${text}`);
+      texts.push(text);
+    }
+    const state = await call<ViewerState>('get_state');
+    Expect(Show(HpOf(state, 'r')) === Show(full) && !ShipIn(state, 'r').hpSet, Show({ hp: HpOf(state, 'r'), hpSet: ShipIn(state, 'r').hpSet }));
+    return texts.join(' | ');
+  });
+
+  await Check('set_hp on a fleet right after the load waits for the fits, then applies', async () => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter' }).catch(SkipWithoutSde);
+    // Slashers with an EFT fit no earlier check names: the hub still resolves its names and dogma when the set runs.
+    const fit = ['[Slasher, Pending]', 'Damage Control II', '', '1MN Afterburner II', '', '125mm Gatling AutoCannon II, EMP S'].join('\n');
+    const Slasher = (id: string, position: SceneVector) => ({ id, dna: 'mf1_t1:minmatarbase:minmatar', type: 'Slasher', position, fit });
+    const ids = ['q1', 'q2', 'q3'];
+    const fleets = [{ id: 'f', commander: 'q1', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ids.slice(1) }] }] }];
+    await call('load_scene', { scene: { name: 'verify-set-hp-pending', ships: ids.map((id, index) => Slasher(id, [index * 2000, 0, 0])), fleets } });
+    const result = await call<SetHpResult>('set_hp', { fleet: 'f', shield: '0%', armor: '25%' });
+    const applied = await WaitFor('every member takes the set', 60, (polled) => {
+      const waiting = ids.map((id) => ShipIn(polled, id)).find((ship) => ship.hpSet?.state !== 'applied');
+      return waiting ? `${waiting.id}: ${Show(waiting.hpSet ?? waiting.fit?.math)}` : null;
+    });
+    for (const id of ids) {
+      const [shieldMax, armorMax, structureMax] = MaxOf(applied, id);
+      Expect(HpNear(HpOf(applied, id), [0, armorMax / 4, structureMax]) && shieldMax > 0 && (ShipIn(applied, id).hpSet?.appliedAt ?? -1) >= result.tick, `${id} ${Show({ hp: HpOf(applied, id), hpSet: ShipIn(applied, id).hpSet })}`);
+    }
+    const waited = result.pending?.map((entry) => entry.id + ' (' + entry.note + ')') ?? [];
+    return `pending at the call: ${Show(waited)}, applied at once: ${Show(result.ships.map((ship) => ship.id))}; landed at ticks ${Show(ids.map((id) => (ShipIn(applied, id).hpSet?.appliedAt ?? 0) - result.tick))} after`;
   });
 
   // Missiles (sd-combat → Missiles in the page): a default-fit Caracal's 5 Heavy Missile Launcher II with Scourge.
@@ -2036,7 +2210,7 @@ try {
     Expect(engaged.ships[0]?.modules.length === 5 && !engaged.skipped.length, Show(engaged));
     const dead = await WaitFor('the missile kill', 90, (polled) => (ShipIn(polled, 'rifter').destroyed ? null : Show(ShipIn(polled, 'rifter').defense?.structure)));
     const kill = ShipIn(dead, 'rifter').destroyed;
-    Expect(kill?.by === 'caracal' && /^high-\d$/u.test(kill.module) && kill.weapon === 'Heavy Missile Launcher II' && kill.mode === 'explode', Show(kill));
+    Expect(kill?.by === 'caracal' && /^high-\d$/u.test(kill.module ?? '') && kill.weapon === 'Heavy Missile Launcher II' && kill.mode === 'explode', Show(kill));
     const gone = await WaitFor('the ball leaves after the linger', 40, (polled) => (ShipIn(polled, 'rifter').destroyed?.explosion?.gone && ShipIn(polled, 'rifter').position == null ? null : Show(ShipIn(polled, 'rifter').destroyed?.explosion)));
     const after = (gone.audio?.gameObjects ?? 0) - (gone.audio?.emitters ?? 0);
     Expect(after === objects && !gone.audio?.foreign, `audio game objects − emitters: ${objects} before, ${after} after`);

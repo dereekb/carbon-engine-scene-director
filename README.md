@@ -33,6 +33,9 @@ What works today:
   armor and hull, and each missile hits through EVE's missile damage formula (or runs
   out of flight time); a ship at 0 hull plays the client's death explosion and leaves the
   scene, its fleet falling back as on a removal (a load revives it).
+- **Battle damage**: `set_hp` sets the shield, armor and hull HP of ships, a fleet, a wing
+  or a squad, live (HP, a percent of max or a seeded random draw, per layer or in total),
+  to look battle damaged on camera without dying, or to start a low-HP fight.
 - **Logi**: a fleet's logi squads repair members under fire on their own: each logi
   locks the member in reach that needs it most, runs its remote repairers on EVE's cycle
   timing with the client's beams, and the reps hold ships up in the damage model
@@ -195,6 +198,7 @@ connected tab.
 | `set_target` | page | gives ships, a fleet, a wing or a squad a ship or object to lock, aim and fire their turrets and launchers at (null clears it) |
 | `engage` | page | arms ships' turrets and launchers on a target: they lock it and keep firing until `cease_fire` |
 | `cease_fire` | page | ends ships' engagements (their turrets and launchers stop at their cycle end); `unlock` drops the targets |
+| `set_hp` | page | sets ships' shield, armor and structure HP live: per layer or the total, as HP, a percent of max or a seeded random draw; cinematic never kills, gameplay can |
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, and called targets (a primary and a queue the group focuses fire on) |
 | `auto_repair` | page | a fleet's, wing's or squad's logi auto-repair on or off, and how they pick: most urgent, most damaged or most shot-at |
 | `screenshot` | page | the next frame as a PNG |

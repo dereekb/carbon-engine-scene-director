@@ -216,6 +216,49 @@ describe('CombatRules', () => {
 
 // A Caracal's HML II with Scourge Heavy at max skills (plan §1.6): 204.875 kinetic per missile, explosion 105 m,
 // 127.5 m/s, drf 0.682.
+describe('CombatRules.SweepDestroyed (set_hp kills)', () => {
+  const RECORD = { tick: 10, appliedAt: 10, intent: 'gameplay' as const, values: { structure: 0 }, hp: { structure: 0 } };
+
+  function Swept(): { rules: CombatRules; damage: DamageModel; kills: { ship: string; shot: unknown }[] } {
+    const damage = new DamageModel();
+    for (const id of ['punisher', 'rifter', 'merlin']) damage.SetDefense(id, Defense(1000));
+    const kills: { ship: string; shot: unknown }[] = [];
+    const rules = new CombatRules({ port: new FakePort(), damage, onKill: (kill, shot) => kills.push({ ship: kill.ship, shot }) });
+    rules.SetCombat({ seed: 1, death: 'flag' });
+    return { rules, damage, kills };
+  }
+
+  it('records a ship set to 0 once, with the cause, no shooter and the earlier shooters', () => {
+    const { rules, damage, kills } = Swept();
+    rules.Resolve([Shot({ ship: 'rifter', target: 'punisher' })], 9);
+    rules.Resolve([Shot({ ship: 'merlin', target: 'punisher', at: 9.5 }), Shot({ ship: 'merlin', target: 'punisher', cycle: 2, at: 9.6 })], 10);
+    damage.SetHp('punisher', { shield: 0, armor: 0, structure: 0 }, RECORD);
+    expect(rules.SweepDestroyed(11, () => true)).toHaveLength(1);
+    const kill = rules.KillOf('punisher');
+    expect(kill).toMatchObject({ ship: 'punisher', cause: 'set_hp', tick: 11, at: 11, mode: 'flag' });
+    expect(kill?.by).toBeUndefined();
+    expect(kill?.contributors.map((row) => row.ship)).toEqual(['merlin', 'rifter']);
+    expect(kills).toEqual([{ ship: 'punisher', shot: null }]);
+    expect(rules.SweepDestroyed(12, () => true)).toEqual([]);
+    expect(rules.Kills()).toHaveLength(1);
+    const after = Shot({ ship: 'rifter', target: 'punisher', cycle: 3, at: 12 });
+    rules.Resolve([after], 13);
+    expect(after.outcome?.result).toBe('overkill');
+  });
+
+  it('waits while mayDie says no, skips a ship at 1 HP, and a load revives', () => {
+    const { rules, damage } = Swept();
+    damage.SetHp('punisher', { shield: 0, armor: 0, structure: 0 }, RECORD);
+    damage.SetHp('rifter', { shield: 0, armor: 0, structure: 1 }, RECORD);
+    expect(rules.SweepDestroyed(11, (id) => id !== 'punisher')).toEqual([]);
+    expect(rules.IsDestroyed('punisher')).toBe(false);
+    expect(rules.SweepDestroyed(12, () => true).map((kill) => kill.ship)).toEqual(['punisher']);
+    expect(rules.IsDestroyed('rifter')).toBe(false);
+    rules.Clear();
+    expect(rules.IsDestroyed('punisher')).toBe(false);
+  });
+});
+
 const SCOURGE = { em: 0, thermal: 0, kinetic: 204.875, explosive: 0 };
 const HEAVY_EXPLOSION = { radius: 105, velocity: 127.5, drf: 0.682 };
 

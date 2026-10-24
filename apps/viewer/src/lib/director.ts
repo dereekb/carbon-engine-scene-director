@@ -66,7 +66,10 @@
  * rolled on Destiny's GetAccuracy and does EVE damage into the damage model
  * (CombatRules) before the OnShot listeners see it. Structure at 0 records a
  * kill (OnKill) and flags the ship destroyed: it takes no more damage, and
- * targets on it clear, until a load revives everyone.
+ * targets on it clear, until a load revives everyone. set_hp sets ships' HP
+ * live through the damage model (SetHp): a cinematic set never kills; a
+ * gameplay set that leaves structure at 0 is swept into a kill at the next
+ * boundary (CombatRules.SweepDestroyed, cause "set_hp").
  *
  * The cinematic camera (cinema.ts): a shot or sequence plays on generated hardpoints from the drawn ships, every
  * frame in TrackCamera, and the engine's FreeCamera draws it. A load cuts it; a camera change, a removed subject or the
@@ -173,6 +176,15 @@ import {
   DEFAULT_ENGAGE_MODULES,
   normalizeCeaseFireCommand,
   normalizeEngageCommand,
+  normalizeHpSetCommand,
+  DEFENSE_LAYERS,
+  type DefenseLayerName,
+  type CombatDeathMode,
+  resolveHpSet,
+  hpSetHasRandom,
+  hpSetValuesOf,
+  type HpSetCommand,
+  type HpSetIntent,
   sceneCombatOf,
   autoCameraReferences,
   normalizeAutoCameraCommand,
@@ -233,7 +245,7 @@ import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type Pick
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
 import { CameraDirector } from './camera-director';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinySnapshot, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
-import { DamageModel, type DamageReport, ImpactsHealed } from './damage';
+import { DamageModel, type DamageReport, type HpSetRecord, ImpactsHealed } from './damage';
 import { ExplosionFiles, ExplosionRemoveTick, ExplosionReplays, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
 import { ShipExplosions, type ShipExplosionReport } from './explosions';
 import {
@@ -544,6 +556,48 @@ export interface EngageResult {
   readonly warnings?: string[];
 }
 
+/**
+ * A layer in a set_hp result row: the HP after, the max, and the HP before.
+ */
+export interface SetHpLayerRow {
+  readonly hp: number;
+  readonly max: number;
+  readonly was: number;
+}
+
+export interface SetHpResult {
+  readonly tick: number;
+  readonly intent: HpSetIntent;
+  /**
+   * The seed the draws used (only when a value is random).
+   */
+  readonly seed?: number;
+  readonly ships: ({ readonly id: string; readonly clamped?: readonly string[] } & Readonly<Record<DefenseLayerName, SetHpLayerRow>>)[];
+  /**
+   * Gameplay sets that left structure at 0: the ship dies at the next tick boundary (once out of warp and landed).
+   */
+  readonly destroys?: { readonly id: string; readonly mode: CombatDeathMode; readonly note?: string }[];
+  /**
+   * Ships whose HP is not known yet (their fit resolving): the set lands once it is.
+   */
+  readonly pending?: { readonly id: string; readonly note: string }[];
+  readonly skipped: { readonly id: string; readonly reason: string }[];
+}
+
+/**
+ * A set_hp waiting for a ship's HP (its fit resolving): SetFlight applies it once the damage model tracks the ship.
+ */
+interface PendingHpSet {
+  readonly command: HpSetCommand;
+  readonly seed: number;
+  readonly tick: number;
+}
+
+/**
+ * Why set_hp skips a ship that never has HP (as combat's "takes no damage").
+ */
+export const SET_HP_NO_DOGMA = 'it has no HP: no EVE dogma for its hull';
+
 export interface CeaseFireResult {
   readonly tick: number;
   readonly ships: {
@@ -592,7 +646,7 @@ export type PrimaryListener = (change: CalledPrimaryChange) => void;
 /**
  * Called with every kill at its tick boundary, with the killing shot (Director.OnKill).
  */
-export type KillListener = (kill: ShipKill, shot: WeaponShot) => void;
+export type KillListener = (kill: ShipKill, shot: Maybe<WeaponShot>) => void;
 
 /**
  * Called with every shot at its tick boundary, before it draws (Director.OnShot).
@@ -695,7 +749,7 @@ interface AppliedScene {
  * The live commands the time-control tape journals (sd-time): a jump back replays them at their ticks. A new live
  * lever joins this list, and its handler does its work synchronously (Director.Replay runs it again).
  */
-export const JOURNALED_TOOLS = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire'] as const;
+export const JOURNALED_TOOLS = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire', 'set_hp'] as const;
 
 /**
  * The director's own per-tick fields in a time-control snapshot (CaptureSim).
@@ -709,6 +763,7 @@ interface DirectorSimFields {
   readonly missileHitShots: Map<string, WeaponShot>;
   readonly drawnMissileKills: Set<string>;
   readonly capacitorMoved: Map<string, number>;
+  readonly pendingHp: Map<string, PendingHpSet>;
 }
 
 /**
@@ -1040,6 +1095,10 @@ export class Director {
    * The shield fraction each ship's impact overlay was last synced at by the recharge.
    */
   private readonly rechargeSynced = new Map<string, number>();
+  /**
+   * set_hp sets waiting for their ship's HP (its fit resolving), by ship.
+   */
+  private readonly pendingHp = new Map<string, PendingHpSet>();
   /**
    * The shots raised at the boundaries, drawn one tick after their cycle start (shots.ts).
    */
@@ -1421,6 +1480,8 @@ export class Director {
     world.OnBoundary((boundary) => {
       this.RemoveDead(boundary);
       this.SyncRecharged(this.combat.Recharge(world.master.tickInterval / 1000));
+      // A gameplay set_hp that left structure at 0 kills here, before this boundary's calls, locks, repairs and shots.
+      this.combat.SweepDestroyed(boundary, (id) => !world.InWarp(id) && !world.Arriving(id));
       // The brains' calls land before the sync, so their locks start at this boundary.
       this.StepFleetBrains(boundary);
       this.SyncFleetTargets(boundary);
@@ -1518,6 +1579,7 @@ export class Director {
       set_target: (args) => this.SetTarget(args),
       engage: (args) => this.Manual('engage', args, () => this.Engage(args)),
       cease_fire: (args) => this.Manual('cease_fire', args, () => this.CeaseFire(args)),
+      set_hp: (args) => this.SetHp(args),
       order_fleet: (args) => this.OrderFleet(args).then((result) => this.Manual('order_fleet', args, () => result)),
       list_hardpoints: (args) => this.ListHardpoints(args),
       play_shot: (args) => this.PlayShot(args),
@@ -2218,6 +2280,128 @@ export class Director {
   }
 
   /**
+   * set_hp: sets the selected ships' shield, armor and structure HP live, through the damage model only
+   * (DamageModel.SetHp): each named layer, or the total drained from full shield first, as HP, a percent of the max or
+   * a draw keyed by (seed, ship, target) (the package's resolveHpSet). The hull shows it at once (SyncImpactState);
+   * shields recharge from it, repairs land on it, armor and structure hold. A cinematic set never kills; a gameplay set
+   * that leaves structure at 0 is swept into a kill at the next boundary (CombatRules.SweepDestroyed), once the ship is
+   * out of warp and landed. Never written to the document: a load restores full HP.
+   *
+   * @param input - The set_hp arguments: a selection, shield / armor / structure or total, intent and seed.
+   * @returns The tick, each set ship's HP before and after, the gameplay deaths to come, the ships waiting for their
+   *   fit, and what was skipped with why.
+   * @throws {SceneError} When the command is invalid or names an unknown ship, fleet, wing or squad.
+   */
+  SetHp(input: unknown): SetHpResult {
+    const command = normalizeHpSetCommand(input);
+    const scene = this.Current();
+    const selected = selectFleetShips(scene, command);
+    if (selected.problems.length) throw new SceneError([...selected.problems]);
+    const seed = command.seed ?? sceneCombatOf(scene).seed;
+    const tick = this.world.tick;
+    const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
+    const ships: SetHpResult['ships'][number][] = [];
+    const destroys: NonNullable<SetHpResult['destroys']>[number][] = [];
+    const pending: NonNullable<SetHpResult['pending']>[number][] = [];
+    const skipped: SetHpResult['skipped'] = [];
+    for (const id of selected.ships) {
+      const doc = docs.get(id);
+      if (this.combat.IsDestroyed(id) || this.IsDead(id)) {
+        skipped.push({ id, reason: 'it was destroyed (a load revives it)' });
+        continue;
+      }
+      if (!this.damage.Has(id)) {
+        const wait = doc ? this.HpWait(doc) : null;
+        if (wait == null) {
+          skipped.push({ id, reason: SET_HP_NO_DOGMA });
+        } else {
+          this.pendingHp.set(id, { command, seed, tick });
+          pending.push({ id, note: wait });
+        }
+        continue;
+      }
+      this.pendingHp.delete(id);
+      const row = this.ApplyHpSet(id, command, seed, tick);
+      if (!row) continue;
+      ships.push(row.ship);
+      if (row.destroys) {
+        const note = this.world.InWarp(id) ? 'in warp: it dies when it drops out' : this.world.Arriving(id) ? 'arriving by warp: it dies once it lands' : null;
+        destroys.push({ id, mode: this.combat.settings.death, ...(note ? { note } : {}) });
+      }
+    }
+    this.onChange();
+    return { tick, intent: command.intent, ...(hpSetHasRandom(command) ? { seed } : {}), ships, ...(destroys.length ? { destroys } : {}), ...(pending.length ? { pending } : {}), skipped };
+  }
+
+  /**
+   * Lands a set on a ship the damage model tracks: resolves it against its layers, sets the HP (DamageModel.SetHp, with
+   * the record get_state shows), re-arms the recharge sync at the new shield and shows the damage on the hull.
+   *
+   * @param id - The ship.
+   * @param command - The set.
+   * @param seed - The seed its draws use.
+   * @param tick - The tick it was asked at.
+   * @returns The result row and whether the ship dies at the next boundary; null when the model does not track it.
+   */
+  private ApplyHpSet(id: string, command: HpSetCommand, seed: number, tick: number): Maybe<{ readonly ship: SetHpResult['ships'][number]; readonly destroys: boolean }> {
+    const layers = this.damage.Health(id);
+    if (!layers) return null;
+    const resolved = resolveHpSet({ layers, command, ship: id, seed });
+    const hp = Object.fromEntries(Object.entries(resolved.set).map(([target, value]) => [target, Round(value.hp, 1)]));
+    const record: HpSetRecord = { tick, appliedAt: this.world.tick, intent: command.intent, ...(hpSetHasRandom(command) ? { seed } : {}), values: hpSetValuesOf(command), hp, ...(resolved.clamped.length ? { clamped: resolved.clamped } : {}) };
+    this.damage.SetHp(id, resolved.hp, record);
+    this.rechargeSynced.set(id, this.damage.Fractions(id)?.shield ?? 1);
+    this.SyncImpactState(id);
+    const after = this.damage.Health(id) ?? layers;
+    const row = (name: DefenseLayerName): SetHpLayerRow => ({ hp: Round(after[name].hp, 1), max: Round(after[name].max, 1), was: Round(layers[name].hp, 1) });
+    const ship = { id, ...(Object.fromEntries(DEFENSE_LAYERS.map((name) => [name, row(name)])) as Record<DefenseLayerName, SetHpLayerRow>), ...(resolved.clamped.length ? { clamped: resolved.clamped } : {}) };
+    return { ship, destroys: resolved.destroys };
+  }
+
+  /**
+   * Lands a ship's waiting set once the damage model tracks it (SetFlight, right after SetDefense). A gameplay death it
+   * leaves comes from the next boundary's sweep, never from here.
+   */
+  private ApplyPendingHp(id: string): void {
+    const pending = this.pendingHp.get(id);
+    if (!pending || !this.damage.Has(id)) return;
+    this.pendingHp.delete(id);
+    this.ApplyHpSet(id, pending.command, pending.seed, pending.tick);
+    this.onChange();
+  }
+
+  /**
+   * Why a ship the damage model does not track has no HP yet: its fit's or default fit's note while it resolves; null
+   * when it never will (its hull has no EVE type, or that type's EVE data failed).
+   *
+   * @param doc - The document ship.
+   * @returns The note; null for never.
+   */
+  private HpWait(doc: SceneShip): Maybe<string> {
+    const answer = this.hullStats.Cached(doc);
+    const typeID = answer?.hull?.typeID;
+    let note: Maybe<string> = null;
+    if (!(answer && typeID == null) && !(typeID != null && this.fitLookup.TypeFailure(typeID))) note = this.fittings.get(doc.id)?.note ?? this.FitNote(doc) ?? 'waiting for its fit to resolve';
+    return note;
+  }
+
+  /**
+   * A ship's latest set_hp for get_state: one waiting for its fit (`pending`, with why), else the one that landed.
+   */
+  private HpSetState(doc: SceneShip): { readonly hpSet?: object } {
+    const pending = this.pendingHp.get(doc.id);
+    const record = this.damage.HpSet(doc.id);
+    let result: { readonly hpSet?: object } = {};
+    if (pending) {
+      const { command, seed, tick } = pending;
+      result = { hpSet: { state: 'pending', tick, intent: command.intent, ...(hpSetHasRandom(command) ? { seed } : {}), values: hpSetValuesOf(command), note: this.HpWait(doc) ?? SET_HP_NO_DOGMA } };
+    } else if (record) {
+      result = { hpSet: { state: 'applied', ...record } };
+    }
+    return result;
+  }
+
+  /**
    * Ends the selected ships' engagements: their engaged weapons switch online and stop at their cycle end. `unlock`
    * also clears their targets (as set_target null), and the lock sweep drops the locks.
    *
@@ -2493,7 +2677,8 @@ export class Director {
   DriveExplosions(now: number): void {
     const tickSeconds = this.world.master.tickInterval / 1000;
     for (const [id, death] of this.deaths) {
-      if (death.start == null && this.world.tick >= death.kill.tick + (this.drawnMissileKills.has(id) ? MISSILE_FALLBACK_TICKS + 1 : 2)) death.start = now;
+      // No shot draws a set_hp kill: its explosion starts at once.
+      if (death.start == null && this.world.tick >= death.kill.tick + (death.kill.cause ? 0 : this.drawnMissileKills.has(id) ? MISSILE_FALLBACK_TICKS + 1 : 2)) death.start = now;
       if (death.start == null || death.gone) continue;
       if (!death.begun) {
         const curves = this.world.Curves(id);
@@ -2725,7 +2910,8 @@ export class Director {
         missileHits: this.missileHits,
         missileHitShots: this.missileHitShots,
         drawnMissileKills: this.drawnMissileKills,
-        capacitorMoved: this.capacitorMoved
+        capacitorMoved: this.capacitorMoved,
+        pendingHp: this.pendingHp
       },
       [],
       memo
@@ -2758,6 +2944,7 @@ export class Director {
     RefillMap(this.deaths, director.deaths);
     RefillMap(this.missileHitShots, director.missileHitShots);
     RefillMap(this.capacitorMoved, director.capacitorMoved);
+    RefillMap(this.pendingHp, director.pendingHp);
     this.drawnMissileKills.clear();
     for (const id of director.drawnMissileKills) this.drawnMissileKills.add(id);
     this.missileHits = director.missileHits;
@@ -2816,6 +3003,9 @@ export class Director {
         break;
       case 'cease_fire':
         this.Manual('cease_fire', input, () => this.CeaseFire(input));
+        break;
+      case 'set_hp':
+        this.SetHp(input);
         break;
       default:
         throw new Error(`${tool} is not a journaled tool`);
@@ -3933,6 +4123,7 @@ export class Director {
       this.autoRepair.Forget(doc.id);
       this.pilots.Forget(doc.id);
       this.rechargeSynced.delete(doc.id);
+      this.pendingHp.delete(doc.id);
       this.damage.Remove(doc.id);
       this.capacitor.Remove(doc.id);
       this.unaffectedFlights.delete(doc.id);
@@ -3987,6 +4178,7 @@ export class Director {
       this.fleetTargets.Clear();
       this.autoRepair.Clear();
       this.rechargeSynced.clear();
+      this.pendingHp.clear();
       this.shots.Clear();
       this.turretSounds.Clear();
       this.turrets?.ClearAims();
@@ -4243,8 +4435,12 @@ export class Director {
     const stoppedByRefit = this.SyncModules(doc);
     if (stoppedByRefit.length) this.FlyFlight(doc, answer);
     const defense = this.flights.get(doc.id)?.defense;
-    if (defense) this.damage.SetDefense(doc.id, defense);
-    else this.damage.Remove(doc.id);
+    if (defense) {
+      this.damage.SetDefense(doc.id, defense);
+      this.ApplyPendingHp(doc.id);
+    } else {
+      this.damage.Remove(doc.id);
+    }
     const capacitor = this.flights.get(doc.id)?.capacitor;
     if (capacitor) this.capacitor.Set(doc.id, capacitor, this.world.tick);
     else this.capacitor.Remove(doc.id);
@@ -4679,7 +4875,7 @@ export class Director {
    * A ship's structure reached 0: every target on it clears (its attackers' turrets stop), and the kill listeners
    * run. With death `explode` it is destroyed (Destroy): it explodes and its ball leaves after the explosion.
    */
-  private Killed(kill: ShipKill, shot: WeaponShot): void {
+  private Killed(kill: ShipKill, shot: Maybe<WeaponShot>): void {
     const cleared = this.targets.Forget(kill.ship);
     for (const { ship } of cleared) {
       this.ModuleOutputs(this.modules.Retarget(ship, null, this.world.tick));
@@ -5731,6 +5927,7 @@ export class Director {
     this.moduleSpecs.delete(id);
     this.locks.Remove(id);
     this.engagements.delete(id);
+    this.pendingHp.delete(id);
     this.fleetTargets.Forget(id);
     this.autoRepair.Forget(id);
     this.pilots.Forget(id);
@@ -6269,7 +6466,7 @@ export class Director {
     engaged?: { readonly modules: readonly string[] };
     combat?: ShipCombatReport & { readonly paperDps: number };
     missiles?: { readonly launched: number; readonly inFlight: number };
-    destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string };
+    destroyed?: { readonly tick: number; readonly by?: string; readonly module?: string; readonly weapon?: string; readonly cause?: string; readonly mode: string };
   } & Partial<ShipFleetMembership> &
     Omit<Partial<ShipMotion>, 'propMod'> {
     const sphere = this.WorldSphere(doc);
@@ -6310,6 +6507,7 @@ export class Director {
       ...this.AutoRepairShipState(doc.id),
       ...(shots ? { shots } : {}),
       defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
+      ...this.HpSetState(doc),
       capacitor: capacitor ? ShipCapacitorReportOf(capacitor, this.capacitor.Report(doc.id, this.world.tick)) : null,
       targeted: this.TargetedState(doc.id, flight, motion),
       ...this.CombatState(doc.id),
@@ -6390,7 +6588,7 @@ export class Director {
     engaged?: { readonly modules: readonly string[] };
     combat?: ShipCombatReport & { readonly paperDps: number };
     missiles?: { readonly launched: number; readonly inFlight: number };
-    destroyed?: { readonly tick: number; readonly by: string; readonly module: string; readonly weapon: string; readonly mode: string; readonly explosion?: ShipExplosionReport & { readonly removesAt: number; readonly gone: boolean } };
+    destroyed?: { readonly tick: number; readonly by?: string; readonly module?: string; readonly weapon?: string; readonly cause?: string; readonly mode: string; readonly explosion?: ShipExplosionReport & { readonly removesAt: number; readonly gone: boolean } };
   } {
     const tick = this.world.tick;
     const targeting = this.LockTargeting(id);
@@ -6406,7 +6604,7 @@ export class Director {
       ...(engaged ? { engaged: { modules: engaged.modules } } : {}),
       ...(combat ? { combat: { ...combat, paperDps: Round(paperDps, 1) } } : {}),
       ...(missiles.launched || missiles.inFlight ? { missiles } : {}),
-      ...(kill ? { destroyed: { tick: kill.tick, by: kill.by, module: kill.module, weapon: kill.weapon, mode: kill.mode, ...this.DeathState(id) } } : {})
+      ...(kill ? { destroyed: { tick: kill.tick, ...KillerOf(kill), mode: kill.mode, ...this.DeathState(id) } } : {})
     };
   }
 
@@ -6440,7 +6638,7 @@ export class Director {
       seed,
       death,
       ...this.combat.Totals(),
-      kills: this.combat.Kills().map((kill) => ({ ship: kill.ship, ...(docs.get(kill.ship)?.name ? { name: docs.get(kill.ship)?.name } : {}), ...(docs.get(kill.ship)?.team ? { team: docs.get(kill.ship)?.team } : {}), by: kill.by, module: kill.module, weapon: kill.weapon, tick: kill.tick }))
+      kills: this.combat.Kills().map((kill) => ({ ship: kill.ship, ...(docs.get(kill.ship)?.name ? { name: docs.get(kill.ship)?.name } : {}), ...(docs.get(kill.ship)?.team ? { team: docs.get(kill.ship)?.team } : {}), ...KillerOf(kill), tick: kill.tick }))
     };
   }
 
@@ -6685,6 +6883,13 @@ function ToBase64(bytes: Uint8Array): string {
   let text = '';
   for (let index = 0; index < bytes.length; index += 0x8000) text += String.fromCodePoint(...bytes.subarray(index, index + 0x8000));
   return btoa(text);
+}
+
+/**
+ * Who killed a ship, for get_state: the shooter, its module and weapon, or the cause when no shot did (set_hp).
+ */
+function KillerOf(kill: ShipKill): { readonly by?: string; readonly module?: string; readonly weapon?: string; readonly cause?: string } {
+  return kill.cause ? { cause: kill.cause } : { by: kill.by, module: kill.module, weapon: kill.weapon };
 }
 
 function Round(value: number, digits: number): number {

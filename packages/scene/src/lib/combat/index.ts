@@ -8,3 +8,5 @@ export * from './explosions';
 export * from './document';
 export * from './commands';
 export * from './kill';
+export * from './distributions';
+export * from './hp-set';

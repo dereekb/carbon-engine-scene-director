@@ -1,6 +1,6 @@
 import type { ShipDefense } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
-import { DamageModel, ImpactsHealed } from './damage';
+import { DamageModel, type HpSetRecord, ImpactsHealed } from './damage';
 import { RoundTrip } from './state-capture.spec-helper';
 
 const RESONANCES = { em: 0.4, thermal: 0.65, kinetic: 0.75, explosive: 0.9 };
@@ -86,6 +86,83 @@ describe('DamageModel', () => {
     const before = model.Report('rifter')?.shield.hp;
     expect(model.Recharge(10)).toEqual([]);
     expect(model.Report('rifter')?.shield.hp).toBe(before);
+  });
+});
+
+function Rifter(): ShipDefense {
+  const layer = (hp: number) => ({ hp, resonances: RESONANCES, resists: { em: 0, thermal: 0, kinetic: 0, explosive: 0 }, ehp: hp });
+  return { shield: layer(562.5), armor: layer(562.5), structure: layer(437.5), ehp: 0, shieldRecharge: 468.75 };
+}
+
+const RECORD: HpSetRecord = { tick: 4, appliedAt: 4, intent: 'cinematic', values: { shield: '0%', armor: 200 }, hp: { shield: 0, armor: 200 } };
+
+describe('DamageModel set_hp', () => {
+  it('sets HP clamped to [0, max] and Health reads it back', () => {
+    const model = new DamageModel();
+    expect(model.SetHp('r', { shield: 0, armor: 200, structure: 437.5 }, RECORD)).toBe(false);
+    model.SetDefense('r', Rifter());
+    expect(model.SetHp('r', { shield: -5, armor: 200, structure: 9999 }, RECORD)).toBe(true);
+    expect(model.Health('r')).toEqual({ shield: { hp: 0, max: 562.5 }, armor: { hp: 200, max: 562.5 }, structure: { hp: 437.5, max: 437.5 } });
+    expect(model.HpSet('r')).toEqual(RECORD);
+    expect(model.HpSet('other')).toBeNull();
+  });
+
+  it('keeps the record and the set fraction across SetDefense; Remove and Clear drop it', () => {
+    const model = new DamageModel();
+    model.SetDefense('r', Rifter());
+    model.SetHp('r', { shield: 562.5, armor: 281.25, structure: 437.5 }, RECORD);
+    const plated = Rifter();
+    model.SetDefense('r', { ...plated, armor: { ...plated.armor, hp: 1125 } });
+    expect(model.Health('r')?.armor).toEqual({ hp: 562.5, max: 1125 });
+    expect(model.HpSet('r')).toEqual(RECORD);
+    model.Remove('r');
+    model.SetDefense('r', Rifter());
+    expect(model.HpSet('r')).toBeNull();
+    model.SetHp('r', { shield: 1, armor: 1, structure: 1 }, RECORD);
+    model.Clear();
+    expect(model.HpSet('r')).toBeNull();
+  });
+
+  it('recharges a set shield of 0 on the curve, the same in steps or at once', () => {
+    const stepped = new DamageModel();
+    const once = new DamageModel();
+    for (const model of [stepped, once]) {
+      model.SetDefense('r', Rifter());
+      model.SetHp('r', { shield: 0, armor: 562.5, structure: 437.5 }, RECORD);
+    }
+    for (let second = 0; second < 10; second += 1) stepped.Recharge(1);
+    once.Recharge(10);
+    const expected = 562.5 * (1 - Math.exp(-50 / 468.75)) ** 2;
+    expect(expected).toBeCloseTo(5.758, 3);
+    expect(stepped.Health('r')?.shield.hp).toBeCloseTo(expected, 6);
+    expect(once.Health('r')?.shield.hp).toBeCloseTo(expected, 6);
+  });
+
+  it('repairs a set armor; lists the ships at 0 structure, sorted, and does not recharge them', () => {
+    const model = new DamageModel();
+    for (const id of ['c', 'a', 'b']) model.SetDefense(id, Rifter());
+    model.SetHp('a', { shield: 0, armor: 100, structure: 437.5 }, RECORD);
+    expect(model.Repair('a', 'armor', 50)).toBe(50);
+    expect(model.Health('a')?.armor.hp).toBe(150);
+    model.SetHp('c', { shield: 0, armor: 0, structure: 0 }, RECORD);
+    model.SetHp('b', { shield: 0, armor: 0, structure: 0 }, RECORD);
+    model.SetHp('a', { shield: 0, armor: 0, structure: 1 }, RECORD);
+    expect(model.DestroyedShips()).toEqual(['b', 'c']);
+    expect(model.Recharge(10)).toEqual(['a']);
+    expect(model.Health('b')?.shield.hp).toBe(0);
+  });
+
+  it('restores the record from a snapshot', () => {
+    const model = new DamageModel();
+    model.SetDefense('r', Rifter());
+    model.SetHp('r', { shield: 0, armor: 200, structure: 437.5 }, RECORD);
+    const trip = RoundTrip(
+      model,
+      (m) => [m.Health('r'), m.HpSet('r')],
+      (m) => m.SetHp('r', { shield: 1, armor: 1, structure: 1 }, { ...RECORD, tick: 9, appliedAt: 9 })
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
   });
 });
 

@@ -21,6 +21,9 @@
  *   windows, and the 3 latest rows received with the HP restored and the cycle's nominal HP (a landing on a full layer
  *   restores 0).
  * - Recharge runs the passive shield recharge at each boundary, before the shots.
+ * - SweepDestroyed records the kills no shot made: a gameplay set_hp that left a live ship at 0 structure (shots record
+ *   theirs at once). The kill carries `cause: "set_hp"`, no shooter, and the earlier shots' contributors; onKill gets no
+ *   shot.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
@@ -100,9 +103,9 @@ export interface CombatRulesOptions {
   readonly port: CombatPort;
   readonly damage: DamageModel;
   /**
-   * A ship's structure reached 0 (once per ship until a load).
+   * A ship's structure reached 0 (once per ship until a load); no shot for a set_hp kill (SweepDestroyed).
    */
-  readonly onKill?: (kill: ShipKill, shot: WeaponShot) => void;
+  readonly onKill?: (kill: ShipKill, shot: Maybe<WeaponShot>) => void;
   /**
    * A ship's HP changed: its impact overlay follows (Director.SyncImpactState).
    */
@@ -316,6 +319,28 @@ export class CombatRules {
 
   get settings(): ResolvedSceneCombat {
     return this.combat;
+  }
+
+  /**
+   * Records the kills no shot made, at a boundary: each tracked ship at 0 structure the rules have not recorded (only a
+   * gameplay set_hp leaves one) that `mayDie` allows (the director holds off a ship in warp or still arriving), in id
+   * order: `cause: "set_hp"`, no shooter, the death mode, the earlier shots' contributors; then onKill with no shot.
+   *
+   * @param boundary - The master tick boundary.
+   * @param mayDie - Whether a ship can die now.
+   * @returns The kills recorded.
+   */
+  SweepDestroyed(boundary: number, mayDie: (id: string) => boolean): ShipKill[] {
+    const swept: ShipKill[] = [];
+    for (const id of this.damage.DestroyedShips()) {
+      if (this.destroyed.has(id) || !mayDie(id)) continue;
+      const kill: ShipKill = { ship: id, cause: 'set_hp', tick: boundary, at: boundary, mode: this.combat.death, contributors: this.Contributors(id) };
+      this.destroyed.set(id, kill);
+      this.kills.push(kill);
+      swept.push(kill);
+      this.onKill(kill, null);
+    }
+    return swept;
   }
 
   /**
@@ -678,11 +703,14 @@ export class CombatRules {
   }
 
   private Kill(shot: WeaponShot, boundary: number): ShipKill {
-    const contributors = [...(this.tallies.get(shot.target)?.contributors ?? [])].sort((a, b) => b[1] - a[1]).map(([ship, damage]) => ({ ship, damage: Round(damage, 1) }));
-    const kill: ShipKill = { ship: shot.target, by: shot.ship, module: shot.module, weapon: shot.name, tick: boundary, at: shot.at, mode: this.combat.death, contributors };
+    const kill: ShipKill = { ship: shot.target, by: shot.ship, module: shot.module, weapon: shot.name, tick: boundary, at: shot.at, mode: this.combat.death, contributors: this.Contributors(shot.target) };
     this.destroyed.set(shot.target, kill);
     this.kills.push(kill);
     return kill;
+  }
+
+  private Contributors(id: string): ShipKill['contributors'] {
+    return [...(this.tallies.get(id)?.contributors ?? [])].sort((a, b) => b[1] - a[1]).map(([ship, damage]) => ({ ship, damage: Round(damage, 1) }));
   }
 
   private Tally(id: string): Tally {

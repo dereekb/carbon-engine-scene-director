@@ -441,6 +441,10 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
   `Recharge(seconds)` runs the passive shield recharge (`passiveRecharge`, the capacitor's curve; `CapacitorFractionAfter`
   calls it too) at each boundary. `Damage(id, layer, amount)` stays for specs. get_state's `defense` is `Report`: hp,
   max, resists, ehp of the current HP, `repairs`, `incoming`.
+- **`set_hp`** (`sd-combat` → Battle damage): `Health(id)` (per layer `{ hp, max }`, null untracked; auto-repair reads it
+  too), `SetHp(id, hp, record)` (each layer clamped to [0, max], the record kept: the only way a set changes HP),
+  `HpSet(id)` (the latest set; `SetDefense` keeps it, a ship leaving the model drops it with its HP), `DestroyedShips()`
+  (tracked ships at 0 structure, by id: Combat rules' sweep).
 - verify-page (2026-10-23, SDE 3632936): "switch_modules runs a Guardian's armor hardener" (Domination Thermal Armor
   Hardener: thermal 44.75 % → 75.14 % from the next tick, back after `online` and its 24 s cycle end; DC II refused as
   passive, an unmatched `weapon` selector skipped); "switch_modules prop matches switch_prop_mods" (the 10MN AB II
