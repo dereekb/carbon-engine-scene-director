@@ -920,10 +920,10 @@
         "tone": "hint",
         "triggers": [
           {
-            "words": ["battle console", "battle-console", "cjs-scenario", "scenario file", "scenario bundle", "settings drop", "fleet panel", "fleet card", "command bar", "run bar", "Warp out", "Pull range", "Call primary", "readScenarioBundle", "planScenarioStaging", "toFleetCommandCall", "import map"]
+            "words": ["battle console", "battle-console", "cjs-scenario", "scenario file", "scenario bundle", "settings drop", "fleet panel", "fleet card", "command bar", "run bar", "Warp out", "Pull range", "Call primary", "readScenarioBundle", "planScenarioStaging", "toFleetCommandCall", "import map", "verify-console"]
           },
           {
-            "pathContains": ["apps/battle-console/", "packages/battle/"]
+            "pathContains": ["apps/battle-console/", "packages/battle/", "verify-console"]
           }
         ]
       }

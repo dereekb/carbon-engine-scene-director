@@ -4,6 +4,8 @@ import { provideRouter } from '@angular/router';
 import { DbxCoreAngularRouterSegueModule } from '@dereekb/dbx-core';
 import { provideDbxRouterWebAngularRouterProviderConfig, provideDbxScreenMediaService, provideDbxStyleService } from '@dereekb/dbx-web';
 import { provideDbxForgeFormFieldDeclarations, provideDbxFormConfiguration } from '@dereekb/dbx-form';
+import { ConsoleDialogs } from './console-dialogs';
+import { ConsoleMatDialogs } from './console-dialogs.component';
 import { CONSOLE_ENGINE_STARTER, type ConsoleEngineStarter } from './console-viewer.service';
 
 /**
@@ -22,6 +24,7 @@ export const CONSOLE_APP_CONFIG: ApplicationConfig = {
   providers: [
     provideZonelessChangeDetection(),
     { provide: CONSOLE_ENGINE_STARTER, useValue: START_CONSOLE_ENGINE },
+    { provide: ConsoleDialogs, useClass: ConsoleMatDialogs },
     provideRouter([]),
     importProvidersFrom(DbxCoreAngularRouterSegueModule.forRoot()),
     provideDbxRouterWebAngularRouterProviderConfig(),

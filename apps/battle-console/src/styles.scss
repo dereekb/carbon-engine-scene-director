@@ -36,3 +36,13 @@ body.console-ui-hidden console-root,
 body.console-ui-hidden .cdk-overlay-container {
   display: none !important;
 }
+
+// The console's panels over the canvas (the scenario card, the fleet cards): they take the pointer, the UI layer does not.
+.console-panel {
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: rgba(8, 12, 20, 0.82);
+  border: 1px solid rgba(120, 150, 190, 0.25);
+  color: #cfd8e6;
+  pointer-events: auto;
+}

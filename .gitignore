@@ -3,6 +3,8 @@
 /tmp
 /out-tsc
 /.tmp
+# Angular build cache (apps/battle-console)
+/.angular
 
 # dependencies
 node_modules/

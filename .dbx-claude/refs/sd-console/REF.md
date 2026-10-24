@@ -11,9 +11,9 @@
 |---|---|
 | A1: app scaffold, dependencies, spike gate | done: boots through the hub at `/console/`, draws in real Chrome, key gate and H verified |
 | A2: `packages/battle` (pure, node-tested) | done: scenario, bundle, staging, settings, commands, views (32 specs) |
-| A3: loading (drop, zip.js, staging over `CallHub`, dialogs, scenario card, Reset, IndexedDB) | not yet |
-| A4: fleet panel (cards, command bar, target list, settings dialog, doctrine picker) | not yet; the run bar exists |
-| A5: console end-to-end Playwright script, offline verify gaps | not yet |
+| A3: loading (drop, zip.js, staging over `CallHub`, dialogs, scenario card, Reset, IndexedDB) | done (specs + `verify-console`) |
+| A4: fleet panel (cards, command bar, target list, settings dialog, doctrine picker) | done (specs + `verify-console`) |
+| A5: console end-to-end Playwright script, offline verify gaps | `verify-console` passes load, engage, Pull range / Hold, the settings drop and two equal Resets; **Warp out after Retreat fails** (the order is accepted, the FC keeps flying the align stance's direction); the verify-page offline gaps and the real-Chrome pass are a follow-up |
 
 ## Projects
 
@@ -56,13 +56,61 @@
   `console-root` and `.cdk-overlay-container`. CDK 22 renders select and menu panels as popovers **inline** (inside
   their trigger), so hiding `console-root` hides them; the container rule covers dialogs.
 
-## Components (A1)
+## Components and services (`apps/battle-console/src/app`)
 
-| Component | Does |
+| File | Does |
 |---|---|
-| `ConsoleComponent` (`console-root`) | starts the engine, lays the UI over the canvas (`pointer-events: none` except panels) |
-| `ConsoleStatusComponent` | the read-only status: scene, ships, fleets, clock, timeline |
-| `ConsoleRunBarComponent` | play / pause, back 10 s, rate (`time_control`), director camera (`auto_camera`); each one `ViewerApi.Call` |
+| `console.component.ts` (`console-root`) | starts the engine, restores the kept scenario, lays the UI over the canvas (`pointer-events: none` except `.console-panel`s) |
+| `console-status.component.ts` | the read-only status: scene, ships, fleets, clock, timeline status |
+| `console-run-bar.component.ts` | play / pause, back 10 s, rate (`time_control`), director camera (`auto_camera`); each one `ViewerApi.Call` |
+| `console-scenario-card.component.ts` | the scenario's name, description, state and staging warnings; Load (`dbx-file-upload-button`, the e2e's input) and Reset |
+| `console-drop-overlay.component.ts` | the window-level drop: `window:drag*` listeners, an overlay with no pointer events, folders walked through `webkitGetAsEntry`; a drop on a `[data-console-fleet]` card goes to that fleet |
+| `console-fleet-panel.component.ts`, `console-fleet-card.component.ts` | the right column of fleet cards (below) |
+| `console-fleet-settings.ts` | the FC settings dialog: `DbxForgeActionDialogComponent.openDialogWithForm` over `FleetSettingsFormValue` |
+| `console-scenario.service.ts` | the loading rules, settings, doctrine drops and Reset (below) |
+| `console-scenario.store.ts` | IndexedDB `scene-director-console` / `scenario` / `current`: `{ scenario, savedAt }` |
+| `console-files.ts` | dropped / picked files to `{ path, text }`: zips through zip.js (`useWebWorkers: false`), the rest as text |
+| `console-dialogs.ts` / `console-dialogs.component.ts` | the abstract `ConsoleDialogs` (confirm, same-scenario choice, problems) and `ConsoleMatDialogs` on MatDialog (`DbxPromptConfirmDialogComponent` + two `AbstractDialogDirective` dialogs), provided in `console.config.ts` |
+
+- **Why the dialogs are split:** vitest's Angular JIT cannot compile dbx-web's partial components (`Cannot create
+  property '__anonymousType' on string 'block()'`), so anything a spec imports keeps dbx-web components out of its
+  import graph: services ask the abstract `ConsoleDialogs`, specs provide a fake.
+- dbx-web's `dbx-file-upload-area` is not used: its drop sees files only (a folder comes as an empty File) and a drop
+  there would bubble to the window handler too. The window overlay is the drop area.
+
+## Loading (A3, `ConsoleScenarioService`)
+
+- `drop(files, fleet?)` → `readConsoleFiles` → `load` → `readScenarioBundle`. Problems (the bundle's, a
+  `ScenarioError`'s, a hub refusal's `HubCallError.problems`, via `problemsOfError`) all go to one problems dialog.
+- **A scenario:** another `id` (or none): confirm only when **a fight runs (the live scene has fleets**; the welcome
+  scene's lone ship is not one), then `planScenarioStaging` → `runScenarioStaging(plan, api.CallHub)` →
+  `api.Call('load_scene', { scene, ...load })`; the scenario is kept (signal + IndexedDB). The same `id`: the
+  same-scenario dialog, default "Apply settings to the running battle" (the sides' settings as a settings drop), "Load
+  as a new run" (stage again) or Cancel.
+- **A settings drop:** refused for another `id`; else `toSettingsDropOperations` through `patch_scene`, merged
+  (`mergeScenarioSettings`), unknown fleets warned.
+- **A lone personality** dropped on a card: `applyFleetSettings(fleet, { personality })`.
+- `applyFleetSettings` (the Settings dialog, doctrine drops, the doctrine picker): `toFleetSettingsOperations` plus
+  `update_fleet set personality <fleet>-fc` when the fleet's personality is not its own key (a no-brain fleet or a
+  scene no scenario staged), through `patch_scene`; then merged into the kept scenario.
+- **Reset** (confirmed): re-stage the kept scenario (file + merged settings); no scenario: `timeline { action:
+  'restart' }`. After a reload the kept scenario is restored (state `restored`), so Reset still re-stages.
+- The scenario's own `personalities` go into the base document (`set_personalities` in `planScenarioStaging`): a
+  doctrine extending a bundle personality resolves on the hub (it refused before: "not a built-in personality, a
+  saved one or a key of the scene's personalities").
+
+## The fleet panel (A4)
+
+- A card per `ConsoleViewerService.fleets()` fleet: `toFleetCardView` (FC, state, alive, engaged, stance, held, free
+  fire, primary, HP, the levers you hold), the command bar (`CONSOLE_FLEET_BAR`, disabled with `commandsBlocked` as the
+  tooltip), the target list (`toFleetTargetRows`: Call / Clear), Settings, and for a fleet with no brain a doctrine
+  picker (built-ins plus the scenario's personalities) instead of the bar.
+- A button runs `toFleetCommandCall({ command, fleet, target, retreat: the kept scenario side's settings.retreat,
+  fleets })` through `ViewerApi.Call`; a `FleetCommandError` or refusal shows on the card.
+- **Settings** (`packages/battle` `settings-form.ts`): `toFleetSettingsFormValue(side.settings)` fills the form;
+  Apply → `fromFleetSettingsFormValue` (a template `{ extends: doctrine, ...only the fields set }`, logi, retreat) →
+  `applyFleetSettings`. Ranges and reaches are metres or a named reach; the priority is a comma-separated role list;
+  fire is focus / free / focus + free (`calls`, `freeFire`); advanced: command ability, backups, handover, reaction.
 
 ## The scenario file (`cjs-scenario/1`, `packages/battle/src/lib/scenario/scenario.ts`)
 
@@ -138,7 +186,20 @@ doctrine instead) or has no ship left (`fleetCommandsBlocked`). `views.ts`: `toF
 
 ## Checks
 
-- Specs: `dbx-claude-test` `project: battle` (node) and `battle-console` (vitest Angular, jsdom; a fake starter).
+- Specs: `dbx-claude-test` `project: battle` (node) and `battle-console` (vitest Angular, jsdom; a fake starter, a
+  fake engine and fake `ConsoleDialogs` for `ConsoleScenarioService`).
+- **`verify-console`** (`apps/scene-director/src/verify-console.ts`, `npx nx run scene-director:verify-console`, or
+  `node dist/apps/scene-director/verify-console.js [--only <text>] [--headed]` after building `scene-director` and
+  `battle-console`): its own `--eve-data off` hub on temp stores with the built console; opens `/console/` (note
+  `hub.url` ends in `/`), gives the Load input a dna-only zip (scenario, two compositions, a doctrine part), then
+  through get_state: both fleets land and both brains engage; Pull range and Hold change the FC's stance while the
+  calls go on; a settings drop changes `red-fc` without the clock going back; two Resets give equal landing ticks and
+  decision logs; Retreat reports aligned and Warp out lands over 1,000 km off.
+- Its gotchas: the doctrines engage `in-range` (the stand-ins land outside lock range, so `on-sight` never fires
+  offline); a stance shows in `fc.piloted` (move, prop-mods), not `fc.manual`; Destiny's tick runs on across loads,
+  so a Reset is detected by a new warp-in and runs compare ticks from their first landing (to 20 after the last);
+  `landedAt` shows only until a ship starts to follow, so it is recorded while polling. Page errors
+  other than headless WebGPU's are reported as an `info` line.
 - Headless boot (offline hub on a spare port with temp stores, `--console dist/apps/battle-console/browser`): the
   engine starts through the import map (headless Chromium here gets a swiftshader adapter and logs WebGPU validation
   errors; drawing is checked in real Chrome).

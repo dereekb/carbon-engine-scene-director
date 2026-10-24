@@ -4,3 +4,4 @@ export * from './lib/scenario/settings';
 export * from './lib/scenario/staging';
 export * from './lib/commands';
 export * from './lib/views';
+export * from './lib/settings-form';

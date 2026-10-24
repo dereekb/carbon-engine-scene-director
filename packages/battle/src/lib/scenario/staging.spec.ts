@@ -14,6 +14,13 @@ function scenarioOf(input: Record<string, unknown>): Scenario {
 }
 
 describe('planScenarioStaging', () => {
+  it('puts the scenario\'s personalities in the base document, so a doctrine can extend one', () => {
+    const doctrine = { schema: 'cjs-fleet-personality/1', id: 'blue-doctrine', extends: 'line', targeting: { reach: 60000 } };
+    const plan = planScenarioStaging(scenarioOf(makeTestScenario({ personalities: { 'blue-doctrine': doctrine } })));
+
+    expect(plan.base.personalities?.['blue-doctrine']).toMatchObject({ extends: 'line', targeting: { reach: 60000 } });
+  });
+
   it('plans the base document and one stage_engagement at t = 0 when a side warps in', () => {
     const plan = planScenarioStaging(scenarioOf(makeTestScenario()));
 

@@ -98,6 +98,9 @@ What works today:
 - **No-EVE-data mode** (`--eve-data off` / `SCENE_DIRECTOR_EVE_DATA=off`): on a machine without tools-core the hub
   and page ask for no EVE file or lookup. The simulation, orders, the camera, cinema, screenshots and exports run on
   a green screen, each ship and object a cube in its team colour.
+- **Battle console** (`/console/`, `--console`): drop a scenario (a zip, JSON parts, fits or a folder) and the
+  console stages and starts the battle with no agent; per-fleet cards steer it (Engage, Hold, Pull range, Dive,
+  Retreat, Warp out, Hold fire, call a primary), FC settings and settings drops apply live, and Reset re-stages it.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)

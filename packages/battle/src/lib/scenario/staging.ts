@@ -1,4 +1,5 @@
 import { type SceneDocument, applySceneOperations, createEmptyScene, normalizeScene, sceneAtTimelineTime } from '@scene-director/scene';
+import type { Maybe } from '@dereekb/util';
 import type { Scenario, ScenarioSide } from './scenario';
 import { fleetDoctrineKey, toFleetDoctrineTemplate, toFleetSettingsOperations } from './settings';
 
@@ -50,7 +51,8 @@ export interface StagedScenario {
 export type ScenarioHubCall = (tool: string, args: Record<string, unknown>) => Promise<unknown>;
 
 /**
- * Plans staging a scenario (pure): the base document (createEmptyScene, rename, set_combat; or the pre-staged scene),
+ * Plans staging a scenario (pure): the base document (createEmptyScene, rename, set_combat, the scenario's
+ * personalities; or the pre-staged scene with them),
  * then set_location and stage_engagement on it (each side carrying its composition inline with the bundle's fits, and
  * its doctrine as the inline template `<fleet>-fc`), at t = 0 when a side warps in.
  *
@@ -60,12 +62,16 @@ export type ScenarioHubCall = (tool: string, args: Record<string, unknown>) => P
 export function planScenarioStaging(scenario: Scenario): ScenarioStagingPlan {
   let plan: ScenarioStagingPlan;
 
+  // the scenario's personalities go into the document, so a doctrine extending one of them resolves on the hub
+  const personalities = scenario.personalities && Object.keys(scenario.personalities).length > 0 ? [{ op: 'set_personalities', personalities: scenario.personalities }] : [];
+
   if (scenario.scene) {
-    plan = { scenario, base: normalizeScene(scenario.scene).scene, steps: [], warpIn: false };
+    const scene = normalizeScene(scenario.scene).scene;
+    plan = { scenario, base: personalities.length > 0 ? applySceneOperations(scene, personalities).scene : scene, steps: [], warpIn: false };
   } else {
     const warpIn = scenario.sides.some((side) => Boolean(side.warpIn));
-    const combat = scenario.combat ? [{ op: 'set_combat', ...scenario.combat }] : [];
-    const base = combat.length > 0 ? applySceneOperations(createEmptyScene(scenario.name ?? scenario.id), combat).scene : createEmptyScene(scenario.name ?? scenario.id);
+    const operations = [...(scenario.combat ? [{ op: 'set_combat', ...scenario.combat }] : []), ...personalities];
+    const base = operations.length > 0 ? applySceneOperations(createEmptyScene(scenario.name ?? scenario.id), operations).scene : createEmptyScene(scenario.name ?? scenario.id);
     const steps: ScenarioStagingStep[] = [];
 
     if (scenario.location) {
@@ -143,8 +149,7 @@ export function toScenarioCues(scenario: Scenario): Record<string, unknown>[] {
   for (const side of scenario.sides) {
     if (side.start === 'hold') {
       const timing = side.warpIn && !scenario.scene ? { when: { arrival: { fleet: side.fleet, phase: 'landed' } } } : { at: 0 };
-      cues.push({ id: `${side.fleet}-hold`, ...timing, name: `${side.fleet} holds for Engage`, order_fleet: { fleet: side.fleet, order: { type: 'stance', set: { type: 'hold' } } } });
-      cues.push({ id: `${side.fleet}-hold-fire`, ...timing, name: `${side.fleet} holds fire for Engage`, cease_fire: { fleet: side.fleet } });
+      cues.push({ id: `${side.fleet}-hold`, ...timing, name: `${side.fleet} holds for Engage`, order_fleet: { fleet: side.fleet, order: { type: 'stance', set: { type: 'hold' } } } }, { id: `${side.fleet}-hold-fire`, ...timing, name: `${side.fleet} holds fire for Engage`, cease_fire: { fleet: side.fleet } });
     }
   }
 
@@ -238,7 +243,7 @@ export async function runScenarioStaging(plan: ScenarioStagingPlan, callHub: Sce
   const warnings: string[] = [];
 
   for (const step of plan.steps) {
-    const result = (await callHub(step.tool, { ...step.args, scene })) as { readonly scene?: SceneDocument; readonly warnings?: readonly string[] } | null;
+    const result = (await callHub(step.tool, { ...step.args, scene })) as Maybe<{ readonly scene?: SceneDocument; readonly warnings?: readonly string[] }>;
 
     if (!result?.scene) {
       throw new Error(`${step.tool} returned no scene`);
