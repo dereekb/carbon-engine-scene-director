@@ -8,7 +8,7 @@
  * - auto_repair compiles to one update_fleet, update_wing or update_squad with `set: { autoRepair }`, so a timeline beat
  *   can cue the command or the op.
  *
- * The page's AutoRepair (apps/viewer auto-repair.ts) runs the logi: selection.ts picks their targets.
+ * The page's AutoRepair (packages/viewer-engine auto-repair.ts) runs the logi: selection.ts picks their targets.
  */
 
 import type { Maybe } from '@dereekb/util';

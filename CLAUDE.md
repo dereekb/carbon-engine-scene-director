@@ -16,7 +16,8 @@ tools table, and nothing more. Behavior, rules, gotchas, measurements and real-G
   imports**: the hub, the page and the tests all use it.
 - `apps/scene-director` (`@nx/esbuild`, node): the hub (HTTP + WebSocket on 127.0.0.1:5520), the stdio MCP server, the
   CLI (`serve`, `mcp`, `call`) and `verify-page.ts`. Building it builds the viewer too.
-- `apps/viewer` (`@nx/esbuild`, browser): the page. `src/lib/runtime.ts` is the single runtime import point.
+- `packages/viewer-engine`: the engine every page runs (`StartViewer`, `ViewerApi`); `src/lib/runtime.ts` is the single
+  runtime import point. `apps/viewer` (`@nx/esbuild`, browser): the read-only page over it.
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Project references
@@ -68,7 +69,7 @@ Documentation table). `refImpact` is on: a
 
 - Build: `dbx-claude-build` `project: scene-director` (scene, viewer and the CLI). Serve the hub by hand:
   `npx nx run scene-director:serve`.
-- Tests: `dbx-claude-test` (`project: scene` / `viewer` / `scene-director`). Offline; the MCP spec spawns the built CLI.
+- Tests: `dbx-claude-test` (`project: scene` / `viewer-engine` / `scene-director`). Offline; the MCP spec spawns the built CLI.
 - Real-page check: `npx nx run scene-director:verify-page` against a running tools-core (everything but drawing).
 - Commit through `dbx-claude-commit`. Format: `npx oxfmt --write .`. Lint errors block, warnings don't.
 

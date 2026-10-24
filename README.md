@@ -139,7 +139,8 @@ An nx workspace:
 |---|---|---|---|
 | `scene` | `packages/scene` | `@nx/js:tsc` | the scene document and its patch ops, the tool list, ship stats, prop mods, fleets, fleet compositions, locations and scene building, shared by the hub and the page (no runtime imports) |
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI, `verify-page` and `pilot-loop` |
-| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, the Destiny world and its clock, camera, fleet following, location dressing, audio |
+| `viewer-engine` | `packages/viewer-engine` | node tests; `engine` (`@nx/esbuild`, browser) | the engine every page runs: renderer, director, ships, the Destiny world and its clock, camera, fleet following, location dressing, audio; `StartViewer` and the `ViewerApi` facade |
+| `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the read-only page: canvas and status overlay over the engine |
 
 `bin/scene-director.js` launches the built CLI (`dist/apps/scene-director/main.js`).
 

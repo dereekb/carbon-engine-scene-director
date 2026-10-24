@@ -1,5 +1,5 @@
 /**
- * The time_control tool's pure half: the command it takes and its bounds. The page's TimeControl (apps/viewer
+ * The time_control tool's pure half: the command it takes and its bounds. The page's TimeControl (packages/viewer-engine
  * time-control.ts) runs it on the scene clock: a rate (slow motion, fast-forward), a pause, and jumps back or to any
  * time inside the recorded window (the page's snapshots, sd-time).
  */
