@@ -5364,14 +5364,8 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   // The camera director (auto_camera): each check loads its own scene; --only director: runs them alone. The whole cut
   // log is read off the page (auto_camera's result holds it, but any call picks again).
   const DirectorOf = (state: ViewerState): Maybe<DirectorStateReport> => cinemaOf(state).director ?? null;
-  // The log's ticks count from the load (the director's seed tick): back to world ticks here.
-  const DirectorLog = (): Promise<DirectorCutReport[]> =>
-    page.evaluate(() => {
-      const { director } = (globalThis as unknown as { readonly sceneDirector: { readonly director: { readonly loadTick: number; readonly cameraDirector: { Log(): DirectorCutReport[] } } } }).sceneDirector;
-      return director.cameraDirector.Log().map((cut) => ({ ...cut, tick: cut.tick + director.loadTick }));
-    });
-  const DirectorShips = (fleet: string, team: Maybe<string>, z: number, count: number, extra: object = {}) => Array.from({ length: count }, (_, i) => Scripted(`${fleet}-${i}`, [(i - (count - 1) / 2) * 600, 0, z], { ...(team ? { team } : {}), ...extra }));
-  const DirectorFleet = (id: string, count: number) => ({ id, commander: `${id}-0`, wings: [{ id: `${id}-w`, squads: [{ id: `${id}-s`, role: 'dps', members: Array.from({ length: count - 1 }, (_, i) => `${id}-${i + 1}`) }] }] });
+  const DirectorLog = (): Promise<DirectorCutReport[]> => DirectorCutLog(page);
+  const DirectorShips = (fleet: string, team: Maybe<string>, z: number, count: number, extra: object = {}) => DirectorShipsOf(Scripted, fleet, team, z, count, extra);
   const SideValue = (side: string): number => (side === 'starboard' ? 1 : side === 'port' ? -1 : 0);
   // The 180-degree rule over a log: a cut to the far side needs a crossing (the fly-through, or after a neutral shot) or
   // a free side (no axis, or the axis turned past 60 degrees). A crossing framing flips the kept side.
@@ -5387,12 +5381,8 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     }
     return breaks;
   };
-  const CutText = (log: readonly DirectorCutReport[]): string => log.map((cut) => `${cut.tick} ${cut.framing}/${cut.subject}/${cut.scale}/${cut.side}`).join(', ');
-  const DirectorScene = (name: string, fly = true) => ({
-    name,
-    ships: [...DirectorShips('blue', 'blue', 0, 5, fly ? { orders: [{ type: 'direction', direction: [0.2, 0, 1] }] } : {}), ...DirectorShips('red', 'red', 25000, 5, fly ? { orders: [{ type: 'direction', direction: [-0.2, 0, -1] }] } : {})],
-    fleets: [DirectorFleet('blue', 5), DirectorFleet('red', 5)]
-  });
+  const CutText = DirectorCutText;
+  const DirectorScene = (name: string, fly = true) => DirectorSceneOf(Scripted, name, fly);
   const directorLogs: DirectorCutReport[][] = [];
 
   await Check('director: auto_camera fast drives two fleets, cuts 3-7 s apart with no repeat and mixed scales', async () => {
@@ -5575,89 +5565,8 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `cue ${cue?.state} (${cue?.note}); on: false -> driver ${cinemaOf(state).driver}`;
   });
 
-  // The shot rules: a TFIs-like spread (main bodies 6 km apart, each with a rear squad 25 km behind), so engagement wides
-  // fall under the visibility floor with Rifter radii and stand-in cubes alike.
-  const BiasOf = (director: Maybe<DirectorStateReport>) => (director as unknown as { readonly bias?: { readonly minShipSize: number; readonly layers?: { readonly scene: string[]; readonly live: string[] } } }).bias;
-  const NowTick = async (): Promise<number> => (await call<ViewerState>('get_state')).simulation.tick;
-  await Check('director: a spread fight opens on a readable shot and keeps to the rules', async () => {
-    const side = (fleet: string, z: number, rear: number) => [...DirectorShips(fleet, fleet, z, 8), ...Array.from({ length: 3 }, (_, i) => Scripted(`${fleet}-rear-${i}`, [(i - 1) * 600, 0, rear], { team: fleet }))];
-    const fleet = (id: string) => ({
-      id,
-      commander: `${id}-0`,
-      wings: [
-        {
-          id: `${id}-w`,
-          squads: [
-            { id: `${id}-s`, role: 'dps', members: Array.from({ length: 7 }, (_, i) => `${id}-${i + 1}`) },
-            { id: `${id}-rear`, role: 'logi', members: [0, 1, 2].map((i) => `${id}-rear-${i}`) }
-          ]
-        }
-      ]
-    });
-    await call('auto_camera', { on: false });
-    await call('load_scene', { scene: { name: 'verify-director-spread', ships: [...side('blue', 0, -25000), ...side('red', 6000, 31000)], fleets: [fleet('blue'), fleet('red')] } });
-    await Delay(1500);
-    await call('engage', { fleet: 'blue', target: 'red-0' });
-    await call('engage', { fleet: 'red', target: 'blue-0' });
-    let shots = 0;
-    for (let attempt = 0; attempt < 40 && !shots; attempt++) {
-      shots = (await call<ViewerState>('get_state')).combat?.shots ?? 0;
-      if (!shots) await Delay(500);
-    }
-    const on = await call<{ readonly director: DirectorStateReport }>('auto_camera', { pace: 'fast' });
-    const floor = BiasOf(on.director)?.minShipSize ?? 0;
-    await Delay(30000);
-    const log = await DirectorLog();
-    const first = log[0];
-    Expect(first != null && first.framing !== 'overlook-pull-out' && !/open fire/.test(first.why) && first.size >= floor, `first ${Show(first)} (floor ${floor})`);
-    const small = log.filter((cut) => cut.size < floor);
-    Expect(log.length >= 3 && !small.length, `${log.length} cuts, under the floor: ${CutText(small)}`);
-    const since = await NowTick();
-    const ruled = await call<{ readonly director: DirectorStateReport }>('auto_camera', { scales: ['medium', 'close'], exclude: ['over-the-shoulder'] });
-    const live = BiasOf(ruled.director)?.layers?.live ?? [];
-    Expect(live.includes('scales') && live.includes('exclude'), `layers ${Show(BiasOf(ruled.director)?.layers)}`);
-    await Delay(20000);
-    const after = (await DirectorLog()).filter((cut) => cut.tick > since);
-    const broken = after.filter((cut) => cut.scale === 'wide' || cut.framing === 'over-the-shoulder');
-    // The live layer lasts until the tab reloads: drop it for the checks after.
-    await call('auto_camera', { on: false, pace: null, scales: null, exclude: null });
-    Expect(after.length >= 2 && !broken.length, `${after.length} cuts after the rules, broken: ${CutText(broken)}`);
-    return `${shots ? 'firing' : 'not firing'}; first ${first?.framing} on ${first?.subject} at ${first?.size} (floor ${floor}); ${log.length} cuts, smallest ${Math.min(...log.map((cut) => cut.size))}; after the rules ${after.length} cuts: ${[...new Set(after.map((cut) => cut.framing))].join('/')}`;
-  });
-
-  await Check("director: the scene's autoCamera survives a reload, and null falls back to it", async () => {
-    await call('auto_camera', { on: false });
-    await call('load_scene', { scene: DirectorScene('verify-director-rules') });
-    await call('patch_scene', { operations: [{ op: 'set_auto_camera', scales: ['close'], exclude: ['flyby'], pace: 'fast' }] });
-    const held = await call<{ readonly autoCamera?: object }>('get_scene');
-    Expect(JSON.stringify(held.autoCamera) === JSON.stringify({ pace: 'fast', scales: ['close'], exclude: ['flyby'] }), `get_scene autoCamera ${Show(held.autoCamera)}`);
-    await page.reload();
-    let restored = false;
-    for (let attempt = 0; attempt < 100 && !restored; attempt++) {
-      const tabs = (await call<ViewerStatus>('viewer_status')).connectedTabs;
-      const scene = tabs ? await call<Maybe<{ name: string }>>('get_scene').catch(() => null) : null;
-      restored = scene?.name === 'verify-director-rules';
-      if (!restored) await Delay(200);
-    }
-    Expect(restored, 'the reloaded tab did not restore verify-director-rules');
-    await Delay(1500);
-    const Window = async (args: Record<string, unknown>, seconds: number) => {
-      const since = await NowTick();
-      const result = await call<{ readonly director: DirectorStateReport }>('auto_camera', args);
-      await Delay(seconds * 1000);
-      return { layers: BiasOf(result.director)?.layers, cuts: (await DirectorLog()).filter((cut) => cut.tick >= since) };
-    };
-    const scene = await Window({}, 12);
-    Expect(scene.layers?.scene.includes('scales') === true && scene.layers.live.length === 0, `layers ${Show(scene.layers)}`);
-    Expect(scene.cuts.length >= 2 && scene.cuts.every((cut) => cut.scale === 'close' && cut.framing !== 'flyby'), `scene rules: ${CutText(scene.cuts)}`);
-    const medium = await Window({ scales: ['medium'] }, 12);
-    Expect(medium.cuts.length >= 2 && medium.cuts.slice(1).every((cut) => cut.scale === 'medium'), `live medium: ${CutText(medium.cuts)}`);
-    const back = await Window({ scales: null }, 12);
-    Expect(back.cuts.length >= 2 && back.cuts.slice(1).every((cut) => cut.scale === 'close' && cut.framing !== 'flyby'), `back to the scene's: ${CutText(back.cuts)}`);
-    await call('patch_scene', { operations: [{ op: 'set_auto_camera', scales: null, exclude: null, pace: null }] });
-    await call('auto_camera', { on: false });
-    return `scene close: ${CutText(scene.cuts)}; live medium: ${CutText(medium.cuts)}; null back: ${CutText(back.cuts)}`;
-  });
+  // The shot rules run in the no-EVE run too.
+  await DirectorRuleChecks(page, Scripted);
 
   // Movie mode (M2): the page plays event cues on their events. Each check loads its own scene; --only movie: runs them
   // alone. (a) and (b) need the SDE (combat and the warp-ins' flight numbers).
@@ -6758,6 +6667,9 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     return `${shot.width ?? '?'}x${shot.height ?? '?'}, ${cubes} cubes`;
   });
 
+  // Last: the autoCamera check reloads the tab, and the checks above read the first load's requests and page_log.
+  await DirectorRuleChecks(page, (id, position, extra = {}) => ({ id, dna: DNA, position, stats: STATS, ...extra }));
+
   /**
    * Waits until the scripted load's cue fired.
    *
@@ -6775,6 +6687,147 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     }
     throw new Error(`the cue fires within 15 s: ${last}`);
   }
+}
+
+/**
+ * A scripted ship for the director checks: the EVE run's Rifter, the no-EVE run's stand-in on the same dna.
+ */
+type DirectorShipOf = (id: string, position: SceneVector, extra?: object) => object;
+
+/**
+ * The camera director's whole cut log, read off the page (auto_camera's result holds it, but any call picks again).
+ * The log's ticks count from the load (the director's seed tick): back to world ticks here.
+ */
+function DirectorCutLog(page: Page): Promise<DirectorCutReport[]> {
+  return page.evaluate(() => {
+    const { director } = (globalThis as unknown as { readonly sceneDirector: { readonly director: { readonly loadTick: number; readonly cameraDirector: { Log(): DirectorCutReport[] } } } }).sceneDirector;
+    return director.cameraDirector.Log().map((cut) => ({ ...cut, tick: cut.tick + director.loadTick }));
+  });
+}
+
+function DirectorCutText(log: readonly DirectorCutReport[]): string {
+  return log.map((cut) => `${cut.tick} ${cut.framing}/${cut.subject}/${cut.scale}/${cut.side}`).join(', ');
+}
+
+/**
+ * A line of ships 600 m apart across x, centred on x 0 at z.
+ */
+function DirectorShipsOf(ship: DirectorShipOf, fleet: string, team: Maybe<string>, z: number, count: number, extra: object = {}): object[] {
+  return Array.from({ length: count }, (_, i) => ship(`${fleet}-${i}`, [(i - (count - 1) / 2) * 600, 0, z], { ...(team ? { team } : {}), ...extra }));
+}
+
+function DirectorFleet(id: string, count: number) {
+  return { id, commander: `${id}-0`, wings: [{ id: `${id}-w`, squads: [{ id: `${id}-s`, role: 'dps', members: Array.from({ length: count - 1 }, (_, i) => `${id}-${i + 1}`) }] }] };
+}
+
+/**
+ * Two fleets of five 25 km apart, flying past each other unless fly is false.
+ */
+function DirectorSceneOf(ship: DirectorShipOf, name: string, fly = true) {
+  return {
+    name,
+    ships: [...DirectorShipsOf(ship, 'blue', 'blue', 0, 5, fly ? { orders: [{ type: 'direction', direction: [0.2, 0, 1] }] } : {}), ...DirectorShipsOf(ship, 'red', 'red', 25000, 5, fly ? { orders: [{ type: 'direction', direction: [-0.2, 0, -1] }] } : {})],
+    fleets: [DirectorFleet('blue', 5), DirectorFleet('red', 5)]
+  };
+}
+
+/**
+ * The director's shot rules (sd-cinema), in both runs: they need no SDE, and the stand-in cubes measure on screen as
+ * the Rifters do, so the no-EVE run covers them too. --only director: runs them, with the EVE run's other director
+ * checks.
+ *
+ * @param ship - Makes each scripted ship.
+ */
+async function DirectorRuleChecks(page: Page, ship: DirectorShipOf): Promise<void> {
+  const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
+  const DirectorLog = (): Promise<DirectorCutReport[]> => DirectorCutLog(page);
+  const CutText = DirectorCutText;
+  const DirectorShips = (fleet: string, team: Maybe<string>, z: number, count: number) => DirectorShipsOf(ship, fleet, team, z, count);
+  const DirectorScene = (name: string) => DirectorSceneOf(ship, name);
+
+  // The shot rules: a TFIs-like spread (main bodies 6 km apart, each with a rear squad 25 km behind), so engagement wides
+  // fall under the visibility floor with Rifter radii and stand-in cubes alike.
+  const BiasOf = (director: Maybe<DirectorStateReport>) => (director as unknown as { readonly bias?: { readonly minShipSize: number; readonly layers?: { readonly scene: string[]; readonly live: string[] } } }).bias;
+  const NowTick = async (): Promise<number> => (await call<ViewerState>('get_state')).simulation.tick;
+  await Check('director: a spread fight opens on a readable shot and keeps to the rules', async () => {
+    const side = (fleet: string, z: number, rear: number) => [...DirectorShips(fleet, fleet, z, 8), ...Array.from({ length: 3 }, (_, i) => ship(`${fleet}-rear-${i}`, [(i - 1) * 600, 0, rear], { team: fleet }))];
+    const fleet = (id: string) => ({
+      id,
+      commander: `${id}-0`,
+      wings: [
+        {
+          id: `${id}-w`,
+          squads: [
+            { id: `${id}-s`, role: 'dps', members: Array.from({ length: 7 }, (_, i) => `${id}-${i + 1}`) },
+            { id: `${id}-rear`, role: 'logi', members: [0, 1, 2].map((i) => `${id}-rear-${i}`) }
+          ]
+        }
+      ]
+    });
+    await call('auto_camera', { on: false });
+    await call('load_scene', { scene: { name: 'verify-director-spread', ships: [...side('blue', 0, -25000), ...side('red', 6000, 31000)], fleets: [fleet('blue'), fleet('red')] } });
+    await Delay(1500);
+    await call('engage', { fleet: 'blue', target: 'red-0' });
+    await call('engage', { fleet: 'red', target: 'blue-0' });
+    let shots = 0;
+    for (let attempt = 0; attempt < 40 && !shots; attempt++) {
+      shots = (await call<ViewerState>('get_state')).combat?.shots ?? 0;
+      if (!shots) await Delay(500);
+    }
+    const on = await call<{ readonly director: DirectorStateReport }>('auto_camera', { pace: 'fast' });
+    const floor = BiasOf(on.director)?.minShipSize ?? 0;
+    await Delay(30000);
+    const log = await DirectorLog();
+    const first = log[0];
+    Expect(first != null && first.framing !== 'overlook-pull-out' && !/open fire/.test(first.why) && first.size >= floor, `first ${Show(first)} (floor ${floor})`);
+    const small = log.filter((cut) => cut.size < floor);
+    Expect(log.length >= 3 && !small.length, `${log.length} cuts, under the floor: ${CutText(small)}`);
+    const since = await NowTick();
+    const ruled = await call<{ readonly director: DirectorStateReport }>('auto_camera', { scales: ['medium', 'close'], exclude: ['over-the-shoulder'] });
+    const live = BiasOf(ruled.director)?.layers?.live ?? [];
+    Expect(live.includes('scales') && live.includes('exclude'), `layers ${Show(BiasOf(ruled.director)?.layers)}`);
+    await Delay(20000);
+    const after = (await DirectorLog()).filter((cut) => cut.tick > since);
+    const broken = after.filter((cut) => cut.scale === 'wide' || cut.framing === 'over-the-shoulder');
+    // The live layer lasts until the tab reloads: drop it for the checks after.
+    await call('auto_camera', { on: false, pace: null, scales: null, exclude: null });
+    Expect(after.length >= 2 && !broken.length, `${after.length} cuts after the rules, broken: ${CutText(broken)}`);
+    return `${shots ? 'firing' : 'not firing'}; first ${first?.framing} on ${first?.subject} at ${first?.size} (floor ${floor}); ${log.length} cuts, smallest ${Math.min(...log.map((cut) => cut.size))}; after the rules ${after.length} cuts: ${[...new Set(after.map((cut) => cut.framing))].join('/')}`;
+  });
+
+  await Check("director: the scene's autoCamera survives a reload, and null falls back to it", async () => {
+    await call('auto_camera', { on: false });
+    await call('load_scene', { scene: DirectorScene('verify-director-rules') });
+    await call('patch_scene', { operations: [{ op: 'set_auto_camera', scales: ['close'], exclude: ['flyby'], pace: 'fast' }] });
+    const held = await call<{ readonly autoCamera?: object }>('get_scene');
+    Expect(JSON.stringify(held.autoCamera) === JSON.stringify({ pace: 'fast', scales: ['close'], exclude: ['flyby'] }), `get_scene autoCamera ${Show(held.autoCamera)}`);
+    await page.reload();
+    let restored = false;
+    for (let attempt = 0; attempt < 100 && !restored; attempt++) {
+      const tabs = (await call<ViewerStatus>('viewer_status')).connectedTabs;
+      const scene = tabs ? await call<Maybe<{ name: string }>>('get_scene').catch(() => null) : null;
+      restored = scene?.name === 'verify-director-rules';
+      if (!restored) await Delay(200);
+    }
+    Expect(restored, 'the reloaded tab did not restore verify-director-rules');
+    await Delay(1500);
+    const Window = async (args: Record<string, unknown>, seconds: number) => {
+      const since = await NowTick();
+      const result = await call<{ readonly director: DirectorStateReport }>('auto_camera', args);
+      await Delay(seconds * 1000);
+      return { layers: BiasOf(result.director)?.layers, cuts: (await DirectorLog()).filter((cut) => cut.tick >= since) };
+    };
+    const scene = await Window({}, 12);
+    Expect(scene.layers?.scene.includes('scales') === true && scene.layers.live.length === 0, `layers ${Show(scene.layers)}`);
+    Expect(scene.cuts.length >= 2 && scene.cuts.every((cut) => cut.scale === 'close' && cut.framing !== 'flyby'), `scene rules: ${CutText(scene.cuts)}`);
+    const medium = await Window({ scales: ['medium'] }, 12);
+    Expect(medium.cuts.length >= 2 && medium.cuts.slice(1).every((cut) => cut.scale === 'medium'), `live medium: ${CutText(medium.cuts)}`);
+    const back = await Window({ scales: null }, 12);
+    Expect(back.cuts.length >= 2 && back.cuts.slice(1).every((cut) => cut.scale === 'close' && cut.framing !== 'flyby'), `back to the scene's: ${CutText(back.cuts)}`);
+    await call('patch_scene', { operations: [{ op: 'set_auto_camera', scales: null, exclude: null, pace: null }] });
+    await call('auto_camera', { on: false });
+    return `scene close: ${CutText(scene.cuts)}; live medium: ${CutText(medium.cuts)}; null back: ${CutText(back.cuts)}`;
+  });
 }
 
 /**

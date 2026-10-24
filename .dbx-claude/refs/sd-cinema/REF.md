@@ -197,6 +197,10 @@ events and plays the picks through the rig as driver `director`.
   listed under `layers.live` and its null returned the scene's value, and a refused call left the settings as they were.
   The director yielded to "the pointer" twice in that run (once right after a Claude in Chrome screenshot, once with
   only hub tools touching the tab), so take pictures with the hub's `screenshot` tool and expect to hand back.
+- **verify-page-no-eve `director:` (Mac, headless, 2026-10-24)**: (i) on stand-ins opened on `battle-fly-through` on
+  the engagement at 0.53 % (floor 0.5 %), 6 cuts in 30 s, the smallest 0.53 %, then 3 cuts (chase, hero) under the
+  rules. That opening sits where the no-EVE page reads specks, one more point for 0.01. (j): close `hero` and
+  `rear-quarter` from the scene block, live medium `chase` and `flank`, and close again after `scales: null`.
 
 ### The opening, coming back, and "open fire"
 
@@ -249,7 +253,7 @@ events and plays the picks through the rig as driver `director`.
   engagement only (the two biggest teams); kill fill by hull radius, not the explosion file's size; a station's eye
   guard is a sphere; holds run in scene time, so 4× fast-forward cuts about every second.
 
-### verify-page `--only director:` (ten checks, headless, real tools-core; `EveDataChecks` only, not the no-EVE suite)
+### verify-page `--only director:` (ten checks, headless, real tools-core; (i) and (j) in the no-EVE suite too)
 
 (a) fast pace on two stats-only fleets: driving within a boundary, 3–7 s gaps (7/7/7/7 seen), no framing + subject
 repeat, two scales in six cuts; (b) a Claude 2 s release-ending shot yields (claude) and hands back by the next boundary
@@ -263,7 +267,8 @@ movement-only: axis `motion`, three scales, one side; (h) camera off skips the c
 every cut's `size` ≥ the floor over 30 s, then `{ scales: [medium, close], exclude: [over-the-shoulder] }` keeps 20 s
 of cuts to them with `bias.layers.live` listing both; (j) `set_auto_camera { scales: [close], exclude: [flyby] }`
 survives `page.reload()` (`layers.scene`, close cuts, no flyby), a live `scales: [medium]` wins, and `scales: null`
-falls back to close.
+falls back to close. (i) and (j) are `DirectorRuleChecks(page, ship)`, which `EveDataChecks` runs on Rifters and
+`NoEveDataChecks` runs last on stand-ins (its reload would otherwise reach the request and `page_log` checks).
 
 ## Across a time-control jump (`sd-time`)
 

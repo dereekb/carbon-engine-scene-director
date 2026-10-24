@@ -60,9 +60,10 @@ locations, audio. Every ship carries stand-in guns, HP and targeting by class in
   checks (statuses, refusals, zero EVE requests in Playwright's request log, a quiet `page_log`; stand-in combat: guns,
   lock and kill, the same kill for a seed and another for another seed, a lent call that comes back after a kill, two
   loads with equal kills at rate 4 with the call moving on and a red FC handover, a jump back that replays the kill,
-  tracers headed only). The brain checks run every ship `immune`: the guns fire now. On this Mac the
-  Playwright headless shell is `chromium_headless_shell-1234`: it has a WebGPU adapter but loses its device on the first
-  stand-in pass, so the run reports those errors as info and skips the screenshot. Check drawing in a real Chrome tab.
+  tracers headed only), then the director's two shot-rule checks (`director:`, `sd-cinema`). The brain checks run
+  every ship `immune`: the guns fire now. On this Mac the Playwright headless shell is `chromium_headless_shell-1234`:
+  it has a WebGPU adapter but loses its device on the first stand-in pass, so the run reports those errors as info and
+  skips the screenshot. Check drawing in a real Chrome tab.
 - **Mac Chrome findings (2026-10-24, Apple Metal)**: 60 fps; a green screen with team cubes; an orbit drag and the hero
   shot track without the runtime frame; a 2 s 640×360 `export_movie` holds the cubes; the tab requests only `/`,
   `/app/main.js` and `/config`; `refused` 0. Exactly one reload per hub mode change, once `Hub.Stop` closed keep-alive
@@ -278,7 +279,8 @@ raw `--eve-data off` run to `verify-page` and drops the flag: use `verify-page-n
 
 - **Default list**: an item whose changes touch `packages/viewer-engine/src/`, `apps/viewer/src/`,
   `apps/scene-director/src/lib/hub/` or `packages/scene/src/` gets two entries before it closes:
-  - all of `verify-page-no-eve`: 26 checks in ~3 min on the Mac (2026-10-24). It runs on any machine.
+  - all of `verify-page-no-eve`: 28 checks in ~5 min on the Mac (2026-10-24: 26 in ~3 min, and the two `director:`
+    shot-rule checks add ~1.7 min). It runs on any machine.
   - `verify-page` with the smoke filter
     `load_scene builds|patch_scene moves|fleet membership|round-trip through|survives a reload`: the connect check, an
     SOF build, a patch, the fleet tree, the IndexedDB and file saves, and a reload. That is the least of the
@@ -332,7 +334,7 @@ raw `--eve-data off` run to `verify-page` and drops the flag: use `verify-page-n
 | `objects:` | `sd-objects` | `search_objects`, `add_objects`, orders on objects, the scene extent |
 | `asteroid-fields:` | `sd-asteroid-fields` | fields: add, refuse, update, belts, round-trip, remove |
 | `cinema:` | `sd-cinema` | shots, sequences, hardpoints, the warp-in shot |
-| `director:` | `sd-cinema` | `auto_camera` |
+| `director:` | `sd-cinema` | `auto_camera` (the two shot-rule checks run in the no-EVE run too) |
 | `timeline:` | `sd-timeline` | cues, ship orders, live edits, replay, `at` |
 | `movie:` | `sd-timeline` | event cues, the movie tool, letterbox |
 | `time:` | `sd-time` | rate, pause, jumps, the tape, seek |
