@@ -229,6 +229,48 @@ export function fliesAlone(id: string, stance: ResolvedShipStance): boolean {
 }
 
 /**
+ * order_fleet orders that fly ships (FleetOrders.Fly's Move and Warp).
+ */
+const PILOT_TAKEN_FLEET_ORDERS: ReadonlySet<string> = new Set(['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'stop', 'warp']);
+
+/**
+ * The ships whose pilots a model's call that went through takes over (ShipPilots.Manual): order_ship's ship (not a
+ * stance order or rejoin), switch_prop_mods' switched ships, and an order_fleet move's leader or warp's leader and
+ * warpers, so a fleet warp is not steered back onto the stance (the Retreat then Warp out of the console).
+ *
+ * @param tool - The tool's name.
+ * @param args - Its arguments, as given.
+ * @param result - What it returned.
+ * @returns The ship ids.
+ */
+export function shipsTakenOver(tool: string, args: unknown, result: unknown): readonly string[] {
+  const record = PlainRecord(args);
+  const output = PlainRecord(result);
+  let ids: readonly string[] = [];
+  if (tool === 'order_ship' && record && typeof record['id'] === 'string') {
+    const type = PlainRecord(record['order'])?.['type'];
+    if (type !== 'stance' && type !== 'rejoin') ids = [record['id']];
+  } else if (tool === 'switch_prop_mods' && output && Array.isArray(output['ships'])) {
+    ids = IdsOf(output['ships']);
+  } else if (tool === 'order_fleet' && output && typeof output['leader'] === 'string') {
+    const type = PlainRecord(output['order'])?.['type'];
+    if (typeof type === 'string' && PILOT_TAKEN_FLEET_ORDERS.has(type)) ids = type === 'warp' && Array.isArray(output['ships']) ? [...new Set([output['leader'], ...IdsOf(output['ships'])])] : [output['leader']];
+  }
+  return ids;
+}
+
+function PlainRecord(value: unknown): Maybe<Readonly<Record<string, unknown>>> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Readonly<Record<string, unknown>>) : null;
+}
+
+function IdsOf(ships: readonly unknown[]): string[] {
+  return ships.flatMap((ship) => {
+    const id = typeof ship === 'string' ? ship : PlainRecord(ship)?.['id'];
+    return typeof id === 'string' ? [id] : [];
+  });
+}
+
+/**
  * The page's pilots.
  */
 export class ShipPilots {

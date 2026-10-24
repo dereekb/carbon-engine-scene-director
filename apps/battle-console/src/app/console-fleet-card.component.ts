@@ -47,9 +47,23 @@ export const CONSOLE_FLEET_BAR: readonly { readonly command: FleetCommand; reado
       </div>
       <div class="console-fleet-line">FC {{ card().fc }}: {{ card().stateText }}</div>
       <div class="console-fleet-line">
-        {{ card().engaged ? 'Engaged' : 'Not engaged' }}@if (card().stance) {, {{ card().stance }}}@if (card().held) {, holding fire}@if (card().freeFire) {, free fire}
+        {{ card().engaged ? 'Engaged' : 'Not engaged' }}
+        @if (card().stance) {
+          , {{ card().stance }}
+        }
+        @if (card().held) {
+          , holding fire
+        }
+        @if (card().freeFire) {
+          , free fire
+        }
       </div>
-      <div class="console-fleet-line">Primary {{ card().primary ?? 'none' }}@if (hasHealth()) { · HP {{ card().healthPercent }}%}</div>
+      <div class="console-fleet-line">
+        Primary {{ card().primary ?? 'none' }}
+        @if (hasHealth()) {
+          · HP {{ card().healthPercent }}%
+        }
+      </div>
       @if (card().manual.length) {
         <div class="console-fleet-line console-fleet-manual">You hold: {{ card().manual.join(', ') }}</div>
       }
@@ -160,9 +174,23 @@ export const CONSOLE_FLEET_BAR: readonly { readonly command: FleetCommand; reado
     }
 
     .console-fleet-targets button {
+      font: inherit;
       font-size: 11px;
-      padding: 0 6px;
+      padding: 0 8px;
       cursor: pointer;
+      color: var(--mat-sys-primary);
+      background: transparent;
+      border: 1px solid var(--mat-sys-outline-variant);
+      border-radius: 9px;
+    }
+
+    .console-fleet-targets button:hover:not(:disabled) {
+      background: var(--mat-sys-surface-container-high);
+    }
+
+    .console-fleet-targets button:disabled {
+      opacity: 0.4;
+      cursor: default;
     }
 
     .console-fleet-error {

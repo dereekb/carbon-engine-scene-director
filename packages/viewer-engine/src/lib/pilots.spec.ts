@@ -6,7 +6,7 @@ import type { DestinyWorld } from './destiny';
 import { BallStates, GUARDIAN, Harness, RequireMotion, RIFTER, Ship, TFI } from './destiny.spec-helper';
 import { ResolveFlight, type PublishedHull, type ShipFlight } from './flight';
 import { CombatProfileOf } from './pilot-facts';
-import { ShipPilots, type PilotFormation, type PilotTackleModule, type ShipPilotsPort } from './pilots';
+import { ShipPilots, shipsTakenOver, type PilotFormation, type PilotTackleModule, type ShipPilotsPort } from './pilots';
 import { ResolveShipPropMod } from './prop-mods';
 import { RoundTrip } from './state-capture.spec-helper';
 
@@ -209,6 +209,17 @@ describe('ShipPilots', () => {
     expect(port.orders.length).toBe(2);
   });
 
+  it('names the ships a model call takes over: order_ship, switch_prop_mods, order_fleet moves and warps', () => {
+    expect(shipsTakenOver('order_ship', { id: 'a', order: { type: 'stop' } }, {})).toEqual(['a']);
+    expect(shipsTakenOver('order_ship', { id: 'a', order: { type: 'stance', set: { type: 'kite' } } }, {})).toEqual([]);
+    expect(shipsTakenOver('order_ship', { id: 'a', order: { type: 'rejoin' } }, {})).toEqual([]);
+    expect(shipsTakenOver('switch_prop_mods', { fleet: 'red', active: true }, { ships: [{ id: 'a' }, { id: 'b' }] })).toEqual(['a', 'b']);
+    expect(shipsTakenOver('order_fleet', {}, { leader: 'fc', order: { type: 'goto', point: [0, 0, 1] }, ships: ['fc', 'b'] })).toEqual(['fc']);
+    expect(shipsTakenOver('order_fleet', {}, { leader: 'fc', order: { type: 'warp', point: [0, 0, 1] }, ships: [{ id: 'b', landing: [0, 0, 1] }] })).toEqual(['fc', 'b']);
+    expect(shipsTakenOver('order_fleet', {}, { leader: 'fc', order: { type: 'stance', set: { type: 'align' } }, ships: ['fc'] })).toEqual([]);
+    expect(shipsTakenOver('order_fleet', {}, { leader: 'fc', order: { type: 'targets', primary: 'x' }, ships: ['fc'] })).toEqual([]);
+  });
+
   it('runs its tackle on the focus in range and stops only what it switched on', () => {
     const port = new FakePort();
     const tackle: PilotTackleModule[] = [{ key: 'point', kind: 'point', range: 24_000, running: false }];
@@ -382,6 +393,34 @@ describe('ShipPilots on the parks', () => {
     expect(along[first]).toBeGreaterThanOrEqual(0.75 * top - 1);
     expect(states.slice(first).every((state) => state === 'aligned')).toBe(true);
     expect(port.propMods.some((each) => each.id === 'rifter' && each.active)).toBe(true);
+  });
+
+  it('warps out once aligned when a fleet warp takes the pilot over, and steers back onto the align without it', () => {
+    const stance = Own('rifter', { type: 'align', to: [0, 0, 10_000_000], propMods: 'always' });
+    const warp: ShipOrder = { type: 'warp', point: [0, 0, 5_000_000], range: 0 };
+    const fly = (takeOver: boolean) => {
+      let flying: Maybe<DestinyWorld> = null;
+      let ordered = false;
+      return FlyPilots(
+        (world) => {
+          flying = world;
+          return { ...RifterOnPunisher(world), stances: new Map([['rifter', stance]]) };
+        },
+        90,
+        (_second, _port, pilots) => {
+          if (ordered || pilots.Report('rifter', stance, 0).state !== 'aligned') return;
+          ordered = true;
+          // order_fleet's live half on the FC, then Director.Manual's takeover.
+          flying?.Order('rifter', warp);
+          if (takeOver) pilots.Manual(shipsTakenOver('order_fleet', { fleet: 'red', order: warp }, { fleet: 'red', leader: 'rifter', order: warp, ships: [] }));
+        }
+      );
+    };
+    const taken = fly(true);
+    expect(RequireMotion(taken.harness.world, 'rifter').position[2]).toBeGreaterThan(4_000_000);
+    expect(taken.pilots.Report('rifter', stance, 0).state).toBe('manual');
+    const steered = fly(false);
+    expect(RequireMotion(steered.harness.world, 'rifter').position[2]).toBeLessThan(1_000_000);
   });
 
   it('flies the same run twice to the same ball states', () => {

@@ -6203,6 +6203,11 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     await Blue('the call lent', 5, (fc) => (fc.lent?.targets.includes('red-3') && (fc.manual ?? []).join() === 'call' ? null : Show(fc)));
     await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'red-3' }] });
     await Blue('the lent call back', 8, (fc) => (!fc.lent && !(fc.manual ?? []).includes('call') ? null : Show(fc)));
+    // A lent call also ends when its target warps off (CalledTargetStatus warping), not only when it goes.
+    await call('order_fleet', { fleet: 'blue', order: { type: 'targets', primary: 'red-2', until: 'gone' } });
+    await Blue('the call lent on red-2', 5, (fc) => (fc.lent?.targets.includes('red-2') ? null : Show(fc)));
+    await call('order_ship', { id: 'red-2', order: { type: 'warp', point: [0, 0, 5_000_000] } });
+    await Blue('the lent call back once red-2 warps off', 30, (fc) => (!fc.lent && !(fc.manual ?? []).includes('call') ? null : Show(fc)));
     await call('order_fleet', { fleet: 'blue', order: { type: 'stance', set: { type: 'align', to: [0, 0, -5_000_000] } } });
     const states: string[] = [];
     await Blue('blue-1 aligned', 30, (_fc, state) => {
@@ -6210,8 +6215,53 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
       if (states.at(-1) !== now) states.push(now);
       return now === 'aligned' ? null : `blue-1 ${now}`;
     });
+    // Warp out: a fleet warp takes the move from the align stance's pilot (manual) and the brain; engage gives it back.
+    await call('order_fleet', { fleet: 'blue', order: { type: 'warp', point: [0, 0, -5_000_000] } });
+    const PositionOf = (state: BrainState, id: string) => (state.ships.find((ship) => ship.id === id) as { readonly position?: readonly number[] } | undefined)?.position;
+    const warped = await Blue('blue lands off grid', 60, (fc, state) => {
+      const far = ['blue-1', 'blue-2', 'blue-3'].map((id) => -(PositionOf(state, id)?.[2] ?? 0));
+      const pilot = state.ships.find((ship) => ship.id === 'blue-1')?.stance?.state;
+      return far.every((z) => z > 4_000_000) && pilot === 'manual' && (fc.manual ?? []).includes('move') ? null : `${far.map((z) => Math.round(z / 1000)).join(' / ')} km out, blue-1 ${pilot}, ${Show(fc)}`;
+    });
+    await call('order_fleet', { fleet: 'blue', order: { type: 'engage' } });
+    await Blue('the move back with the brain', 5, (fc, state) => (!(fc.manual ?? []).length && state.ships.find((ship) => ship.id === 'blue-1')?.stance?.state !== 'manual' ? null : Show(fc)));
     Expect(engaged.engagedBy === 'ordered' && engaged.released === true, Show(engaged));
-    return `engage (released the hold), the lent call came back after red-3 went, blue-1 ${states.join(' → ')}`;
+    return `engage (released the hold), the lent call came back after red-3 went and after red-2 warped off, blue-1 ${states.join(' → ')}, then warped ${Math.round(-(PositionOf(warped, 'blue-1')?.[2] ?? 0) / 1000)} km out and engage took the move back`;
+  });
+
+  await Check('no EVE data: free fire with calls off, then a freeFire: false doctrine turns it off', async () => {
+    const doctrine = (freeFire: boolean) => ({ schema: 'cjs-fleet-personality/1', extends: 'line', command: { ability: 1 }, engage: 'in-range', targeting: { reach: 30_000, calls: false, freeFire }, movement: { stance: 'hold' } });
+    const ships = (team: string, z: number) => [1, 2, 3].map((n) => ({ id: `${team}-${n}`, dna: DNA, team, position: [n * 300, 0, z] }));
+    const fleet = (team: string, personality?: string) => ({ id: team, commander: `${team}-1`, ...(personality ? { personality } : {}), wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: [`${team}-2`, `${team}-3`] }] }] });
+    await call('load_scene', { scene: { name: 'verify-no-eve-data-free-fire', personalities: { free: doctrine(true) }, ships: [...ships('blue', 0), ...ships('red', 15_000)], fleets: [fleet('blue', 'free'), fleet('red')] } });
+    await WaitNoEve('the builds settle', 10, Settled);
+    interface Decision {
+      readonly lever: string;
+      readonly args?: { readonly order?: { readonly type?: string; readonly on?: boolean } };
+      readonly why?: string;
+    }
+    interface FreeFireState {
+      readonly fleets?: readonly { readonly id: string; readonly freeFire?: boolean; readonly called?: unknown; readonly fc?: { readonly engaged?: boolean; readonly decisions?: readonly Decision[] } }[];
+    }
+    const BlueUntil = async (what: string, seconds: number, test: (blue: NonNullable<FreeFireState['fleets']>[number]) => Maybe<string>) => {
+      const end = Date.now() + seconds * 1000;
+      let last = 'never polled';
+      while (Date.now() < end) {
+        const blue = (await call<FreeFireState>('get_state')).fleets?.find((each) => each.id === 'blue');
+        const problem = blue ? test(blue) : 'no blue fleet';
+        if (problem == null && blue) return blue;
+        last = problem ?? 'no blue fleet';
+        await Delay(250);
+      }
+      throw new Error(`${what} within ${seconds} s: ${last}`);
+    };
+    const on = await BlueUntil('blue engaged with free fire on', 20, (blue) => (blue.fc?.engaged && blue.freeFire ? null : Show({ freeFire: blue.freeFire, fc: blue.fc })));
+    Expect(!(on.fc?.decisions ?? []).some((decision) => decision.lever === 'call') && on.called == null, `calls: false still called: ${Show({ called: on.called, decisions: on.fc?.decisions })}`);
+    await call('set_fleet_personality', { fleet: 'blue', personality: { ...doctrine(false), id: 'no-free-fire' } });
+    const off = await BlueUntil('free fire off by the doctrine', 15, (blue) => (!blue.freeFire ? null : Show({ freeFire: blue.freeFire, decisions: blue.fc?.decisions?.slice(-3) })));
+    const turnedOff = (off.fc?.decisions ?? []).find((decision) => decision.lever === 'free-fire' && decision.args?.order?.on === false);
+    Expect(turnedOff != null, `no free-fire off decision: ${Show(off.fc?.decisions)}`);
+    return `free fire on with no call (${(on.fc?.decisions ?? []).map((decision) => decision.lever).join(', ')}), then off: ${turnedOff?.why ?? '?'}`;
   });
 
   await Check('no EVE data: the tab asked for no EVE data', async () => {

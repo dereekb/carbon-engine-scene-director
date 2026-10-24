@@ -39,7 +39,8 @@ export async function openConsoleFleetSettingsDialog(matDialog: MatDialog, confi
     header: `${config.fleet}: FC settings`,
     initialValue: config.value,
     submitButtonConfig: { text: 'Apply' },
-    dialog: { panelClass: 'console-fleet-settings-dialog' },
+    // openDialogWithForm's default 300px max height shows three of the form's fields at a time.
+    dialog: { panelClass: 'console-fleet-settings-dialog', maxHeight: '85vh' },
     config: {
       fields: [
         dbxForgeValueSelectionField<string>({ key: 'doctrine', label: 'Doctrine', props: { options: selectionOptions(config.doctrines) } }),
@@ -55,7 +56,17 @@ export async function openConsoleFleetSettingsDialog(matDialog: MatDialog, confi
         dbxForgeNumberField({ key: 'reachMetres', label: 'Calls reach (m)', min: 0 }),
         dbxForgeNumberField({ key: 'queue', label: 'Queue (called targets after the primary)', min: 0, max: 10 }),
         dbxForgeValueSelectionField<string>({ key: 'switch', label: 'Switch', props: { options: selectionOptions(FLEET_TARGET_SWITCHES), addClearOption: 'Doctrine' } }),
-        dbxForgeValueSelectionField<string>({ key: 'logiFormation', label: 'Logi', props: { options: [{ value: 'follow', label: 'Follow the FC' }, { value: 'loose', label: 'On their own' }], addClearOption: 'As staged' } }),
+        dbxForgeValueSelectionField<string>({
+          key: 'logiFormation',
+          label: 'Logi',
+          props: {
+            options: [
+              { value: 'follow', label: 'Follow the FC' },
+              { value: 'loose', label: 'On their own' }
+            ],
+            addClearOption: 'As staged'
+          }
+        }),
         dbxForgeToggleField({ key: 'autoRepair', label: 'Logi auto-repair' }),
         dbxForgeValueSelectionField<string>({ key: 'autoRepairPolicy', label: 'Auto-repair picks', props: { options: selectionOptions(AUTO_REPAIR_POLICIES), addClearOption: 'Default' } }),
         dbxForgeTextField({ key: 'retreat', label: 'Retreat to', hint: 'away, a station, gate or celestial name, or x, y, z metres' }),

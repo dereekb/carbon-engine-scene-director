@@ -248,6 +248,10 @@ export interface FleetCommandReport {
    */
   readonly hostiles: number;
   readonly reach: FleetReachNumbers;
+  /**
+   * The fleet's live stance an order set (order_fleet stance on the fleet: the console's Retreat, Pull range, ...),
+   * else its personality's.
+   */
   readonly stance: string;
   readonly manual: readonly FleetBrainLever[];
   /**
@@ -923,7 +927,7 @@ export class FleetCommanders {
       ...(memory.engagedBy ? { engagedBy: memory.engagedBy } : {}),
       hostiles: brain?.hostiles ?? 0,
       reach: brain?.reach ?? NO_REACH,
-      stance: personality.movement.stance,
+      stance: this.StanceOf({ fleet, kind: 'fleet', id: fleet })?.stance?.type ?? personality.movement.stance,
       manual,
       ...(brain?.lent ? { lent: { lever: 'call' as const, targets: [...brain.lent] } } : {}),
       ...(brain?.piloted ? { piloted: [...FLEET_PILOTED_LEVERS] } : {}),

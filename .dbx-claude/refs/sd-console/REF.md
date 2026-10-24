@@ -13,7 +13,7 @@
 | A2: `packages/battle` (pure, node-tested) | done: scenario, bundle, staging, settings, commands, views (32 specs) |
 | A3: loading (drop, zip.js, staging over `CallHub`, dialogs, scenario card, Reset, IndexedDB) | done (specs + `verify-console`) |
 | A4: fleet panel (cards, command bar, target list, settings dialog, doctrine picker) | done (specs + `verify-console`) |
-| A5: console end-to-end Playwright script, offline verify gaps | `verify-console` passes load, engage, Pull range / Hold, the settings drop and two equal Resets; **Warp out after Retreat fails** (the order is accepted, the FC keeps flying the align stance's direction); the verify-page offline gaps and the real-Chrome pass are a follow-up |
+| A5: console end-to-end Playwright script, offline verify gaps | done: `verify-console` passes load, engage, Pull range / Hold, the settings drop, two equal Resets and Retreat then Warp out (fixed: a fleet warp now holds the align stance's pilot, `sd-piloting` Manual); verify-page's offline brain checks cover a fleet warp after align, a lent call ended by a warp-off, `calls: false` with free fire and a `freeFire: false` doctrine; the real-Chrome pass is done (below). Kill checks wait on offline damage |
 
 ## Projects
 
@@ -203,5 +203,14 @@ doctrine instead) or has no ship left (`fleetCommandsBlocked`). `views.ts`: `toF
 - Headless boot (offline hub on a spare port with temp stores, `--console dist/apps/battle-console/browser`): the
   engine starts through the import map (headless Chromium here gets a swiftshader adapter and logs WebGPU validation
   errors; drawing is checked in real Chrome).
-- Real Chrome on the Mac (Claude in Chrome): the console draws the stand-ins; the select panel is themed; keys and H as
-  above.
+- Real Chrome on the Mac (Claude in Chrome, a spare `--eve-data off` hub on 5531 with temp stores): the console draws
+  the stand-ins; the select panel is themed; keys and H as above. The A5 pass (2026-10-24) dropped the scenario as loose
+  files through synthetic `DragEvent`s on `#view` (a `DataTransfer` of `File`s; a real folder or zip drag cannot be
+  scripted, the zip is verify-console's): the overlay shows over the canvas, the cards, command bar, target list,
+  Settings (Apply edits `<fleet>-fc`), the confirm, same-scenario and problems dialogs work over it, a lone personality
+  dropped on a card becomes its doctrine, Retreat then Warp out leaves the grid, a reload restores the scenario and
+  Reset re-stages it. Keys typed in a dialog field stay there (Space, ← and H); H with focus on the body hides the
+  dialogs and their backdrop too.
+- Fixed in that pass: the Settings dialog opened at `openDialogWithForm`'s default `maxHeight: 300px` (three fields
+  visible): it passes `85vh`; the target rows' Call / Clear were unstyled native buttons: themed with `--mat-sys-*`;
+  the card's stance read the doctrine's after Retreat: `fc.stance` is now the fleet's live stance (`sd-personalities`).

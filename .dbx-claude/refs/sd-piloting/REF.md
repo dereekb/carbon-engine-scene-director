@@ -151,10 +151,15 @@ Viewer: `packages/viewer-engine/src/lib/destiny-orbit-model.spec.ts` calibrates 
   ever stops modules it switched on (`owned`), and stops them when its stance ends.
 - **Stagger**: the first ideal's `idealAt` is set back by `unitHash('pilot|<id>') × refresh`, so pilots that start
   together refresh on different boundaries.
-- **Manual**: `Director.Manual` (a model's order_ship that is not a stance order or rejoin, switch_prop_mods' switched
-  ships, a ship script's steps) and switch_modules touching `prop` / `point` / `scram` / `web` call `ShipPilots.Manual`:
-  the pilot holds (`manual`) until a stance order names it (order_ship stance, order_fleet stance: `Release`), a
-  rejoin, or its stance changes.
+- **Manual**: `Director.Manual` (`shipsTakenOver`: a model's order_ship that is not a stance order or rejoin,
+  switch_prop_mods' switched ships, an order_fleet move's leader and a fleet warp's leader and warpers, a ship script's
+  steps) and switch_modules touching `prop` / `point` / `scram` / `web` call `ShipPilots.Manual`: the pilot holds
+  (`manual`) until a stance order names it (order_ship stance, order_fleet stance: `Release`), order_fleet engage
+  (releases the fleet), a rejoin, or its stance changes.
+- **Why a fleet move holds the pilot**: it is `world.Order` on the leader, which a stance's pilot re-orders at its next
+  step. Before, the console's Retreat (a fleet align stance) then Warp out had the align pilot give the FC its
+  `direction` again and the warp never left (`pilots.spec` "warps out once aligned when a fleet warp takes the pilot
+  over, and steers back onto the align without it"); now the warp flies and Engage hands the FC back.
 - **FC brain**: `FleetBrainPort.Piloted` (`ShipPilots.Flies`) on the acting FC adds `FLEET_PILOTED_LEVERS` (`move`,
   `prop-mods`) to that step's manual levers; `fc.piloted` reports them.
 - **get_state**: `ships[].stance` for every ship with a stance or a pilot record: the resolved stance and sources,

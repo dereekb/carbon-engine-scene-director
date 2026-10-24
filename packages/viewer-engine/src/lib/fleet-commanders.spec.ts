@@ -486,6 +486,18 @@ describe('FleetCommanders: the FC brain', () => {
     expect(rig.runs.at(-1)).toMatchObject({ tick: 2, lever: 'call', args: CallArgs('fc', ['r2', 'r1']) });
   });
 
+  it("reports the fleet's live stance an order set, else its personality's", () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 1);
+    const own = rig.commanders.Report(FLEET, 1)?.stance;
+    rig.commanders.SetStance(DPS, { type: 'kite' }, { tick: 1, delays: new Map() });
+    expect(rig.commanders.Report(FLEET, 1)?.stance).toBe(own);
+    rig.commanders.SetStance(WHOLE, { type: 'align', to: [0, 0, -1_000_000] }, { tick: 1, delays: new Map() });
+    expect(rig.commanders.Report(FLEET, 1)?.stance).toBe('align');
+    rig.commanders.Engage(FLEET);
+    expect(rig.commanders.Report(FLEET, 1)?.stance).toBe(own);
+  });
+
   it('targets until gone lends only the call lever; the brain calls again once its targets are gone, or at a clear', () => {
     const rig = BrainRig(BrainScene('sharp'));
     rig.Steps(1, 1);

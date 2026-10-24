@@ -191,6 +191,8 @@ OrderOf, CallOf, PropMods, Run, HandOver), so the brain is node-tested with a fa
   A stance flown by the acting FC (`FleetBrainPort.Piloted`, `ShipPilots.Flies`, `sd-piloting`) holds `move` and
   `prop-mods` for each step it flies (not in `manual`: `fc.piloted` reports them); the brain still calls targets and
   free fire. No stance on the FC: the brain moves it as before.
+  A fleet move or warp also holds the FC's pilot (`sd-piloting` Manual), so Retreat then Warp out leaves with `move`
+  manual and the pilot `manual` until Engage hands both back.
   `set_fleet_personality` (any `update_fleet` whose `set` has `personality`, `AfterOperations` from `Edit` and
   `CueEdit`) clears `manual`, `held` and the pending decisions; a held fleet's members get their holds lifted
   (`FleetTargets.Rearm`) so the brain's call is shot again.
@@ -210,7 +212,8 @@ OrderOf, CallOf, PropMods, Run, HandOver), so the brain is node-tested with a fa
 - **get_state `fleets[].fc`** (personality fleets): `personality`, `ship` (the live commander: the formation root;
   during an explode handover already the designate), `ability`, `state` (`handover` > `leaderless` > `waiting` >
   `no-team` > `commanding`), `successor` / `takesOverIn` (seconds) during a handover, `readyAt`, `engaged` /
-  `engagedBy`, `hostiles` and `reach` (the last picture), `stance`, `manual`, `lent`, `held`, `pending` (`lever`, `dueIn`,
+  `engagedBy`, `hostiles` and `reach` (the last picture), `stance` (the fleet's live stance an order_fleet stance order set, e.g. the
+  console's Retreat `align`, else the personality's `movement.stance`), `manual`, `lent`, `held`, `pending` (`lever`, `dueIn`,
   `why`), `decisions` (`tick`, `lever`, `tool`, `args`, `why`, `refused?`; the latest 20), `note`. **`ships[].pilot`**:
   `{ command?, reaction?, source }` for a personality fleet's members and ships with authored traits.
 - **Reset**: a load clears every brain, acting commander, gate memory and the trait book (`Clear`); a fleet removed

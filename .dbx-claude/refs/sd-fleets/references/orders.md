@@ -43,6 +43,9 @@ the tool runs them; anchor / break-off / regroup edit the **live scene only** (`
 
 - **Fleet move**: `world.Order(fc, order)`, exactly what `order_ship` on the FC does; members keep following. Groups
   apart and detached members stay where they are (as in EVE): a fleet warp or a fleet `regroup` brings them back.
+- **A model's move or warp holds the stance pilots it flies** (`shipsTakenOver`, `sd-piloting` Manual): the leader's,
+  and for a warp every warper's, so a live stance (Retreat's align) does not re-order them; a stance order or engage
+  hands them back. The FC brain's own moves never do.
 - **Wing or squad move** (needs `formation.ready`): `OrderRefusal(leader)`, `world.Order(leader)`, then
   `FleetFollowing.BreakAway`. The group **flies apart** on its leader with `toFleetGroupFollowPlans`: a ship whose
   anchor is inside the group keeps it and its fleet slot (logi keep their lead); a ship anchored outside the group

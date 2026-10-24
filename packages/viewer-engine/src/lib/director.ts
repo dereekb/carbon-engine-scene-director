@@ -274,7 +274,7 @@ import {
 } from './fittings';
 import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
 import { CombatProfileOf, HeadingVectorOf, IncomingRepsOf, RemainingEhpOf, TackleModulesOf, TackleOn } from './pilot-facts';
-import { ShipPilots, type PilotFormation, type ShipStanceReport } from './pilots';
+import { ShipPilots, shipsTakenOver, type PilotFormation, type ShipStanceReport } from './pilots';
 import { type FleetCommandReport, FleetCommanders, type ShipPilotReport } from './fleet-commanders';
 import { CaptureFleetHeirs, InheritFleetOrders } from './fleet-succession';
 import { FleetOrders, type FleetOrderResult } from './fleet-orders';
@@ -6080,19 +6080,12 @@ export class Director {
   }
 
   /**
-   * A model's order_ship (not a stance order or rejoin) or switch_prop_mods holds the pilots of the ships it named until
-   * a stance order or rejoin (ShipPilots.Manual).
+   * A model's order_ship (not a stance order or rejoin), switch_prop_mods or order_fleet move or warp holds the pilots
+   * of the ships it flew until a stance order, engage or rejoin (shipsTakenOver, ShipPilots.Manual).
    */
   private PilotsTakenOver(tool: string, args: unknown, result: unknown): void {
-    if (args === null || typeof args !== 'object') return;
-    const record = args as Readonly<Record<string, unknown>>;
-    if (tool === 'order_ship' && typeof record['id'] === 'string') {
-      const order = record['order'];
-      const type = order !== null && typeof order === 'object' ? (order as Readonly<Record<string, unknown>>)['type'] : null;
-      if (type !== 'stance' && type !== 'rejoin') this.pilots.Manual([record['id']]);
-    } else if (tool === 'switch_prop_mods' && result !== null && typeof result === 'object' && 'ships' in result) {
-      this.pilots.Manual(((result as SwitchPropModsResult).ships ?? []).map((ship) => ship.id));
-    }
+    const ids = shipsTakenOver(tool, args, result);
+    if (ids.length) this.pilots.Manual(ids);
   }
 
   /**
