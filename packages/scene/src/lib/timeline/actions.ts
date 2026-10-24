@@ -12,6 +12,7 @@ import { normalizePropModSwitch } from '../prop-mods/switch';
 import { normalizeModuleSwitch } from '../fitting/switch';
 import { normalizeTargetCommand } from '../weapons/target';
 import { normalizeCeaseFireCommand, normalizeEngageCommand } from '../combat/commands';
+import { normalizeImmunityCommand } from '../combat/immunity';
 import { normalizeAutoRepairCommand } from '../logi/auto-repair';
 import { cameraPathAnchors, cameraShotSubjects, type CameraShot, normalizeCameraSequence, normalizeCameraShot } from '../cinema/shot';
 import { autoCameraReferences, normalizeAutoCameraCommand, type AutoCameraCommand } from '../cinema/director/command';
@@ -318,6 +319,7 @@ export const TIMELINE_ACTIONS: Readonly<Record<TimelineActionName, TimelineActio
   engage: selectionEntry('engage', (input, where) => normalizeEngageCommand(input, where), 'target'),
   cease_fire: selectionEntry('cease_fire', (input, where) => normalizeCeaseFireCommand(input, where)),
   auto_repair: { ...selectionEntry('auto_repair', (input, where) => normalizeAutoRepairCommand(input, where)), kind: documentKind },
+  set_immunity: { ...selectionEntry('set_immunity', (input, where) => normalizeImmunityCommand(input, where)), kind: documentKind },
   play_shot: {
     name: 'play_shot',
     kind: camera,

@@ -96,6 +96,62 @@ function Rifter(): ShipDefense {
 
 const RECORD: HpSetRecord = { tick: 4, appliedAt: 4, intent: 'cinematic', values: { shield: '0%', armor: 200 }, hp: { shield: 0, armor: 200 } };
 
+describe('DamageModel immunity', () => {
+  const em = (amount: number) => ({ em: amount, thermal: 0, kinetic: 0, explosive: 0 });
+
+  it('indexes immune layers apart from the HP entries; SetImmunity replaces the index', () => {
+    const model = new DamageModel();
+    expect(model.Immunity('r')).toEqual([]);
+    model.SetImmunity(new Map([['r', ['structure'] as const]]));
+    expect(model.Immunity('r')).toEqual(['structure']);
+    model.SetDefense('r', Defense(600));
+    model.Remove('r');
+    model.Clear();
+    expect(model.Immunity('r')).toEqual(['structure']);
+    model.SetImmunity(new Map([['x', ['shield', 'armor', 'structure'] as const]]));
+    expect(model.Immunity('r')).toEqual([]);
+    expect(model.Immunity('x')).toEqual(['shield', 'armor', 'structure']);
+  });
+
+  it('absorbs a hit at an immune layer that has HP, leaving HP unchanged', () => {
+    const model = new DamageModel();
+    model.SetDefense('r', Defense(600));
+    model.SetImmunity(new Map([['r', ['shield', 'armor', 'structure'] as const]]));
+    expect(model.ApplyHit('r', em(1000))).toEqual({ taken: { shield: 0, armor: 0, structure: 0 }, total: 0, structure: 400, absorbed: 400, absorbedBy: 'shield' });
+    expect(model.Fractions('r')).toEqual({ shield: 1, armor: 1, structure: 1 });
+    model.SetImmunity(new Map([['r', ['armor'] as const]]));
+    const hit = model.ApplyHit('r', em(2000));
+    expect(hit).toMatchObject({ taken: { shield: 500, armor: 0, structure: 0 }, total: 500, absorbedBy: 'armor' });
+    expect(hit?.absorbed).toBeCloseTo(300, 9);
+    expect(model.Damage('r', 'armor', 100)).toBe(0);
+    expect(model.Damage('r', 'structure', 100)).toBe(100);
+    model.SetImmunity(new Map());
+    expect(model.ApplyHit('r', em(100))).toEqual({ taken: { shield: 0, armor: 40, structure: 0 }, total: 40, structure: 300 });
+  });
+
+  it('is never Destroyed at 0 structure while structure is immune, and is once the index lifts it', () => {
+    const model = new DamageModel();
+    model.SetDefense('r', Defense(600));
+    model.SetImmunity(new Map([['r', ['structure'] as const]]));
+    model.SetHp('r', { shield: 0, armor: 0, structure: 0 }, RECORD);
+    expect(model.Destroyed('r')).toBe(false);
+    expect(model.DestroyedShips()).toEqual([]);
+    expect(model.Damage('r', 'structure', 10)).toBe(0);
+    model.SetImmunity(new Map());
+    expect(model.Destroyed('r')).toBe(true);
+    expect(model.DestroyedShips()).toEqual(['r']);
+  });
+
+  it('lets the drains through to structure, then stops them there', () => {
+    const model = new DamageModel();
+    model.SetDefense('r', Defense(600));
+    model.SetImmunity(new Map([['r', ['structure'] as const]]));
+    for (let i = 0; i < 10; i++) model.ApplyHit('r', em(2000));
+    expect(model.Fractions('r')).toEqual({ shield: 0, armor: 0, structure: 1 });
+    expect(model.Destroyed('r')).toBe(false);
+  });
+});
+
 describe('DamageModel set_hp', () => {
   it('sets HP clamped to [0, max] and Health reads it back', () => {
     const model = new DamageModel();

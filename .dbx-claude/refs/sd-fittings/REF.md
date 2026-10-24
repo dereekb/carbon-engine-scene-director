@@ -450,7 +450,11 @@ Live only (never in the document; a fit's `/OFFLINE` is the persistent offline m
 - **`set_hp`** (`sd-combat` → Battle damage): `Health(id)` (per layer `{ hp, max }`, null untracked; auto-repair reads it
   too), `SetHp(id, hp, record)` (each layer clamped to [0, max], the record kept: the only way a set changes HP),
   `HpSet(id)` (the latest set; `SetDefense` keeps it, a ship leaving the model drops it with its HP), `DestroyedShips()`
-  (tracked ships at 0 structure, by id: Combat rules' sweep).
+  (tracked ships at 0 structure that can die, by id: Combat rules' sweep).
+- **Damage immunity** (`sd-combat` → Damage immunity → The page half): `SetImmunity(index)` (the document's immune ships,
+  re-indexed on every apply, kept apart from the HP entries), `Immunity(id)`; `ApplyHit` stops a hit at an immune layer
+  that has HP and returns `absorbed` / `absorbedBy`; `Damage` takes nothing from one; `Destroyed` is false while
+  structure is immune (so `DestroyedShips` skips it). `SetHp`, `Repair` and `Recharge` ignore immunity.
 - verify-page (2026-10-23, SDE 3632936): "switch_modules runs a Guardian's armor hardener" (Domination Thermal Armor
   Hardener: thermal 44.75 % → 75.14 % from the next tick, back after `online` and its 24 s cycle end; DC II refused as
   passive, an unmatched `weapon` selector skipped); "switch_modules prop matches switch_prop_mods" (the 10MN AB II

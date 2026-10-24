@@ -71,6 +71,15 @@
  * gameplay set that leaves structure at 0 is swept into a kill at the next
  * boundary (CombatRules.SweepDestroyed, cause "set_hp").
  *
+ * Damage immunity and selections (sd-combat, sd-selectors): ships[].immune is
+ * the document's; Apply re-indexes it in the damage model on every apply, which
+ * stops hits at an immune layer that has HP (every source: CombatRules.Land).
+ * set_immunity resolves its selector at its turn in the edit queue
+ * (SelectShips: the package's selectShips with the page's facts, each ship's
+ * EVE type and group and its live state) and applies one set_immunity op on
+ * the ids it picked. Immune ships are still locked and fired at; engage and
+ * order_fleet targets warn when the target is immune.
+ *
  * The cinematic camera (cinema.ts): a shot or sequence plays on generated hardpoints from the drawn ships, every
  * frame in TrackCamera, and the engine's FreeCamera draws it. A load cuts it; a camera change, a removed subject or the
  * pointer releases it back to the orbit camera (the pointer adopting the cinematic view). get_state reports it as
@@ -133,6 +142,20 @@ import {
   shipPropModModuleOf,
   selectFittedModules,
   selectFleetShips,
+  selectShips,
+  shipSelectionReport,
+  isFilteredSelector,
+  immuneLayersOf,
+  immunityWarning,
+  normalizeImmunityCommand,
+  sameImmunity,
+  toSceneImmunity,
+  type ImmunityValue,
+  type ShipImmunity,
+  type ShipSelectionFacts,
+  type ShipSelectionReport,
+  type ShipSelectionResult,
+  type ShipSelector,
   toFleetMemberships,
   toFleetReports,
   SCENE_CAMERA_MODES,
@@ -578,6 +601,24 @@ export interface EngageResult {
   readonly warnings?: string[];
 }
 
+export interface SetImmunityResult {
+  readonly tick: number;
+  readonly immune: ImmunityValue;
+  /**
+   * Every selected ship: its immunity after, `was` when it changed, `destroyed` for a dead ship (immune from the next
+   * load).
+   */
+  readonly ships: { readonly id: string; readonly immune: ImmunityValue; readonly was?: ImmunityValue; readonly destroyed?: true }[];
+  /**
+   * The selection's report, for a selector using all or a filter (sd-selectors).
+   */
+  readonly selection?: ShipSelectionReport;
+  /**
+   * The op's warnings.
+   */
+  readonly warnings?: string[];
+}
+
 /**
  * A layer in a set_hp result row: the HP after, the max, and the HP before.
  */
@@ -866,6 +907,7 @@ function SimulationChange(diff: ReturnType<typeof diffScenes>, previous: Readonl
   for (const [kind, list] of Object.entries(ships)) if (list.length) changed.push(`${list.length} ship${list.length === 1 ? '' : 's'} ${kind}`);
   const teams = diff.relabelled.filter((doc) => previous.get(doc.id)?.team !== doc.team).length;
   if (teams) changed.push(`${teams} ship${teams === 1 ? '' : 's'} re-teamed`);
+  if (diff.immunity.length) changed.push(`${diff.immunity.length} ship${diff.immunity.length === 1 ? "'s" : "s'"} immunity`);
   if (Object.values(diff.objects).some((list) => Array.isArray(list) && list.length > 0)) changed.push('objects');
   for (const kind of ['fleets', 'location', 'environment', 'combat'] as const) if (diff[kind]) changed.push(kind);
   return changed.length ? changed.join(', ') : null;
@@ -1676,6 +1718,7 @@ export class Director {
       engage: (args) => this.Manual('engage', args, () => this.Engage(args)),
       cease_fire: (args) => this.Manual('cease_fire', args, () => this.CeaseFire(args)),
       set_hp: (args) => this.SetHp(args),
+      set_immunity: (args) => this.SetImmunity(args),
       order_fleet: (args) => this.OrderFleet(args).then((result) => this.Manual('order_fleet', args, () => result)),
       list_hardpoints: (args) => this.ListHardpoints(args),
       play_shot: (args) => this.PlayShot(args),
@@ -2106,6 +2149,76 @@ export class Director {
   }
 
   /**
+   * Makes a selection of ships ignore incoming damage (set_immunity): the selector resolves at its turn in the edit
+   * queue (SelectShips), then one set_immunity op on the ships whose immunity changes goes through the edit queue, as
+   * patch_scene does; Apply re-indexes the damage model. A dead ship's immunity is written and applies from the next
+   * load. No pilot delay: it is the director's lever.
+   *
+   * @param input - The set_immunity arguments: a selector (sd-selectors) and immune.
+   * @returns The tick, the immunity set, every selected ship's row, the selection report for a filtered selector and
+   *   the op's warnings.
+   * @throws {SceneError} When the command is invalid or the selector names an unknown ship, fleet, wing or squad.
+   */
+  SetImmunity(input: unknown): Promise<SetImmunityResult> {
+    const command = normalizeImmunityCommand(input);
+    return this.Serialize(async () => {
+      const selected = this.SelectShips(command);
+      if (selected.problems.length) throw new SceneError(selected.problems);
+      const before = new Map(this.Current().ships.map((doc) => [doc.id, doc.immune ?? false]));
+      const changed = selected.ships.filter((id) => !sameImmunity(before.get(id), command.immune));
+      const patch = changed.length ? ((await this.EditNow([{ op: 'set_immunity', ships: changed, immune: command.immune }])) as { readonly warnings?: readonly string[] }) : null;
+      const after = new Map(this.Current().ships.map((doc) => [doc.id, doc.immune ?? false]));
+      const ships = selected.ships.map((id) => ({
+        id,
+        immune: after.get(id) ?? false,
+        ...(changed.includes(id) ? { was: before.get(id) ?? false } : {}),
+        ...(this.combat.IsDestroyed(id) || this.IsDead(id) ? { destroyed: true as const } : {})
+      }));
+      const warnings = [...(patch?.warnings ?? [])];
+      return { tick: this.world.tick, immune: command.immune, ships, ...(isFilteredSelector(command) ? { selection: shipSelectionReport(selected) } : {}), ...(warnings.length ? { warnings } : {}) };
+    });
+  }
+
+  /**
+   * A timeline cue's set_immunity: the selection resolved now, its op on the live scene only (CueEdit).
+   */
+  private ImmunityNow(input: unknown, cue: SceneCue): object {
+    const command = normalizeImmunityCommand(input);
+    const selected = this.SelectShips(command);
+    if (selected.problems.length) throw new SceneError(selected.problems);
+    const changed = selected.ships.filter((id) => !sameImmunity(this.Current().ships.find((doc) => doc.id === id)?.immune, command.immune));
+    const patch = changed.length ? this.CueEdit([{ op: 'set_immunity', ships: changed, immune: command.immune }], cue) : null;
+    return { immune: command.immune, ships: changed, ...(isFilteredSelector(command) ? { selection: shipSelectionReport(selected) } : {}), ...(patch ? { patch } : {}) };
+  }
+
+  /**
+   * The ships a selector picks in the current document, with the page's facts: each ship's EVE type and group (its
+   * /ship-stats answer; pending until it settles) and its live state (destroyed, in warp or arriving, HP fractions).
+   *
+   * @param selector - A normalized selector (readShipSelector).
+   * @param where - Where it sits, for messages.
+   * @returns The selection; callers throw its problems.
+   */
+  SelectShips(selector: ShipSelector, where = 'selection'): ShipSelectionResult {
+    const scene = this.Current();
+    return selectShips(scene, selector, { where, facts: this.SelectionFacts(scene) });
+  }
+
+  private SelectionFacts(scene: SceneDocument): ShipSelectionFacts {
+    const docs = new Map(scene.ships.map((doc) => [doc.id, doc]));
+    return {
+      hullOf: (id) => {
+        const doc = docs.get(id);
+        const answer = doc ? this.hullStats.Cached(doc) : null;
+        if (!answer) return undefined;
+        const { hull } = answer;
+        return hull ? { typeID: hull.typeID, name: hull.name, group: hull.group ?? null } : null;
+      },
+      stateOf: (id) => ({ destroyed: this.combat.IsDestroyed(id) || this.IsDead(id), inWarp: this.world.InWarp(id) || this.world.Arriving(id), fractions: this.damage.Fractions(id) })
+    };
+  }
+
+  /**
    * Sets a fleet's, wing's or squad's logi auto-repair (auto_repair): compiled to one update_fleet / update_wing /
    * update_squad op on the group's `autoRepair` through the edit queue, as patch_scene does. Calling it always hands
    * the group's logi back from a manual switch_modules (AutoRepair.Rearm); the new settings decide at once and the reps
@@ -2387,6 +2500,8 @@ export class Director {
     for (const id of named) {
       if (destroyed(id)) warnings.push(`"${id}" was destroyed: it is skipped until a load`);
       if (team && docs.get(id)?.team === team) warnings.push(`"${resolved.issuer}" and the called target "${id}" are both on team "${team}"`);
+      const immune = immunityWarning(id, immuneLayersOf(docs.get(id) ?? {}));
+      if (immune) warnings.push(immune);
     }
     return warnings;
   }
@@ -2663,6 +2778,8 @@ export class Director {
       const held = this.locks.Of(id).some((lock) => lock.target === target);
       ships.push({ id, target, lock: this.LockState(id, target, held ? null : this.RequestLock(id, target)), modules });
     }
+    const immune = kind === 'ship' && ships.length ? immunityWarning(target, immuneLayersOf(docs.get(target) ?? {})) : null;
+    if (immune) warnings.push(immune);
     this.onChange();
     return { tick: this.world.tick, target, ships, skipped, ...(warnings.length ? { warnings } : {}) };
   }
@@ -2713,7 +2830,7 @@ export class Director {
       if (!row) continue;
       ships.push(row.ship);
       if (row.destroys) {
-        const note = this.world.InWarp(id) ? 'in warp: it dies when it drops out' : this.world.Arriving(id) ? 'arriving by warp: it dies once it lands' : null;
+        const note = this.damage.Immunity(id).includes('structure') ? 'its structure is immune: it dies once that immunity is lifted' : this.world.InWarp(id) ? 'in warp: it dies when it drops out' : this.world.Arriving(id) ? 'arriving by warp: it dies once it lands' : null;
         destroys.push({ id, mode: this.combat.settings.death, ...(note ? { note } : {}) });
       }
     }
@@ -4138,6 +4255,8 @@ export class Director {
         return Fired(this.Manual('cease_fire', input, () => this.CeaseFire(args)));
       case 'auto_repair':
         return Fired(this.AutoRepairNow(args, cue));
+      case 'set_immunity':
+        return Fired(this.ImmunityNow(args, cue));
       case 'play_shot':
         return Fired(this.PlayShot(args, 'timeline', time));
       case 'play_sequence':
@@ -4683,6 +4802,8 @@ export class Director {
       this.moduleSpecs.clear();
       this.flownStates.clear();
     }
+    // Immunity is the document's: the damage model re-indexes it on every apply, after a restart cleared the HP.
+    this.damage.SetImmunity(toSceneImmunity(scene));
     // Modules that ran on or at a removed ship stop: their ships fly again without them (a load retunes every ship).
     if (restart) {
       this.ModuleOutputs(moduleEvents);
@@ -7005,6 +7126,10 @@ export class Director {
     autoRepair?: AutoRepairReport;
     shots?: number;
     defense: Maybe<ShipDefenseReport | DamageReport>;
+    /**
+     * The document's immunity (sd-combat): true, or its immune layers.
+     */
+    immune?: ShipImmunity;
     capacitor: Maybe<ShipCapacitorReport>;
     targeted: Maybe<ShipTargetedReport>;
     targeting?: LockTargeting;
@@ -7053,6 +7178,7 @@ export class Director {
       ...this.AutoRepairShipState(doc.id),
       ...(shots ? { shots } : {}),
       defense: this.LiveDefense(doc.id) ?? (defense ? ShipDefenseReportOf(defense) : null),
+      ...(doc.immune ? { immune: doc.immune } : {}),
       ...this.HpSetState(doc),
       capacitor: capacitor ? ShipCapacitorReportOf(capacitor, this.capacitor.Report(doc.id, this.world.tick)) : null,
       targeted: this.TargetedState(doc.id, flight, motion),

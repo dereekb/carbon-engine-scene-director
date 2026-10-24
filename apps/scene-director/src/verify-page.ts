@@ -146,6 +146,7 @@ interface ShipState extends Partial<ShipFleetMembership> {
   readonly combat?: ShipCombatState;
   readonly missiles?: { readonly launched: number; readonly inFlight: number };
   readonly hpSet?: HpSetState;
+  readonly immune?: true | ('shield' | 'armor' | 'structure')[];
   readonly destroyed?: {
     readonly tick: number;
     /**
@@ -185,6 +186,7 @@ interface CombatRowState {
   readonly quality: number;
   readonly damage: number;
   readonly layer?: 'shield' | 'armor' | 'structure';
+  readonly absorbed?: number;
   readonly note?: string;
   readonly missile?: true;
 }
@@ -227,6 +229,7 @@ interface ShipCombatState {
   readonly misses: number;
   readonly lastHits: CombatRowState[];
   readonly lastTaken: CombatRowState[];
+  readonly absorbed?: number;
   readonly paperDps: number;
   readonly repairs?: ShipRepairsState;
 }
@@ -281,6 +284,16 @@ interface ShipRepairsState {
 /**
  * set_hp's answer (the viewer's director.ts SetHpResult).
  */
+type ImmunityState = boolean | ('shield' | 'armor' | 'structure')[];
+
+interface SetImmunityResult {
+  readonly tick: number;
+  readonly immune: ImmunityState;
+  readonly ships: { readonly id: string; readonly immune: ImmunityState; readonly was?: ImmunityState; readonly destroyed?: true }[];
+  readonly selection?: { readonly scope: string; readonly scoped: number; readonly matched: number; readonly excluded?: Record<string, number>; readonly sample?: { readonly from: number; readonly kept: number; readonly seed: number }; readonly warnings?: string[] };
+  readonly warnings?: string[];
+}
+
 interface SetHpResult {
   readonly tick: number;
   readonly intent: string;
@@ -1993,6 +2006,147 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     // Headless draws no hull, so no damage controller loads the hull's fires: only the real GPU sees that leak.
     const drawn = gone.renderer.available ? '' : " (no renderer: the hull's damage effects never load)";
     return `killed by ${kill?.by} (${kill?.module}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(stopped, 'orbiter').orderNote}; order_ship refused (${refused}); sounds ${Show(sounds)}; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} ball gone at tick ${gone.simulation.tick} (removesAt ${ShipIn(gone, 'rifter').destroyed?.explosion?.removesAt}); gameObjects − emitters ${after}${drawn}`;
+  });
+
+  // Damage immunity (set_immunity, sd-combat → Damage immunity): each check loads its own scene; --only immunity runs
+  // them alone.
+  const IMMUNE_LAYERS = ['shield', 'armor', 'structure'] as const;
+  const ImmunityRefusal = (tool: string, args: Record<string, unknown>): Promise<string> =>
+    call(tool, args).then(
+      () => 'taken',
+      (error: unknown) => (ErrorProblems(error) ?? []).join('; ') || ErrorMessage(error)
+    );
+
+  await Check('combat: immunity: immune ships still lock and draw fire but take no damage', async () => {
+    const immune = { ...Rifter('rifter', [0, 0, 0]), immune: true };
+    const loaded = await LoadCombatScene([immune, Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0])], { death: 'explode' });
+    const [gun] = ShipGuns(loaded, 'p1');
+    const damage: Record<string, number> = gun?.combat?.damage ?? {};
+    const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
+    Expect(
+      (engaged.warnings ?? []).some((warning) => /immune to damage/u.test(warning)),
+      Show(engaged)
+    );
+    const shotsOf = (state: ViewerState): number => ['p1', 'p2'].reduce((sum, id) => sum + (ShipIn(state, id).combat?.shots ?? 0), 0);
+    const fired = await WaitFor('8 shots on the immune rifter and an impact post', 45, (polled) => {
+      const impacts = (polled.audio?.posted ?? []).filter((entry) => entry.tick >= engaged.tick && entry.ship === 'rifter' && /^ship_impact_/u.test(entry.event));
+      return shotsOf(polled) >= 8 && impacts.length ? null : Show({ shots: shotsOf(polled), impacts: impacts.length });
+    });
+    const rifter = ShipIn(fired, 'rifter');
+    Expect(
+      IMMUNE_LAYERS.every((layer) => rifter.defense?.[layer].hp === rifter.defense?.[layer].max),
+      Show(rifter.defense)
+    );
+    Expect(rifter.combat?.taken === 0 && (rifter.combat?.absorbed ?? 0) > 0, Show(rifter.combat));
+    const resists = rifter.defense?.shield.resists;
+    const Expected = (row: CombatRowState): number => Object.entries(damage).reduce((sum, [type, amount]) => sum + amount * (1 - (resists?.[type as keyof DamageResists] ?? 0) / 100), 0) * row.quality;
+    const rows = rifter.combat?.lastTaken ?? [];
+    Expect(rows.length > 0 && rows.every((row) => row.result === 'immune' && row.damage === 0 && Math.abs((row.absorbed ?? 0) - Expected(row)) <= 0.1), `rows ${Show(rows)} vs ${Show(rows.map(Expected))}`);
+    const shooters = ['p1', 'p2'].map((id) => ShipIn(fired, id).combat);
+    Expect(
+      shooters.every((combat) => combat && combat.hits === combat.shots),
+      Show(shooters)
+    );
+    Expect(LockOf(fired, 'p1', 'rifter')?.state === 'locked', Show(LockOf(fired, 'p1', 'rifter')));
+    Expect(rifter.immune === true && !rifter.destroyed, Show({ immune: rifter.immune, destroyed: rifter.destroyed }));
+    const saved = (await call<SceneDocument>('get_scene')).ships.find((ship) => ship.id === 'rifter');
+    Expect(saved?.immune === true, Show(saved));
+    const lifted = await call<SetImmunityResult>('set_immunity', { ships: ['rifter'], immune: false });
+    Expect(lifted.ships.length === 1 && lifted.ships[0].immune === false && lifted.ships[0].was === true, Show(lifted));
+    const hurt = await WaitFor('hits land once the immunity lifts', 20, (polled) => {
+      const after = ShipIn(polled, 'rifter');
+      const landed = (after.combat?.lastTaken ?? []).some((row) => row.tick > lifted.tick && row.result !== 'immune' && row.result !== 'misses' && row.damage > 0);
+      return landed && (after.defense?.shield.hp ?? 0) < (after.defense?.shield.max ?? 0) ? null : Show(after.combat?.lastTaken);
+    });
+    const absorbed = ShipIn(fired, 'rifter').combat?.absorbed;
+    return `${shotsOf(fired)} shots, ${shooters.reduce((sum, combat) => sum + (combat?.hits ?? 0), 0)} hits, 0 taken, ${absorbed} absorbed; rows ${Show(rows.map((row) => row.absorbed))}; after the lift shield ${ShipIn(hurt, 'rifter').defense?.shield.hp} / ${ShipIn(hurt, 'rifter').defense?.shield.max}`;
+  });
+
+  await Check('combat: immunity: structure immunity drains shield and armor but the ship never dies', async () => {
+    const hero = { ...Rifter('r', [0, 0, 0]), immune: ['structure'] };
+    await LoadCombatScene([hero, Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0]), Punisher('p3', [0, 0, 2000])], { death: 'explode' });
+    const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2', 'p3'], target: 'r' });
+    Expect(
+      (engaged.warnings ?? []).some((warning) => /cannot be destroyed/u.test(warning)),
+      Show(engaged)
+    );
+    const drained = await WaitFor('the shield under 5 % and armor at 0', 45, (polled) => {
+      const defense = ShipIn(polled, 'r').defense;
+      return defense && defense.armor.hp === 0 && defense.shield.hp < 0.05 * defense.shield.max ? null : Show(defense);
+    });
+    const held = await WaitFor('10 more boundaries', 20, (polled) => (polled.simulation.tick >= drained.simulation.tick + 10 ? null : Show(polled.simulation.tick)));
+    const r = ShipIn(held, 'r');
+    Expect(r.defense?.structure.hp === r.defense?.structure.max, Show(r.defense));
+    const rows = r.combat?.lastTaken ?? [];
+    Expect(rows.length > 0 && rows.every((row) => (row.absorbed ?? 0) > 0 && row.layer !== 'structure') && rows.some((row) => row.result === 'immune'), Show(rows));
+    Expect(!r.destroyed && !(held.combat?.kills ?? []).length, Show({ destroyed: r.destroyed, kills: held.combat?.kills }));
+    const lifted = await call<SetImmunityResult>('set_immunity', { ships: ['r'], immune: false });
+    Expect(lifted.ships[0]?.was !== undefined && Show(lifted.ships[0].was) === Show(['structure']), Show(lifted));
+    const dead = await WaitFor('the kill once the immunity lifts', 30, (polled) => (ShipIn(polled, 'r').destroyed && (polled.combat?.kills ?? []).some((kill) => kill.ship === 'r') ? null : Show(ShipIn(polled, 'r').defense)));
+    const kill = ShipIn(dead, 'r').destroyed;
+    Expect(kill?.mode === 'explode', Show(kill));
+    return `drained at tick ${drained.simulation.tick}; structure ${r.defense?.structure.hp} / ${r.defense?.structure.max} after 10 more ticks, absorbed ${r.combat?.absorbed}; killed by ${kill?.by} at tick ${kill?.tick}, ${(kill?.tick ?? 0) - lifted.tick} ticks after the lift`;
+  });
+
+  await Check('combat: immunity: set_immunity selects by fleet, role, team, hull and sample, is saved and survives a load', async () => {
+    const blue = (id: string, position: SceneVector) => ({ ...Punisher(id, position), team: 'blue' });
+    const red = (ship: { readonly id: string }) => ({ ...ship, team: 'red' });
+    const fleets = [
+      {
+        id: 'b',
+        commander: 'bfc',
+        wings: [
+          {
+            id: 'w1',
+            squads: [
+              { id: 'dps', role: 'dps', members: ['p1', 'p2'] },
+              { id: 'logi', role: 'logi', members: ['g1'] }
+            ]
+          }
+        ]
+      }
+    ];
+    const ships = [blue('bfc', [0, 0, 0]), blue('p1', [1000, 0, 0]), blue('p2', [-1000, 0, 0]), blue('g1', [0, 0, 1000]), red(Rifter('r1', [0, 0, 8000])), red(Rifter('r2', [2000, 0, 8000])), red(Rifter('r3', [-2000, 0, 8000])), red(Punisher('rp', [0, 2000, 8000]))];
+    await LoadCombatScene(ships, { death: 'flag' }, { fleets });
+    const logi = await call<SetImmunityResult>('set_immunity', { fleet: 'b', role: 'logi', immune: true });
+    Expect(Show(logi.ships.map((ship) => ship.id)) === Show(['g1']) && logi.selection?.scoped === 4 && logi.selection.matched === 1 && logi.selection.excluded?.['role'] === 3, Show(logi));
+    const rifters = await call<SetImmunityResult>('set_immunity', { all: true, team: 'red', hull: 'Rifter', immune: ['structure'] });
+    Expect(Show(rifters.ships.map((ship) => ship.id)) === Show(['r1', 'r2', 'r3']), Show(rifters));
+    const sample = { all: true, hull: 'Frigate', sample: { count: 2, seed: 7 }, immune: true };
+    const first = await call<SetImmunityResult>('set_immunity', sample);
+    const again = await call<SetImmunityResult>('set_immunity', sample);
+    Expect(first.ships.length === 2 && Show(first.ships.map((ship) => ship.id)) === Show(again.ships.map((ship) => ship.id)) && again.ships.every((ship) => ship.was === undefined), Show({ first, again }));
+    const other = await call<SetImmunityResult>('set_immunity', { ...sample, sample: { count: 2, seed: 8 } });
+    const state = await call<ViewerState>('get_state');
+    const document = await call<SceneDocument>('get_scene');
+    const immuneOf = (list: readonly { readonly id: string; readonly immune?: unknown }[]) => Object.fromEntries(list.filter((ship) => ship.immune != null).map((ship) => [ship.id, ship.immune]));
+    const saved = immuneOf(document.ships);
+    Expect(Show(immuneOf(state.ships)) === Show(saved) && saved['g1'] === true, Show({ state: immuneOf(state.ships), saved }));
+    await call('load_scene', { scene: document });
+    const reloaded = await WaitFor('the reloaded scene resolves its fits', 60, (polled) => (polled.ships.every((ship) => ship.fit?.math === 'dogma' && ship.targeting) ? null : 'fits'));
+    Expect(Show(immuneOf(reloaded.ships)) === Show(saved), Show(immuneOf(reloaded.ships)));
+    await call<EngageResult>('engage', { ships: ['p1'], target: 'g1' });
+    await WaitFor('the loaded immunity absorbs the hits', 30, (polled) => ((ShipIn(polled, 'g1').combat?.lastTaken ?? []).some((row) => row.result === 'immune') ? null : Show(ShipIn(polled, 'g1').combat?.lastTaken)));
+    const none = await call<SetImmunityResult>('set_immunity', { all: true, immune: false });
+    const cleared = await call<SceneDocument>('get_scene');
+    Expect(cleared.ships.every((ship) => ship.immune == null) && none.ships.length === ships.length, Show(immuneOf(cleared.ships)));
+    const refusals = {
+      role: await ImmunityRefusal('set_immunity', { fleet: 'b', role: 'healer', immune: true }),
+      scopes: await ImmunityRefusal('set_immunity', { ships: ['r1'], all: true, immune: true }),
+      fleet: await ImmunityRefusal('set_immunity', { fleet: 'nope', immune: true }),
+      missing: await ImmunityRefusal('set_immunity', { ships: ['r1'] }),
+      hull: await ImmunityRefusal('set_immunity', { ships: ['r1'], immune: ['hull'] }),
+      op: await ImmunityRefusal('patch_scene', { operations: [{ op: 'set_immunity', all: true, state: 'damaged', immune: true }] })
+    };
+    Expect(/healer/u.test(refusals.role) && /exactly one of ships/u.test(refusals.scopes) && /nope/u.test(refusals.fleet) && /needs immune/u.test(refusals.missing) && /the hull layer is structure/u.test(refusals.hull) && /set_immunity tool/u.test(refusals.op), Show(refusals));
+    Expect(
+      (await call<SceneDocument>('get_scene')).ships.every((ship) => ship.immune == null),
+      'a refusal changed the document'
+    );
+    const green = await call<SetImmunityResult>('set_immunity', { all: true, team: 'green', immune: true });
+    const warned = (green.selection?.warnings ?? []).join(' ');
+    Expect(green.ships.length === 0 && /blue/u.test(warned) && /red/u.test(warned), Show(green));
+    return `logi ${Show(logi.selection)}; red Rifters ${Show(rifters.ships.map((ship) => ship.id))}; sample seed 7 ${Show(first.ships.map((ship) => ship.id))}, seed 8 ${Show(other.ships.map((ship) => ship.id))}; saved ${Show(saved)} survived the load; green: ${warned}`;
   });
 
   // Battle damage (set_hp, sd-combat → Battle damage): HP set live on default-fit Rifters (562.5 / 562.5 / 437.5 on SDE

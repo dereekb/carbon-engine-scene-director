@@ -248,6 +248,74 @@ describe('CombatRules', () => {
 
 // A Caracal's HML II with Scourge Heavy at max skills (plan §1.6): 204.875 kinetic per missile, explosion 105 m,
 // 127.5 m/s, drf 0.682.
+describe('CombatRules immunity', () => {
+  const ALL = new Map([['punisher', ['shield', 'armor', 'structure'] as const]]);
+
+  it('reads immune for a hit that took no HP: drawn as a hit, counted as one, absorbed tallied, no onDamaged', () => {
+    const { rules, damage, damaged } = Rules();
+    damage.SetImmunity(ALL);
+    const shot = Shot();
+    rules.Resolve([shot], 10);
+    expect(shot.missed).toBe(false);
+    expect(shot.outcome).toMatchObject({ result: 'immune', damage: 0 });
+    expect(shot.outcome?.absorbed).toBeCloseTo(60 * (shot.outcome?.quality ?? 0), 9);
+    expect(damage.Fractions('punisher')).toEqual({ shield: 1, armor: 1, structure: 1 });
+    expect(damaged).toEqual([]);
+    expect(rules.Report('rifter', 10)).toMatchObject({ shots: 1, hits: 1, misses: 0, dealt: 0 });
+    const victim = rules.Report('punisher', 10);
+    expect(victim?.taken).toBe(0);
+    expect(victim?.absorbed).toBeCloseTo(60 * (shot.outcome?.quality ?? 0), 1);
+    expect(victim?.lastTaken[0]).toMatchObject({ from: 'rifter', result: 'immune', damage: 0 });
+    expect(victim?.lastTaken[0].absorbed).toBeGreaterThan(0);
+    expect(rules.Report('rifter', 10)?.absorbed).toBeUndefined();
+  });
+
+  it('keeps the tier of a hit that took some HP and adds what an immune layer absorbed', () => {
+    const { rules, damage, port, damaged } = Rules(50);
+    port.weapons.set('high-0', { ...GUN, damage: { em: 1000, thermal: 0, kinetic: 0, explosive: 0 } });
+    damage.SetImmunity(new Map([['punisher', ['armor'] as const]]));
+    const shot = Shot();
+    rules.Resolve([shot], 10);
+    const quality = shot.outcome?.quality ?? 0;
+    expect(shot.outcome?.result).not.toBe('immune');
+    expect(shot.outcome?.damage).toBe(50);
+    expect(shot.outcome?.layers).toEqual({ shield: 50, armor: 0, structure: 0 });
+    expect(shot.outcome?.absorbed).toBeCloseTo(1000 * quality - 50, 9);
+    expect(damaged).toEqual(['punisher']);
+  });
+
+  it('never kills a structure-immune ship, and a hit after the immunity lifts does', () => {
+    const { rules, damage, port, kills } = Rules(50);
+    port.weapons.set('high-0', { ...GUN, damage: { em: 1000, thermal: 0, kinetic: 0, explosive: 0 } });
+    damage.SetImmunity(new Map([['punisher', ['structure'] as const]]));
+    const shots = Array.from({ length: 200 }, (_, i) => Shot({ cycle: i + 1, at: i }));
+    rules.Resolve(shots, 200);
+    expect(kills).toEqual([]);
+    expect(rules.IsDestroyed('punisher')).toBe(false);
+    expect(damage.Fractions('punisher')).toEqual({ shield: 0, armor: 0, structure: 1 });
+    expect(shots.slice(1).every((shot) => shot.outcome?.result === 'immune')).toBe(true);
+    damage.SetImmunity(new Map());
+    const last = Shot({ cycle: 201, at: 201 });
+    rules.Resolve([last], 201);
+    expect(last.fatal).toBe(true);
+    expect(kills).toEqual(['punisher by rifter:high-0']);
+  });
+
+  it('reads immune for a vorton application and a missile hit (every source lands through Land)', () => {
+    const { rules, damage, port } = Rules();
+    damage.SetImmunity(ALL);
+    port.weapons.set('high-1', { ...GUN, key: 'high-1', kind: 'vorton', falloff: null, tracking: null, signatureResolution: null, optimal: 6000, explosion: { radius: 43, velocity: 190, drf: 0.4 } });
+    const vorton = Shot({ module: 'high-1' });
+    const missile = MissileShot();
+    rules.Resolve([vorton, missile], 10);
+    expect(vorton.outcome).toMatchObject({ result: 'immune', damage: 0 });
+    expect(vorton.missed).toBe(false);
+    expect(missile.outcome).toMatchObject({ result: 'immune', damage: 0 });
+    expect(missile.outcome?.absorbed).toBeGreaterThan(0);
+    expect(rules.Report('punisher', 10)?.lastTaken.map((row) => row.result)).toEqual(['immune', 'immune']);
+  });
+});
+
 describe('CombatRules.SweepDestroyed (set_hp kills)', () => {
   const RECORD = { tick: 10, appliedAt: 10, intent: 'gameplay' as const, values: { structure: 0 }, hp: { structure: 0 } };
 

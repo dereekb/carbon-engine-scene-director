@@ -14,6 +14,11 @@
  * - SetHp is how set_hp changes HP (the director resolves the values with the package's resolveHpSet); the latest set's
  *   record lives with the HP, so a ship that leaves the model drops both. A set can leave a live ship at 0 structure
  *   (gameplay): DestroyedShips lists them for combat.ts' sweep.
+ * - Damage immunity (sd-combat): SetImmunity indexes the document's immune ships on every apply, apart from the HP
+ *   entries (a ship is immune before its fit resolves, and a refit's Remove keeps it). ApplyHit and Damage take nothing
+ *   from an immune layer that has HP, and Destroyed is false while structure is immune: the one death test, so neither a
+ *   shot nor set_hp's sweep kills the ship. SetHp still sets an immune ship's HP: immunity stops damage, not the
+ *   director's own sets.
  *
  * Node-tested: it imports nothing from ./runtime.
  */
@@ -129,15 +134,26 @@ export interface AppliedHit {
    * Structure HP left; at 0 the ship is destroyed.
    */
   readonly structure: number;
+  /**
+   * HP its target's immunity absorbed, at the immune layer's resonances (omitted when none).
+   */
+  readonly absorbed?: number;
+  /**
+   * The immune layer that stopped the hit.
+   */
+  readonly absorbedBy?: DefenseLayerName;
 }
 
 /**
- * What a DamageModel snapshot (sd-time) leaves out: nothing, every field is state.
+ * What a DamageModel snapshot (sd-time) leaves out: the immunity index, which is the document's (Apply re-indexes it).
  */
-const DAMAGE_CAPTURE: CaptureOptions = {};
+const DAMAGE_CAPTURE: CaptureOptions = { wiring: ['immunity'] };
+
+const NO_IMMUNITY: readonly DefenseLayerName[] = [];
 
 export class DamageModel {
   private readonly ships = new Map<string, ShipDamage>();
+  private immunity: ReadonlyMap<string, readonly DefenseLayerName[]> = new Map();
 
   /**
    * The per-tick state for a time-control snapshot (sd-time): every field but the wiring.
@@ -246,14 +262,33 @@ export class DamageModel {
   }
 
   /**
-   * The tracked ships at 0 structure, by id (combat.ts' sweep records the ones a set left there).
+   * Replaces the immune ships' index (the document's ships[].immune, toSceneImmunity): kept apart from the HP entries,
+   * so Remove and Clear leave it.
+   *
+   * @param index - Ship id → its immune layers.
+   */
+  SetImmunity(index: ReadonlyMap<string, readonly DefenseLayerName[]>): void {
+    this.immunity = index;
+  }
+
+  /**
+   * A ship's immune layers ([] when none).
+   */
+  Immunity(id: string): readonly DefenseLayerName[] {
+    return this.immunity.get(id) ?? NO_IMMUNITY;
+  }
+
+  /**
+   * The tracked ships at 0 structure that can die (Destroyed), by id (combat.ts' sweep records the ones a set left
+   * there; an immune structure waits for its immunity to lift).
    */
   DestroyedShips(): string[] {
     return [...this.ships.keys()].filter((id) => this.Destroyed(id)).sort();
   }
 
   /**
-   * Takes HP off a layer (no resists: the caller applies them). Internal until Combat rules.
+   * Takes HP off a layer (no resists: the caller applies them). Internal until Combat rules. An immune layer that has
+   * HP takes nothing.
    *
    * @param id - The ship id.
    * @param layer - The layer.
@@ -262,25 +297,26 @@ export class DamageModel {
    */
   Damage(id: string, layer: DefenseLayerName, amount: number): number {
     const entry = this.ships.get(id)?.layers[layer];
-    if (!entry || !(amount > 0)) return 0;
+    if (!entry || !(amount > 0) || (entry.hp > 0 && this.Immunity(id).includes(layer))) return 0;
     const taken = Math.min(entry.hp, amount);
     entry.hp -= taken;
     return taken;
   }
 
   /**
-   * Applies a shot's raw damage through the layers (shield, armor, structure).
+   * Applies a shot's raw damage through the layers (shield, armor, structure); an immune layer that has HP stops it.
    *
    * @param id - The ship id.
    * @param damage - Raw damage by type.
-   * @returns What each layer lost and the structure left; null when the model does not track the ship.
+   * @returns What each layer lost, the structure left and what immunity absorbed; null when the model does not track
+   * the ship.
    */
   ApplyHit(id: string, damage: DamageVector): Maybe<AppliedHit> {
     const ship = this.ships.get(id);
     if (!ship) return null;
-    const result = applyLayeredDamage(ship.layers as DamageLayers, damage);
+    const result = applyLayeredDamage(ship.layers as DamageLayers, damage, this.Immunity(id));
     for (const name of DEFENSE_LAYERS) ship.layers[name].hp = result.layers[name].hp;
-    return { taken: result.taken, total: result.total, structure: result.structure };
+    return { taken: result.taken, total: result.total, structure: result.structure, ...(result.absorbedBy ? { absorbed: result.absorbed, absorbedBy: result.absorbedBy } : {}) };
   }
 
   /**
@@ -304,11 +340,12 @@ export class DamageModel {
   }
 
   /**
-   * Whether a tracked ship's structure is at 0.
+   * Whether a tracked ship's structure is at 0 and not immune: the one death test (an immune structure at 0 waits for
+   * its immunity to lift).
    */
   Destroyed(id: string): boolean {
     const ship = this.ships.get(id);
-    return ship != null && ship.layers.structure.max > 0 && ship.layers.structure.hp <= 0;
+    return ship != null && ship.layers.structure.max > 0 && ship.layers.structure.hp <= 0 && !this.Immunity(id).includes('structure');
   }
 
   /**
@@ -348,7 +385,7 @@ export class DamageModel {
   }
 
   /**
-   * Forgets every ship (a load restarts the scene at full HP).
+   * Forgets every ship (a load restarts the scene at full HP); the immunity index stays (Apply replaces it).
    */
   Clear(): void {
     this.ships.clear();

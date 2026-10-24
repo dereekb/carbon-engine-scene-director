@@ -5,9 +5,9 @@
 
 **Status (2026-10-24)**: the immunity-and-selectors plan
 (`~/.claude/plans/damage-immunity-and-a-generic-apply-to-fleet-apply-to-scene-targeting-layer.md`) lands in four
-slices. **S1 is in**: the pure selector (`readShipSelector`, `selectShips`, the report) and its first adopter, the
-`set_immunity` patch op (`sd-combat` → Damage immunity). **S2** adds the page's facts (`Director.SelectShips`) and the
-`set_immunity` tool; **S3** moves `switch_prop_mods`, `switch_modules`, `set_target`, `engage`, `cease_fire` (and
+slices. **S1 and S2 are in**: the pure selector (`readShipSelector`, `selectShips`, the report) and its first adopter,
+the `set_immunity` patch op (`sd-combat` → Damage immunity) (S1); the page's facts (`Director.SelectShips`), the
+`set_immunity` tool and timeline cue, and the shared schema `SHIP_SELECTOR_PROPERTIES` (S2). **S3** moves `switch_prop_mods`, `switch_modules`, `set_target`, `engage`, `cease_fire` (and
 `set_hp`) and the `set_prop_mods` op onto it; **S4** is the real-GPU look.
 
 ## The grammar (the one place it is written)
@@ -81,6 +81,12 @@ slices. **S1 is in**: the pure selector (`readShipSelector`, `selectShips`, the 
 - **The report** (`shipSelectionReport`): `{ scope, scoped, matched, excluded?, unresolved?, sample?, warnings? }`. A
   lever adds it as `selection` **only when `isFilteredSelector`** (`all` or a filter), so an old call's result is
   unchanged.
+- **`Director.SelectShips(selector, where = "selection")`** (S2) runs `selectShips` on the current document with the
+  page's facts (`SelectionFacts`): `hullOf` reads `hullStats.Cached(doc)` (no answer yet → `undefined`, pending;
+  `answer.hull` null → `null`; else `{ typeID, name, group }`, the group kept by `flight.ts` `ReadPublishedHull` from
+  the hub's `hull.group`); `stateOf` is `{ destroyed: combat.IsDestroyed || IsDead, inWarp: world.InWarp ||
+  world.Arriving, fractions: damage.Fractions }`. Callers throw its problems as a `SceneError`. `set_immunity` resolves
+  it at its turn in the edit queue (and its cue at the cue's tick), then applies one op on the explicit ids it picked.
 - Why the page resolves, not the hub: only the page knows deaths, warp and HP, and it already holds each ship's EVE
   type and group from tools-core (through the hub's `/ship-stats`). A hub pre-pass could only add SDE-wide typo
   detection, and group names would need tools-core's inspection-only `sde/<table>` routes; the unmatched-hull warning
@@ -131,6 +137,8 @@ note covers inspection).
 | `packages/scene/src/lib/selectors/select.ts` | the facts, `selectShips`, `sampleShips`, `stateMatches`, `shipSelectionReport`, the role walk |
 | `packages/scene/src/lib/fleets/selection.ts` | `readFleetSelectionParts` (the four keys, shared), `readFleetSelection`, `selectFleetShips` |
 | `packages/scene/src/lib/combat/immunity.ts` | the first adopter: `normalizeImmunityCommand`, `applyImmunityOperation` |
+| `packages/scene/src/lib/tools.ts` | `SHIP_SELECTOR_PROPERTIES`: the schema every selecting tool spreads |
+| `packages/viewer-engine/src/lib/director.ts` | `SelectShips`, `SelectionFacts`; `SetImmunity` and `ImmunityNow` (the first live adopter) |
 
 Specs: `selector.spec.ts` (every reader, every problem pinned, stability), `select.spec.ts` (every scope and filter,
 combinations, sample rounding / seeding / order / nesting, empty sets, unknown ids, warnings, the no-facts refusal,
@@ -138,5 +146,11 @@ draft tolerance, the report), `combat/immunity.spec.ts` (the op).
 
 ## Verify-page
 
-S2 adds `immunity: …` (set_immunity's fleet, role, team, hull and sample selections), S3 `selector: …` (all, team,
+`immunity: set_immunity selects by fleet, role, team, hull and sample, is saved and survives a load` (S2; `--only
+immunity`). Evidence (2026-10-24, SDE 3646012, headless): `{ fleet: "b", role: "logi" }` → g1 with `selection {
+scope: 'fleet "b"', scoped: 4, matched: 1, excluded: { role: 3 } }` (the FC is in no squad); `{ all, team: "red", hull:
+"Rifter" }` → r1, r2, r3, not the red Punisher; `{ all, hull: "Frigate", sample: { count: 2, seed: 7 } }` → bfc, p2,
+the same two on a repeat (no `was`), seed 8 → p1, r2; `{ all, team: "green" }` → `ships: []` and `selection.team
+"green" matches no ship in the scene (teams there: blue, red)`; refusals for `role: "healer"`, `ships` + `all`, `fleet:
+"nope"`, a missing `immune`, `["hull"]` and the op with `state` (names the tool). S3 adds `selector: …` (all, team,
 role, state and sample on the existing levers, and an unchanged legacy result).

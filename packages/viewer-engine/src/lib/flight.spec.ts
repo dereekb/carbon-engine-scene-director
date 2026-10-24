@@ -179,6 +179,12 @@ describe('HullStatsLookup', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
   });
 
+  it("keeps the hull's ship group for the selector's hull filter", async () => {
+    const lookup = new HullStatsLookup({ fetch: () => Promise.resolve(Respond(200, { hull: { typeID: 587, name: 'Rifter', group: 'Frigate', published: RIFTER.published } })) });
+    const answer = await lookup.Lookup({ dna: 'mf1_t1:minmatarbase:minmatar' });
+    expect(answer.hull).toEqual({ ...RIFTER, group: 'Frigate' });
+  });
+
   it('never rejects when the hub does not answer', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     const lookup = new HullStatsLookup({ fetch: () => Promise.reject(new TypeError('fetch failed')) });

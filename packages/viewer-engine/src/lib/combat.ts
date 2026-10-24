@@ -13,6 +13,10 @@
  *     cycle, target) (combatRoll); a disintegrator's spool (consecutive cycles on the target since its activation);
  *     then the damage through shield, armor and structure (DamageModel.ApplyHit). A ship the model does not track
  *     takes nothing (`takes no damage: no EVE dogma for its hull`).
+ * - Every hit on a ship, turret, vorton or missile, lands through Land: the damage model's immunity (sd-combat) stops it
+ *   at an immune layer that has HP. A hit that took no HP because of immunity reads `immune` with `absorbed`; one that
+ *   took some keeps its tier and adds `absorbed`. The shooter's hits count it (the gun hit), the victim's `absorbed`
+ *   tallies it, and it draws as a hit (missed stays false). Destroyed is false while structure is immune, so no kill.
  * - Every shot gets `missed` and `outcome`; the killing one `fatal`. Structure at 0 records a ShipKill (onKill); the
  *   ship is then flagged destroyed: it takes no more damage until a load and its kill is not repeated.
  * - Tallies per ship: dealt and taken, a 20 s trailing DPS window, shots, hits and misses, the 3 latest rows fired and
@@ -31,6 +35,7 @@
 import type { Maybe } from '@dereekb/util';
 import {
   combatRoll,
+  type DamageVector,
   DEFAULT_COMBAT_DEATH,
   DEFAULT_COMBAT_SEED,
   DEFENSE_LAYERS,
@@ -142,6 +147,10 @@ export interface CombatRow {
    * The deepest layer it took HP from.
    */
   readonly layer?: DefenseLayerName;
+  /**
+   * HP its target's immunity absorbed (omitted when none).
+   */
+  readonly absorbed?: number;
   readonly note?: string;
   /**
    * A missile's row.
@@ -222,6 +231,10 @@ export interface ShipCombatReport {
   readonly lastHits: readonly CombatRow[];
   readonly lastTaken: readonly CombatRow[];
   /**
+   * HP its immunity absorbed (omitted at 0).
+   */
+  readonly absorbed?: number;
+  /**
    * Once it received or gave a repair.
    */
   readonly repairs?: ShipRepairReport;
@@ -230,6 +243,10 @@ export interface ShipCombatReport {
 interface Tally {
   dealt: number;
   taken: number;
+  /**
+   * Victim side: HP its immunity absorbed.
+   */
+  absorbed: number;
   shots: number;
   hits: number;
   misses: number;
@@ -263,6 +280,19 @@ interface Spool {
 }
 
 const NO_LAYERS: Readonly<Record<DefenseLayerName, number>> = { shield: 0, armor: 0, structure: 0 };
+
+/**
+ * A hit landed through the damage model.
+ */
+interface LandedHit {
+  readonly damage: number;
+  readonly layers: Readonly<Record<DefenseLayerName, number>>;
+  readonly absorbed?: number;
+  /**
+   * Immunity absorbed it and nothing was taken.
+   */
+  readonly immune: boolean;
+}
 
 /**
  * What a CombatRules snapshot (sd-time) leaves out: its wiring (port, damage, onKill, onDamaged).
@@ -492,6 +522,7 @@ export class CombatRules {
       misses: tally.misses,
       lastHits: [...tally.lastHits],
       lastTaken: [...tally.lastTaken],
+      ...(tally.absorbed > 0 ? { absorbed: Round(tally.absorbed, 1) } : {}),
       ...(tally.repairLandings
         ? {
             repairs: {
@@ -603,19 +634,27 @@ export class CombatRules {
       result = roll.result;
     }
     const spool = this.Spool(shot, numbers);
-    let damage = 0;
-    let layers: Readonly<Record<DefenseLayerName, number>> = NO_LAYERS;
+    let landed: Maybe<LandedHit> = null;
     let note: Maybe<string> = numbers.note ?? null;
     if (quality > 0) {
-      const applied = this.damage.ApplyHit(target, shotDamage(numbers.damage, quality * (1 + spool)));
-      if (applied) {
-        damage = applied.total;
-        layers = applied.taken;
-      } else {
-        note = 'takes no damage: no EVE dogma for its hull';
-      }
+      landed = this.Land(target, shotDamage(numbers.damage, quality * (1 + spool)));
+      if (!landed) note = 'takes no damage: no EVE dogma for its hull';
     }
-    return { result, chance, quality, damage, layers, ...(quality > 0 && note ? { note } : {}) };
+    return { result: landed?.immune ? 'immune' : result, chance, quality, damage: landed?.damage ?? 0, layers: landed?.layers ?? NO_LAYERS, ...(landed?.absorbed ? { absorbed: landed.absorbed } : {}), ...(quality > 0 && note ? { note } : {}) };
+  }
+
+  /**
+   * Lands a hit on a ship through the damage model, its immunity included: every damage source goes through here.
+   *
+   * @param target - The ship.
+   * @param damage - Raw damage by type.
+   * @returns The HP taken, per layer, and what immunity absorbed; null when the model does not track the ship.
+   */
+  private Land(target: string, damage: DamageVector): Maybe<LandedHit> {
+    const applied = this.damage.ApplyHit(target, damage);
+    if (!applied) return null;
+    const absorbed = applied.absorbed ?? 0;
+    return { damage: applied.total, layers: applied.taken, ...(absorbed > 0 ? { absorbed } : {}), immune: absorbed > 0 && !(applied.total > 0) };
   }
 
   /**
@@ -630,17 +669,9 @@ export class CombatRules {
     } else {
       const explosion = missile.explosion;
       const quality = explosion ? missileApplication({ signatureRadius: this.port.SignatureOf(target), targetSpeed: this.port.Speed(target), explosionRadius: explosion.radius, explosionVelocity: explosion.velocity, drf: explosion.drf }) : 1;
-      let damage = 0;
-      let layers: Readonly<Record<DefenseLayerName, number>> = NO_LAYERS;
-      let note: Maybe<string> = null;
-      const applied = quality > 0 ? this.damage.ApplyHit(target, shotDamage(missile.damage, quality)) : null;
-      if (applied) {
-        damage = applied.total;
-        layers = applied.taken;
-      } else if (quality > 0) {
-        note = 'takes no damage: no EVE dogma for its hull';
-      }
-      outcome = { result: 'hits', chance: quality, quality, damage, layers, ...(note ? { note } : {}) };
+      const landed = quality > 0 ? this.Land(target, shotDamage(missile.damage, quality)) : null;
+      const note = !landed && quality > 0 ? 'takes no damage: no EVE dogma for its hull' : null;
+      outcome = { result: landed?.immune ? 'immune' : 'hits', chance: quality, quality, damage: landed?.damage ?? 0, layers: landed?.layers ?? NO_LAYERS, ...(landed?.absorbed ? { absorbed: landed.absorbed } : {}), ...(note ? { note } : {}) };
     }
     return outcome;
   }
@@ -678,6 +709,7 @@ export class CombatRules {
       quality: Round(outcome.quality, 3),
       damage: Round(outcome.damage, 1),
       ...(deepest ? { layer: deepest } : {}),
+      ...(outcome.absorbed ? { absorbed: Round(outcome.absorbed, 1) } : {}),
       ...(outcome.note ? { note: outcome.note } : {}),
       ...(shot.missile ? { missile: true as const } : {})
     };
@@ -692,6 +724,7 @@ export class CombatRules {
     this.Prune(shooter, boundary);
     if (victim) {
       victim.taken += outcome.damage;
+      victim.absorbed += outcome.absorbed ?? 0;
       if (outcome.damage > 0) {
         victim.takenWindow.push({ tick: boundary, amount: outcome.damage });
         victim.contributors.set(shot.ship, (victim.contributors.get(shot.ship) ?? 0) + outcome.damage);
@@ -719,6 +752,7 @@ export class CombatRules {
       tally = {
         dealt: 0,
         taken: 0,
+        absorbed: 0,
         shots: 0,
         hits: 0,
         misses: 0,

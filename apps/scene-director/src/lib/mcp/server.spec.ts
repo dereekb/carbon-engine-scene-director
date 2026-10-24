@@ -31,6 +31,11 @@ describe('mcp server', () => {
       const orderFleet = tools.find((tool) => tool.name === 'order_fleet')?.description;
       expect(orderFleet).toMatch(/break-off/u);
       expect(tools.find((tool) => tool.name === 'auto_repair')?.description).toMatch(/urgent/u);
+      const setImmunity = tools.find((tool) => tool.name === 'set_immunity');
+      expect(setImmunity?.description).toMatch(/absorbed/u);
+      expect(setImmunity?.description).toMatch(/ships\[\]\.immune/u);
+      expect(setImmunity?.inputSchema).toMatchObject({ properties: { all: { enum: [true] }, sample: { anyOf: expect.any(Array) }, at: { type: 'number' } }, required: ['immune'] });
+      expect(client.getInstructions()).toMatch(/set_immunity makes ships ignore damage/u);
       expect(orderFleet).toMatch(/regroup/u);
       expect(orderFleet).toMatch(/by is the ship giving the order/u);
       expect(orderFleet).toMatch(/"targets"/u);

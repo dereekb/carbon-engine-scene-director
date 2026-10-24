@@ -537,9 +537,10 @@ hulls that look battle damaged for a shot, or a low-HP fight without waiting for
 
 ## Damage immunity (`ships[].immune`, `set_immunity`)
 
-Plan: `~/.claude/plans/damage-immunity-and-a-generic-apply-to-fleet-apply-to-scene-targeting-layer.md`. **S1 is in**
-(the pure rule, the document field, the op and the command in `packages/scene`); S2 wires the page (`DamageModel`,
-`CombatRules.Land`, `Director.SetImmunity`, the `set_immunity` tool, get_state), S4 is the real-GPU look.
+Plan: `~/.claude/plans/damage-immunity-and-a-generic-apply-to-fleet-apply-to-scene-targeting-layer.md`. **S1 and S2
+are in**: the pure rule, the document field, the op and the command in `packages/scene` (S1); the page's damage model,
+`CombatRules.Land`, `Director.SetImmunity`, the `set_immunity` tool and timeline cue, get_state (S2). S3 puts the
+selector on every lever, S4 is the real-GPU look.
 
 - **The field**: `ships[].immune?: true | ("shield" | "armor" | "structure")[]` (`ShipImmunity`,
   `combat/immunity.ts`). `true` is every layer; a list is normalized in layer order, deduplicated, case-insensitive,
@@ -592,6 +593,51 @@ Plan: `~/.claude/plans/damage-immunity-and-a-generic-apply-to-fleet-apply-to-sce
   (`immune`), `combat/kill.ts` (`absorbed`), `scene.ts` (`SceneShip.immune`, `SceneDiff.immunity`). Specs:
   `immunity.spec.ts`, `damage.spec.ts` (the table, real resonances, no mutation), `scene.spec.ts` (round trip, diff).
 
+### The page half (S2)
+
+- **`DamageModel`** (`damage.ts`): `SetImmunity(index)` replaces the id → layers index, kept apart from the HP entries
+  (a ship is immune before its fit resolves; `Remove`, `Clear` and a refit keep it; a time-control snapshot leaves it
+  out as `wiring`: the document is its truth). `Immunity(id)` (`[]` when none). `ApplyHit` passes it to
+  `applyLayeredDamage` and returns `absorbed` / `absorbedBy` (omitted when none); `Damage` takes nothing from an immune
+  layer with HP; `Destroyed` also needs structure not immune, and `DestroyedShips` (set_hp's sweep) is built on it.
+  `SetHp` ignores immunity.
+- **`Director.Apply`** calls `damage.SetImmunity(toSceneImmunity(scene))` on every apply, right after the restart block
+  (which clears HP) and before the first await. `SimulationChange` counts `diff.immunity` (`"1 ship's immunity"`), so an
+  immunity edit cuts the time-control window like any document change.
+- **`CombatRules.Land(target, damage)`** (`combat.ts`, private): the one place a hit lands, for turrets, vortons and
+  missiles (`ShipOutcome`, `MissileOutcome`). It returns `{ damage, layers, absorbed?, immune }` (`immune`: absorbed > 0
+  and nothing taken), or null for a ship the model does not track. `Record` adds `absorbed` to the row and to the
+  victim's tally; `Report` gives `absorbed` (omitted at 0). `onDamaged` and the kill check still need damage > 0.
+- **`Director.SetImmunity(input)`** (`set_immunity`, `where: page`; the hub's `SLOW_TOOLS`): normalize, then at its turn
+  in the edit queue `SelectShips(command)` (sd-selectors), then one `set_immunity` op on the ships whose value changes
+  (`sameImmunity`) through `EditNow`, as patch_scene. Returns `{ tick, immune, ships: [{ id, immune, was? (only when
+  it changed), destroyed? }], selection? (a filtered selector), warnings? (the op's) }`; an empty selection is `ships:
+  []`, not an error. No pilot delay. Not journaled: it is a document edit.
+- **Timeline**: `set_immunity` is a cue action of kind `document` (`TIMELINE_ACTIONS`, `selectionEntry` with
+  `normalizeImmunityCommand`); `FireCue` runs `ImmunityNow`: the selection resolved at the cue, its op through
+  `CueEdit` (the live scene only). A lever given `at` / `when` / `cue` becomes that cue.
+- **Warnings**: `Engage` adds `immunityWarning` once for a ship target it armed ships on; `CallWarnings` (order_fleet
+  targets) adds one per immune `primary` / `queue` / `set` id. Both read the document's `immune`.
+- **set_hp**: a gameplay `destroys` row on an immune structure gets `note: "its structure is immune: it dies once that
+  immunity is lifted"`; the sweep skips it until then (`Destroyed`).
+- **get_state** per ship: `immune` (the document's, omitted when none), `combat.absorbed`, rows with `absorbed` and
+  `result: "immune"`.
+- **Files**: `damage.ts`, `combat.ts`, `flight.ts` (`PublishedHull.group`, for the hull filter), `director.ts`
+  (`SetImmunity`, `ImmunityNow`, `SelectShips`, `SelectionFacts`, the Apply hook, warnings, get_state); specs
+  `damage.spec.ts`, `combat.spec.ts` (immune turret hit, partial absorb keeps its tier, structure immunity never kills
+  over 200 hits then a hit after the lift does, vorton and missile read `immune`), `flight.spec.ts`.
+- **Verify-page** (S2; in the `combat:` area, `--only immunity` runs them alone): `combat: immunity: immune ships still
+  lock and draw fire but take no damage`, `combat: immunity: structure immunity drains shield and armor but the ship
+  never dies`, `combat: immunity: set_immunity selects by fleet, role, team, hull and sample, is saved and survives a
+  load`. Evidence (2026-10-24, SDE 3646012, headless): two
+  Punishers on an immune Rifter at 2 km: 8 shots, 8 hits, `taken` 0, `absorbed` 467.9, every row `immune` within 0.1 of
+  the volley through the shield's resists, p1 locked, an impact post on the Rifter; after the lift the shield fell to
+  37.7 / 562.5. Three Punishers on a structure-immune Rifter: shield and armor drained by tick 65, structure 437.5 /
+  437.5 ten ticks later (absorbed 2645.7), no kill; killed by p2 one tick after the lift. Selections: `fleet b, role
+  logi` → g1 (`scoped` 4, `excluded.role` 3); `all, team red, hull Rifter` → r1–r3; `all, hull Frigate, sample { count:
+  2, seed: 7 }` → bfc, p2 twice (seed 8: p1, r2); the immunity survived get_scene → load_scene; `team: green` warns
+  `(teams there: blue, red)`.
+
 ## Stand-in combat (no EVE data)
 
 Without EVE data every ship fights with class values, not dogma (`packages/scene` `combat/stand-ins.ts`,
@@ -635,6 +681,7 @@ Without EVE data every ship fights with class values, not dogma (`packages/scene
   volley, dps, damage }` (DPS by type; a siege module in `active` raises it). Spec:
   `ship-stats-tool.spec.ts` (a default-fit Rifter text gives the table's numbers; a TFI's empty guns load Barrage L).
 - **`patch_scene`**: `set_combat`, `set_immunity` (Damage immunity).
+- **`set_immunity`**: Damage immunity → The page half.
 - **`set_target`** starts the lock (its answer's `lock`: `{ state, lockTime?, readyIn?, note? }` or `{ refused }`); a
   null target ends the ship's engagement. **`switch_modules`** turrets wait for the lock on the ship's target; remote
   repairers for the lock on the switch's target (`SwitchModules` asks for it).
@@ -643,11 +690,11 @@ Without EVE data every ship fights with class values, not dogma (`packages/scene
   them firing (`Engagements`). It
   ends on `cease_fire`, `set_target` null, removal or a load, and survives the target's death. Skipped: itself, in
   warp, target in warp, destroyed, fit unresolved, no targeting numbers, no matching weapon ("it fits no weapon matching …"). A `warning` when shooter
-  and target share a team (no hostility check).
+  and target share a team (no hostility check), and one when the target is immune (Damage immunity).
 - **`cease_fire`** `{ selection, unlock? }`: ends the engagement, its weapons switch online (cycle end; missiles in flight fly on); `unlock` also
   clears the target (the sweep drops the lock).
 - **get_state** per ship: `targeting` `{ scanResolution, maxTargetRange, maxLocks }`, `locks`, `engaged`, `combat`
-  `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, paperDps, repairs? }` (once it
+  `{ dealt, taken, dps: { dealt, taken }, shots, hits, misses, lastHits, lastTaken, absorbed?, paperDps, repairs? }` (once it
   fired, was shot or was repaired), `destroyed` `{ tick, by, module, weapon, mode }`; weapon rows `combat` `{ damage,
   volley, dps }` and the lock note while held; scene `combat` `{ seed, death, shots, hits, repaired, kills }`.
 - **`set_hp`**: Battle damage, above.
@@ -687,7 +734,7 @@ re-simulation rolls the same; explosions re-trigger from their kills' times. Mis
 - Battle damage: `OnKill` listeners get `shot: null` and `kill.cause: "set_hp"` for a set kill (the camera director and
   the timeline's kill events already take a kill without `by`). A timeline beat embeds `normalizeHpSetCommand`'s plain
   object and calls `Director.SetHp` (not wired yet: `set_hp` is no timeline action).
-- Damage immunity (S2): every hit lands through one `CombatRules.Land(target, damage)` helper over
+- Damage immunity (built): every hit lands through one `CombatRules.Land(target, damage)` helper over
   `DamageModel.ApplyHit`, so turrets, vortons and missiles all read `result: "immune"` and `absorbed`; a new damage
   source must land there too.
 - Missiles (M2a and M2b in: Missiles in the page): hits are `WeaponShot`s with `missile` through `Resolve` and the shared

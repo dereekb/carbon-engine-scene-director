@@ -19,6 +19,7 @@ import type { ModuleSwitch } from '../fitting/switch';
 import type { TargetCommand } from '../weapons/target';
 import type { CeaseFireCommand, EngageCommand } from '../combat/commands';
 import type { AutoRepairCommand } from '../logi/auto-repair';
+import type { ImmunityCommand } from '../combat/immunity';
 import type { AutoCameraCommand } from '../cinema/director/command';
 import { type CueTrigger, describeCueTrigger } from './events';
 
@@ -66,13 +67,13 @@ export const SCRIPT_STOPPED_SPEED = 1;
 /**
  * The levers a cue can pull, each named after its MCP tool.
  */
-export const TIMELINE_ACTION_NAMES = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire', 'auto_repair', 'play_shot', 'play_sequence', 'stop_shot', 'auto_camera', 'patch_scene'] as const;
+export const TIMELINE_ACTION_NAMES = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire', 'auto_repair', 'set_immunity', 'play_shot', 'play_sequence', 'stop_shot', 'auto_camera', 'patch_scene'] as const;
 
 export type TimelineActionName = (typeof TIMELINE_ACTION_NAMES)[number];
 
 /**
  * What a cue's action touches when it fires: `live` state (orders, switches, locks: never saved), the `camera`, or the
- * `document` (a patch, an anchor order, auto-repair), which the page applies to the live scene only.
+ * `document` (a patch, an anchor order, auto-repair, immunity), which the page applies to the live scene only.
  */
 export const TIMELINE_ACTION_KINDS = ['live', 'camera', 'document'] as const;
 
@@ -120,6 +121,7 @@ export interface TimelineActionArgs {
   readonly engage: EngageCommand;
   readonly cease_fire: CeaseFireCommand;
   readonly auto_repair: AutoRepairCommand;
+  readonly set_immunity: ImmunityCommand;
   readonly play_shot: JsonObject;
   readonly play_sequence: JsonObject;
   readonly stop_shot: StopShotCueAction;

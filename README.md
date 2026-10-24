@@ -36,6 +36,10 @@ What works today:
 - **Battle damage**: `set_hp` sets the shield, armor and hull HP of ships, a fleet, a wing
   or a squad, live (HP, a percent of max or a seeded random draw, per layer or in total),
   to look battle damaged on camera without dying, or to start a low-HP fight.
+- **Immunity and selections**: `set_immunity` makes ships ignore damage on every layer or
+  chosen ones (the guns still lock and fire at them, and their hits read `immune`), saved
+  with the scene; it selects ships by id, fleet, wing, squad or the whole scene, filtered
+  by role, team, hull, state and a seeded sample.
 - **Logi**: a fleet's logi squads repair members under fire on their own: each logi
   locks the member in reach that needs it most, runs its remote repairers on EVE's cycle
   timing with the client's beams, and the reps hold ships up in the damage model
@@ -212,6 +216,7 @@ connected tab.
 | `set_target` | page | gives ships, a fleet, a wing or a squad a ship or object to lock, aim and fire their turrets and launchers at (null clears it) |
 | `engage` | page | arms ships' turrets and launchers on a target: they lock it and keep firing until `cease_fire` |
 | `cease_fire` | page | ends ships' engagements (their turrets and launchers stop at their cycle end); `unlock` drops the targets |
+| `set_immunity` | page | makes a selection of ships ignore damage (every layer or chosen ones), saved in the document; they are still locked and fired at |
 | `set_hp` | page | sets ships' shield, armor and structure HP live: per layer or the total, as HP, a percent of max or a seeded random draw; cinematic never kills, gameplay can |
 | `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, called targets (a primary and a queue the group focuses fire on; `until: "gone"` lends an FC brain only its call), free fire, a stance (including `align` to retreat), and `engage` (a personality fleet back to its FC brain) |
 | `auto_repair` | page | a fleet's, wing's or squad's logi auto-repair on or off, and how they pick: most urgent, most damaged or most shot-at |

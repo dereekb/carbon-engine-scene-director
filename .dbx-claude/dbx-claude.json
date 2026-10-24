@@ -1158,7 +1158,8 @@
               "mcp__scene-director__engage",
               "mcp__scene-director__cease_fire",
               "mcp__scene-director__set_target",
-              "mcp__scene-director__set_hp"
+              "mcp__scene-director__set_hp",
+              "mcp__scene-director__set_immunity"
             ]
           }
         ]

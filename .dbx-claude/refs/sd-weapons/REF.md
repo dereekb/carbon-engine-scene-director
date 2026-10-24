@@ -212,6 +212,10 @@ turrets fire only at a locked target. No hostility check, and no pilot delay on 
   FIRING on the dead hull (`aim: firing`, `renderer.turrets.firing` stuck) once no target followed. Found and fixed in
   the fleet targeting T3 GPU check (2026-10-23).
 - The queue, the counts and `OnShot` run without a renderer too (headless shot counts; W4's sounds).
+- **Shots at an immune ship** (`set_immunity`, `sd-combat` → Damage immunity): a hit its target's immunity absorbed
+  reads `result: "immune"`, but `missed` stays false, so it draws as a hit: the impact on the hull (shield ripples at
+  full shield, armor or hull impacts on a battered hull, per the overlay) and the `ship_impact_*` sound on the target's
+  emitter. Nothing draws "immunity" itself.
 - **Shots at a dying ship** (death `explode`, `sd-combat`): the boundary's shots after the killing one are `overkill`
   and still draw; every target on it clears, so no later shots are raised. Queued shots at it keep drawing (its ball
   stays) until its explosion's wreck switch hides the hull, when `shots.Forget(id)` drops the rest. The killing shot's

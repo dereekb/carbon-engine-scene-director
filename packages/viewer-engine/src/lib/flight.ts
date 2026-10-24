@@ -61,6 +61,10 @@ export type FlightSource = 'sde' | 'stats' | 'class';
 export interface PublishedHull {
   readonly typeID: number;
   readonly name: string;
+  /**
+   * The type's ship group ("Frigate", "Logistics Cruiser"): what a selector's hull filter matches (sd-selectors).
+   */
+  readonly group?: string;
   readonly published: HullStats;
 }
 
@@ -494,7 +498,8 @@ function ReadPublishedHull(body: unknown): HullStatsAnswer {
   const published = Field(hull, 'published');
   const valid = typeof typeID === 'number' && typeof name === 'string' && published !== null && typeof published === 'object';
   const note = Field(hull, 'note');
-  return valid ? { hull: { typeID, name, published: published as HullStats }, note: null } : { hull: null, note: typeof note === 'string' ? note : "the hub's /ship-stats answer named no hull" };
+  const group = Field(hull, 'group');
+  return valid ? { hull: { typeID, name, ...(typeof group === 'string' && group ? { group } : {}), published: published as HullStats }, note: null } : { hull: null, note: typeof note === 'string' ? note : "the hub's /ship-stats answer named no hull" };
 }
 
 function ReadErrorMessage(body: unknown): Maybe<string> {

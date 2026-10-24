@@ -61,12 +61,13 @@ The director is both ports.
   second, then document order, which is the order they fire in on a shared tick. Messages index the **input** position.
 - **Actions** are the lever tools' names with the tool's arguments as the value: `order_ship` (`{ id, order }`),
   `order_fleet`, `switch_prop_mods`, `switch_modules`, `set_target`, `engage`, `cease_fire`, `auto_repair`,
+  `set_immunity` (kind document: the selection resolves when the cue fires, `sd-combat` → Damage immunity),
   `play_shot`, `play_sequence`, `stop_shot`, `auto_camera` (kind camera: `sd-cinema`'s director; removing the followed
   fleet or ship drops `follow` and keeps the cue), `patch_scene` (`{ operations }`). Each is read by its tool's normalizer and
   stored normalized, except camera shots (stored as written: a library shot expands when it plays) and patches (as
   written: ops apply when the cue fires). A patch cue may not carry the timeline ops or `set_environment` (a reload).
 - **Kinds** (`entry.kind(args)`): `live` (orders, switches, locks, called targets: `order_fleet` targets is live since
-  fb0f033), `camera`, `document` (`patch_scene`, `auto_repair`, and `order_fleet`'s anchor / break-off / regroup). T2
+  fb0f033), `camera`, `document` (`patch_scene`, `auto_repair`, `set_immunity`, and `order_fleet`'s anchor / break-off / regroup). T2
   applies document cues to the **live scene only**, so saving mid-play saves the script, not its effects.
 - **Cues are a model's calls to the FC brain** (`sd-personalities`): an `order_fleet`, `order_ship`, `engage`,
   `cease_fire` or `switch_prop_mods` cue on a personality fleet takes its lever manual as the tool does
@@ -261,7 +262,7 @@ The director is both ports.
 
 ## The authored document and the live scene
 
-Document cues (`patch_scene`, `auto_repair`, `order_fleet` anchor / break-off / regroup) change **the live scene only**
+Document cues (`patch_scene`, `auto_repair`, `set_immunity`, `order_fleet` anchor / break-off / regroup) change **the live scene only**
 (`CueEdit`: `applySceneOperations(live)` → `ApplyNow` → a live edit → `FinishApply` outside the edit queue, no store
 write). `get_scene`, `save_scene` and the working copy keep the authored document, so saving mid-play saves the script,
 not its effects, and a restart replays it. Details, user edits while live edits exist (live-only, authored-only) and the
@@ -304,7 +305,7 @@ Every cueable tool takes `at` (seconds, `AT_ARGUMENT`), `when` (an event, `WHEN_
 (`cueable()` over `TOOL_LIST`); `patch_scene` also takes `name` (the cue's).
 
 - **Page levers** (`order_ship`, `order_fleet`, `switch_prop_mods`, `switch_modules`, `set_target`, `engage`,
-  `cease_fire`, `auto_repair`, `play_shot`, `play_sequence`, `stop_shot`, `patch_scene`): `Director.Handlers()` wraps
+  `cease_fire`, `auto_repair`, `set_immunity`, `play_shot`, `play_sequence`, `stop_shot`, `patch_scene`): `Director.Handlers()` wraps
   each `TIMELINE_ACTION_NAMES` handler; `at` or `cue` routes to `AddCue(action, args)`, which builds `{ id?: cue, at,
   name? (patch_scene's), [action]: the rest }` (`patch_scene: { operations }`) and runs `EditNow([{ op: 'add_cue', cue }])`
   in the edit queue. So it validates exactly as a document edit (against the scene as projected to the cue's time) and
