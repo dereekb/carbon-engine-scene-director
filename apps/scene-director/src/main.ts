@@ -10,6 +10,10 @@
  *                        For save_fleet_composition and add_fleet_composition --in fills "composition"
  *                        instead (`call save_fleet_composition --in tfis.json`), and --out writes the
  *                        composition get_fleet_composition returns
+ * scene-director https-cert [--https-dir <dir>]
+ *                        makes the HTTPS listener's files (https-cert.ts): a local CA (made once and kept; a device
+ *                        trusts it once), a certificate for this machine's names and private LAN addresses (made
+ *                        again each run) and an access token (kept)
  *
  * Options: --port <n> (5520), --host <addr> (127.0.0.1), --tools-core <url> (http://127.0.0.1:5510),
  *          --eve-data tools-core|off (SCENE_DIRECTOR_EVE_DATA; tools-core by default; off is no-EVE-data mode: the hub
@@ -25,7 +29,11 @@
  *          --movies <dir> (export_movie's MP4 files, served at /movies/<file>; a scene-director/movies folder in the
  *          per-user data directory by default),
  *          --audio-cache <dir> (local copies of tools-core's sound banks the page reads ranges from; a
- *          scene-director-audio-cache folder in the OS temp directory by default)
+ *          scene-director-audio-cache folder in the OS temp directory by default),
+ *          --https-port <n> (SCENE_DIRECTOR_HTTPS_PORT; none by default) also serves the hub over HTTPS to other devices
+ *          on the LAN (an iPad's Safari: WebGPU needs a secure context; https.ts), on --https-host <addr>
+ *          (SCENE_DIRECTOR_HTTPS_HOST, 0.0.0.0), with the files in --https-dir <dir> (SCENE_DIRECTOR_HTTPS_DIR; a
+ *          scene-director/https folder in the per-user data directory by default) that https-cert writes
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -35,6 +43,8 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AudioBankCache, DEFAULT_AUDIO_CACHE_DIRECTORY } from './lib/hub/audio-cache';
 import { DEFAULT_PORT, Hub, type HubOptions, LogToStderr } from './lib/hub/hub';
+import { DEFAULT_HTTPS_HOST, DEFAULT_HTTPS_PORT, DefaultHttpsDirectory, HTTPS_CA_PATH, type HubHttpsOptions, ReadHttpsFiles } from './lib/hub/https';
+import { HTTPS_CERT_DAYS, MakeHttpsCertificate } from './lib/hub/https-cert';
 import { RemoteHub } from './lib/hub/remote-hub';
 import { SceneOf } from './lib/hub/saved-scenes';
 import { ErrorMessage, ErrorProblems, type ToolCaller } from './lib/hub/tool-call';
@@ -46,7 +56,7 @@ import { defaultFleetPersonalitiesDirectory, FleetPersonalityFileStore } from '.
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
 const USAGE =
-  'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
+  'usage: scene-director serve|mcp|call <tool> [json]|https-cert [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--https-port <n>] [--https-host 0.0.0.0] [--https-dir <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -78,6 +88,32 @@ const compositions = new FleetCompositionFileStore(Option('--fleets', process.en
 const personalities = new FleetPersonalityFileStore(Option('--personalities', process.env['SCENE_DIRECTOR_PERSONALITIES'] || defaultFleetPersonalitiesDirectory()));
 const movies = new MovieFileStore(Option('--movies', process.env['SCENE_DIRECTOR_MOVIES'] || DefaultMoviesDirectory()));
 const audioCache = new AudioBankCache({ directory: Option('--audio-cache', process.env['SCENE_DIRECTOR_AUDIO_CACHE'] || DEFAULT_AUDIO_CACHE_DIRECTORY), log: LogToStderr });
+const httpsDirectory = Option('--https-dir', process.env['SCENE_DIRECTOR_HTTPS_DIR'] || DefaultHttpsDirectory());
+
+/**
+ * The HTTPS listener's options, when --https-port (or SCENE_DIRECTOR_HTTPS_PORT) asks for one. A bad port or missing
+ * files exit 2.
+ *
+ * @returns The options, or null for no HTTPS listener.
+ */
+function HttpsOptionsFromCommandLine(): Maybe<HubHttpsOptions> {
+  const portText = Option('--https-port', process.env['SCENE_DIRECTOR_HTTPS_PORT'] || null);
+  let options: Maybe<HubHttpsOptions> = null;
+  if (portText !== null) {
+    const httpsPort = Number(portText);
+    if (!Number.isInteger(httpsPort) || httpsPort < 0 || httpsPort > 65535) {
+      process.stderr.write(`--https-port (or SCENE_DIRECTOR_HTTPS_PORT) must be a port number, not "${portText}"\n${USAGE}`);
+      process.exit(2);
+    }
+    try {
+      options = { host: Option('--https-host', process.env['SCENE_DIRECTOR_HTTPS_HOST'] || DEFAULT_HTTPS_HOST), port: httpsPort, ...ReadHttpsFiles(httpsDirectory) };
+    } catch (error) {
+      process.stderr.write(`${ErrorMessage(error)}\n`);
+      process.exit(2);
+    }
+  }
+  return options;
+}
 
 /**
  * The options a hub is made with. The EVE data mode is read here, where a hub is made, so `call` ignores it; an
@@ -98,7 +134,7 @@ function HubOptionsFromCommandLine(): HubOptions {
           url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
           build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
         });
-  return { host, port, eveData, toolsCore, viewerDirectory, consoleDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr };
+  return { host, port, eveData, toolsCore, viewerDirectory, consoleDirectory, scenes, compositions, personalities, movies, audioCache, https: HttpsOptionsFromCommandLine(), log: LogToStderr };
 }
 
 /**
@@ -180,12 +216,42 @@ async function CallOnce(name: string): Promise<void> {
   }
 }
 
+/**
+ * Makes or refreshes the HTTPS listener's files and prints what a device needs to trust them.
+ */
+async function HttpsCert(): Promise<void> {
+  try {
+    const report = await MakeHttpsCertificate({ directory: httpsDirectory });
+    const name = report.names[1] ?? 'localhost';
+    const lines = [
+      `HTTPS files in ${report.directory}`,
+      `- CA "${report.caName}": ${report.caCreated ? 'new: every device must trust it (below)' : 'kept: devices that trust it need nothing new'}`,
+      `- certificate for ${report.names.join(', ')} (${HTTPS_CERT_DAYS} days; run this again when the machine's LAN address changes)`,
+      ...(report.skipped.length ? [`- left out (not a private address the CA may sign for): ${report.skipped.join(', ')}`] : []),
+      `- access token: ${report.tokenCreated ? 'new' : 'kept'}`,
+      '',
+      `Serve: scene-director serve --https-port ${DEFAULT_HTTPS_PORT} (SCENE_DIRECTOR_HTTPS_PORT=${DEFAULT_HTTPS_PORT} for the hub an MCP session starts); it prints the device link with the token.`,
+      'Trust the CA once on an iPad or iPhone:',
+      `1. In Safari open https://${name}:${DEFAULT_HTTPS_PORT}${HTTPS_CA_PATH} (accept the warning this once) and allow the profile download, or AirDrop ${report.ca}.`,
+      '2. Settings > General > VPN & Device Management: install the downloaded profile.',
+      `3. Settings > General > About > Certificate Trust Settings: turn on full trust for "${report.caName}".`,
+      ''
+    ];
+    process.stdout.write(lines.join('\n'));
+  } catch (error) {
+    process.stderr.write(`${ErrorMessage(error)}\n`);
+    process.exitCode = 1;
+  }
+}
+
 if (command === 'serve') {
   await Serve();
 } else if (command === 'mcp') {
   await Mcp();
 } else if (command === 'call' && process.argv[3]) {
   await CallOnce(process.argv[3]);
+} else if (command === 'https-cert') {
+  await HttpsCert();
 } else {
   process.stderr.write(USAGE);
   process.exit(2);

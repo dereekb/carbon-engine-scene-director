@@ -99,6 +99,9 @@ What works today:
   and page ask for no EVE file or lookup. The simulation, orders, the camera, cinema, screenshots and exports run on
   a green screen, each ship and object a cube in its team colour, and stand-in guns by class, so fights lock, shoot
   and kill.
+- **Other devices over HTTPS** (`--https-port`, `scene-director https-cert`): a second listener for an iPad or
+  another machine on the LAN (WebGPU needs a secure context), signed by a local CA the device trusts once, behind an
+  access token.
 - **Battle console** (`/console/`, `--console`): drop a scenario (a zip, JSON parts, fits or a folder) and the
   console stages and starts the battle with no agent; per-fleet cards steer it (Engage, Hold, Pull range, Dive,
   Retreat, Warp out, Hold fire, call a primary), FC settings and settings drops apply live, and Reset re-stages it.

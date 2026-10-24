@@ -12,6 +12,9 @@
  * with an audio cache, ranged reads come from local copies of the banks: audio-cache.ts), /movies/<file> (an exported
  * movie, GET and HEAD with Range: movie-files.ts), /health, and the viewer files.
  *
+ * An optional HTTPS listener (https.ts, `--https-port`) serves the same routes and /ws to other devices on the LAN,
+ * behind an access token, plus /ca.crt (its CA certificate) without one.
+ *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
  *   controller  another process (an MCP bridge started after this hub) that sends calls
@@ -32,12 +35,14 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { X509Certificate } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type Server, type ServerResponse } from 'node:http';
+import { createServer, type IncomingMessage, type OutgoingHttpHeaders, type RequestListener, type Server, type ServerResponse } from 'node:http';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import path from 'node:path';
-import { Readable } from 'node:stream';
+import { type Duplex, Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
@@ -62,6 +67,7 @@ import { ShipDataError, type ShipDataApi } from './ship-data';
 import { type DogmaDataApi, MAX_DOGMA_TYPE_IDS } from './dogma-data';
 import type { WeaponDataApi } from './weapon-data';
 import { EveDataStatusOf, HubEveDataSources } from './eve-data';
+import { AdmitHttpsRequest, AdmitHttpsUpgrade, DEFAULT_HTTPS_HOST, DEFAULT_HTTPS_PORT, HTTPS_CA_PATH, HttpsUrls, type HubHttpsOptions } from './https';
 import { AnswerPropMod, AnswerShipStats } from './ship-stats-tool';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
 import type { SofCatalogKind, ToolsCoreApi } from './tools-core';
@@ -170,6 +176,10 @@ export interface HubOptions {
    */
   readonly audioCache?: Maybe<AudioBankCache>;
   /**
+   * An HTTPS listener for other devices on the LAN, beside the loopback HTTP one (https.ts); none by default.
+   */
+  readonly https?: Maybe<HubHttpsOptions>;
+  /**
    * Diagnostics sink; stderr by default, never stdout (MCP owns stdout).
    */
   readonly log?: (line: string) => void;
@@ -226,6 +236,11 @@ export class Hub implements ToolCaller {
   readonly asteroidData: AsteroidDataApi;
   readonly asteroidFields: AsteroidFieldTools;
   readonly movieExports: MovieExports;
+  readonly https: Maybe<HubHttpsOptions>;
+  /**
+   * The HTTPS listener's port once it listens.
+   */
+  httpsPort: Maybe<number> = null;
   private readonly log: (line: string) => void;
   private readonly audioCache: Maybe<AudioBankCache>;
   private readonly pages: WebSocket[] = [];
@@ -234,6 +249,7 @@ export class Hub implements ToolCaller {
   private nextId = 1;
   private server: Maybe<Server> = null;
   private wss: Maybe<WebSocketServer> = null;
+  private httpsServer: Maybe<HttpsServer> = null;
 
   constructor({
     host = '127.0.0.1',
@@ -253,6 +269,7 @@ export class Hub implements ToolCaller {
     objectData,
     asteroidData,
     audioCache = null,
+    https = null,
     log = LogToStderr
   }: HubOptions = {}) {
     this.host = host;
@@ -288,6 +305,7 @@ export class Hub implements ToolCaller {
     });
     this.log = log;
     this.audioCache = audioCache;
+    this.https = https;
   }
 
   get url(): string {
@@ -295,36 +313,54 @@ export class Hub implements ToolCaller {
   }
 
   /**
+   * The HTTPS listener's URLs for another device, once it listens.
+   */
+  get httpsUrls(): string[] {
+    const port = this.httpsPort;
+    return this.https && typeof port === 'number' ? HttpsUrls({ host: this.https.host ?? DEFAULT_HTTPS_HOST, port }) : [];
+  }
+
+  /**
+   * The HTTPS URLs with the access token: what a device opens first.
+   */
+  get httpsLinks(): string[] {
+    const token = this.https?.token ?? '';
+    return this.httpsUrls.map((url) => `${url}?token=${token}`);
+  }
+
+  /**
    * Starts listening. Rejects with code EADDRINUSE when another hub owns the port.
    */
   async Start(): Promise<this> {
-    const server = createServer((request, response) => {
+    const handle: RequestListener = (request, response) => {
       this.HandleHttp(request, response).catch((error: unknown) => {
         if (!response.headersSent) response.writeHead(500, { 'content-type': 'text/plain' });
         response.end(`hub error: ${ErrorMessage(error)}`);
       });
-    });
-    const wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
-    server.on('upgrade', (request, socket, head) => {
-      if (new URL(request.url ?? '/', 'http://localhost').pathname === '/ws') wss.handleUpgrade(request, socket, head, (ws) => this.Accept(ws));
-      else socket.destroy();
-    });
+    };
+    const server = createServer(handle);
+    server.on('upgrade', (request, socket, head) => this.Upgrade(request, socket, head));
     this.server = server;
-    this.wss = wss;
-    await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
-      server.listen(this.port, this.host, () => {
-        server.off('error', reject);
-        resolve();
-      });
-    });
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 * 1024 });
+    await Listen(server, this.port, this.host);
     this.port = (server.address() as AddressInfo).port;
+    if (this.https) {
+      const { host = DEFAULT_HTTPS_HOST, port = DEFAULT_HTTPS_PORT } = this.https;
+      try {
+        await this.StartHttps(this.https, handle);
+      } catch (error) {
+        // No EADDRINUSE code: a caller that joins the hub on a busy port must not take this for the HTTP port.
+        await this.Stop();
+        throw new Error(`the HTTPS listener could not start on ${host}:${port}: ${ErrorMessage(error)}`, { cause: error });
+      }
+    }
     const stores = `saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory}, fleet personalities in ${this.fleetPersonalities.files.directory}, movies in ${this.movieExports.directory}`;
     const off = this.eveData === 'off';
     const source = off ? 'no EVE data: tools-core is not used' : 'tools-core ' + this.toolsCore.url;
     this.log(`viewer at ${this.url} (${source}; ${stores})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
     if (this.consoleDirectory) this.log(`battle console at ${this.url}${CONSOLE_PREFIX.slice(1)} (${this.consoleDirectory})`);
+    if (this.https) this.log(`HTTPS for other devices at ${this.httpsLinks.join(', ')} (a device trusts ${HTTPS_CA_PATH} once first; sd-dev-env)`);
     if (!off) {
       this.toolsCore.ResolveBuild().then(
         (build) => this.log(`EVE resource build ${build}`),
@@ -339,12 +375,58 @@ export class Hub implements ToolCaller {
     for (const { reject } of this.pending.values()) reject(new ToolError('the hub is shutting down'));
     this.pending.clear();
     for (const ws of this.wss?.clients ?? []) ws.terminate();
-    const server = this.server;
-    const closed = new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    const servers = [this.server, this.httpsServer].filter((server): server is Server => !!server?.listening);
+    const closed = Promise.all(servers.map((server) => new Promise<void>((resolve) => server.close(() => resolve()))));
     // Drop the browsers' keep-alive connections too: left open, they keep reaching this stopped hub after a new one took
     // the port, so a tab reloading for the new hub's EVE data mode would read this one's GET /config and reload again.
-    server?.closeAllConnections();
+    for (const server of servers) server.closeAllConnections();
     await closed;
+  }
+
+  /**
+   * Starts the HTTPS listener: the same routes and /ws as the HTTP one, each request admitted by its token, and
+   * HTTPS_CA_PATH without one.
+   *
+   * @param options - The listener's options.
+   * @param handle - The HTTP listener's request handler.
+   */
+  private async StartHttps(options: HubHttpsOptions, handle: RequestListener): Promise<void> {
+    const ca = options.ca ? new X509Certificate(options.ca).raw : null;
+    const server = createHttpsServer({ cert: options.cert, key: options.key }, (request, response) => {
+      const admission = new URL(request.url ?? '/', 'https://hub').pathname === HTTPS_CA_PATH ? null : AdmitHttpsRequest(options.token, request);
+      if (!admission) {
+        response.writeHead(ca ? 200 : 404, ca ? { 'content-type': 'application/x-x509-ca-cert', 'content-disposition': 'attachment; filename="scene-director-ca.crt"', 'cache-control': 'no-store' } : { 'content-type': 'text/plain' });
+        response.end(ca ?? 'no CA certificate is configured');
+      } else if (admission.kind === 'pass') {
+        handle(request, response);
+      } else if (admission.kind === 'redirect') {
+        response.writeHead(302, { location: admission.location, 'set-cookie': admission.cookie, 'cache-control': 'no-store' });
+        response.end();
+      } else {
+        response.writeHead(401, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+        response.end('scene-director: this HTTPS listener needs its access token. Open the link the hub printed (https://…/?token=…), or viewer_status.https.links on the hub.\n');
+      }
+    });
+    server.on('upgrade', (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+      if (AdmitHttpsUpgrade(options.token, request)) this.Upgrade(request, socket, head);
+      else socket.end('HTTP/1.1 401 Unauthorized\r\nconnection: close\r\n\r\n');
+    });
+    this.httpsServer = server;
+    await Listen(server, options.port ?? DEFAULT_HTTPS_PORT, options.host ?? DEFAULT_HTTPS_HOST);
+    this.httpsPort = (server.address() as AddressInfo).port;
+  }
+
+  /**
+   * Hands a /ws upgrade to the WebSocket server; any other upgrade is dropped.
+   *
+   * @param request - The upgrade request.
+   * @param socket - Its socket.
+   * @param head - The first packet of the upgraded stream.
+   */
+  private Upgrade(request: IncomingMessage, socket: Duplex, head: Buffer): void {
+    const wss = this.wss;
+    if (wss && new URL(request.url ?? '/', 'http://localhost').pathname === '/ws') wss.handleUpgrade(request, socket, head, (ws) => this.Accept(ws));
+    else socket.destroy();
   }
 
   /**
@@ -429,6 +511,7 @@ export class Hub implements ToolCaller {
           fleetsDirectory: this.fleetCompositions.files.directory,
           personalitiesDirectory: this.fleetPersonalities.files.directory,
           moviesDirectory: this.movieExports.directory,
+          https: this.https ? { urls: this.httpsUrls, links: this.httpsLinks, ca: this.httpsUrls.map((url) => `${url}${HTTPS_CA_PATH.slice(1)}`) } : null,
           hint: this.pages.length ? undefined : `Open ${this.url} in Chrome or Edge on this machine.`
         };
       case 'page_log': {
@@ -866,6 +949,23 @@ export class Hub implements ToolCaller {
     response.writeHead(404, { 'content-type': 'text/plain' });
     response.end(`not found: ${what}`);
   }
+}
+
+/**
+ * Starts a server listening.
+ *
+ * @param server - The HTTP or HTTPS server.
+ * @param port - The port; 0 picks a free one.
+ * @param host - The address.
+ */
+async function Listen(server: Server, port: number, host: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, () => {
+      server.off('error', reject);
+      resolve();
+    });
+  });
 }
 
 const SHIP_DATA_FAILURE_STATUS: Record<ShipDataError['failure'], number> = { invalid: 400, 'not-found': 404, ambiguous: 409, unavailable: 503 };

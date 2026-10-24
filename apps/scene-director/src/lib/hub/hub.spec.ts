@@ -1,5 +1,8 @@
+import { spawnSync } from 'node:child_process';
+import { X509Certificate } from 'node:crypto';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
+import { createServer, type IncomingHttpHeaders } from 'node:http';
+import { request as httpsRequest } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -23,6 +26,8 @@ import { MakeFakeAsteroidData } from './asteroid-data.testing';
 import { MakeFakeDogmaData } from './dogma-data.testing';
 import { MakeFakeWeaponData } from './weapon-data.testing';
 import { AudioBankCache } from './audio-cache';
+import { HTTPS_TOKEN_COOKIE, ReadHttpsFiles } from './https';
+import { MakeHttpsCertificate } from './https-cert';
 
 /** Where the fake tools-core's audio URLs point: a local server a spec starts. */
 let audioUpstream = 'http://127.0.0.1:9';
@@ -1158,5 +1163,109 @@ describe('live recording', () => {
     } finally {
       await target.Stop();
     }
+  });
+});
+
+describe.skipIf(spawnSync('openssl', ['version']).status !== 0)('the HTTPS listener', () => {
+  let target: Hub;
+  let files: ReturnType<typeof ReadHttpsFiles>;
+  let ca: string;
+
+  /** One GET on the HTTPS listener, checking its certificate against the CA as the name "localhost". */
+  async function Get(urlPath: string, headers: Record<string, string> = {}, trust: string | null = ca): Promise<{ status: number; headers: IncomingHttpHeaders; body: Buffer }> {
+    return new Promise((resolve, reject) => {
+      const request = httpsRequest({ host: '127.0.0.1', port: target.httpsPort ?? 0, path: urlPath, ca: trust ?? undefined, servername: 'localhost', headers }, (response) => {
+        const chunks: Buffer[] = [];
+        response.on('data', (chunk: Buffer) => chunks.push(chunk));
+        response.on('end', () => resolve({ status: response.statusCode ?? 0, headers: response.headers, body: Buffer.concat(chunks) }));
+      });
+      request.on('error', reject);
+      request.end();
+    });
+  }
+
+  /** Opens /ws on the HTTPS listener; resolves with the socket once open, or the error a refused upgrade gives. */
+  async function OpenSocket(headers: Record<string, string>, origin?: string): Promise<WebSocket | Error> {
+    const ws = new WebSocket(`wss://127.0.0.1:${target.httpsPort}/ws`, { ca, headers, origin });
+    return new Promise((resolve) => {
+      ws.once('open', () => resolve(ws));
+      ws.once('error', (error) => resolve(error));
+    });
+  }
+
+  beforeAll(async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'scene-director-https-'));
+    const report = await MakeHttpsCertificate({ directory, hostname: 'test-box', interfaces: {} });
+    expect(report).toMatchObject({ caCreated: true, tokenCreated: true, names: ['localhost', 'test-box.local', '127.0.0.1'], skipped: [] });
+    const again = await MakeHttpsCertificate({ directory, hostname: 'test-box', interfaces: {} });
+    expect(again).toMatchObject({ caCreated: false, tokenCreated: false, caName: 'scene-director dev CA (test-box.local)' });
+    files = ReadHttpsFiles(directory);
+    ca = files.ca ?? '';
+    target = await StartHub({ https: { host: '127.0.0.1', port: 0, ...files } });
+  });
+
+  afterAll(async () => {
+    await target?.Stop();
+  });
+
+  it('serves a certificate the CA signed for localhost, and nothing to a client that does not trust the CA', async () => {
+    expect((await Get('/ca.crt')).status).toBe(200);
+    await expect(Get('/ca.crt', {}, null)).rejects.toThrow(/unable to verify|self.signed|local issuer/i);
+  });
+
+  it('serves the CA certificate without the token, everything else only with it', async () => {
+    const certificate = await Get('/ca.crt');
+    expect(certificate.headers['content-type']).toBe('application/x-x509-ca-cert');
+    expect(certificate.body.equals(new X509Certificate(ca).raw)).toBe(true);
+    const refused = await Get('/config');
+    expect(refused.status).toBe(401);
+    expect(String(refused.body)).toMatch(/needs its access token/);
+    expect(String(refused.body)).not.toContain(files.token);
+  });
+
+  it('turns the token link into a cookie, and the cookie opens the routes', async () => {
+    const link = await Get(`/?token=${files.token}&eve=off`);
+    expect(link.status).toBe(302);
+    expect(link.headers.location).toBe('/?eve=off');
+    const cookie = String(link.headers['set-cookie']?.[0]).split(';')[0];
+    expect(cookie).toBe(`${HTTPS_TOKEN_COOKIE}=${files.token}`);
+    const config = await Get('/config', { cookie });
+    expect(config.status).toBe(200);
+    expect(JSON.parse(String(config.body))).toHaveProperty('eveData');
+    expect((await Get('/index.html', { cookie })).status).toBe(200);
+  });
+
+  it('upgrades /ws for the cookie and the listener origin, and the tab answers page tools', async () => {
+    const cookie = `${HTTPS_TOKEN_COOKIE}=${files.token}`;
+    const origin = `https://127.0.0.1:${target.httpsPort}`;
+    expect(String(await OpenSocket({}, origin))).toMatch(/401/);
+    expect(String(await OpenSocket({ cookie }, 'https://evil.test'))).toMatch(/401/);
+    const ws = await OpenSocket({ cookie }, origin);
+    expect(ws).toBeInstanceOf(WebSocket);
+    if (!(ws instanceof WebSocket)) return;
+    try {
+      ws.on('message', (data) => {
+        const message = JSON.parse(String(data)) as { type: string; id: number };
+        if (message.type === 'call') ws.send(JSON.stringify({ type: 'result', id: message.id, ok: true, value: { name: 'over https' } }));
+      });
+      ws.send(JSON.stringify({ type: 'hello', role: 'page' }));
+      await new Promise((resolve) => ws.once('message', resolve));
+      expect(await target.Call('get_scene')).toEqual({ name: 'over https' });
+    } finally {
+      ws.close();
+    }
+  });
+
+  it('viewer_status gives the HTTPS URLs, the token links and the CA', async () => {
+    const status = (await target.Call('viewer_status')) as { https: { urls: string[]; links: string[]; ca: string[] } };
+    const url = `https://127.0.0.1:${target.httpsPort}/`;
+    expect(status.https).toEqual({ urls: [url], links: [`${url}?token=${files.token}`], ca: [`${url}ca.crt`] });
+    expect(((await hub.Call('viewer_status')) as { https: unknown }).https).toBeNull();
+  });
+
+  it('a hub whose HTTPS port is taken does not start, and frees its HTTP port', async () => {
+    const failure = await StartHub({ https: { host: '127.0.0.1', port: target.httpsPort ?? 0, ...files } }).catch((error: unknown) => error as NodeJS.ErrnoException);
+    expect(String(failure)).toMatch(/the HTTPS listener could not start on 127\.0\.0\.1:\d+/);
+    expect((failure as NodeJS.ErrnoException).code).toBeUndefined();
   });
 });

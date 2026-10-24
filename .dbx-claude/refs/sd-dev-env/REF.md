@@ -139,6 +139,57 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
   `hub/mp4-reader.testing.ts` (`ReadMp4`), as the specs and verify-page do.
 - WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
 
+## Other devices on the LAN over HTTPS (an iPad)
+
+WebGPU and WebCodecs exist only in a secure context. A page from `http://<lan address>:5520` is not one, so
+`Engine.Create` fails there, and iOS Safari can't be told to treat it as secure. The hub can serve a second, HTTPS
+listener for other devices (`hub/https.ts`). The loopback HTTP listener, MCP sessions, `RemoteHub`, `call` and
+verify-page are unchanged. No Tailscale, proxy or Docker is involved. The assessment behind this is
+`~/.claude/plans/would-it-be-possible-majestic-bear.md`.
+
+- **Files**: `scene-director https-cert` (`hub/https-cert.ts`, the `openssl` command; LibreSSL on macOS works) writes
+  them to `--https-dir <dir>` / `SCENE_DIRECTOR_HTTPS_DIR`, by default `scene-director/https` in the per-user data
+  directory (`~/Library/Application Support/scene-director/https` on the Mac):
+  - `ca.crt` / `ca.key`: a local CA, made once and kept, so a device trusts it once. It is name-constrained to
+    `.local`, localhost and the private IPv4 ranges: its key can sign nothing else a device would trust.
+  - `cert.pem` / `key.pem`: made again each run, for `localhost`, `<host>.local`, 127.0.0.1 and the private LAN
+    addresses. It follows Apple's rules (RSA 2048, SHA-256, names in the SAN, serverAuth, 800 days, under 825).
+    Run it again when the LAN address changes. `<host>.local` keeps working without that, since the iPad resolves it
+    over mDNS.
+  - `token`: the access token, made once and kept.
+
+  Keys and token are 0600. Never copy them into the repo; dbx-components' nginx certs are committed, these are not.
+- **Serve**: `--https-port <n>` / `SCENE_DIRECTOR_HTTPS_PORT` (5521 by convention; no listener by default) on
+  `--https-host` / `SCENE_DIRECTOR_HTTPS_HOST` (default `0.0.0.0`). If the files are missing, the hub exits 2 and
+  names `https-cert`. If the port is taken, the hub stops and throws without an EADDRINUSE code, so an `mcp` start
+  never mistakes it for the HTTP port and joins. For the hub an MCP session starts, export the variable in the shell
+  profile Claude Code starts from, as with `SCENE_DIRECTOR_EVE_DATA`. To try it beside a session's hub, use a spare
+  HTTP port with temp stores: `node dist/apps/scene-director/main.js serve --port 5532 --https-port 5521 --eve-data
+  off --scenes <tmp> ...`, then drive it with `call <tool> --port 5532`.
+- **Access**: every request needs the token. Open `/?token=…` once; the hub answers with a cookie
+  (`scene_director_token`: Secure, HttpOnly, SameSite=Lax, 400 days) and a 302 to the same URL without the token.
+  After that the cookie carries every route and the `/ws` upgrade. An upgrade also needs the listener's own Origin
+  when the client sends one. Anything else gets a 401. `/ca.crt` (the CA, DER) is the one path served without the
+  token. The hub prints the links on stderr; `viewer_status.https` gives `urls`, `links` (with the token) and `ca`.
+  A cookie belongs to the host it was set on: the `.local` name and the IP each need the link once.
+- **Trust on an iPad**: in Safari open `https://<host>.local:5521/ca.crt` (accept the warning this once) and allow
+  the profile, or AirDrop `ca.crt`. Then Settings → General → VPN & Device Management → install it. Then Settings →
+  General → About → Certificate Trust Settings → full trust for "scene-director dev CA (<host>.local)". Then open the
+  link with the token.
+- **dbxpc**: WSL2 is in NAT mode, so the LAN can't reach a hub inside WSL. It needs mirrored networking or a
+  `netsh portproxy` for 5521, plus a Windows firewall rule. Not set up.
+- **Checked (Mac, 2026-10-24)**: curl with `--cacert` over `Michelles-MacBook-Air.local` and 10.0.0.187 (the name
+  constraints pass); no CA fails TLS. Playwright Chromium over the token link: a 302, then `isSecureContext` true,
+  `navigator.gpu` present, the cookie set, and the page's `wss://` link connected (the hub counted the tab). The
+  headless shell then loses its GPU device as usual.
+- **Not yet checked: an iPad.** What's open: Safari's acceptance of the CA (its name constraints included), WebKit's
+  WebGPU on the runtime's shaders and limits, `new VideoFrame(canvas)` and H.264 WebCodecs, and per-tab memory. The
+  probe is in the plan above.
+  - **Stage A**: no EVE data. `get_state.renderer`, `screenshot`, then `record_movie { action: "start", duration: 5,
+    codec: "h264", width: 1280, height: 720, fps: 30 }`, and check the MP4 with `ReadMp4`.
+  - **Stage B**: EVE data, which needs tools-core.
+  - Close the desktop tabs first: page tools go to the newest tab.
+
 ## verify-page (everything but drawing)
 
 verify-page (`apps/scene-director/src/verify-page.ts`, the `scene-director:verify-page` target) drives the real page in

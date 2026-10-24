@@ -510,7 +510,12 @@
               "no EVE data",
               "eve-data",
               "stand-in",
-              "green screen"
+              "green screen",
+              "iPad",
+              "Safari",
+              "https-cert",
+              "https-port",
+              "self-signed"
             ]
           },
           {
@@ -522,7 +527,8 @@
               ".claude/skills/windows-chrome",
               "packages/viewer-engine/src/lib/eve-data",
               "hub/eve-data",
-              "packages/scene/src/lib/eve-data"
+              "packages/scene/src/lib/eve-data",
+              "hub/https"
             ],
             "every": 12
           },
