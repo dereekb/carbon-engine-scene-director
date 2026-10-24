@@ -340,6 +340,10 @@ export class TimeControl {
   private drift: { count: number; tick?: number; summary?: string } = { count: 0 };
   private lastJump: Maybe<TimeJumpReport> = null;
   private jumping = false;
+  /**
+   * Where the frame loop stops (Movie mode M5: a movie's end), and who to tell.
+   */
+  private stopAt: Maybe<{ readonly clock: number; readonly onStop?: () => void }> = null;
 
   constructor({ clock, world, realNow = () => performance.now(), budgetMs = FRAME_STEP_BUDGET_MS, windowConfig = {} }: TimeControlConfig) {
     this.clock = clock;
@@ -694,7 +698,12 @@ export class TimeControl {
   Frame(frameMs: number): number {
     if (this.jumping) return this.clock.now;
     const before = this.clock.now;
-    const target = this.clock.Next(frameMs);
+    const stop = this.stopAt;
+    // A stop the clock already reached or passed (a jump past it, say) is dropped.
+    if (stop && stop.clock <= before) this.stopAt = null;
+    let target = this.clock.Next(frameMs);
+    const stopping = stop != null && stop.clock > before && target >= stop.clock;
+    if (stopping) target = stop.clock;
     const start = this.realNow();
     try {
       for (;;) {
@@ -720,7 +729,40 @@ export class TimeControl {
     }
     if (this.recording.on) this.end = Math.max(this.end ?? this.clock.now, this.clock.now);
     this.Measure(frameMs, this.clock.now - before);
+    // The stop's boundaries all ran (a frame behind its budget waits at an earlier one and goes on next frame).
+    if (stopping && stop && this.clock.now === stop.clock) {
+      this.stopAt = null;
+      this.Pause(true);
+      stop.onStop?.();
+    }
     return this.clock.now;
+  }
+
+  /**
+   * Stops the frame loop exactly at a clock (Movie mode M5: a movie's end): the frame that reaches it steps the
+   * boundaries up to it, sets the clock there and pauses, at any rate; then the stop clears itself. Jumps and
+   * re-simulations ignore it (they have their own target), and a clock the loop is already at or past drops it.
+   *
+   * @param clock - 100 ns ticks, or null to clear the stop.
+   * @param onStop - Called once the loop stopped there.
+   */
+  StopAt(clock: Maybe<number>, onStop?: () => void): void {
+    this.stopAt = clock == null ? null : { clock, ...(onStop ? { onStop } : {}) };
+  }
+
+  /**
+   * The clock the frame loop stops at (StopAt), or null.
+   */
+  get stopsAt(): Maybe<number> {
+    return this.stopAt?.clock ?? null;
+  }
+
+  /**
+   * The furthest clock recorded (the recorded end), or now while nothing is: a seek goes at most MAX_SEEK_AHEAD_SECONDS
+   * past it.
+   */
+  get recordedEnd(): number {
+    return this.RecordedEnd();
   }
 
   /**

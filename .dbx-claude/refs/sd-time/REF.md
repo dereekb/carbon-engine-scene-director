@@ -17,7 +17,8 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 2026-10-22). **Movie mode M3** (`sd-timeline` doc `movie`): the timeline's pinned origin, `AbandonFuture`, script
 edits re-simulating through `Resimulate` (over `Run`, the jump's core) instead of cutting, and `AfterRestore` (below,
 "Script edits re-simulate"). **Movie mode M4**: the snapshot holds the camera (`SimState.camera`), restored while the
-movie owns the camera (below, "Presentation across a jump"; `sd-cinema`).
+movie owns the camera (below, "Presentation across a jump"; `sd-cinema`). **Movie mode M5**: `StopAt`, the stop at a
+movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump` (`sd-timeline` doc `movie`).
 
 ## Files
 
@@ -26,7 +27,7 @@ movie owns the camera (below, "Presentation across a jump"; `sd-cinema`).
 | `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek` (scene seconds, or `TimeSeek` `{ timeline }`), `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
 | `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`, `timeline` included) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
 | `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`; `Advance` = `Set(Next())` for the specs |
-| `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift; M3: `MarkOrigin`, `AbandonFuture`, `Resimulate`, the private `Run`), `TimeSimPort` (M3: `AfterRestore`) / `TapeEntry` / `JumpLanding` / `TimeResimulateOptions` / `TimeResimulation`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
+| `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift; M3: `MarkOrigin`, `AbandonFuture`, `Resimulate`, the private `Run`; M5: `StopAt`, `stopsAt`, `recordedEnd`), `TimeSimPort` (M3: `AfterRestore`) / `TapeEntry` / `JumpLanding` / `TimeResimulateOptions` / `TimeResimulation`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
 | `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`), `BoundaryTime(boundary)` (any boundary on the grid: the timeline's t = 0) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
 | `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
@@ -75,6 +76,18 @@ movie owns the camera (below, "Presentation across a jump"; `sd-cinema`).
 - **Keys** (`main.ts` `TimeKeys`; ignored with Ctrl / Meta / Alt, on key repeat, and while a button or text field has
   focus): Space pauses or plays; `[` / `]` halve or double the rate within the bounds. The HUD row reads `1×`,
   `paused at 0.25×`, `32× (2.7× actual) · muted`.
+
+## The movie's end (Movie mode M5)
+
+- `StopAt(clock, onStop?)` stops the frame loop exactly at a clock: the frame whose target reaches it clamps the target
+  there, steps the boundaries up to it (its own boundary included, so the cues due then fire) and, once the clock is
+  there, pauses (`Pause(true)`), clears the stop and calls `onStop`. At 32× the same (spec'd at 1× and 32×); a frame
+  over its step budget waits at an earlier boundary and the next frame finishes it.
+- A stop at or before the clock when a frame starts is dropped (a jump past it). Jumps and re-simulations ignore it
+  (`Run` has its own target): a jump back keeps it, so the loop stops there again.
+- The director arms it for a movie's `end` (`ArmMovieEnd`, `sd-timeline` doc `movie` "The end"); `movie play` resumes
+  past it.
+- `recordedEnd` is the furthest recorded clock (the `movie` tool's chunked seeks step from it).
 
 ## The tool and get_state
 

@@ -83,8 +83,12 @@ What works today:
   Destiny parks and its own per-tick state every few seconds, re-simulates from the
   nearest snapshot and replays the live commands given since, so the same fight
   plays again (`time_control`, `get_state.time`, Space, `[` `]` and `←` on the page).
+- **Movie mode**: the timeline is the movie: fleet and camera beats at times or on
+  events (a kill, a landing, a called primary), a letterboxed look and an end, and
+  script edits that re-simulate, so a seek lands on the same frame every time
+  (`movie`: beats, seek to a beat, play from a beat, retake).
 
-Movie mode and movie export come in later phases.
+Movie export comes in a later phase.
 
 ```text
 Claude Code ──stdio──▶ scene-director mcp (Node)
@@ -199,6 +203,7 @@ connected tab.
 | `auto_camera` | page | the director camera on or off, and its bias |
 | `time_control` | page | pause or play, slow motion or fast-forward the scene, and jump back or seek within the recorded window |
 | `timeline` | page | the scene's script: status (every cue and ship script), play, pause, restart; the lever tools and `add_ships`, `add_fleet_composition`, `stage_engagement`, `add_objects` take `at` to add a cue instead of acting now |
+| `movie` | page | the timeline as a movie: beats in a fleet and a camera lane, add / move / edit / remove them, seek to a beat (paused, for a screenshot), play from one, retake after a cut, and the movie's look and end |
 
 Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/tools.ts`).
 

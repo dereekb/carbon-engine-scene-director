@@ -197,8 +197,8 @@ at the landing:
   and the director's state at the landing are the straight run's.
 - **At `EndJump`**: no `Rebase` and no `cameraDirector.Clear`. The first frame after the landing advances a sequence
   through the durations that passed (`Frame`'s loop), releases a finished shot and resolves anchors.
-- **Claude's `play_shot`** while a movie owns the camera is a live preview: a jump or a re-simulation returns the
-  movie's camera.
+- **Claude's `play_shot`** while a movie owns the camera is a live preview: a jump, a `movie seek` or a re-simulation
+  returns the movie's camera (the `play_shot` and `movie` tool texts say so).
 - **Limits**: an anchored hardpoint (flyby, warp-landing) whose shot started during the re-simulation anchors at the
   landing's first frame, not at the shot's start (a follow-up); a shot whose subject vanished between boundaries is
   re-picked at the next boundary in the re-simulation but at the next frame in straight play (`Lost` / `TakeBack` are
@@ -364,6 +364,9 @@ The canvas listeners are capture-phase, so they run before `OrbitCamera`'s own h
   movie export capture exactly the frame; L toggles a 2.39 letterbox. `LetterboxRect` pillarboxes a wider window.
 - `?hud=off` hides the overlay; H toggles it. `screenshot` never includes the DOM overlay; `take_screenshot` does.
 - A shot's `letterbox` / `hud` win while it plays, then the page's settings come back.
+- A movie's look (Movie mode M5, `sd-timeline` doc `movie` "The look") sits between them: `Director.Presentation()`
+  hands main.ts the shot's look and the movie block's while its timeline is not idle or stopped; L and H then switch a
+  key for the run (until the next load or restart) instead of the page setting. Merged by `MoviePresentation`.
 
 ## get_state
 

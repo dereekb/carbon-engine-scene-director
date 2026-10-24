@@ -2,10 +2,10 @@
 
 > The page side of Movie mode (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`).
 > The document side (event cue syntax, `arms`, the check-second walk, chains, pruning, the `movie` block, `set_movie`)
-> is the main `sd-timeline` REF ("Event cues", "The movie block"). **M2, M3 and M4 have landed** (the page plays event
+> is the main `sd-timeline` REF ("Event cues", "The movie block"). **M2 to M5 have landed** (the page plays event
 > cues on their events; script edits re-simulate, "Edit-resimulate" below; the movie camera comes back the same after a
-> jump, "The movie camera" below); M5 the `movie` tool and the movie's look and end, M6 the full verify-page and the
-> real-GPU movie are next.
+> jump, "The movie camera" below; the `movie` tool, the movie's look and its end, "The movie tool" below); M6 the full
+> verify-page and the real-GPU movie are next.
 
 ## Files
 
@@ -25,6 +25,11 @@
 | `apps/viewer/src/lib/movie.spec.ts` | M3: the determinism oracle (`TimelineRig`) |
 | `apps/viewer/src/lib/cinema.ts` / `camera-director.ts` | M4: `CinemaRig.Snapshot` / `Restore`, `CameraDirector.Snapshot` / `Restore` (`cinema.spec.ts`, `camera-director.spec.ts`) |
 | `apps/viewer/src/lib/director.ts` / `timeline.ts` | M4: `MovieOwnsCamera`, `movieCamera`, `SimState.camera`, the camera director port's `Silent()` / `Settled()`; `TimelinePlayer.cameraCues` |
+| `packages/scene/src/lib/timeline/movie.ts` | M5: `MOVIE_ACTIONS`, `BEAT_LANES`, `CAMERA_BEAT_ACTIONS`, `beatLaneOf`, `movieLookOf`, `DEFAULT_MOVIE_LEAD_SECONDS`, `normalizeMovieCommand` (every problem at once), `MovieReport` / `MovieBeatReport` / `MovieEditResult` (pure; `movie.spec.ts`) |
+| `packages/scene/src/lib/tools.ts` | M5: the `movie` entry after `time_control` (hub `SLOW_TOOLS`); `play_shot`'s live-preview sentence |
+| `apps/viewer/src/lib/movie.ts` | M5: `MovieReportOf`, `BeatReportOf`, `BeatTime`, `SeekChunks`, `MovieLookApplies`, `MoviePresentation`, `FramePresentation` (no runtime; `movie.spec.ts` "the movie report") |
+| `apps/viewer/src/lib/time-control.ts` | M5: `StopAt(clock, onStop)`, `stopsAt`, `recordedEnd` (`time-control.spec.ts` "StopAt"; `sd-time`) |
+| `apps/viewer/src/lib/director.ts` / `main.ts` | M5: `Movie` (the handler) and its `MovieEdit`, `MoviePlay`, `MovieSeek`, `MovieRetake`, `MovieJump` / `MovieJumpTo`, `MovieReport`, `ArmMovieEnd`, `NextFrames`, `Presentation()`; `TimelinePlayer.Records()`; main.ts's `Presentation.Apply(director.Presentation())` with the L / H run override |
 
 ## The record
 
@@ -111,7 +116,7 @@ instead of `missed`. This applies to every scripted timeline, not only movies.
   are taken out. It returns `{ cues: { added, removed, changed }, ships: [{ id, step }], movie }` (`step` the first
   changed one, `firstChangedStep`: 0 when orders were added or removed), else null. Anything else mixed in takes the
   usual path (a cut when the simulation changes), warned `this edit changed the scene too, so the time window was cut:
-  timeline restart replays the script with it` when it changed the script too (`scriptChanged`) and cut a recording
+  movie retake replays the movie with it` when it changed the script too (`scriptChanged`) and cut a recording
   window.
 - **When** (`Director.ScriptEditable`): time control records, no jump runs, the clock is not held, and the timeline
   started (`startTick` set, playing or paused). Otherwise the usual path (`Edit`: pending or `missed`).
@@ -167,12 +172,90 @@ short: `Director.MovieOwnsCamera()` (the timeline's camera on, started, a camera
 director steps through the re-simulation; `EndJump` skips `Rebase` and `Clear`. The director's settle gate reads the
 simulation's check, so a re-simulation gates its first pick as the straight run did.
 
+## The movie tool (M5)
+
+`movie` is a page tool (`where: 'page'`, hub `SLOW_TOOLS`), the authoring view over the timeline; the `timeline` tool
+stays the low-level cue list. `normalizeMovieCommand` refuses with every problem (a field of another action, an unknown
+field, a bad value); `action` defaults to `status`.
+
+- **Beats** are the player's records (`TimelinePlayer.Records()`, removed ones dropped), in two lanes (`beatLaneOf`):
+  `camera` (`play_shot`, `play_sequence`, `stop_shot`, `auto_camera`) and `fleet` (the rest, warp-in patch cues
+  included). A beat's **time** (`BeatTime`) is its record's `second` (fired, failed or skipped), else its `due` (timed,
+  a resolved event cue, a missed one), else null (waiting). Rows are sorted by time, waiting last, then stored order;
+  `trigger` is `{ at }` or `{ when (the text), arms, after, latest }`; `in` only on a pending beat with a time.
+- **Edits** (`MovieEdit`, in the edit queue through `EditNow`, so a past edit re-simulates): `add { beat }` → `add_cue`,
+  `move { id, at?, when? }` and `edit { id, set }` → `update_cue`, `remove { id }` → `remove_cue`, `set { movie }` →
+  `set_movie`. The result: `{ beat (its row; null after a remove or for set), resimulated (null: only the future), movie
+  (the report), warnings }`, the warnings those naming the beat or about the window, a re-simulation, the movie block or
+  a late prefetch. Two frames are awaited after a re-simulation.
+- **play** `{ from?, lead? (DEFAULT_MOVIE_LEAD_SECONDS 2), rate? }`: with `from` (a beat id or timeline seconds) it
+  jumps to `max(0, time − lead)` and unpauses the clock; without, it plays from now (a `stopped`, `ready`, `paused` or
+  `preparing` timeline gets `Play()` and its origin). A waiting beat throws `beat "x" waits for <text>, so it has no time
+  yet: give timeline seconds instead`; before t = 0 a jump throws `the movie has not started …: movie play starts it`.
+- **seek** `{ to, offset? 0, play? false }`: pauses first (unless `play`), jumps to the beat's second + offset (a landing
+  on t = s has fired the cues due at s: a shot is on its first frame), then pauses or plays.
+- **Jumps** (`MovieJumpTo`): one `TimeControl.Jump` per chunk (`SeekChunks`: at most `MAX_SEEK_AHEAD_SECONDS` past the
+  recorded end each), recomputed from `recordedEnd` after a frame between them. A target before the window with no
+  pinned origin warns `the time window was cut since t = 0: movie retake replays the movie from t = 0 …` and clamps as
+  any jump does.
+- **pause** pauses the clock (`TimeControl.Pause(true)`), not the timeline's cursor; **restart** `{ paused? }` is
+  `timeline restart` (the report plus the load's warnings and changes).
+- **retake** (after a cut: a placement edit, a fleet toggle, a lookup landing): remembers the timeline time and the pause,
+  `timeline restart { paused: true }`, waits frames while `preparing` (the prepare cap + 10 s), pauses the clock, plays
+  the timeline (the origin is pinned, recording starts from the settled scene), then jumps from now to the t = 0 boundary
+  (`NextBoundaryTime()`) + the remembered time, so t = 0's boundary runs inside the jump; the pause comes back. When the
+  scene did not settle (nothing recorded) it plays from t = 0 with a warning.
+- **Two frames**: `play`, `seek`, `retake` and re-simulating edits await `NextFrames(2)` before returning (requestAnimationFrame,
+  with a 1 s fallback for a tab the browser stopped drawing), so a `screenshot` right after shows the landing.
+- **The report** (`MovieReportOf`): `state`, `time` (fractional timeline seconds), `end`, `ended`, `look { letterbox, hud,
+  applied }` (only with a movie block), `camera { driver, beat? }`, `beat { fleet?, camera? }` (the summary's last fired
+  per lane), `next` (the first pending beat with a time, with `in`), `beats`, `waiting`, `events { count, last (≤ 10,
+  newest first), full? }`, `window { earliest, latest, origin }` (timeline seconds; `origin`: the pinned t = 0 snapshot
+  is in the ring), `scripts`, `note`.
+- **get_state** `timeline.movie`: the block with its look filled (`movieLookOf`), `ended?` and `applied`.
+
+### The look
+
+`Director.Presentation()` returns `{ shot (CinemaRig.Presentation), movie: { letterbox, hud, run } | null }`: the
+movie's look while the authored timeline has a movie block and the player is not `idle` or `stopped`
+(`MovieLookApplies`), its `run` the timeline's `startTick` (−1 before t = 0). main.ts's `Presentation.Apply` merges with
+`MoviePresentation`, lowest first: the page's settings (`?letterbox=`, `?hud=`, L and H), the movie's look, a playing
+shot's `letterbox` / `hud`. While a movie's look applies, L and H switch that key for the run (the opposite of what is
+shown) instead of the page setting; a new run (a load, a restart: a new `startTick`) drops them.
+
+### The end
+
+`ArmMovieEnd` (first in `DriveTimeline`, every frame) keys the stop by `<startTick>:<end>`: a new key (the timeline
+started, `end` changed, a load) calls `TimeControl.StopAt(origin + end s)` when that clock is still ahead, else clears it
+(`sd-time` "The movie's end"). The frame that reaches it pauses the clock exactly there with the cues due at `end`
+fired; the stop then clears itself, so `movie play` goes on past it. `movie play`, `seek` and `retake` reset the key: a
+landing before the end stops there again. A `time_control` jump back before the end does not re-arm it.
+
 ## Limits
 
 - An event's facts are the document membership at the time (a ship moved to another fleet by a live edit reports its
   new fleet).
 - Live input during play changes the run (as for timed cues); a waiting cue whose event never comes and has no
   `latest` waits for the rest of the run and keeps the timeline from `done`.
+- The movie tool's jumps are synchronous like every jump (a long chunked seek blocks the tab per chunk); `retake`
+  re-simulates the whole movie to now in one jump, so it costs what a seek from t = 0 costs.
+- The run override for L and H is per page (main.ts), not reported in get_state; `look.applied` says only that the
+  movie's look is in force.
+
+## verify-page evidence (M5, 2026-10-24, dbxpc, headless)
+
+- **(e)** `movie: the movie tool lists beats in two lanes …`: Rifters `a`, `b`; `go` at 1, a `hero` shot at 3, `later`
+  (`when: { cue: 'go', after: 5 }`) and `never` (the kill of b). At 8 s: `go fleet 1, hero camera 3, later fleet 6,
+  never fleet waiting` (never last, `beat.fleet` later, `beat.camera` hero). `add` at 40 → pending, `resimulated: null`;
+  `move` 42, `edit` name, `remove` round-tripped. `play { from: 'go', lead: 1 }` landed at 0.03 s and played; `seek {
+  to: 'go' }` landed paused at 1 s with go fired. A placement edit cut the window (`an edit changed the simulation (1
+  ship moved)`); `retake` came back to 6.02 s (was 6.02 s), paused, recording on, `window.origin`. `set { end: 8 }` +
+  `restart`: the clock stopped at timeline 8 exactly, `ended`, and `play` went on past it.
+- **(j)** `movie: the movie block letterboxes the frame …`: `{ letterbox: 2.39, hud: false }`: the canvas 2.39:1 and the
+  overlay hidden while it plays; a `hud: true` shot showed it; after its cut, H showed it for the run; `timeline restart`
+  hid it again.
+- In an `--only` batch behind the warm-up (which timed out its prepare on the first load's default-weapons fits, as
+  known).
 
 ## verify-page evidence (M4, 2026-10-24, dbxpc, headless)
 
@@ -181,7 +264,7 @@ simulation's check, so a re-simulation gates its first pick as the straight run 
   `timeline`, the hero at 3.00 s, progress 0.50. `seek { timeline: 18 }`: the director driving, its cut log to 18 the
   straight run's (overlook the engagement at 10, flyby b at 16). A scene with no camera cue: Claude's chase at 3.02 s
   before and after `back: 4` (the rebase). In an `--only` batch with the warm-up and M3's (c) and (d), all ok.
-- The full headless verify-page (M3's and M4's) runs in M6.
+- The full headless verify-page (M3's, M4's and M5's) runs in M6.
 
 ## verify-page evidence (M3, 2026-10-24, dbxpc, headless)
 

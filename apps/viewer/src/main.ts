@@ -13,7 +13,9 @@
  *
  * Presentation: `?letterbox=2.39` (or `off`) letterboxes the frame and L
  * toggles a 2.39 letterbox; `?hud=off` hides the overlay and H toggles it. A
- * playing camera shot's `letterbox` / `hud` override them while it plays.
+ * movie's look (the timeline's movie block) overrides them while its timeline
+ * plays (L and H then switch it for the run), and a playing camera shot's
+ * `letterbox` / `hud` override both while it plays.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -31,6 +33,7 @@ import { ObjectsText } from './lib/objects';
 import { TimelineText } from './lib/timeline';
 import { TimeControl, TimeText } from './lib/time-control';
 import { LetterboxRect } from './lib/cinema';
+import { MoviePresentation, type FramePresentation, type MovieRunOverrides } from './lib/movie';
 import { CameraDirectorText } from './lib/camera-director';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
@@ -157,13 +160,20 @@ class Overlay {
 
 /**
  * The frame's presentation for clean frames: the letterbox resizes the canvas element to the aspect, centred on black
- * bars, so the swap chain, screenshots and captures are exactly the frame; the HUD is the overlay. A playing shot's
- * `letterbox` / `hud` win while it plays, then the page's settings come back.
+ * bars, so the swap chain, screenshots and captures are exactly the frame; the HUD is the overlay. Lowest first: the
+ * page's settings, a movie's look while its timeline plays (L and H switch a key for the run: the user wins until the
+ * next load or restart), a playing shot's `letterbox` / `hud` (MoviePresentation).
  */
 class Presentation {
   private letterbox: Maybe<number>;
   private hud: boolean;
   private applied = '';
+  private shown: { letterbox: Maybe<number>; hud: boolean };
+  /**
+   * The movie run the user's switches belong to, while a movie's look applies.
+   */
+  private run: Maybe<number> = null;
+  private overrides: MovieRunOverrides = {};
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -173,22 +183,35 @@ class Presentation {
     const aspect = Number(search.get('letterbox'));
     this.letterbox = Number.isFinite(aspect) && aspect >= 0.5 && aspect <= 4 ? aspect : null;
     this.hud = search.get('hud') !== 'off';
+    this.shown = { letterbox: this.letterbox, hud: this.hud };
     addEventListener('keydown', (event) => {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       const key = event.key.toLowerCase();
-      if (key === 'h') this.hud = !this.hud;
-      else if (key === 'l') this.letterbox = this.letterbox ? null : SCOPE_ASPECT;
+      const movie = this.run != null;
+      if (key === 'h') {
+        if (movie) this.overrides = { ...this.overrides, hud: !this.shown.hud };
+        else this.hud = !this.hud;
+      } else if (key === 'l') {
+        if (movie) this.overrides = { ...this.overrides, letterbox: this.shown.letterbox ? null : SCOPE_ASPECT };
+        else this.letterbox = this.letterbox ? null : SCOPE_ASPECT;
+      }
     });
   }
 
   /**
-   * Applies the page's settings under the shot's; cheap when nothing changed (the animation loop calls it every frame).
+   * Applies the page's settings under the movie's and the shot's; cheap when nothing changed (the animation loop calls
+   * it every frame).
    *
-   * @param shot - The playing shot's presentation (CinemaRig.Presentation).
+   * @param frame - The director's presentation (Director.Presentation): the shot's look, the movie's and its run.
    */
-  Apply(shot: { readonly letterbox?: number | false; readonly hud?: boolean }): void {
-    const letterbox = shot.letterbox === undefined ? this.letterbox : shot.letterbox || null;
-    const hud = shot.hud ?? this.hud;
+  Apply({ shot, movie }: FramePresentation): void {
+    if (!movie) this.run = null;
+    else if (movie.run !== this.run) {
+      this.run = movie.run;
+      this.overrides = {};
+    }
+    const { letterbox, hud } = MoviePresentation({ page: { letterbox: this.letterbox, hud: this.hud }, movie, overrides: this.overrides, shot });
+    this.shown = { letterbox, hud };
     const key = `${letterbox}:${hud}:${innerWidth}x${innerHeight}`;
     if (key === this.applied) return;
     this.applied = key;
@@ -296,7 +319,7 @@ async function Start(): Promise<void> {
     liveDirector?.DriveBoosters(now);
     liveDirector?.fields.DriveLod();
     liveDirector?.TrackCamera(now);
-    presentation.Apply(liveDirector?.cinema.Presentation() ?? {});
+    presentation.Apply(liveDirector?.Presentation() ?? { shot: {}, movie: null });
     liveDirector?.DriveAudio(now);
     liveDirector?.DriveModuleEffects(now);
     liveDirector?.DriveWarpEffects(now);

@@ -54,6 +54,12 @@ describe('mcp server', () => {
       expect(tools.find((tool) => tool.name === 'time_control')?.description).toMatch(/steps every 1 s Destiny tick/u);
       expect(tools.find((tool) => tool.name === 'get_state')?.description).toMatch(/time is the scene clock under time_control/u);
       expect(client.getInstructions()).toMatch(/time_control pauses or plays the scene/u);
+      expect(tools.find((tool) => tool.name === 'movie')?.inputSchema).toMatchObject({
+        properties: { action: { enum: ['status', 'add', 'move', 'edit', 'remove', 'play', 'seek', 'pause', 'restart', 'retake', 'set'] }, from: { anyOf: [{ type: 'string' }, { type: 'number' }] }, lead: { minimum: 0 }, movie: { anyOf: [{ type: 'object' }, { type: 'null' }] } }
+      });
+      expect(tools.find((tool) => tool.name === 'movie')?.description).toMatch(/lands on the beat paused/u);
+      expect(tools.find((tool) => tool.name === 'play_shot')?.description).toMatch(/a play is a live preview/u);
+      expect(client.getInstructions()).toMatch(/movie is the timeline as a movie of beats/u);
       expect(tools.find((tool) => tool.name === 'stage_engagement')?.inputSchema).toMatchObject({ properties: { sides: { items: { properties: { personality: {} } } } } });
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_fleet_composition/u);
       expect(tools.find((tool) => tool.name === 'patch_scene')?.description).toMatch(/add_ships/u);

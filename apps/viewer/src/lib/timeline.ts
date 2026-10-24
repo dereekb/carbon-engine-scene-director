@@ -357,6 +357,13 @@ export class TimelinePlayer {
   }
 
   /**
+   * Every cue record in stored order, removed ones included (flagged): the movie report's beats (Movie mode M5).
+   */
+  Records(): readonly CueRecord[] {
+    return this.data.records;
+  }
+
+  /**
    * Takes a user edit of the authored timeline or ship orders. Cues not fired yet follow it (one added or retimed into
    * the past while playing is `missed`: it plays from the next restart); fired cues keep their records and effects. A
    * scene that gains its first cue or steps is `stopped` (timeline play starts it); one that loses them is idle.

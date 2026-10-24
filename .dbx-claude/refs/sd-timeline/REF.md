@@ -12,11 +12,13 @@ lever tool authors a cue with `at`.
 **Movie mode** (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`,
 slices M1 the document → M2 the page plays event cues → M3 edit-resimulate → M4 the movie camera across jumps → M5 the
 `movie` tool → M6 verify-page and the real-GPU movie): the movie *is* this timeline, plus event cues, a `movie` block
-and script edits that re-simulate. **M1, M2 and M3 have landed**: event cues and the movie block in the document
-(below), the page playing event cues on their events, and script edits re-simulating instead of `missed`. Sub-doc
+and script edits that re-simulate. **M1 to M5 have landed**: event cues and the movie block in the document (below),
+the page playing event cues on their events, script edits re-simulating instead of `missed`, the movie camera coming
+back the same across a jump, and the `movie` tool with the movie's look and end. Sub-doc
 (`{ ref: "sd-timeline", doc: "movie" }`): **`movie`** (the page's event cues: the record, the event second rule, the
 five sources, the event log and its cursor, `latest`, the reports, `when` on the tools; edit-resimulate: the divergence
-test, the edit path, the prefetch, the oracle; later the movie camera pointer and the `movie` tool).
+test, the edit path, the prefetch, the oracle; the movie camera pointer; the `movie` tool: beats, lanes, play, seek,
+retake, the report, the look and the end).
 
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
@@ -31,6 +33,7 @@ test, the edit path, the prefetch, the oracle; later the movie camera pointer an
 | `operations.ts` | `TIMELINE_OPERATIONS` + `applyTimelineOperation` (wired into `applyOperation`'s `default:`) |
 | `prune.ts` | `removeTimelineReferences`, called by `remove_ship`, `remove_object`, `remove_fleet`, `remove_wing`, `remove_squad` |
 | `report.ts` | `TIMELINE_STATES`, `CUE_STATES`, `SHIP_SCRIPT_STATES` and the report shapes (get_state, the `timeline` tool) |
+| `movie.ts` | Movie mode M5: the `movie` tool's command (`MOVIE_ACTIONS`, `normalizeMovieCommand`), the beat lanes (`beatLaneOf`), `movieLookOf`, `DEFAULT_MOVIE_LEAD_SECONDS`, the report shapes; `movie.spec.ts` |
 | `script-edit.ts` | Movie mode M3: `scriptEditOf` (an edit of only the cues, the movie block and ships' orders, or null), `scriptEditIsEmpty`, `scriptChanged`, `firstChangedStep`, `withScriptOrders` (the live scene's ships take edited orders); `script-edit.spec.ts` |
 
 The page (`apps/viewer/src/lib/`, node-tested, no runtime): `timeline.ts` (`TimelinePlayer` over a `TimelinePort`,
@@ -125,8 +128,10 @@ The director is both ports.
   are dropped; a timeline with a movie block and no cues is kept (a movie being started).
 - `set_movie { movie }` merges into it (a `null` key resets that key; `movie: null` removes the block; it creates `{
   cues: [] }` when there is no timeline). Like the other timeline ops a patch cue may not carry it.
-- It lives in the authored document only (the live scene has no timeline). What the page does with it (the look while
-  the timeline plays, the end through `TimeControl.StopAt`) lands in M5.
+- It lives in the authored document only (the live scene has no timeline). The page (M5, doc `movie` "The look", "The
+  end"): while the timeline is not idle or stopped, the frame takes its letterbox and HUD (a playing shot's own win; L
+  and H switch a key for the run), and the clock stops exactly at `end` (`TimeControl.StopAt`); `movie play` goes on
+  past it. get_state `timeline.movie` reports it with `ended` and `applied`.
 
 ## Validation at cue time: the projection and `adds`
 
@@ -272,14 +277,15 @@ target cue-added ships as names; the user sees the authored document's warnings,
   is still ahead is pending; one in the past is `missed` ("added after its time: it plays from the next restart"); a
   fired cue keeps its record (an edit notes "edited after it fired: the edit plays on a restart"; a removal keeps it in
   the log, "removed after it fired"), warned `the time window does not reach back to before this edit's first change
-  (…): timeline restart replays the script with it`. A scene that loses every cue and step goes `idle`.
+  (…): movie retake replays the movie with it`. A scene that loses every cue and step goes `idle`.
 
 ## Reporting
 
 - **get_state** `timeline` (null when idle): `state`, `time`, `startedAt` (world tick of t = 0), `camera`, `cues` (total
   and per state, `waiting` included), `next` (≤ 5 pending with a due second, with `in`), `waiting` (≤ 5 event cues: `id`,
   `when` text, `armsIn`, `latestIn`), `beat` (the last fired cue per lane, fleet and camera: `{ id, name?, at }`),
-  `events { count, last (≤ 5, newest first), full? }` (the event log, doc `movie`), `last` (≤ 5 processed), `failed` (≤ 10 with `error`), `scripts`
+  `events { count, last (≤ 5, newest first), full? }` (the event log, doc `movie`), `movie` (the block with its look,
+  `ended?`, `applied`), `last` (≤ 5 processed), `failed` (≤ 10 with `error`), `scripts`
   (counts per state), `liveEdits { count, last }`, `preparing { seconds, waiting: lookups, fits, builds, fleets,
   objects, location }`, `note`. Each scripted ship: `script { state, step, steps, order, startsIn, endsIn, note }`.
   `simulation.held: true` while the clock is held. The HUD row: `playing · 42 s · 7/12 cues (1 failed) · 2 waiting` or

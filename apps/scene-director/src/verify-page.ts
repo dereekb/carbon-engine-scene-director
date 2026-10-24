@@ -35,6 +35,7 @@ import {
   type TimelineSummary,
   type TimeReport,
   type CueReport,
+  type MovieReport,
   type SceneCue
 } from '@scene-director/scene';
 import { AudioBankCache } from './lib/hub/audio-cache';
@@ -5415,6 +5416,113 @@ try {
       const after = await MovieCamera("Claude's shot after back 4", (cinema) => cinema.driver === 'claude' && cinema.shot != null);
       Expect(Math.abs((after.shot?.elapsed ?? 0) - (before.shot?.elapsed ?? -1)) < 0.25, `before ${Show(before.shot)}, after ${Show(after.shot)}`);
       return `seek 5: timeline hero at ${early.shot?.elapsed.toFixed(2)} s (${early.shot?.progress?.toFixed(2)}); seek 18: the straight run's ${straight.length} cuts (${straight.join(', ')}); no camera cue: Claude's shot rebased (${before.shot?.elapsed.toFixed(2)} s before and after back 4)`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  // The movie tool (Movie mode M5): beats in two lanes, edits, play and seek from a beat, retake, the end and the look.
+  const Movie = (args: Record<string, unknown> = {}) => call<MovieReport & { readonly warnings?: string[] }>('movie', args);
+  const MovieEdit = (args: Record<string, unknown>) => call<{ readonly beat: Maybe<MovieReport['beats'][number]>; readonly resimulated?: unknown; readonly movie: MovieReport; readonly warnings: string[] }>('movie', args);
+
+  await Check('movie: the movie tool lists beats in two lanes, edits them, plays and seeks from a beat, retakes, and stops at the end', async () => {
+    try {
+      await LoadTimeline({
+        ships: [Scripted('a', [0, 0, 0]), Scripted('b', [0, 0, 4000])],
+        timeline: [
+          { id: 'go', at: 1, ...Direction('a', [0, 0, 1]) },
+          { id: 'hero', at: 3, play_shot: { shot: 'hero', ship: 'a', duration: 4, end: 'release' } },
+          { id: 'later', when: { cue: 'go', after: 5 }, ...Direction('b', [1, 0, 0]) },
+          { id: 'never', when: { kill: { ship: 'b' } }, ...Direction('b', [0, 1, 0]) }
+        ]
+      });
+      await Played('the movie reaches 8 s', 40, 8);
+      const status = await Movie();
+      const row = (id: string) => status.beats.find((beat) => beat.id === id);
+      Expect(row('go')?.lane === 'fleet' && row('go')?.time === 1 && row('hero')?.lane === 'camera' && row('hero')?.time === 3 && row('later')?.time === 6 && row('later')?.state === 'fired' && row('never')?.time === null && row('never')?.state === 'waiting' && status.waiting === 1, Show(status.beats));
+      Expect(status.beats.at(-1)?.id === 'never' && status.beat.fleet?.id === 'later' && status.beat.camera?.id === 'hero' && 'when' in (row('never')?.trigger ?? {}), Show({ order: status.beats.map((beat) => beat.id), beat: status.beat, never: row('never')?.trigger }));
+      const added = await MovieEdit({ action: 'add', beat: { id: 'halt', at: 40, order_ship: { id: 'a', order: { type: 'stop' } } } });
+      const moved = await MovieEdit({ action: 'move', id: 'halt', at: 42 });
+      const named = await MovieEdit({ action: 'edit', id: 'halt', set: { name: 'Halt' } });
+      const removed = await MovieEdit({ action: 'remove', id: 'halt' });
+      Expect(
+        added.beat?.time === 40 && added.beat.state === 'pending' && added.resimulated === null && moved.beat?.time === 42 && named.beat?.name === 'Halt' && removed.beat === null && !removed.movie.beats.some((beat) => beat.id === 'halt'),
+        Show({ added: added.beat, resimulated: added.resimulated, moved: moved.beat, named: named.beat, removed: removed.beat })
+      );
+      const played = await Movie({ action: 'play', from: 'go', lead: 1 });
+      const playing = TimeOf(await call<ViewerState>('get_state'));
+      Expect(played.time < 0.5 && playing?.paused === false && played.beats.find((beat) => beat.id === 'go')?.state === 'pending', Show({ time: played.time, paused: playing?.paused, go: played.beats.find((beat) => beat.id === 'go') }));
+      const seeked = await Movie({ action: 'seek', to: 'go' });
+      const landed = TimeOf(await call<ViewerState>('get_state'));
+      Expect(Math.abs(seeked.time - 1) < 0.01 && seeked.beats.find((beat) => beat.id === 'go')?.state === 'fired' && landed?.paused === true, Show({ time: seeked.time, go: seeked.beats.find((beat) => beat.id === 'go'), paused: landed?.paused }));
+      // A placement edit cuts the window; retake replays from t = 0 and comes back, the pause kept.
+      await Playing();
+      await Played('the movie plays to 6 s', 30, 6);
+      await TimeControl({ pause: true });
+      const at = (await Movie()).time;
+      await call('patch_scene', { operations: [{ op: 'update_ship', id: 'b', set: { position: [0, 0, 4500] } }] });
+      const cut = TimeOf(await call<ViewerState>('get_state'))?.recording;
+      const retake = await Movie({ action: 'retake' });
+      const after = TimeOf(await call<ViewerState>('get_state'));
+      Expect(Math.abs(retake.time - at) < 0.05 && after?.recording.on === true && after.paused === true && retake.window?.origin === true, Show({ at, retake: retake.time, cut, after: after?.recording, paused: after?.paused, window: retake.window, warnings: retake.warnings }));
+      // The end: the clock stops exactly there, and play goes on past it.
+      await Playing();
+      await MovieEdit({ action: 'set', movie: { end: 8 } });
+      await Movie({ action: 'restart' });
+      await WaitFor('the movie stops at its end, 8 s', 40, (polled) => {
+        const time = TimeOf(polled);
+        return time?.paused === true && Math.abs((time.timeline ?? 0) - 8) < 0.01 ? null : Show({ paused: time?.paused, timeline: time?.timeline });
+      });
+      const end = await Movie();
+      Expect(end.ended === true && end.end === 8 && end.look?.applied === true, Show({ ended: end.ended, end: end.end, look: end.look }));
+      await Movie({ action: 'play' });
+      await WaitFor('play goes on past the end', 10, (polled) => ((TimeOf(polled)?.timeline ?? 0) > 8.5 ? null : Show(TimeOf(polled)?.timeline)));
+      const beats = status.beats.map((beat) => [beat.id, beat.lane, beat.time ?? beat.state].join(' ')).join(', ');
+      return `status: ${beats}; add / move / edit / remove round-trip; play from go lands at ${played.time} s; seek go at ${seeked.time} s paused; retake back to ${retake.time} s (was ${at} s, cut ${Show(cut?.why ?? cut?.on)}); end 8 stopped and play went on`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check("movie: the movie block letterboxes the frame with the HUD off while it plays, a shot's hud wins, a restart re-applies it after H", async () => {
+    const Look = () =>
+      page.evaluate(() => {
+        const canvas = document.getElementById('view') as HTMLCanvasElement;
+        const overlay = document.getElementById('overlay') as HTMLElement;
+        return { aspect: Math.round((parseFloat(canvas.style.width) / parseFloat(canvas.style.height)) * 100) / 100, hud: !overlay.hidden };
+      });
+    const LookUntil = async (what: string, test: (look: { aspect: number; hud: boolean }) => boolean) => {
+      for (let i = 0; i < 50; i++) {
+        const look = await Look();
+        if (test(look)) return look;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error(`${what}: ${Show(await Look())}`);
+    };
+    try {
+      await LoadTimeline({
+        ships: [Scripted('a', [0, 0, 0])],
+        timeline: {
+          cues: [
+            { id: 'go', at: 1, ...Direction('a', [0, 0, 1]) },
+            { id: 'shot', at: 4, play_shot: { shot: 'hero', ship: 'a', duration: 3, hud: true, end: 'hold' } },
+            { id: 'cut', at: 8, stop_shot: { cut: true } }
+          ],
+          movie: { letterbox: 2.39, hud: false }
+        }
+      });
+      await Played('the movie plays', 40, 1);
+      const movie = await LookUntil('the movie look (2.39, no HUD)', (look) => Math.abs(look.aspect - 2.39) < 0.02 && !look.hud);
+      await Played('the shot with hud: true plays', 30, 5);
+      const shot = await LookUntil("the shot's HUD", (look) => look.hud);
+      await Played('the shot was cut', 30, 9);
+      await LookUntil('the movie look again', (look) => !look.hud);
+      await page.keyboard.press('h');
+      const pressed = await LookUntil('H shows the HUD for the run', (look) => look.hud && Math.abs(look.aspect - 2.39) < 0.02);
+      await TimelineTool({ action: 'restart' });
+      await Played('the restart plays', 40, 1);
+      const restarted = await LookUntil("the restart's movie look", (look) => !look.hud && Math.abs(look.aspect - 2.39) < 0.02);
+      return `movie ${Show(movie)}; shot ${Show(shot)}; after H ${Show(pressed)}; after restart ${Show(restarted)}`;
     } finally {
       await Playing();
     }

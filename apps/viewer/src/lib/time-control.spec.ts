@@ -599,3 +599,49 @@ describe('TimeControl script edits (Movie mode M3)', () => {
     expect(report.latest).toBe(report.seconds);
   });
 });
+
+describe('TimeControl StopAt (Movie mode M5)', () => {
+  for (const rate of [1, 32]) {
+    it(`rests exactly at the stop at ${rate}×, pauses once, then plays on past it`, () => {
+      const { clock, world, control, Frames } = Rig();
+      control.SetRate(rate);
+      Frames(2);
+      const stop = world.BoundaryTime(world.tick + 6) ?? 0;
+      let stopped = 0;
+      control.StopAt(stop, () => (stopped += 1));
+      expect(control.stopsAt).toBe(stop);
+      Frames(rate === 1 ? 600 : 60);
+      expect(clock.now).toBe(stop);
+      // The stop's own boundary ran: its cues fired.
+      expect(Number(world.master.time)).toBe(stop);
+      expect(control.paused).toBe(true);
+      expect(stopped).toBe(1);
+      expect(control.stopsAt).toBeNull();
+      const tick = world.tick;
+      control.Pause(false);
+      Frames(120);
+      expect(world.tick).toBeGreaterThan(tick);
+      expect(stopped).toBe(1);
+    });
+  }
+
+  it('is ignored by jumps: a jump past it drops it, one back keeps it', () => {
+    const { clock, world, control, RunTo, Frames } = Rig();
+    RunTo(12);
+    control.StopAt(world.BoundaryTime(world.tick + 4));
+    const past = world.BoundaryTime(world.tick + 8) ?? 0;
+    control.Jump(past);
+    expect(clock.now).toBe(past);
+    expect(control.paused).toBe(false);
+    Frames(2);
+    expect(control.stopsAt).toBeNull();
+    expect(control.paused).toBe(false);
+    const stop = world.BoundaryTime(world.tick + 3) ?? 0;
+    control.StopAt(stop);
+    control.Jump(clock.now - 4 * TICKS_PER_SECOND);
+    expect(control.stopsAt).toBe(stop);
+    Frames(600);
+    expect(clock.now).toBe(stop);
+    expect(control.paused).toBe(true);
+  });
+});

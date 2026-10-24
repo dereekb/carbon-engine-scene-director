@@ -799,7 +799,7 @@
             "every": 12
           },
           {
-            "toolNames": ["mcp__scene-director__timeline"]
+            "toolNames": ["mcp__scene-director__timeline", "mcp__scene-director__movie"]
           }
         ]
       },

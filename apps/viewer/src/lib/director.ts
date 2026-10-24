@@ -217,7 +217,11 @@ import {
   type SceneCueAdds,
   type KillTimelineEvent,
   type TimelineEvent,
-  type TimelineEventParty
+  type TimelineEventParty,
+  movieLookOf,
+  normalizeMovieCommand,
+  type MovieBeatTarget,
+  type MovieReport
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -285,7 +289,8 @@ import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
 import { ShipScripts } from './ship-scripts';
-import { TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
+import { TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
+import { BeatReportOf, BeatTime, MovieLookApplies, MovieReportOf, SeekChunks, type FramePresentation } from './movie';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
 import type { CapturedSim, JumpLanding, TapeEntry, TimeControl } from './time-control';
@@ -1105,6 +1110,11 @@ export class Director {
    */
   private movieCamera = false;
   /**
+   * The movie end the time control stops at (Movie mode M5): `<t = 0 tick>:<end>`, empty without one; another value
+   * re-arms the stop (movie play and seek set one, so a landing before the end stops there again).
+   */
+  private movieStop = '';
+  /**
    * Counts jump landings: a hull rebuild started by an earlier one is dropped.
    */
   private landings = 0;
@@ -1498,6 +1508,7 @@ export class Director {
       get_overview: (args) => this.Overview(args),
       timeline: (args) => this.Timeline(args),
       time_control: (args) => this.TimeControl(args),
+      movie: (args) => this.Movie(args),
       screenshot: ({ maxWidth }) => this.Screenshot(maxWidth),
       frame_camera: (args) => this.FrameCamera(args as FrameCameraArgs),
       order_ship: (args) => this.Manual('order_ship', args, () => this.OrderShip(args['id'], args['order'])),
@@ -3014,6 +3025,7 @@ export class Director {
    * Called first in every frame: a preparing timeline checks whether the scene settled, then releases the clock.
    */
   DriveTimeline(): void {
+    this.ArmMovieEnd();
     const before = this.timeline.state;
     this.timeline.Frame();
     if (this.timeline.state === before) return;
@@ -3136,7 +3148,9 @@ export class Director {
     const summary = this.timeline.Summary();
     if (!summary) return null;
     const last = this.liveEdits.slice(-5).map(({ source, cue, tick, adds }) => ({ source, ...(cue ? { cue } : {}), tick, ...(adds ? { adds } : {}) }));
-    return { ...summary, ...(this.liveEdits.length ? { liveEdits: { count: this.liveEdits.length, last } } : {}) };
+    const block = this.authored?.timeline?.movie;
+    const movie = block ? { movie: { ...block, ...movieLookOf(block), ...(this.MovieEnded() ? { ended: true } : {}), applied: MovieLookApplies(summary.state) } } : {};
+    return { ...summary, ...movie, ...(this.liveEdits.length ? { liveEdits: { count: this.liveEdits.length, last } } : {}) };
   }
 
   /**
@@ -3147,6 +3161,277 @@ export class Director {
     if (!report) return null;
     const liveEdits = this.liveEdits.map(({ source, cue, tick, adds, operations }) => ({ source, ...(cue ? { cue } : {}), tick, operations: Array.isArray(operations) ? operations.length : 0, ...(adds ? { adds } : {}) }));
     return { ...report, held: this.clock.held, liveEdits };
+  }
+
+  /**
+   * The frame's presentation for main.ts (Movie mode M5): the playing shot's look, and the movie block's while it
+   * applies (the timeline is not idle or stopped), with its run (t = 0's tick: a load or a restart is a new run, which
+   * drops the user's L and H for the last one).
+   */
+  Presentation(): FramePresentation {
+    const block = this.authored?.timeline?.movie;
+    const movie = block && MovieLookApplies(this.timeline.state) ? { ...movieLookOf(block), run: this.timeline.startTick ?? -1 } : null;
+    return { shot: this.cinema.Presentation(), movie };
+  }
+
+  /**
+   * The movie tool (Movie mode M5, sd-timeline doc `movie`): the timeline as beats. Its edits are timeline ops through
+   * the edit queue (one that reaches into the past re-simulates); play and seek jump to a beat's timeline second; pause
+   * pauses the clock; restart and retake replay from t = 0 (retake comes back to now); set edits the movie block.
+   *
+   * @throws {SceneError} When the command or an edit is invalid.
+   * @throws {Error} When a beat is unknown or still waits, the timeline has not started, or a jump is refused.
+   */
+  async Movie(input: Record<string, unknown> = {}): Promise<object> {
+    const command = normalizeMovieCommand(input);
+    switch (command.action) {
+      case 'status':
+        return this.MovieReport();
+      case 'add':
+        return this.MovieEdit([{ op: 'add_cue', cue: command.beat }], typeof command.beat['id'] === 'string' ? command.beat['id'] : null);
+      case 'move':
+        return this.MovieEdit([{ op: 'update_cue', id: command.id, set: { ...(command.at !== undefined ? { at: command.at } : {}), ...(command.when !== undefined ? { when: command.when } : {}) } }], command.id);
+      case 'edit':
+        return this.MovieEdit([{ op: 'update_cue', id: command.id, set: command.set }], command.id);
+      case 'remove':
+        return this.MovieEdit([{ op: 'remove_cue', id: command.id }], command.id);
+      case 'set':
+        return this.MovieEdit([{ op: 'set_movie', movie: command.movie }], null);
+      case 'pause':
+        this.RequireTime().Pause(true);
+        return this.MovieReport();
+      case 'restart': {
+        const result = (await this.Timeline({ action: 'restart', paused: command.paused })) as { readonly load?: unknown };
+        return { ...this.MovieReport(), ...(result.load ? { load: result.load } : {}) };
+      }
+      case 'play':
+        return this.MoviePlay(command.from ?? null, command.lead, command.rate ?? null);
+      case 'seek':
+        return this.MovieSeek(command.to, command.offset, command.play);
+      case 'retake':
+        return this.MovieRetake();
+    }
+  }
+
+  /**
+   * A movie edit: the timeline ops at their turn in the edit queue (EditNow, so a past edit re-simulates), then two
+   * frames when it re-simulated.
+   *
+   * @param operations - The timeline ops.
+   * @param id - The beat's id (null: the one the add assigned, or none for set).
+   * @returns The beat's row, the re-simulation, the movie report and the warnings about the beat, the window or the
+   *   movie block.
+   */
+  private MovieEdit(operations: object[], id: Maybe<string>): Promise<object> {
+    return this.Serialize(async () => {
+      const known = new Set((this.authored?.timeline?.cues ?? []).map((cue) => cue.id));
+      const result = (await this.EditNow(operations)) as { readonly warnings?: string[]; readonly resimulated?: unknown };
+      const beat = id ?? (operations.some((operation) => (operation as { readonly op?: string }).op === 'add_cue') ? ((this.authored?.timeline?.cues ?? []).find((cue) => !known.has(cue.id))?.id ?? null) : null);
+      const record = beat != null ? this.timeline.Records().find((candidate) => candidate.id === beat && !candidate.removed) : null;
+      if (result.resimulated) await this.NextFrames(2);
+      const warnings = (result.warnings ?? []).filter((warning) => (beat != null && warning.includes(`"${beat}"`)) || /time window|re-simulat|movie|did not answer/u.test(warning));
+      return { beat: record ? BeatReportOf(record, this.MovieTime()) : null, ...(result.resimulated !== undefined ? { resimulated: result.resimulated } : {}), movie: this.MovieReport(), warnings };
+    });
+  }
+
+  /**
+   * movie play: lands `lead` seconds before a beat (or at timeline seconds) and plays the clock; with no beat it plays
+   * from now, starting a stopped or ready timeline.
+   */
+  private async MoviePlay(from: Maybe<MovieBeatTarget>, lead: number, rate: Maybe<number>): Promise<object> {
+    const time = this.RequireTime();
+    let warnings: string[] = [];
+    if (from == null) {
+      const before = this.timeline.state;
+      if (before === 'stopped' || before === 'ready' || before === 'paused' || before === 'preparing') {
+        this.timeline.Play();
+        this.MarkTimelineOrigin(before);
+      }
+    } else warnings = await this.MovieJump(Math.max(0, this.MovieBeatSecond(from) - lead));
+    if (rate != null) time.SetRate(rate);
+    time.Pause(false);
+    this.movieStop = '~';
+    this.onChange();
+    await this.NextFrames(2);
+    return { ...this.MovieReport(), warnings };
+  }
+
+  /**
+   * movie seek: lands on a beat (its cue fired at the landing), paused unless `play`.
+   */
+  private async MovieSeek(to: MovieBeatTarget, offset: number, play: boolean): Promise<object> {
+    const time = this.RequireTime();
+    const second = this.MovieBeatSecond(to) + offset;
+    if (!play) time.Pause(true);
+    const warnings = await this.MovieJump(second);
+    time.Pause(!play);
+    this.onChange();
+    await this.NextFrames(2);
+    return { ...this.MovieReport(), warnings };
+  }
+
+  /**
+   * movie retake: after a scene edit cut the time window, replays the movie from t = 0 and comes back to the timeline
+   * time it was at: a restart held at t = 0 (ready, after the prepare), played with the clock paused, then a forward
+   * seek there; the pause state comes back.
+   */
+  private async MovieRetake(): Promise<object> {
+    const time = this.RequireTime();
+    if (!this.authored) throw new Error('no scene is loaded');
+    const paused = time.paused;
+    const at = this.MovieTime();
+    const restart = (await this.Timeline({ action: 'restart', paused: true })) as { readonly load?: unknown };
+    const deadline = performance.now() + (TIMELINE_PREPARE_LIMIT_SECONDS + 10) * 1000;
+    while (this.timeline.state === 'preparing' && performance.now() < deadline) await this.NextFrames(1);
+    if (this.timeline.state !== 'ready') throw new Error(`movie retake: the restarted timeline is ${this.timeline.state}, not ready at t = 0`);
+    time.Pause(true);
+    this.timeline.Play();
+    this.MarkTimelineOrigin('ready');
+    const warnings: string[] = [];
+    const zero = this.world.NextBoundaryTime();
+    if (!time.ring.length || zero == null) {
+      warnings.push('the scene did not settle, so nothing could be recorded to seek with: the movie plays from t = 0');
+      time.Pause(false);
+    } else {
+      warnings.push(...(await this.MovieJumpTo(zero + Math.round(at * TICKS_PER_SECOND))));
+      time.Pause(paused);
+    }
+    this.movieStop = '~';
+    this.onChange();
+    await this.NextFrames(2);
+    return { ...this.MovieReport(), warnings, ...(restart.load ? { load: restart.load } : {}) };
+  }
+
+  /**
+   * Jumps to seconds of timeline time (MovieJumpTo), warned when the window was cut since t = 0 and the target is before
+   * it.
+   *
+   * @throws {Error} Before the timeline started.
+   */
+  private async MovieJump(seconds: number): Promise<string[]> {
+    const time = this.RequireTime();
+    const start = this.timeline.startTick;
+    const origin = start == null ? null : this.world.BoundaryTime(start);
+    if (origin == null) throw new Error(`the movie has not started (the timeline is ${this.timeline.state}): movie play starts it, then seek or play from a beat`);
+    const target = origin + Math.round(Math.max(0, seconds) * TICKS_PER_SECOND);
+    const ring = time.ring;
+    const warnings = ring[0] && target < ring[0].clock && !ring.some((snapshot) => snapshot.pinned) ? ['the time window was cut since t = 0: movie retake replays the movie from t = 0, so every beat can be reached again'] : [];
+    return [...warnings, ...(await this.MovieJumpTo(target))];
+  }
+
+  /**
+   * Jumps to a scene clock, as consecutive jumps of at most MAX_SEEK_AHEAD_SECONDS past the recorded end (SeekChunks),
+   * a frame between them.
+   *
+   * @returns The jumps' warnings (but "already there").
+   */
+  private async MovieJumpTo(target: number): Promise<string[]> {
+    const time = this.RequireTime();
+    const warnings: string[] = [];
+    for (let guard = 0; guard < 1000; guard++) {
+      const next = SeekChunks(target, time.recordedEnd)[0] ?? target;
+      warnings.push(...(time.Jump(next).warnings ?? []).filter((warning) => !warning.startsWith('already there')));
+      if (next === target) break;
+      await this.NextFrames(1);
+    }
+    this.movieStop = '~';
+    return warnings;
+  }
+
+  /**
+   * A beat's timeline second (BeatTime), or the seconds given.
+   *
+   * @throws {Error} For an unknown beat, or one still waiting for its event.
+   */
+  private MovieBeatSecond(target: MovieBeatTarget): number {
+    if (typeof target === 'number') return target;
+    const record = this.timeline.Records().find((candidate) => candidate.id === target && !candidate.removed);
+    if (!record) throw new Error(`no beat "${target}" in the movie: movie status lists the beats`);
+    const second = BeatTime(record);
+    if (second == null) throw new Error(`beat "${target}" waits for ${record.whenText ?? 'its event'}, so it has no time yet: give timeline seconds instead`);
+    return second;
+  }
+
+  /**
+   * Timeline seconds now (fractional), 0 before t = 0.
+   */
+  private MovieTime(): number {
+    return this.timeline.startTick == null ? 0 : this.TimelineSeconds(this.clock.now);
+  }
+
+  /**
+   * Whether the movie reached its end: a started timeline at or past `movie.end`.
+   */
+  private MovieEnded(): boolean {
+    const end = this.authored?.timeline?.movie?.end;
+    return end != null && this.timeline.startTick != null && this.MovieTime() >= end;
+  }
+
+  /**
+   * The movie tool's report.
+   */
+  private MovieReport(): MovieReport {
+    const time = this.time;
+    const ring = time?.ring ?? [];
+    const first = ring[0];
+    const window = time && first && this.timeline.startTick != null ? { earliest: this.TimelineSeconds(first.clock), latest: this.TimelineSeconds(time.recordedEnd), origin: ring.some((snapshot) => snapshot.pinned) } : null;
+    return MovieReportOf({
+      summary: this.timeline.Summary(),
+      records: this.timeline.Records(),
+      events: this.timeline.Events(),
+      time: this.MovieTime(),
+      movie: this.authored?.timeline?.movie ?? null,
+      driver: this.cinema.Report(this.clock.now).driver,
+      window
+    });
+  }
+
+  /**
+   * Keeps the movie's end on the time control (Movie mode M5), every frame: armed when the timeline starts or the end
+   * changes (or movie play / seek asks again), only while the clock is before it; cleared without an end (a load). The
+   * stop pauses the clock exactly there, with the cues due at the end fired.
+   */
+  private ArmMovieEnd(): void {
+    const time = this.time;
+    if (!time) return;
+    const end = this.authored?.timeline?.movie?.end;
+    const start = this.timeline.startTick;
+    const key = end == null || start == null ? '' : `${start}:${end}`;
+    if (key === this.movieStop) return;
+    this.movieStop = key;
+    const origin = end == null || start == null ? null : this.world.BoundaryTime(start);
+    const stop = origin == null || end == null ? null : origin + Math.round(end * TICKS_PER_SECOND);
+    time.StopAt(stop != null && stop > this.clock.now ? stop : null, () => this.onChange());
+  }
+
+  /**
+   * The page's time control.
+   *
+   * @throws {Error} Before main.ts attached it.
+   */
+  private RequireTime(): TimeControl {
+    if (!this.time) throw new Error('time control is not attached yet: the page is still starting');
+    return this.time;
+  }
+
+  /**
+   * Resolves after `count` animation frames (or 1 s, when the browser stopped drawing the tab), so a screenshot after
+   * a jump shows the landing.
+   */
+  private NextFrames(count: number): Promise<void> {
+    return new Promise((resolve) => {
+      let left = count;
+      const timer = setTimeout(resolve, 1000);
+      const step = (): void => {
+        left -= 1;
+        if (left > 0) requestAnimationFrame(step);
+        else {
+          clearTimeout(timer);
+          resolve();
+        }
+      };
+      requestAnimationFrame(step);
+    });
   }
 
   /**
@@ -3369,7 +3654,7 @@ export class Director {
     const recording = this.time?.recordingOn === true;
     const result = (await this.EditApply(operations)) as { readonly warnings?: string[] };
     const warnings = [...script.warnings];
-    if (script.mixed && recording && !this.time?.recordingOn) warnings.push('this edit changed the scene too, so the time window was cut: timeline restart replays the script with it');
+    if (script.mixed && recording && !this.time?.recordingOn) warnings.push('this edit changed the scene too, so the time window was cut: movie retake replays the movie with it');
     return warnings.length ? { ...result, warnings: [...new Set([...(result.warnings ?? []), ...warnings])] } : result;
   }
 
@@ -3424,7 +3709,7 @@ export class Director {
       if (!run) {
         const earliest = time.ring[0];
         const window = earliest ? ` (it holds ${this.TimelineSeconds(earliest.clock)}–${this.TimelineSeconds(this.clock.now)} s of timeline time)` : '';
-        return { warnings: [...extra, `the time window does not reach back to before this edit's first change${window}: timeline restart replays the script with it`], mixed: false };
+        return { warnings: [...extra, `the time window does not reach back to before this edit's first change${window}: movie retake replays the movie with it`], mixed: false };
       }
       resimulated = { from: this.TimelineSeconds(run.snapshot.clock), to: this.TimelineSeconds(this.clock.now), ticks: run.report.resimulated, ms: run.report.ms, ...counts };
     }
