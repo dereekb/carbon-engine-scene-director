@@ -259,6 +259,7 @@ behavior, the rules, the files and the gotchas of one area:
 | The timeline and ship orders: cues, steps, validation, the timeline ops | [`sd-timeline`](.dbx-claude/refs/sd-timeline/REF.md), with [Movie mode](.dbx-claude/refs/sd-timeline/references/movie.md) |
 | Time control: rate, pause and fast-forward stepping, snapshots of the parks and per-tick state, the tape, jumps and what cuts the window | [`sd-time`](.dbx-claude/refs/sd-time/REF.md) |
 | Piloting: stances, the ideal range, the orbit model, maneuvers and the pilot step | [`sd-piloting`](.dbx-claude/refs/sd-piloting/REF.md) |
+| Movie export: the fixed-step export clock, what samples scene time, the picture, encoding, the hub's MP4 writer | [`sd-export`](.dbx-claude/refs/sd-export/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

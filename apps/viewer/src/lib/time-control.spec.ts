@@ -4,8 +4,9 @@ import { DestinyWorld } from './destiny';
 import { BallStates, FRAME_TICKS, Harness, Ship, TFI } from './destiny.spec-helper';
 import { ResolveFlight, type PublishedHull } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
+import { ExportFrameTicks } from './export-frames';
 import { EstimateBytes } from './state-capture';
-import { RateText, SceneSeconds, SceneTicks, TimeControl, TimeText, type TapeEntry, type TimePresentation, type TimeSimPort } from './time-control';
+import { EXPORT_LOCKED_TEXT, RateText, SceneSeconds, SceneTicks, TimeControl, TimeText, type TapeEntry, type TimePresentation, type TimeSimPort } from './time-control';
 import type { ShipOrder } from '@scene-director/scene';
 import type { DestinySnapshot } from './destiny';
 
@@ -272,7 +273,7 @@ function Rig({ every = 2, window = 120, settledFrom = 0 }: { every?: number; win
     world.Order(id, order);
     control.Record(mark, 'order_ship', { id, order });
   };
-  return { clock, world, control, calls, replayed, boundaryOf, RunTo, Frames, Live };
+  return { clock, world, control, port, calls, replayed, boundaryOf, RunTo, Frames, Live };
 }
 
 const TURN: ShipOrder = { type: 'direction', direction: [0, 1, 1], speed: 1 };
@@ -643,5 +644,87 @@ describe('TimeControl StopAt (Movie mode M5)', () => {
     Frames(600);
     expect(clock.now).toBe(stop);
     expect(control.paused).toBe(true);
+  });
+});
+
+describe('TimeControl export mode (sd-export)', () => {
+  it('refuses to begin during a jump, while the timeline holds the clock and during another export', () => {
+    const { clock, control, port, RunTo } = Rig();
+    RunTo(10);
+    let refusal = '';
+    control.AttachSim({
+      ...port,
+      SilentFrame: () => {
+        if (refusal) return;
+        try {
+          control.BeginExport();
+        } catch (error) {
+          refusal = (error as Error).message;
+        }
+      }
+    });
+    control.Jump(clock.now - 4 * TICKS_PER_SECOND);
+    expect(refusal).toMatch(/a jump is running/);
+    expect(control.exporting).toBe(false);
+    clock.Hold();
+    expect(() => control.BeginExport()).toThrow(/the timeline holds the clock while its scene prepares/);
+    clock.Release();
+    control.BeginExport();
+    expect(() => control.BeginExport()).toThrow(/already running/);
+  });
+
+  it("locks the user's time controls, steps nothing in Frame and reports exporting", () => {
+    const { clock, world, control, RunTo, Frames } = Rig();
+    RunTo(10);
+    control.Pause(true);
+    control.BeginExport({ fps: 30 });
+    expect(control.paused).toBe(false);
+    const now = clock.now;
+    const tick = world.tick;
+    Frames(120);
+    expect([clock.now, world.tick]).toEqual([now, tick]);
+    for (const call of [() => control.Command({ pause: true }), () => control.Command({ back: 2 }), () => control.Jump(now - TICKS_PER_SECOND), () => control.Pause(true), () => control.SetRate(2), () => control.Resimulate({ accept: () => true, restored: () => undefined })]) {
+      expect(call).toThrow(EXPORT_LOCKED_TEXT);
+    }
+    const report = control.Report();
+    expect(report).toMatchObject({ state: 'exporting', paused: false, exportFps: 30, rate: 1 });
+    expect(TimeText(report)).toBe('exporting · 1/30 s a frame');
+    // Not refused: the cut, the origin and recording.
+    expect(() => control.Mark()).not.toThrow();
+  });
+
+  it('pauses at the end, and the first live frame after it does not count the export as a frame', () => {
+    const { clock, control, RunTo } = Rig();
+    RunTo(10);
+    control.BeginExport({ fps: 30 });
+    const origin = clock.now;
+    for (let index = 1; index <= 90; index++) control.FrameTo(origin + ExportFrameTicks(index, 30));
+    control.EndExport();
+    expect(control.Report()).toMatchObject({ state: 'paused', paused: true });
+    expect(control.Report()).not.toHaveProperty('exportFps');
+    expect(clock.now).toBe(origin + 3 * TICKS_PER_SECOND);
+    control.Pause(false);
+    // A minute of real time went by during the export: the first frame targets now, the next one moves a frame.
+    control.Frame(60_000);
+    expect(clock.now).toBe(origin + 3 * TICKS_PER_SECOND);
+    control.Frame(60_000 + 1000 / 60);
+    expect(clock.now).toBe(origin + 3 * TICKS_PER_SECOND + Math.round(TICKS_PER_SECOND / 60));
+    control.EndExport();
+    expect(control.paused).toBe(false);
+  });
+
+  it('records snapshots on the grid during an export, and the run is scrubbable after', () => {
+    const { clock, world, control, RunTo } = Rig({ every: 2 });
+    RunTo(5);
+    const start = control.ring[0].tick;
+    control.BeginExport({ fps: 30 });
+    const origin = clock.now;
+    for (let index = 1; world.tick < 16; index++) control.FrameTo(origin + ExportFrameTicks(index, 30));
+    const ticks = control.ring.map((snapshot) => snapshot.tick);
+    expect(ticks.filter((tick) => tick > 5)).toEqual([6, 8, 10, 12, 14, 16].filter((tick) => (tick - start) % 2 === 0 && tick <= world.tick));
+    expect(control.Report().latest).toBe(SceneSeconds(clock.now));
+    control.EndExport();
+    control.Command({ back: 6 });
+    expect(world.tick).toBeLessThan(16);
   });
 });

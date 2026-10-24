@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Maybe } from '@dereekb/util';
 import { catmullRom, distanceVec, poseRoll, quatFromAxisAngle, type CameraMove, type CameraPose, type CinemaScene, type CinemaShip, type SceneVector } from '@scene-director/scene';
 import { CINEMA_RELEASE_SECONDS, CinemaReleases, CinemaRig, LetterboxRect } from './cinema';
 import { Ease, EvaluateMoves, Noise, ShakeEnvelope, Smooth, type MoveContext } from './cinema-moves';
@@ -604,5 +605,109 @@ describe('CinemaRig over MCP', () => {
       0
     );
     expect(result.shots.map((shot) => shot.library)).toEqual(['chase', 'flyby']);
+  });
+});
+
+describe('the cinema rig at any frame rate (sd-export)', () => {
+  const SPEED = 300;
+  /**
+   * A ship flying a straight line along +Z at SPEED m/s.
+   */
+  const Flying = (now: number): CinemaScene => Scene([Ship('a', [0, 0, (SPEED * now) / SECOND], [0, 0, SPEED])]);
+
+  /**
+   * Plays a shot from 0 and frames it at `fps` for `seconds`.
+   *
+   * @returns The pose and the rig's state at each frame's clock, and the clocks where the shot or sequence index changed.
+   */
+  function Drive(input: Parameters<CinemaRig['Play']>[0], fps: number, seconds: number) {
+    const rig = new CinemaRig();
+    rig.Play(input, 0);
+    const poses = new Map<number, Maybe<CameraPose>>();
+    const changes: string[] = [];
+    let last = '';
+    for (let index = 0; index <= seconds * fps; index++) {
+      const now = Math.round((index * SECOND) / fps);
+      const frame = rig.Frame(now, () => Flying(now));
+      poses.set(now, frame?.pose ?? null);
+      const report = rig.Report();
+      const key = `${report.state}:${report.sequence?.index ?? '-'}`;
+      if (key !== last) changes.push(`${(now / SECOND).toFixed(4)} ${key}`);
+      last = key;
+    }
+    return { poses, changes };
+  }
+
+  /**
+   * The largest gap between two drives' poses at their shared clocks, as a share of the eye–subject distance.
+   */
+  function Gap(a: Map<number, Maybe<CameraPose>>, b: Map<number, Maybe<CameraPose>>): { share: number; shared: number; fov: number } {
+    let share = 0;
+    let shared = 0;
+    let fov = 0;
+    for (const [now, pose] of a) {
+      if (!b.has(now)) continue;
+      const twin = b.get(now);
+      shared += 1;
+      if (!pose || !twin) {
+        expect(pose ?? null).toEqual(twin ?? null);
+        continue;
+      }
+      const distance = distanceVec(pose.eye, [0, 0, (SPEED * now) / SECOND]);
+      share = Math.max(share, distanceVec(pose.eye, twin.eye) / distance, distanceVec(pose.look, twin.look) / distance);
+      fov = Math.max(fov, Math.abs(pose.fov - twin.fov));
+    }
+    return { share, shared, fov };
+  }
+
+  const HERO = {
+    hardpoint: { name: 'hero-port', ship: 'a' },
+    duration: 6,
+    moves: [
+      { type: 'orbit', axis: 'subject-up', angle: 25, easing: 'ease-in-out' },
+      { type: 'push', factor: 0.85, easing: 'ease-in-out' },
+      { type: 'shake', amplitude: 1.5, frequency: 6, decay: 0.5 }
+    ],
+    lag: { eye: 0.3, look: 0.4 }
+  };
+
+  it('frames a lagged, shaken hero shot the same at 24, 30 and 60 fps', () => {
+    const at60 = Drive(HERO, 60, 7);
+    for (const fps of [24, 30]) {
+      const other = Drive(HERO, fps, 7);
+      const { share, shared, fov } = Gap(other.poses, at60.poses);
+      // Shared clocks: every 1/12 s for 24 fps, every 1/30 s for 30.
+      expect(shared).toBe(7 * (fps === 24 ? 12 : 30) + 1);
+      if (process.env['SD_EXPORT_MEASURE']) console.log(`hero shot ${fps} vs 60 fps: ${share.toExponential(3)} of the eye distance`);
+      expect(share, `${fps} fps`).toBeLessThan(1e-3);
+      expect(fov).toBe(0);
+      expect(other.changes).toEqual(at60.changes);
+    }
+  });
+
+  it('moves the unlagged shot, its shake and the library hero exactly alike', () => {
+    const unlagged = { ...HERO, lag: { eye: 0, look: 0 } };
+    expect(Gap(Drive(unlagged, 24, 7).poses, Drive(unlagged, 60, 7).poses).share).toBe(0);
+    const hero = { shot: 'hero', ship: 'a', duration: 5 } as unknown as Parameters<CinemaRig['Play']>[0];
+    const { share } = Gap(Drive(hero, 30, 6).poses, Drive(hero, 60, 6).poses);
+    expect(share).toBeLessThan(1e-3);
+  });
+
+  it('advances a three-shot sequence, blends and releases on the same scene tick at any rate', () => {
+    const sequence = {
+      shots: [
+        { hardpoint: { name: 'chase', ship: 'a' }, duration: 1.5, lag: { eye: 0.35, look: 0.15 } },
+        { hardpoint: { name: 'hero-port', ship: 'a' }, duration: 2, transition: { type: 'blend', duration: 1 } },
+        { hardpoint: { name: 'flyby', ship: 'a' }, duration: 1.5, transition: { type: 'blend', duration: 0.5 } }
+      ]
+    } as Parameters<CinemaRig['Play']>[0];
+    const at60 = Drive(sequence, 60, 7);
+    expect(at60.changes.at(-1)).toMatch(/idle/u);
+    for (const fps of [24, 30]) {
+      const other = Drive(sequence, fps, 7);
+      // The sequence's shot changes, the release and the hand-back fall on the same clocks (multiples of 1/6 s).
+      expect(other.changes).toEqual(at60.changes);
+      expect(Gap(other.poses, at60.poses).share, `${fps} fps`).toBeLessThan(1e-3);
+    }
   });
 });

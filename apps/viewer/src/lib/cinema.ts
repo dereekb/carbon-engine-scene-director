@@ -46,7 +46,7 @@ import {
   type SceneVector,
   type SubjectFrame
 } from '@scene-director/scene';
-import { Ease, EvaluateMoves, SeedOf, Smooth, TrackLag } from './cinema-moves';
+import { Ease, EvaluateMoves, SeedOf, SmoothTrack, TrackLag } from './cinema-moves';
 import { TICKS_PER_SECOND } from './clock';
 import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
@@ -235,7 +235,11 @@ export class CinemaRig {
   private run: Maybe<ShotRun> = null;
   private release: Maybe<Release> = null;
   private last: Maybe<{ readonly pose: CameraPose; readonly near: number; readonly far: number }> = null;
-  private smoothed: Maybe<{ eye: SceneVector; look: SceneVector }> = null;
+  /**
+   * The lagged eye and look, and the targets they trailed last frame (null at a shot's start: held still to its first
+   * frame).
+   */
+  private smoothed: Maybe<{ eye: SceneVector; look: SceneVector; target: Maybe<{ eye: SceneVector; look: SceneVector }> }> = null;
   private lastTick: Maybe<number> = null;
   private note: Maybe<string> = null;
   private reportedAt = 0;
@@ -574,30 +578,56 @@ export class CinemaRig {
     const shot = this.shots[this.index];
     const blend = shot.transition.type === 'blend';
     this.run = { shot, start: now, seed: SeedOf(`${this.index}:${JSON.stringify(shot)}`), anchor: null, blendFrom: blend ? (this.last?.pose ?? null) : null, framed: false };
+    // A blend keeps trailing from the last shot's lagged eye and look, toward the new shot's targets from its first frame.
     if (!blend) this.smoothed = null;
+    else if (this.smoothed) this.smoothed = { ...this.smoothed, target: null };
   }
 
   private PlayFrame(now: number, seconds: number, scene: CinemaScene): Maybe<CinemaFrame> {
     const shotNow = this.ShotNow(now);
     let run = this.run;
     let holding = false;
+    // The frame's lag step still to take: a shot ending inside the frame takes its share up to its end.
+    let step = seconds;
     // Advance the sequence on each shot's duration, from its exact end so the timing never drifts.
     while (run?.shot.duration != null && shotNow - run.start >= run.shot.duration * TICKS_PER_SECOND) {
-      if (this.index + 1 >= this.shots.length) {
-        // A standing-by director takes another driver's release-ending shot back at its boundary: hold until then.
-        if (run.shot.end === 'hold' || (this.standby && this.driver !== 'director')) {
-          holding = true;
-          break;
-        }
-        this.Release(now, { note: this.shots.length > 1 ? 'the sequence finished' : 'the shot finished', forget: true });
-        return null;
+      const last = this.index + 1 >= this.shots.length;
+      // A standing-by director takes another driver's release-ending shot back at its boundary: hold until then.
+      if (last && (run.shot.end === 'hold' || (this.standby && this.driver !== 'director'))) {
+        holding = true;
+        break;
       }
       const end = run.start + Math.round(run.shot.duration * TICKS_PER_SECOND);
+      // What follows (the release, or the next shot's blend) starts from the shot's pose at its exact end, not from the
+      // last frame drawn before it, so it is the same at any frame rate (sd-export). It is framed on this frame's scene.
+      const toEnd = Math.min(step, Math.max(0, step - (shotNow - end) / TICKS_PER_SECOND));
+      this.FrameRun(run, end, toEnd, scene, true, end);
+      if (this.run !== run) return null;
+      step -= toEnd;
+      if (last) {
+        this.Release(end, { note: this.shots.length > 1 ? 'the sequence finished' : 'the shot finished', forget: true });
+        return null;
+      }
       this.index += 1;
       this.StartShot(end);
       run = this.run;
     }
     if (!run) return null;
+    return this.FrameRun(run, shotNow, step, scene, holding, now);
+  }
+
+  /**
+   * Frames a shot: its hardpoint or pose on the scene, its moves at the shot time, the lag stepped by `seconds`, a blend
+   * in, clearance and the clip planes.
+   *
+   * @param run - The shot playing.
+   * @param shotNow - The shot clock framed at.
+   * @param seconds - The lag's step.
+   * @param scene - The scene as drawn this frame.
+   * @param holding - Whether the shot holds its last frame (its moves at their end values).
+   * @param now - The scene clock a release starts at.
+   */
+  private FrameRun(run: ShotRun, shotNow: number, seconds: number, scene: CinemaScene, holding: boolean, now: number): Maybe<CinemaFrame> {
     const { shot } = run;
     const elapsed = (shotNow - run.start) / TICKS_PER_SECOND;
     const t = holding && shot.duration != null ? Math.min(elapsed, shot.duration) : elapsed;
@@ -634,8 +664,9 @@ export class CinemaRig {
     if (!base) return null;
     const moved = EvaluateMoves(base, shot.moves, t, { subject, seed: run.seed, shotDuration: shot.duration ?? null, scene });
     const lookLag = Math.max(shot.lag.look, TrackLag(shot.moves, t));
-    const smoothed = this.smoothed ?? { eye: moved.eye, look: moved.look };
-    this.smoothed = { eye: Smooth(smoothed.eye, moved.eye, seconds, shot.lag.eye), look: Smooth(smoothed.look, moved.look, seconds, lookLag) };
+    const smoothed = this.smoothed ?? { eye: moved.eye, look: moved.look, target: null };
+    const from = smoothed.target ?? moved;
+    this.smoothed = { eye: SmoothTrack(smoothed.eye, from.eye, moved.eye, seconds, shot.lag.eye), look: SmoothTrack(smoothed.look, from.look, moved.look, seconds, lookLag), target: { eye: moved.eye, look: moved.look } };
     let pose: CameraPose = { ...moved, eye: this.smoothed.eye, look: this.smoothed.look };
     if (run.resumeBlend) {
       run.blendFrom ??= scene.camera ?? null;

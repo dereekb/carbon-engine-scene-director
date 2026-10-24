@@ -5,9 +5,10 @@
 
 /**
  * playing: the clock runs at its rate; paused: it stands still (the drawing goes on); jumping: a jump back
- * re-simulates (sd-time).
+ * re-simulates (sd-time); exporting: a movie export moves the clock 1/fps a drawn frame, whatever the real frame time
+ * (sd-export).
  */
-export const TIME_STATES = ['playing', 'paused', 'jumping'] as const;
+export const TIME_STATES = ['playing', 'paused', 'jumping', 'exporting'] as const;
 export type TimeState = (typeof TIME_STATES)[number];
 
 /**
@@ -27,6 +28,10 @@ export interface TimeReport {
   readonly rate: number;
   readonly paused: boolean;
   readonly state: TimeState;
+  /**
+   * While a movie export runs (`state: exporting`): its frames a scene second, each frame advancing the clock 1/fps.
+   */
+  readonly exportFps?: number;
   /**
    * Seconds of timeline time at now (`seconds` less the scene time of the timeline's t = 0), once a scripted timeline
    * started: what `seek { timeline }` takes.

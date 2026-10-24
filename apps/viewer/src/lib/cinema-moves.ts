@@ -345,7 +345,27 @@ export function SeedOf(text: string): number {
  * @param timeConstant - Seconds to cover about 63 % of the gap; 0 snaps.
  */
 export function Smooth(current: SceneVector, target: SceneVector, seconds: number, timeConstant: number): SceneVector {
+  return SmoothTrack(current, target, target, seconds, timeConstant);
+}
+
+/**
+ * First-order lag toward a moving target over `seconds` of scene time: the exact lag for a target moving in a straight
+ * line from `from` to `target` over the step. Smooth holds the target still over the step instead, which trails a
+ * moving subject by less at a lower frame rate (24 fps 1.4 % of the eye distance off 60 fps on a 300 m/s hero shot); this
+ * trails it by the same at any frame rate (sd-export).
+ *
+ * @param current - Where it is.
+ * @param from - The target at the step's start.
+ * @param target - The target at the step's end.
+ * @param seconds - The time step (0 freezes it).
+ * @param timeConstant - Seconds to cover about 63 % of the gap; 0 snaps.
+ */
+export function SmoothTrack(current: SceneVector, from: SceneVector, target: SceneVector, seconds: number, timeConstant: number): SceneVector {
   if (!(timeConstant > 0)) return [...target];
-  const keep = Math.exp(-Math.max(0, seconds) / timeConstant);
-  return [target[0] + (current[0] - target[0]) * keep, target[1] + (current[1] - target[1]) * keep, target[2] + (current[2] - target[2]) * keep];
+  if (!(seconds > 0)) return [...current];
+  const ratio = seconds / timeConstant;
+  const keep = Math.exp(-ratio);
+  // The share of the step's target motion the lag takes up: (τ / h)(1 − e^(−h/τ)), 1 for a step near 0.
+  const share = -Math.expm1(-ratio) / ratio;
+  return [0, 1, 2].map((axis) => target[axis] + (current[axis] - from[axis]) * keep - (target[axis] - from[axis]) * share) as SceneVector;
 }

@@ -292,6 +292,40 @@ describe('CameraFollow', () => {
   });
 });
 
+describe('CameraFollow at any frame rate (sd-export)', () => {
+  /**
+   * The chase camera behind a ship turning at 20°/s while climbing, framed at `fps` for 12 s.
+   *
+   * @returns The yaw and pitch at each frame's clock.
+   */
+  function Chase(fps: number): Map<number, [number, number]> {
+    const follow = new CameraFollow();
+    follow.mode = 'chase';
+    const view = View(0, -15);
+    follow.Follow({ id: 's', position: [0, 0, 0] }, null, 0);
+    const angles = new Map<number, [number, number]>();
+    for (let index = 0; index <= 12 * fps; index++) {
+      const now = Math.round((index * SECOND) / fps);
+      const turn = (20 * DEGREES * now) / SECOND;
+      follow.Frame(now, view, () => ({ position: [0, 0, 0], forward: [Math.cos(turn), 0.3 * Math.sin(turn / 3), Math.sin(turn)] }));
+      angles.set(now, [view.yaw, view.pitch]);
+    }
+    return angles;
+  }
+
+  it('swings the chase on a turning ship within 0.2° at 30 and 60 fps', () => {
+    const at30 = Chase(30);
+    const at60 = Chase(60);
+    let gap = 0;
+    for (const [now, [yaw, pitch]] of at30) {
+      const [yaw60, pitch60] = at60.get(now) ?? [NaN, NaN];
+      gap = Math.max(gap, Math.abs(((((yaw - yaw60 + 540) % 360) + 360) % 360) - 180), Math.abs(pitch - pitch60));
+    }
+    if (process.env['SD_EXPORT_MEASURE']) console.log(`chase 30 vs 60 fps: ${gap.toFixed(4)}°`);
+    expect(gap).toBeLessThan(0.2);
+  });
+});
+
 describe('ReframesAfterEdit', () => {
   const edit = { restart: false, cameraChanged: false, following: 'fc', removed: [] as string[] };
 

@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { CameraDirectorPicture, CinemaDriver, DirectorShip, SceneFleet, SceneVector } from '@scene-director/scene';
 import { CameraDirector, CameraDirectorText, DIRECTOR_SETTLE_SECONDS, type CameraDirectorCinema, type CameraDirectorPort } from './camera-director';
+import { SceneClock, TICKS_PER_SECOND } from './clock';
+import { DestinyWorld } from './destiny';
+import { RIFTER, Ship as Placement } from './destiny.spec-helper';
+import { ExportStepper } from './export-frames';
+import { ResolveFlight } from './flight';
 import { RoundTrip } from './state-capture.spec-helper';
+import { TimeControl } from './time-control';
 
 function Ship(id: string, team: string, position: SceneVector, forward: SceneVector): DirectorShip {
   return { id, team, position, velocity: [0, 0, 0], speed: 0, forward, radius: 50, maxVelocity: 400, health: 1, remaining: 5000, total: 5000 };
@@ -205,5 +211,62 @@ describe('CameraDirector snapshots (sd-time)', () => {
     rig.silent = false;
     Boundaries(director, 21, 40);
     expect(rig.plays.length).toBeGreaterThan(1);
+  });
+});
+
+describe('CameraDirector at any frame rate (sd-export)', () => {
+  const rifter = ResolveFlight({ published: RIFTER, hull: null, overrides: null });
+
+  /**
+   * Two fleets closing in a world a movie export steps at `fps` for 40 s, the director deciding at every boundary on the
+   * world's ships, as the page calls it.
+   *
+   * @returns Its cut log and the shots it played, with their scene clocks.
+   */
+  function Export(fps: number) {
+    const world = new DestinyWorld();
+    const ids: { id: string; team: string }[] = [];
+    for (const [team, z, heading] of [
+      ['blue', 0, 1],
+      ['red', 20000, -1]
+    ] as const) {
+      for (let i = 0; i < 4; i += 1) {
+        const id = `${team}-${i}`;
+        ids.push({ id, team });
+        world.AddShip(Placement(id, [(i - 2) * 600, 0, z]), rifter);
+        world.Order(id, { type: 'direction', direction: [0.2 * (i - 1.5), 0, heading], speed: 1 });
+      }
+    }
+    const rig = new FakeRig();
+    const port = rig.Port();
+    const director = new CameraDirector({
+      ...port,
+      Facts: (tick) => {
+        const picture = Picture(tick);
+        const ships = ids.map(({ id, team }) => {
+          const motion = world.Motion(id);
+          return { ...Ship(id, team, motion?.position ?? [0, 0, 0], [0, 0, team === 'blue' ? 1 : -1]), velocity: motion?.velocity ?? [0, 0, 0], speed: motion?.speed ?? 0 };
+        });
+        return { ...picture, ships };
+      }
+    });
+    const clock = new SceneClock();
+    const control = new TimeControl({ clock, world, realNow: () => 0 });
+    control.Frame(0);
+    // The clock sits on the boundary while the world evolves it (FrameTo sets it first).
+    world.OnBoundary((boundary) => director.Boundary(boundary, boundary, clock.now));
+    director.Command({ pace: 'fast' }, { source: 'claude', tick: world.tick, time: world.tick, at: clock.now });
+    control.BeginExport({ fps });
+    const stepper = new ExportStepper({ time: control, world, grid: { origin: clock.now, fps, preroll: 0, frames: 40 * fps } });
+    while (stepper.Next());
+    return { log: director.Log(), plays: rig.plays.map(({ shot, at }) => ({ shot, at: Math.round(at / TICKS_PER_SECOND) })) };
+  }
+
+  it('cuts the same shots on the same ticks at 24 and 60 fps', () => {
+    const at60 = Export(60);
+    expect(at60.plays.length).toBeGreaterThanOrEqual(4);
+    const at24 = Export(24);
+    expect(at24.log).toEqual(at60.log);
+    expect(at24.plays).toEqual(at60.plays);
   });
 });

@@ -26,7 +26,8 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 |---|---|
 | `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek` (scene seconds, or `TimeSeek` `{ timeline }`), `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
 | `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`, `timeline` included) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
-| `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`; `Advance` = `Set(Next())` for the specs |
+| `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`, `Resync()` (forget the last frame time: after an export); `Advance` = `Set(Next())` for the specs |
+| `time-control.ts` export mode | `BeginExport` / `FrameTo` / `EndExport`, `exporting`, `EXPORT_LOCKED_TEXT`: a movie export moves the clock 1/fps a frame (`sd-export`) |
 | `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift; M3: `MarkOrigin`, `AbandonFuture`, `Resimulate`, the private `Run`; M5: `StopAt`, `stopsAt`, `recordedEnd`), `TimeSimPort` (M3: `AfterRestore`) / `TapeEntry` / `JumpLanding` / `TimeResimulateOptions` / `TimeResimulation`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
 | `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`), `BoundaryTime(boundary)` (any boundary on the grid: the timeline's t = 0) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
@@ -50,6 +51,10 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
      that boundary and the next frame steps on from it. **The clock never jumps.**
   3. `clock.Set(target)`, `world.Tick(target)` (no evolve; before the first evolve this one anchors the grid).
   4. A throwing `Tick` is logged once per distinct message and ends the frame's stepping; the loop goes on.
+- **A movie export steps with `FrameTo` instead** (`sd-export`): every boundary up to the frame's exact target
+  (T0 + i / fps), no budget, no `StopAt`; `Frame` steps nothing meanwhile, and `Command`, `Jump`, `Resimulate`, `Pause`
+  and `SetRate` throw `EXPORT_LOCKED_TEXT`. Recording goes on. `EndExport` pauses at the last frame and resyncs the
+  clock (`SceneClock.Resync`), so the first live frame does not count the export as one long frame.
 - So every pending order, Follow the FC steering, module cycle, lock and combat roll runs at the same tick, in the same
   order, at any rate. `time-control.spec.ts` proves it: a 1× harness world and `TimeControl` worlds at 8× (two
   boundaries a frame) and at 32× behind its budget (one a frame) give identical master `BallStates` and boundary
@@ -99,7 +104,7 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
   (`TimeSimPort.TimelineOrigin` = `world.BoundaryTime(timeline.startTick)`), once a scripted timeline started;
   `seek: { timeline: s }` jumps to that origin + s (refused without a started timeline). A landing on t = s exactly has
   fired the cues due at s.
-- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping, timeline?, effectiveRate?, held?, audio?:
+- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping | exporting, exportFps?, timeline?, effectiveRate?, held?, audio?:
   muted | suspended, back, earliest?, latest?, window: { seconds, every, window, snapshots, bytes, budget, capture? },
   recording: { on, since?, why?, cutAt?, waiting? }, replay?: { pending, next?: { tool, seconds } }, drift?: { count,
   tick?, summary? }, jump?: { from, to, snapshot, resimulated, ms, cause: jump | edit, edit?: { cues, ships }, warnings? } }` (`seconds` and `tick` equal

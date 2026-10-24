@@ -25,7 +25,7 @@
 | `apps/scene-director/src/lib/hub/hub.ts` | `list_shots` (a hub tool: the library is static, so it answers with no tab) |
 | `packages/scene/src/lib/waypoints/waypoints.ts` | `Waypoint`, `resolveWaypoint`, `readWaypoints`, `measureWaypointPath`, `pathPointAt` / `pathTangentAt` / `pathDistanceAt`, `catmullRom` |
 | `apps/viewer/src/lib/cinema.ts` | `CinemaRig` (`Play`, `Stop`, `Release`, `Frame`, `Report`, `Presentation`, `Subjects`), `CinemaReleases`, `LetterboxRect`; node-tested |
-| `apps/viewer/src/lib/cinema-moves.ts` | `EvaluateMoves`, `Ease`, `TrackLag`, `Smooth`, the seeded `Noise` / `ShakeEnvelope`; node-tested |
+| `apps/viewer/src/lib/cinema-moves.ts` | `EvaluateMoves`, `Ease`, `TrackLag`, `Smooth`, `SmoothTrack` (the lag, exact for a target moving over the step), the seeded `Noise` / `ShakeEnvelope`; node-tested |
 | `engine.ts` | `FreeCamera`, `Engine.SetCinematicFrame` / `DrawnCamera` / `Aspect`, `OrbitCamera.Drawn` |
 | `director.ts` | `cinema`, `TrackCamera`, the tool handlers (`ListHardpoints`, `PlayShot`, `StopShot`, `ResumeShot`), `CinemaScene` (+ `CinemaWarp`), `ReleaseCinema` / `TakeOverCinema`, the `CinemaReleases` call in `Apply` |
 | `main.ts` | `Presentation`: `?letterbox=`, `?hud=off`, the L and H keys, a shot's overrides |
@@ -324,6 +324,16 @@ Catmull-Rom walked by arc length, resolved and measured again every frame becaus
 - Nothing in `waypoints/` knows about cameras, on purpose: ship pathing (a ship flying a route at set speeds) is meant
   to reuse `resolveWaypoint` and the path walk.
 
+## At any frame rate (movie export, `sd-export`)
+
+A movie export draws the camera at a fixed 1/fps step, whatever the live preview ran at, so every camera path must give
+the same picture at any frame rate: shots, moves, shake and the release and resume blends ease on scene time; the lag
+is `SmoothTrack`; a shot's end (the release, or the next shot's blend) starts from its pose **at its exact end**
+(`FrameRun` at `end` with the lag stepped to it, the release starting at `end`), not from the last frame drawn before
+it; `CameraFollow`'s chase eases on scene seconds; the director decides at boundaries. Spec'd at 24 / 30 / 60 fps in
+`describe('… at any frame rate (sd-export)')` of `cinema.spec.ts`, `camera.spec.ts` and `camera-director.spec.ts`;
+the measured gaps and the rule for new camera paths are in `sd-export` ("The camera at any frame rate").
+
 ## How it draws
 
 - **`FreeCamera` writes EveCamera's own `TriView` / `TriProjection`** (`GetViewMatrix().SetTransform`,
@@ -335,7 +345,9 @@ Catmull-Rom walked by arc length, resolved and measured again every frame becaus
   cinematic pose into `OrbitCamera.Drawn()`.
 - **The rig runs on the scene clock**, in `Director.TrackCamera(now)` (after `world.Tick`, before `engine.Frame`), on
   the **drawn** ClientBall samples (`world.Curves(id)` translation, rotation, velocity), never the Destiny master,
-  which runs up to a tick ahead. A paused clock holds the shot; lag is exponential smoothing on scene seconds.
+  which runs up to a tick ahead. A paused clock holds the shot; lag is exponential smoothing on scene seconds
+  (`SmoothTrack`: exact for a target moving in a straight line over the frame, so it trails a moving subject by the
+  same at any frame rate).
 - It runs without a renderer too (aspect 16:9), which is how verify-page checks it headless.
 - Per frame: resolve the hardpoint → moves → lag → `clearHulls` → `cameraClips` (hulls plus `incoming`; near = half
   the nearest surface distance, 0.5 m inside a hull's sphere, never below far / 2e6; far = max(1e5, 1.1 × (farthest

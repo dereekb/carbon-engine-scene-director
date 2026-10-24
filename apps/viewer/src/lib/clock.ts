@@ -98,6 +98,14 @@ export class SceneClock {
   }
 
   /**
+   * Forgets the last frame time, so the next Next targets now: after a movie export (sd-export), whose frames never
+   * call Next, the first live frame would otherwise count the whole export as one (capped) frame.
+   */
+  Resync(): void {
+    this.lastFrameMs = null;
+  }
+
+  /**
    * Moves the clock.
    *
    * @param ticks - The time, in 100 ns ticks (rounded to whole ticks).

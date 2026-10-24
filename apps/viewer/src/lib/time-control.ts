@@ -21,6 +21,12 @@
  * never drops, and an edit of the cues or ships' orders that changes the past re-simulates from the latest snapshot it
  * does not affect (Resimulate, over the same Run as a jump) instead of cutting the window.
  *
+ * Export (sd-export): a movie export moves the clock only through FrameTo, one drawn frame at a time to an exact target
+ * (T0 + i / fps), stepping every boundary on the way with no step budget and no StopAt, so the file's frames sit on a
+ * fixed grid however slowly the page draws. Between BeginExport and EndExport the user's time controls (Command, Jump,
+ * Resimulate, Pause, SetRate) are refused and Frame steps nothing; recording goes on, so the exported run stays
+ * scrubbable.
+ *
  * Node-tested (time-control.spec.ts): it imports no runtime.
  */
 
@@ -67,6 +73,10 @@ export const BEHIND_SHARE = 0.95;
  * A snapshot capture slower than this doubles the spacing (reported in window.every).
  */
 export const CAPTURE_SLOW_MS = 15;
+/**
+ * The refusal of the user's time controls while a movie export drives the clock (sd-export).
+ */
+export const EXPORT_LOCKED_TEXT = 'a movie export is running: export_movie { action: "cancel" } stops it';
 
 /**
  * What the page's presentation does with the clock's state: the AudioContext suspends while paused, and the sounds
@@ -344,6 +354,11 @@ export class TimeControl {
    * Where the frame loop stops (Movie mode M5: a movie's end), and who to tell.
    */
   private stopAt: Maybe<{ readonly clock: number; readonly onStop?: () => void }> = null;
+  /**
+   * Whether a movie export drives the clock (BeginExport to EndExport), and at how many frames a second.
+   */
+  private exportMode = false;
+  private exportFps: Maybe<number> = null;
 
   constructor({ clock, world, realNow = () => performance.now(), budgetMs = FRAME_STEP_BUDGET_MS, windowConfig = {} }: TimeControlConfig) {
     this.clock = clock;
@@ -407,6 +422,13 @@ export class TimeControl {
   }
 
   /**
+   * Whether a movie export drives the clock (sd-export): only FrameTo moves it.
+   */
+  get exporting(): boolean {
+    return this.exportMode;
+  }
+
+  /**
    * Whether snapshots are being taken.
    */
   get recordingOn(): boolean {
@@ -421,6 +443,7 @@ export class TimeControl {
    * @throws {Error} When a jump is refused or fails (the scene is as it was), or the rate is out of bounds.
    */
   Command(command: TimeControlCommand): string[] {
+    this.Unlocked();
     const warnings: string[] = [];
     if (command.every !== undefined || command.window !== undefined) this.Configure({ every: command.every, window: command.window });
     if (command.back !== undefined) warnings.push(...(this.Jump(this.clock.now - Math.round(command.back * TICKS_PER_SECOND)).warnings ?? []));
@@ -612,6 +635,7 @@ export class TimeControl {
   private Ready(): TimeSnapshot {
     if (!this.sim) throw new Error('time control is not attached yet: the page is still starting');
     if (this.jumping) throw new Error('a jump is already running');
+    this.Unlocked();
     if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: jump once it plays');
     const first = this.snapshots[0];
     if (!first) throw new Error(`nothing is recorded yet: ${this.NotRecordingText()}`);
@@ -696,7 +720,7 @@ export class TimeControl {
    * @returns The clock's time after the frame, in 100 ns ticks: what the frame draws at.
    */
   Frame(frameMs: number): number {
-    if (this.jumping) return this.clock.now;
+    if (this.jumping || this.exportMode) return this.clock.now;
     const before = this.clock.now;
     const stop = this.stopAt;
     // A stop the clock already reached or passed (a jump past it, say) is dropped.
@@ -739,6 +763,75 @@ export class TimeControl {
   }
 
   /**
+   * Hands the clock to a movie export (sd-export): from now until EndExport only FrameTo moves it, and the user's time
+   * controls are refused (EXPORT_LOCKED_TEXT). The clock is unpaused (FrameTo ignores the pause, but the reports, the
+   * audio port and the HUD read it).
+   *
+   * @param options - `fps`: the export's frames a second, for the report.
+   * @throws {Error} During a jump, while the timeline holds the clock, and during another export.
+   */
+  BeginExport({ fps }: { readonly fps?: number } = {}): void {
+    if (this.jumping) throw new Error('a jump is running: export once it lands');
+    if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: export once it plays');
+    if (this.exportMode) throw new Error('a movie export is already running');
+    this.exportMode = true;
+    this.exportFps = fps ?? null;
+    this.clock.paused = false;
+    this.ResetMeasure();
+    this.Present();
+  }
+
+  /**
+   * One export frame (sd-export): steps every tick boundary up to the target, one evolve per world.Tick, setting the clock
+   * at each, then sets the clock to the target. Unlike Frame there is no step budget (the frame lands on its target
+   * however long the ticks take) and no StopAt. A throwing tick propagates: the clock waits at its boundary and the
+   * exporter retries the frame at the same target.
+   *
+   * @param target - The frame's clock, 100 ns ticks (rounded): T0 + i / fps.
+   * @returns The clock after the frame: the target.
+   * @throws {Error} Outside an export, for a target before now, and when a tick throws.
+   */
+  FrameTo(target: number): number {
+    if (!this.exportMode) throw new Error('FrameTo steps a movie export: BeginExport first');
+    const goal = Math.round(target);
+    if (goal < this.clock.now) throw new Error(`an export frame never goes back (to ${SecondsText(goal - CLOCK_EPOCH_TICKS)} s from ${SecondsText(this.clock.now - CLOCK_EPOCH_TICKS)} s)`);
+    for (;;) {
+      const boundary = this.world.NextBoundaryTime();
+      if (boundary == null || boundary > goal) break;
+      this.clock.Set(boundary);
+      this.world.Tick(boundary);
+      this.Recorded();
+    }
+    this.clock.Set(goal);
+    this.world.Tick(goal);
+    if (this.recording.on) this.end = Math.max(this.end ?? goal, goal);
+    return this.clock.now;
+  }
+
+  /**
+   * Gives the clock back after a movie export (sd-export): the user's time controls work again, the next live frame
+   * targets now (SceneClock.Resync: the export's real time is not one long frame), and the clock pauses (by default)
+   * at the last exported frame. Nothing outside an export.
+   *
+   * @param options - `pause`: pause at the end (default true).
+   */
+  EndExport({ pause = true }: { readonly pause?: boolean } = {}): void {
+    if (!this.exportMode) return;
+    this.exportMode = false;
+    this.exportFps = null;
+    this.clock.Resync();
+    this.lastFrameMs = null;
+    this.Pause(pause);
+  }
+
+  /**
+   * @throws {Error} EXPORT_LOCKED_TEXT while a movie export drives the clock.
+   */
+  private Unlocked(): void {
+    if (this.exportMode) throw new Error(EXPORT_LOCKED_TEXT);
+  }
+
+  /**
    * Stops the frame loop exactly at a clock (Movie mode M5: a movie's end): the frame that reaches it steps the
    * boundaries up to it, sets the clock there and pauses, at any rate; then the stop clears itself. Jumps and
    * re-simulations ignore it (they have their own target), and a clock the loop is already at or past drops it.
@@ -771,6 +864,7 @@ export class TimeControl {
    * @param paused - True pauses.
    */
   Pause(paused: boolean): void {
+    this.Unlocked();
     this.clock.paused = paused;
     this.ResetMeasure();
     this.Present();
@@ -783,6 +877,7 @@ export class TimeControl {
    * @throws {RangeError} When the rate is out of bounds.
    */
   SetRate(rate: number): void {
+    this.Unlocked();
     if (!isTimeRate(rate)) throw new RangeError(`the rate must be from ${MIN_TIME_RATE} to ${MAX_TIME_RATE}, not ${rate}`);
     this.clock.rate = rate;
     this.ResetMeasure();
@@ -809,7 +904,8 @@ export class TimeControl {
       tick: this.world.tick,
       rate,
       paused,
-      state: this.jumping ? 'jumping' : paused ? 'paused' : 'playing',
+      state: this.State(),
+      ...(this.exportMode && this.exportFps != null ? { exportFps: this.exportFps } : {}),
       ...(origin == null ? {} : { timeline: Round2((now - origin) / TICKS_PER_SECOND) }),
       ...(behind ? { effectiveRate: Math.round(effective * 100) / 100 } : {}),
       ...(this.clock.held ? { held: true as const } : {}),
@@ -822,6 +918,12 @@ export class TimeControl {
       ...(this.drift.count ? { drift: { ...this.drift } as TimeDriftReport } : {}),
       ...(this.lastJump ? { jump: this.lastJump } : {})
     };
+  }
+
+  private State(): TimeReport['state'] {
+    if (this.jumping) return 'jumping';
+    if (this.exportMode) return 'exporting';
+    return this.clock.paused ? 'paused' : 'playing';
   }
 
   /**
@@ -1072,6 +1174,7 @@ export function RateText(rate: number): string {
  * @returns Such as "1×", "paused at 0.25×" or "4× (2.7× actual) · muted".
  */
 export function TimeText(report: TimeReport): string {
+  if (report.state === 'exporting') return report.exportFps ? `exporting · 1/${report.exportFps} s a frame` : 'exporting';
   let text = report.paused ? `paused at ${RateText(report.rate)}` : RateText(report.rate);
   if (report.effectiveRate != null) text += ` (${RateText(report.effectiveRate)} actual)`;
   if (report.held) text += ' · held for the timeline';
