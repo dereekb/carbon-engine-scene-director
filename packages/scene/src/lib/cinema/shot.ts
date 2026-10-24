@@ -64,6 +64,10 @@ export type CinemaDriver = (typeof CINEMA_DRIVERS)[number];
  * The default blend into a shot, seconds.
  */
 export const DEFAULT_BLEND_SECONDS = 1.5;
+/**
+ * A hardpoint's fill tops out here (more crops the subject's sphere).
+ */
+export const MAX_HARDPOINT_FILL = 1.5;
 
 /**
  * The widest field of view a shot takes, degrees.
@@ -364,7 +368,7 @@ function readHardpointFields(input: JsonObject, where: string, problems: string[
     if ((typeof celestial === 'string' && celestial.trim()) || (typeof celestial === 'number' && Number.isInteger(celestial))) ref.celestial = typeof celestial === 'string' ? celestial.trim() : celestial;
     else problems.push(`${where}.celestial must be a celestial id or name`);
   }
-  if (input['fill'] != null) ref.fill = readRange(input['fill'], `${where}.fill`, problems, 0.05, 1.5);
+  if (input['fill'] != null) ref.fill = readRange(input['fill'], `${where}.fill`, problems, 0.05, MAX_HARDPOINT_FILL);
   if (input['fov'] != null) ref.fov = readRange(input['fov'], `${where}.fov`, problems, MIN_SHOT_FOV, MAX_SHOT_FOV);
   if (input['bank'] != null) {
     if (typeof input['bank'] === 'boolean') ref.bank = input['bank'];

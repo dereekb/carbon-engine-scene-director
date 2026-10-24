@@ -36,6 +36,9 @@
   `cjs-fleet-personality/1` templates by key, never a built-in name; each resolves through `extends` to `line`;
   `personalities/`; normalized before fleets so the fleets' names check), `combat?` (`{ seed?, death? }`: the seed every shot's roll is keyed by, an integer 0 … 2³² − 1,
   default 1; `death` `"explode"` (default) or `"flag"`; omitted when empty; `combat/document.ts`, `sd-combat`),
+  `autoCamera?` (the camera director's settings for the scene: `{ favour?, sun?, pace?, hold?, scales?, framings?,
+  exclude?, minShipSize?, letterbox?, hud?, seed? }` read with auto_camera's readers; `on`, `follow`, `teams` and
+  unknown keys warn and drop; omitted when empty; `cinema/director/document.ts`, `sd-cinema`),
   `location?`, `timeline?` (the scene's script: cues at a time, each running one lever; validated against the scene
   projected to the cue's time, `timeline/`, `sd-timeline`). Both are validated and stored; the page plays them from T2.
 - Object fields (`objects/object.ts`): `id`, `dna`, `type?` (provenance only: a type id or the English name), `name?`,
@@ -73,6 +76,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 | fits | `set_fits { fits: { key: text \| null } }` (merged; `null` deletes a key no ship uses) | `fitting/operation.ts` (`sd-fittings`) |
 | personalities | `set_personalities { personalities: { key: template \| null } }` (merged; `null` deletes a key no fleet uses; a fleet picks one with `update_fleet set { personality }`) | `personalities/document.ts` |
 | combat | `set_combat { seed?: n \| null, death?: "explode" \| "flag" \| null }` (merged; `null` resets a field; an emptied `combat` goes) | `combat/document.ts` (`sd-combat`) |
+| director | `set_auto_camera { favour?, sun?, pace?, hold?, scales?, framings?, exclude?, minShipSize?, letterbox?, hud?, seed? }` (merged into `autoCamera`; `null` removes a key; an emptied block goes; `follow` / `teams` warn) | `cinema/director/document.ts` (`sd-cinema`) |
 | immunity | `set_immunity { <selector: ships \| fleet [+ wing \| squad] \| all, role?, team?, sample?>, immune: true \| false \| [layers] }` (replaces each selected ship's `immune`; `false` deletes; `hull` / `state` need the `set_immunity` tool) | `combat/immunity.ts` (`sd-combat`, `sd-selectors`) |
 | timeline | `add_cue { cue }` / `update_cue { id, set }` (an action replaces the cue's and clears `adds`) / `remove_cue { id }` / `set_timeline { timeline \| null }` / `clear_timeline` | `timeline/operations.ts` (`sd-timeline`) |
 | objects | `add_object { object }` / `add_objects` (count of one DNA in a formation at a place) / `update_object { id, set }` (id can't change; `null` clears `type`, `name`, `radius`) / `move_object` (position or `near`, turn; the rest kept) / `remove_object` (clears `camera.target`) | `objects/operations.ts` (`sd-objects`) |
@@ -134,6 +138,7 @@ Without a timeline in it, normalizing it never projects, and cue-added ids never
 | `environment` | **reloads the tab** (the environment is initialized with the device) |
 | `camera` | re-frame |
 | `combat` | the seed or death mode changed; the page's combat rules (`sd-combat`, K2) take it for later shots and deaths |
+| `autoCamera` | the director's scene settings changed; `ApplyNow` hands every apply's block to `CameraDirector.SetSceneBias` (under the live auto_camera overrides); not a simulation change, so the time-control window stays (`sd-cinema`) |
 | `immunity` | kept ships whose `immune` changed: the damage model's immune layers follow (no rebuild, no retune; S2 indexes them on every apply) |
 | `orders` | kept ships whose `orders` changed: their scripts restart (T2, `sd-timeline`); timeline edits need no diff field. A script edit on a started timeline (M3) bypasses the diff: changed steps swap in place or re-simulate |
 

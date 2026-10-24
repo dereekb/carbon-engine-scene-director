@@ -4765,6 +4765,8 @@ export class Director {
     }
     // The document's seed and death mode apply to later shots and deaths.
     this.combat.SetCombat(sceneCombatOf(scene));
+    // The scene's director settings sit under the live auto_camera overrides; the next boundary re-evaluates.
+    this.cameraDirector.SetSceneBias(scene.autoCamera ?? null);
     if (restart) {
       this.hullStats.ForgetFailures();
       this.propMods.ForgetFailures();

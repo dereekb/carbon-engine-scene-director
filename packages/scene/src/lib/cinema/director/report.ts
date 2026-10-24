@@ -6,10 +6,11 @@
 
 import type { Maybe } from '@dereekb/util';
 import type { DirectorSide } from './axis';
-import { directorHold, type CameraDirectorSettings, type DirectorFollow, type DirectorPace, type DirectorScale } from './command';
+import { directorHold, type AutoCameraBiasKey, type CameraDirectorSettings, type DirectorFollow, type DirectorPace, type DirectorScale } from './command';
 import type { DirectorFramingName } from './framings';
 import type { DirectorEventRef } from './interest';
-import type { DirectorCandidateReport, DirectorPick } from './step';
+import type { DirectorCandidateReport, DirectorPick, DirectorRuledOut } from './step';
+import { roundShipSize } from './visibility';
 
 /**
  * off; waiting (on, until the scene settles or has something to frame); driving (its shot is on screen); paused (its
@@ -33,9 +34,22 @@ export interface DirectorBiasReport {
   readonly teams: Maybe<readonly [string, string]>;
   readonly pace: DirectorPace;
   readonly hold: { readonly min: number; readonly max: number };
+  readonly scales: Maybe<readonly DirectorScale[]>;
+  readonly framings: Maybe<readonly DirectorFramingName[]>;
+  readonly exclude: readonly DirectorFramingName[];
+  readonly minShipSize: number;
   readonly letterbox: Maybe<number | false>;
   readonly hud: Maybe<boolean>;
   readonly seed: Maybe<number>;
+  /**
+   * The keys the scene's `autoCamera` sets, and the keys the live overrides (calls and cues since the tab loaded) set.
+   */
+  readonly layers?: DirectorBiasLayers;
+}
+
+export interface DirectorBiasLayers {
+  readonly scene: readonly AutoCameraBiasKey[];
+  readonly live: readonly AutoCameraBiasKey[];
 }
 
 export interface DirectorPickReport {
@@ -49,6 +63,11 @@ export interface DirectorPickReport {
   readonly since: number;
   readonly holdsFor: number;
   readonly score: number;
+  /**
+   * Its ship size when picked (a share of the frame height, 3 significant figures), and the fill it was tightened to.
+   */
+  readonly size: number;
+  readonly fill?: number;
   readonly why: string;
   readonly event?: DirectorEventRef;
   readonly transition: 'cut' | 'blend';
@@ -66,11 +85,30 @@ export interface CameraDirectorReport {
   readonly cuts: number;
   readonly recent: readonly { readonly at: number; readonly framing: DirectorFramingName; readonly subject: string; readonly scale: DirectorScale; readonly why: string }[];
   readonly cost: { readonly lastMs: number; readonly maxMs: number };
+  /**
+   * What the rules kept out at the last step; omitted when nothing.
+   */
+  readonly ruledOut?: DirectorRuledOut;
   readonly note?: string;
 }
 
-export function toDirectorBiasReport(settings: CameraDirectorSettings): DirectorBiasReport {
-  return { follow: settings.follow, favour: settings.favour, sun: settings.sun, teams: settings.teams, pace: settings.pace, hold: directorHold(settings), letterbox: settings.letterbox, hud: settings.hud, seed: settings.seed };
+export function toDirectorBiasReport(settings: CameraDirectorSettings, layers?: DirectorBiasLayers): DirectorBiasReport {
+  return {
+    follow: settings.follow,
+    favour: settings.favour,
+    sun: settings.sun,
+    teams: settings.teams,
+    pace: settings.pace,
+    hold: directorHold(settings),
+    scales: settings.scales,
+    framings: settings.framings,
+    exclude: settings.exclude,
+    minShipSize: settings.minShipSize,
+    letterbox: settings.letterbox,
+    hud: settings.hud,
+    seed: settings.seed,
+    ...(layers ? { layers } : {})
+  };
 }
 
 /**
@@ -90,6 +128,8 @@ export function describeDirectorPick(pick: DirectorPick, time: number): Director
     since: Math.round(since * 10) / 10,
     holdsFor: Math.max(0, Math.round((pick.max - since) * 10) / 10),
     score: pick.score,
+    size: roundShipSize(pick.size),
+    ...(pick.fill == null ? {} : { fill: pick.fill }),
     why: pick.why,
     ...(pick.event ? { event: pick.event } : {}),
     transition: pick.transition

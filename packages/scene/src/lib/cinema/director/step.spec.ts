@@ -5,7 +5,7 @@ import { cutsOf, directorFleet, directorPicture, directorShip, runDirector, twoF
 import type { CameraDirectorEvent } from './events';
 import type { CameraDirectorPicture, DirectorShip } from './picture';
 import { toDirectorScene } from './picture';
-import { emptyCameraDirectorMemory, eyeInsideLandmark, recordDirectorCut, stepCameraDirector, type CameraDirectorMemory, type DirectorPick } from './step';
+import { emptyCameraDirectorMemory, eyeInsideLandmark, recordDirectorCut, stepCameraDirector, type CameraDirectorMemory, type CameraDirectorMode, type DirectorPick } from './step';
 
 function calm(tick: number) {
   const { ships, fleets } = twoFleets();
@@ -205,5 +205,136 @@ describe('camera director step', () => {
       return performance.now() - started;
     });
     expect(Math.min(...times)).toBeLessThan(20);
+  });
+});
+
+/**
+ * A spread fight like the user's TFIs one: two 8-ship fleets 30 km apart, each with a 3-ship rear squad 25 km behind,
+ * 100 m hulls (stand-ins), the main bodies firing.
+ */
+function spreadFight(tick: number, firing = true): { picture: CameraDirectorPicture } {
+  const ships: DirectorShip[] = [];
+  const fleets = [];
+  for (const [team, enemy, z, rear, facing] of [
+    ['blue', 'red', 0, -25000, 1],
+    ['red', 'blue', 30000, 55000, -1]
+  ] as const) {
+    for (let i = 0; i < 8; i += 1) ships.push(directorShip(`${team}-${i}`, [(i - 4) * 800, 0, z], { team, radius: 100, forward: [0, 0, facing], ...(firing ? { dealt: 100, target: `${enemy}-0` } : {}) }));
+    for (let i = 0; i < 3; i += 1) ships.push(directorShip(`${team}-rear-${i}`, [(i - 1) * 800, 0, rear], { team, radius: 100, forward: [0, 0, facing] }));
+    const fleet = directorFleet(team, `${team}-0`, []);
+    fleets.push({
+      ...fleet,
+      wings: [
+        {
+          id: `${team}-w`,
+          squads: [
+            { id: `${team}-main`, role: 'dps', members: Array.from({ length: 7 }, (_, i) => `${team}-${i + 1}`) },
+            { id: `${team}-rear`, role: 'logi', members: [0, 1, 2].map((i) => `${team}-rear-${i}`) }
+          ]
+        }
+      ]
+    } as typeof fleet);
+  }
+  return { picture: directorPicture(tick, ships, fleets) };
+}
+
+/**
+ * Two fleets that go quiet → firing at tick 1 (a watched engage), flying so chase and the flyby apply.
+ */
+function opening(tick: number): { picture: CameraDirectorPicture } {
+  const { ships, fleets } = twoFleets(tick >= 1 ? { blue: { dealt: 100, target: 'red-1', velocity: [0, 0, 300] }, red: { dealt: 100, target: 'blue-1', velocity: [0, 0, -300] } } : { blue: { velocity: [0, 0, 300] }, red: { velocity: [0, 0, -300] } });
+  return { picture: directorPicture(tick, ships, fleets) };
+}
+
+describe('camera director shot rules and the visibility floor', () => {
+  it('never cuts to an excluded framing, where it would otherwise', () => {
+    // Watched quiet at 0, then the fleets open fire as the director takes the camera at 1: the pull-out is the pick.
+    const mode = (tick: number): CameraDirectorMode => (tick === 0 ? 'watch' : tick === 1 ? 'take' : 'drive');
+    const open = runDirector(2, opening, { settings: { minShipSize: 0 }, mode });
+    expect(open.results[1].cut?.framing).toBe('overlook-pull-out');
+    const ruled = cutsOf(runDirector(30, opening, { settings: { minShipSize: 0, exclude: ['overlook-pull-out'] }, mode: (tick) => (tick === 0 ? 'watch' : tick === 1 ? 'take' : 'drive') }));
+    expect(ruled.length).toBeGreaterThan(2);
+    expect(ruled.some((cut) => cut.framing === 'overlook-pull-out')).toBe(false);
+  });
+
+  it('keeps to the allowed scales and framings', () => {
+    const scaled = cutsOf(runDirector(90, calm, { settings: { scales: ['medium', 'close'] } }));
+    expect(scaled.length).toBeGreaterThan(5);
+    expect(scaled.some((cut) => cut.scale === 'wide')).toBe(false);
+    const framed = cutsOf(runDirector(60, opening, { settings: { framings: ['hero', 'chase'] } }));
+    expect(framed.length).toBeGreaterThan(3);
+    expect(new Set(framed.map((cut) => cut.framing))).toEqual(new Set(['hero', 'chase']));
+  });
+
+  it('skips the wides of a spread fight under the floor, and does not open on one', () => {
+    const run = runDirector(30, spreadFight);
+    const cuts = run.results.flatMap((result) => (result.cut ? [result.cut] : []));
+    expect(cuts.length).toBeGreaterThan(2);
+    expect(['overlook', 'overlook-pull-out', 'into-sun', 'battle-fly-through']).not.toContain(cuts[0].framing);
+    for (const cut of cuts) expect(cut.size).toBeGreaterThanOrEqual(DEFAULT_CAMERA_DIRECTOR_SETTINGS.minShipSize);
+    expect(run.results[0].ruledOut?.size).toBeGreaterThan(0);
+    // The probe as a regression: the stand-in overlook over this fight measures under the floor.
+    const loose = runDirector(1, spreadFight, { settings: { minShipSize: 0, framings: ['overlook'] } });
+    expect(loose.results[0].cut?.size).toBeLessThan(DEFAULT_CAMERA_DIRECTOR_SETTINGS.minShipSize);
+  });
+
+  it('tightens a near-floor engagement wide with a raised fill', () => {
+    const natural = runDirector(1, calm, { settings: { minShipSize: 0, framings: ['overlook'] } }).results[0].cut;
+    expect(natural?.fill).toBeUndefined();
+    const floor = (natural?.size ?? 0) * 1.3;
+    const tightened = runDirector(1, calm, { settings: { minShipSize: floor, framings: ['overlook'] } }).results[0].cut;
+    expect(tightened?.framing).toBe('overlook');
+    expect(tightened?.fill).toBeGreaterThan(0.9);
+    expect(tightened?.size).toBeGreaterThanOrEqual(floor);
+    expect(tightened?.shot['hardpoint']).toMatchObject({ fill: tightened?.fill });
+    expect(tightened?.why).toMatch(/tightened to fill/);
+  });
+
+  it('cuts at the next boundary when the rules rule out the shot on screen', () => {
+    const run = runDirector(1, calm);
+    const framing = run.memory.current?.framing;
+    const next = runDirector(1, calm, { from: 1, memory: run.memory, settings: { exclude: [framing as 'overlook'] } });
+    expect(next.results[0].cut?.framing).not.toBe(framing);
+    expect(next.results[0].cut?.why).toContain(`auto_camera rules out ${framing} now`);
+  });
+
+  it('cuts a held group wide once its ships shrink under 0.8 × the floor', () => {
+    const settings = { framings: ['flank', 'hero'] as const, favour: 'wide' as const };
+    const run = runDirector(1, calm, { settings: { ...settings, framings: [...settings.framings] } });
+    expect(run.memory.current).toMatchObject({ framing: 'flank', scale: 'wide', label: 'fleet red' });
+    const spread = (tick: number) => {
+      const { ships, fleets } = twoFleets();
+      return {
+        picture: directorPicture(
+          tick,
+          ships.map((ship) => ({ ...ship, position: [ship.position[0] * 200, 0, ship.position[2]] as SceneVector })),
+          fleets
+        )
+      };
+    };
+    const next = runDirector(1, spread, { from: 1, memory: run.memory, settings: { ...settings, framings: [...settings.framings] } });
+    expect(next.results[0].cut?.why).toMatch(/flank on fleet red shrank to [\d.]+ % \(floor 0\.5 %\)/);
+  });
+
+  it('opens on the favoured scale on a firing fight, and takes back with the best', () => {
+    const medium = runDirector(1, (tick) => opening(tick + 5), { settings: { favour: 'medium' } }).results[0].cut;
+    expect(medium?.scale).toBe('medium');
+    expect(medium?.why).toContain('first pick (favour medium)');
+    const run = runDirector(20, calm);
+    const back = runDirector(1, calm, { from: 20, memory: run.memory, mode: () => 'take' }).results[0].cut;
+    expect(back?.why).toMatch(/taking back/);
+  });
+
+  it("does not read a fight in progress as opening fire: the user's TFIs scenario", () => {
+    const run = runDirector(12, (tick) => spreadFight(tick + 60));
+    const cuts = cutsOf(run);
+    expect(cuts.some((cut) => cut.framing === 'overlook-pull-out')).toBe(false);
+    expect(run.memory.interest.some((entry) => entry.kind === 'engage')).toBe(false);
+    expect(run.results[0].cut?.why).not.toMatch(/open fire/);
+  });
+
+  it('waits with a note when the rules leave nothing to frame', () => {
+    expect(runDirector(1, calm, { settings: { framings: ['warp-in'] } }).results[0].note).toMatch(/^nothing the rules allow resolves on the scene \(ruled out \d+ by framing\)$/);
+    expect(runDirector(1, calm, { settings: { framings: ['overlook'], scales: ['close'] } }).results[0].note).toBe('the rules leave no framing to pick (framings overlook; scales close)');
   });
 });

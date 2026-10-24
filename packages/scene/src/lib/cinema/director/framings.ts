@@ -10,6 +10,7 @@
 import type { Maybe } from '@dereekb/util';
 import type { JsonObject } from '../../json';
 import type { HardpointRef } from '../hardpoints';
+import { MAX_HARDPOINT_FILL } from '../shot';
 import type { DirectorScale } from './command';
 import type { DirectorGroupSubject, DirectorSubject, DirectorSubjectKind } from './interest';
 
@@ -108,6 +109,24 @@ export function framingScale(row: DirectorFramingRow, subject: DirectorSubject):
   return scale;
 }
 
+/**
+ * The scales a framing can take: its own, or wide and medium for a group row (by its subject).
+ */
+export function framingScales(row: DirectorFramingRow): readonly DirectorScale[] {
+  return row.scale === 'group' ? ['wide', 'medium'] : [row.scale];
+}
+
+/**
+ * The fill a framing's hardpoint frames at unless told otherwise (its hardpoint row's): the engagement rows', the group
+ * rows' 0.85; null for the rest.
+ */
+export function framingDefaultFill(row: DirectorFramingRow): Maybe<number> {
+  let fill: Maybe<number> = null;
+  if (row.subject === 'engagement') fill = ENGAGEMENT_FILLS[row.name] ?? 0.9;
+  else if (row.subject === 'group' && row.name !== 'warp-in') fill = GROUP_FILL;
+  return fill;
+}
+
 export interface DirectorFramingOptions {
   /**
    * Seconds; omitted holds.
@@ -149,6 +168,11 @@ export interface DirectorFramingShot {
  * The engagement framings' default fills (their hardpoints' rows), scaled by the core factor.
  */
 const ENGAGEMENT_FILLS: Readonly<Record<string, number>> = { overlook: 0.9, 'overlook-pull-out': 1.15, 'into-sun': 0.75, 'into-celestial': 0.75, 'battle-fly-through': 0.9 };
+
+/**
+ * The group hardpoints' fill (behind-fc, flank, top-down, leading-edge).
+ */
+const GROUP_FILL = 0.85;
 
 function groupKeys(subject: DirectorGroupSubject): JsonObject {
   let keys: JsonObject;
@@ -203,8 +227,7 @@ export function toFramingShot(row: DirectorFramingRow, subject: DirectorSubject,
   } else if (subject.kind === 'engagement' && row.subject === 'engagement') {
     const teams = options.teams ? { teams: [...options.teams] } : {};
     const teamsRef = options.teams ? { teams: options.teams } : {};
-    // A hardpoint's fill tops out at 1.5 (shot.ts).
-    const fill = Math.min(1.5, Math.round((ENGAGEMENT_FILLS[row.name] ?? 0.9) * (options.coreFactor ?? 1) * 100) / 100);
+    const fill = Math.min(MAX_HARDPOINT_FILL, Math.round((ENGAGEMENT_FILLS[row.name] ?? 0.9) * (options.coreFactor ?? 1) * 100) / 100);
     const fillKey = (options.coreFactor ?? 1) > 1 ? { fill } : {};
     if (row.name === 'overlook') built = explicit({ name: 'overlook', ...teamsRef, ...(side ? { side } : {}), ...fillKey });
     else if (row.name === 'into-celestial') {

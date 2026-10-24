@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { DEFAULT_CAMERA_DIRECTOR_SETTINGS, type CameraDirectorSettings } from './command';
 import { directorPicture, directorShip, twoFleets } from './director.spec-helper';
 import type { CameraDirectorEvent } from './events';
-import { decayedInterest, EMPTY_DIRECTOR_INTEREST, ENGAGE_QUIET_SECONDS, stepDirectorInterest, type DirectorInterestMemory, type ScoredDirectorSubject } from './interest';
+import { decayedInterest, EMPTY_DIRECTOR_INTEREST, ENGAGE_QUIET_SECONDS, ENGAGE_WATCH_SECONDS, stepDirectorInterest, type DirectorInterestMemory, type ScoredDirectorSubject } from './interest';
 import type { CameraDirectorPicture } from './picture';
 
 function step(picture: CameraDirectorPicture, events: CameraDirectorEvent[] = [], memory: DirectorInterestMemory = EMPTY_DIRECTOR_INTEREST, settings: Partial<CameraDirectorSettings> = {}) {
@@ -61,8 +61,25 @@ describe('camera director interest', () => {
     expect(first?.time).toBe(1);
     result = step(directorPicture(2, firing.ships, firing.fleets), [], result.memory);
     expect(result.memory.interest.find((entry) => entry.kind === 'engage' && entry.subject === 'engagement')?.time).toBe(1);
+    // The quiet spell, watched boundary by boundary.
+    for (let tick = 3; tick < 3 + ENGAGE_QUIET_SECONDS; tick += 1) result = step(directorPicture(tick, quiet.ships, quiet.fleets), [], result.memory);
     result = step(directorPicture(3 + ENGAGE_QUIET_SECONDS, firing.ships, firing.fleets), [], result.memory);
     expect(result.memory.interest.find((entry) => entry.kind === 'engage' && entry.subject === 'engagement')?.time).toBe(3 + ENGAGE_QUIET_SECONDS);
+    expect(engages(result.memory)).toBe(1);
+  });
+
+  it('records a fight already in progress as firing, not as an engage: on a fresh memory or after a gap', () => {
+    const quiet = twoFleets();
+    const firing = twoFleets({ blue: { dealt: 100, target: 'red-1' } });
+    const engages = (memory: DirectorInterestMemory): number => memory.interest.filter((entry) => entry.kind === 'engage').length;
+    let result = step(directorPicture(40, firing.ships, firing.fleets));
+    expect(engages(result.memory)).toBe(0);
+    expect(result.memory.firing['blue|red']).toBe(40);
+    expect(result.memory.observed).toBe(40);
+    // A boundary watched, then a gap past ENGAGE_WATCH_SECONDS (the director was off) before the fire.
+    result = step(directorPicture(0, quiet.ships, quiet.fleets));
+    result = step(directorPicture(1 + ENGAGE_WATCH_SECONDS, firing.ships, firing.fleets), [], result.memory);
+    expect(engages(result.memory)).toBe(0);
   });
 
   it('fires a head-on pass once per pair, never for parallel flight', () => {

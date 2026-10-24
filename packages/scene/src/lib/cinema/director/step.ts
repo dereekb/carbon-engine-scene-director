@@ -8,27 +8,37 @@
  * Cut rules, h the seconds held, the live score the current framing's score now with no variety penalty on itself ×
  * continuity (1.25 at min falling to 0.75 at max):
  *
- * 1. The current shot is invalid (its subject gone, removed in under 2 s, or unresolvable): cut now.
+ * 1. The current shot is invalid (its subject gone, removed in under 2 s, or unresolvable; ruled out by auto_camera's
+ *    rules; or shrunk under SIZE_KEEP_FACTOR × the size floor): cut now.
  * 2. A kill of the current subject: blend 1 s to its kill framing (unless already on it) and hold KILL_HOLD more.
  * 3. h < min: keep, unless the best is urgent (event interest ≥ URGENT_INTEREST), h ≥ URGENT_MIN_HOLD and another subject.
  * 4. h ≥ max (warp-in: 2 × max, and 3 s past the landing): cut to the best other candidate.
  * 5. Otherwise cut when the best beats the live score × CUT_RATIO.
+ *
+ * The shot rules are hard: a candidate outside `scales` or `framings`, or in `exclude`, is never scored, and one whose
+ * ships fall under `minShipSize` is tightened (group and engagement framings raise their fill) or skipped.
+ *
+ * With nothing on screen the opening pick (no cut since a load or a jump) goes urgent → the favoured scale's best →
+ * establishing when calm → the best wide → the best; a take-back (on again, after a yield or a lost shot) urgent, else
+ * the best.
  */
 
 import type { Maybe } from '@dereekb/util';
 import type { JsonObject } from '../../json';
 import { fleetTraitUnit } from '../../personalities/traits';
 import type { SceneVector } from '../../scene';
-import { resolveHardpoint, WARP_LANDING_CORE_SPREAD, type HardpointRef } from '../hardpoints';
+import { resolveHardpoint, WARP_LANDING_CORE_SPREAD, type HardpointRef, type ResolvedHardpoint } from '../hardpoints';
 import type { CameraPose } from '../pose';
+import { MAX_HARDPOINT_FILL } from '../shot';
 import { engagementFrame, type CinemaScene } from '../subjects';
 import { distanceVec, dotVec, normalizeVec, subVec, WORLD_UP } from '../vectors';
 import { axisResets, directorAxis, flybyViewSide, leanOf, sideName, viewSideOf, type DirectorAxis, type DirectorSide, type DirectorSideMemory } from './axis';
-import { DIRECTOR_SCALES, directorHold, type CameraDirectorSettings, type DirectorScale } from './command';
+import { DIRECTOR_SCALES, directorFramingAllowed, directorHold, directorRulesProblem, type CameraDirectorSettings, type DirectorScale } from './command';
 import { compareDirectorKeys, sortDirectorEvents, type CameraDirectorEvent } from './events';
-import { DIRECTOR_FRAMING_ROWS, DIRECTOR_FRAMINGS, framingScale, toFramingShot, type DirectorFramingName, type DirectorFramingRow } from './framings';
+import { DIRECTOR_FRAMING_ROWS, DIRECTOR_FRAMINGS, framingDefaultFill, framingScale, toFramingShot, type DirectorFramingName, type DirectorFramingRow } from './framings';
 import { EMPTY_DIRECTOR_INTEREST, stepDirectorInterest, subjectLabel, type DirectorEventRef, type DirectorInterestMemory, type DirectorPictureFacts, type DirectorSubject, type ScoredDirectorSubject } from './interest';
 import { toDirectorScene, type CameraDirectorPicture } from './picture';
+import { framedShipSize, roundShipSize, shipSizeText, SIZE_KEEP_FACTOR, TIGHTEN_MARGIN, TIGHTEN_TRIES } from './visibility';
 
 export const CUT_RATIO = 1.4;
 export const URGENT_INTEREST = 8;
@@ -101,6 +111,11 @@ export interface DirectorPick {
    */
   readonly landing?: number;
   readonly score: number;
+  /**
+   * Its ship size when picked (visibility.ts), and the fill it was tightened to, if it was.
+   */
+  readonly size: number;
+  readonly fill?: number;
   readonly why: string;
   readonly event?: DirectorEventRef;
   readonly transition: 'cut' | 'blend';
@@ -136,6 +151,10 @@ export interface DirectorCutLogEntry {
    * No side was kept before the cut (the first cut, no axis, or the axis turned past AXIS_RESET_DEGREES).
    */
   readonly free?: true;
+  /**
+   * Its ship size, a share of the frame height (3 significant figures).
+   */
+  readonly size: number;
   readonly why: string;
 }
 
@@ -197,6 +216,11 @@ export interface DirectorCandidate {
   readonly notes: readonly string[];
   readonly hardpoint: HardpointRef;
   readonly pose: CameraPose;
+  /**
+   * Its ship size (visibility.ts), and the fill tightening raised it to.
+   */
+  readonly size: number;
+  readonly fill?: number;
 }
 
 export interface DirectorCandidateReport {
@@ -206,7 +230,17 @@ export interface DirectorCandidateReport {
   readonly scale: DirectorScale;
   readonly side: DirectorSide;
   readonly score: number;
+  readonly size: number;
   readonly why: string;
+}
+
+/**
+ * Candidates the rules kept out this step: outside `framings` or in `exclude`, outside `scales`, under the size floor.
+ */
+export interface DirectorRuledOut {
+  readonly framings: number;
+  readonly scales: number;
+  readonly size: number;
 }
 
 export interface CameraDirectorStepResult {
@@ -224,6 +258,10 @@ export interface CameraDirectorStepResult {
    */
   readonly candidates: readonly DirectorCandidateReport[];
   readonly axis: Maybe<DirectorAxis>;
+  /**
+   * What the rules kept out; omitted when nothing.
+   */
+  readonly ruledOut?: DirectorRuledOut;
   readonly note?: string;
 }
 
@@ -244,7 +282,9 @@ export function stepCameraDirector(input: CameraDirectorStepInput): CameraDirect
   const previous = input.memory ?? emptyCameraDirectorMemory(time);
   const events = sortDirectorEvents(input.events ?? []);
   const current = mode === 'drive' ? previous.current : null;
-  const interest = stepDirectorInterest({ picture, events, settings, memory: previous, first: mode === 'take' || (mode === 'drive' && !previous.current), lastLandmark: previous.lastLandmark, keep: current ? [current.subject.key] : [] });
+  // The opening: no cut since a load or a jump cleared the memory. Any later pick with nothing on screen is a take-back.
+  const opening = previous.cuts === 0;
+  const interest = stepDirectorInterest({ picture, events, settings, memory: previous, first: opening && (mode === 'take' || (mode === 'drive' && !previous.current)), lastLandmark: previous.lastLandmark, keep: current ? [current.subject.key] : [] });
   let memory: CameraDirectorMemory = { ...previous, ...interest.memory };
   const facts = interest.facts;
   const axis = directorAxis(picture, facts);
@@ -253,7 +293,7 @@ export function stepCameraDirector(input: CameraDirectorStepInput): CameraDirect
   const scene = toDirectorScene(picture);
   const names = new Map(picture.ships.map((ship) => [ship.id, ship.name ?? ship.id]));
   const label = (id: string): string => names.get(id) ?? id;
-  const candidates = buildCandidates({ picture, settings, seed, memory, facts, axis, scene, subjects: interest.subjects, label });
+  const { candidates, ruledOut } = buildCandidates({ picture, settings, seed, memory, facts, axis, scene, subjects: interest.subjects, label });
   const reports = candidates.slice(0, 3).map((candidate) => candidateReport(candidate, label));
   const hold = directorHold(settings);
   let cut: Maybe<DirectorPick> = null;
@@ -265,24 +305,35 @@ export function stepCameraDirector(input: CameraDirectorStepInput): CameraDirect
     cut = toPick({ candidate, reason, current, time, tick: picture.tick, hold, settings, memory, facts, label, overrides });
     pick = cut;
   };
-  if (!candidates.length) note = facts.landed.length || picture.arrivals?.length ? 'no framing resolves on the scene' : 'nothing to frame: the scene has no ships';
-  else if (!current) {
+  const ruled = ruledOut.framings + ruledOut.scales + ruledOut.size;
+  if (!candidates.length) {
+    const rules = directorRulesProblem(settings);
+    if (rules) note = rules.replace(/^auto_camera: /, '');
+    else if (ruled) note = `nothing the rules allow resolves on the scene (${ruledOutText(ruledOut)})`;
+    else note = facts.landed.length || picture.arrivals?.length ? 'no framing resolves on the scene' : 'nothing to frame: the scene has no ships';
+  } else if (!current) {
     const urgent = best.scored.events >= URGENT_INTEREST ? best : null;
-    const establishing = !facts.firing ? candidates.find((candidate) => candidate.row.name === 'establishing') : null;
-    const wide = candidates.find((candidate) => candidate.scale === 'wide');
-    if (urgent) choose(urgent, 'first pick (urgent)');
-    else if (establishing) choose(establishing, 'first pick: setting the scene');
-    else choose(wide ?? best, 'first pick');
+    if (urgent) choose(urgent, opening ? 'first pick (urgent)' : 'taking back (urgent)');
+    else if (!opening) choose(best, 'taking back');
+    else {
+      const favoured = settings.favour ? candidates.find((candidate) => candidate.scale === settings.favour) : null;
+      const establishing = !facts.firing ? candidates.find((candidate) => candidate.row.name === 'establishing') : null;
+      const wide = candidates.find((candidate) => candidate.scale === 'wide');
+      if (favoured) choose(favoured, `first pick (favour ${settings.favour})`);
+      else if (establishing) choose(establishing, 'first pick: setting the scene');
+      else choose(wide ?? best, 'first pick');
+    }
   } else {
     const held = time - current.since;
-    const live = liveScore(current, { scene, facts, subjects: interest.subjects, settings, held, picture });
+    const judged = liveScore(current, { scene, facts, subjects: interest.subjects, settings, held, picture });
+    const live = 'score' in judged ? judged.score : 0;
     const killed = events.some((event) => event.kind === 'kill' && (current.subject.kind === 'ship' ? current.subject.ship === event.ship : current.subject.kind === 'pair' && current.subject.target === event.ship));
     const victim = current.subject.kind === 'pair' ? current.subject.target : current.subject.kind === 'ship' ? current.subject.ship : null;
     const max = current.framing === 'warp-in' ? Math.max(2 * current.max, (current.landing ?? time) + WARP_IN_LANDED_HOLD - current.since) : current.max;
     // An urgent subject (a kill, an arrival about to land) takes the camera after URGENT_MIN_HOLD, the hold or not; never
     // from a kill framing inside its hold (the blast stays on screen).
     const urgent = best.scored.events >= URGENT_INTEREST && held >= URGENT_MIN_HOLD && best.scored.subject.key !== current.subject.key && !(current.framing === 'kill' && held < current.min);
-    if (live == null) choose(best, `the last shot (${current.framing} ${current.label}) lost its subject`);
+    if ('invalid' in judged) choose(best, judged.invalid);
     else if (killed && current.framing !== 'kill') {
       const kill = candidates.find((candidate) => candidate.row.name === 'kill' && candidate.scored.subject.kind === 'ship' && candidate.scored.subject.ship === victim);
       if (kill) choose(kill, 'blending to the kill', { transition: 'blend', blend: KILL_BLEND_SECONDS, min: KILL_HOLD });
@@ -299,7 +350,12 @@ export function stepCameraDirector(input: CameraDirectorStepInput): CameraDirect
     }
   }
   memory = cut ? recordDirectorCut(memory, cut, axis, time, picture.tick) : { ...memory, current: pick };
-  return { memory, cut, pick, candidates: reports, axis, ...(note ? { note } : {}) };
+  return { memory, cut, pick, candidates: reports, axis, ...(ruled ? { ruledOut } : {}), ...(note ? { note } : {}) };
+}
+
+function ruledOutText(ruledOut: DirectorRuledOut): string {
+  const parts = [...(ruledOut.framings ? [`${ruledOut.framings} by framing`] : []), ...(ruledOut.scales ? [`${ruledOut.scales} by scale`] : []), ...(ruledOut.size ? [`${ruledOut.size} under the size floor`] : [])];
+  return `ruled out ${parts.join(', ')}`;
 }
 
 interface CandidateContext {
@@ -387,8 +443,46 @@ function scaleWeight(scale: DirectorScale, favour: Maybe<DirectorScale>): number
   return weight;
 }
 
-function buildCandidates(context: CandidateContext): DirectorCandidate[] {
+/**
+ * A framing that may raise its fill to reach the size floor: group framings but warp-in, engagement framings but the
+ * fly-through (its path ignores fill).
+ */
+function tightenable(row: DirectorFramingRow): boolean {
+  return (row.subject === 'group' && row.name !== 'warp-in') || (row.subject === 'engagement' && row.name !== 'battle-fly-through');
+}
+
+interface Tightened {
+  readonly hardpoint: HardpointRef;
+  readonly resolved: ResolvedHardpoint;
+  readonly pose: CameraPose;
+  readonly size: number;
+  readonly fill: number;
+}
+
+/**
+ * A candidate under the size floor re-resolved with a raised fill (fill × floor ÷ size × TIGHTEN_MARGIN, at most
+ * MAX_HARDPOINT_FILL, TIGHTEN_TRIES times); null when it cannot reach the floor.
+ */
+function tighten(row: DirectorFramingRow, hardpoint: HardpointRef, size: number, floor: number, scene: CinemaScene, measure: (resolved: ResolvedHardpoint, pose: CameraPose) => number): Maybe<Tightened> {
+  let fill = hardpoint.fill ?? framingDefaultFill(row);
+  let measured = size;
+  let result: Maybe<Tightened> = null;
+  for (let attempt = 0; tightenable(row) && fill != null && !result && attempt < TIGHTEN_TRIES && fill < MAX_HARDPOINT_FILL; attempt++) {
+    fill = Math.min(MAX_HARDPOINT_FILL, Math.ceil(fill * (floor / Math.max(measured, 1e-9)) * TIGHTEN_MARGIN * 100) / 100);
+    const ref: HardpointRef = { ...hardpoint, fill };
+    const resolved = resolveHardpoint(ref, scene);
+    const pose = resolved.pose;
+    if (!pose || eyeInsideLandmark(pose.eye, scene)) break;
+    measured = measure(resolved, pose);
+    if (measured >= floor) result = { hardpoint: ref, resolved, pose, size: measured, fill };
+  }
+  return result;
+}
+
+function buildCandidates(context: CandidateContext): { readonly candidates: DirectorCandidate[]; readonly ruledOut: DirectorRuledOut } {
   const { settings, seed, memory, axis, scene, subjects, picture, facts } = context;
+  const floor = settings.minShipSize;
+  const ruledOut = { framings: 0, scales: 0, size: 0 };
   const landmark = subjects.find((entry) => entry.subject.kind === 'landmark')?.subject;
   const coreFactor = engagementCoreFactor(scene, facts.teams);
   const recent = memory.recent;
@@ -399,6 +493,14 @@ function buildCandidates(context: CandidateContext): DirectorCandidate[] {
     for (const row of DIRECTOR_FRAMINGS) {
       if (row.subject !== scored.subject.kind || !applies(row, scored, context, Boolean(landmark))) continue;
       const scale = framingScale(row, scored.subject);
+      if (!directorFramingAllowed(row.name, settings)) {
+        ruledOut.framings += 1;
+        continue;
+      }
+      if (settings.scales && !settings.scales.includes(scale)) {
+        ruledOut.scales += 1;
+        continue;
+      }
       for (const variant of row.variants ?? [undefined]) {
         const radius = scored.subject.kind === 'ship' ? (facts.ships.get(scored.subject.ship)?.ship.radius ?? 0) : 0;
         const framed = toFramingShot(row, scored.subject, variant, {
@@ -409,10 +511,23 @@ function buildCandidates(context: CandidateContext): DirectorCandidate[] {
           ...(landmark?.kind === 'landmark' ? { landmark: { ...(landmark.object != null ? { object: landmark.object } : {}), ...(landmark.celestial != null ? { celestial: landmark.celestial } : {}) } } : {})
         });
         if (!framed) continue;
-        const resolved = resolveHardpoint(framed.hardpoint, scene);
-        const pose = resolved.pose;
+        let hardpoint = framed.hardpoint;
+        let resolved = resolveHardpoint(hardpoint, scene);
+        let pose = resolved.pose;
         if (!pose || eyeInsideLandmark(pose.eye, scene)) continue;
         const notes: string[] = [];
+        const measure = (judged: ResolvedHardpoint, judgedPose: CameraPose): number => framedShipSize({ scene, framing: row.name, subject: scored.subject, resolved: judged, pose: judgedPose, teams: facts.teams });
+        let size = measure(resolved, pose);
+        let fill: Maybe<number> = null;
+        if (floor > 0 && size < floor) {
+          const tightened = tighten(row, hardpoint, size, floor, scene, measure);
+          if (!tightened) {
+            ruledOut.size += 1;
+            continue;
+          }
+          ({ hardpoint, resolved, pose, size, fill } = tightened);
+          notes.push(`tightened to fill ${fill}`);
+        }
         let view: -1 | 0 | 1 = 0;
         let lean: -1 | 0 | 1 = 0;
         if (axis) {
@@ -449,12 +564,12 @@ function buildCandidates(context: CandidateContext): DirectorCandidate[] {
         const key = [row.name, scored.subject.key, ...(variant ? [variant] : [])].join('|');
         const jitter = 1 + 0.06 * (fleetTraitUnit(seed, `camera|${picture.tick}|${key}`) - 0.5);
         const plain = scored.interest * weight * scaleWeight(scale, settings.favour);
-        candidates.push({ key, row, ...(variant ? { variant } : {}), scored, scale, view, lean, crossing, score: plain * rhythm * variety * axisFactor * jitter, plain, notes, hardpoint: framed.hardpoint, pose });
+        candidates.push({ key, row, ...(variant ? { variant } : {}), scored, scale, view, lean, crossing, score: plain * rhythm * variety * axisFactor * jitter, plain, notes, hardpoint, pose, size, ...(fill == null ? {} : { fill }) });
       }
     }
   }
   sunward(candidates, picture.sunDirection);
-  return candidates.sort((a, b) => b.score - a.score || compareDirectorKeys(a.key, b.key));
+  return { candidates: candidates.sort((a, b) => b.score - a.score || compareDirectorKeys(a.key, b.key)), ruledOut };
 }
 
 /**
@@ -486,10 +601,11 @@ interface LiveContext {
 }
 
 /**
- * The current shot's live score: its framing's score now with no variety penalty on itself, × continuity; null when it
- * is invalid (its subject gone or about to be removed, its hardpoint unresolvable).
+ * The current shot's live score: its framing's score now with no variety penalty on itself, × continuity; or why it is
+ * invalid (its subject gone or about to be removed, its hardpoint unresolvable, ruled out by the rules, or shrunk under
+ * SIZE_KEEP_FACTOR × the size floor).
  */
-function liveScore(current: DirectorPick, context: LiveContext): Maybe<number> {
+function liveScore(current: DirectorPick, context: LiveContext): { readonly score: number } | { readonly invalid: string } {
   const { facts, settings, held } = context;
   const scored = context.subjects.find((entry) => entry.subject.key === current.subject.key);
   const ids = current.subject.kind === 'ship' ? [current.subject.ship] : current.subject.kind === 'pair' ? [current.subject.ship, current.subject.target] : [];
@@ -497,13 +613,20 @@ function liveScore(current: DirectorPick, context: LiveContext): Maybe<number> {
     const ship = facts.ships.get(id)?.ship;
     return !ship || (ship.destroyed != null && ship.destroyed.removesIn < REMOVAL_CUT_SECONDS);
   });
-  let live: Maybe<number> = null;
-  if (scored && !removing && resolveHardpoint(current.hardpoint, context.scene).pose) {
-    const row = DIRECTOR_FRAMING_ROWS.get(current.framing);
-    const weight = (row?.weight ?? 1) * (current.framing === 'into-sun' && settings.sun ? 2.5 : 1);
-    const span = Math.max(1e-6, current.max - current.min);
-    const continuity = 1.25 - 0.5 * Math.min(1, Math.max(0, (held - current.min) / span));
-    live = scored.interest * weight * scaleWeight(current.scale, settings.favour) * continuity;
+  const resolved = scored && !removing ? resolveHardpoint(current.hardpoint, context.scene) : null;
+  const floor = settings.minShipSize;
+  let live: { readonly score: number } | { readonly invalid: string } = { invalid: `the last shot (${current.framing} ${current.label}) lost its subject` };
+  if (scored && resolved?.pose) {
+    const size = floor > 0 ? framedShipSize({ scene: context.scene, framing: current.framing, subject: scored.subject, resolved, pose: resolved.pose, teams: facts.teams }) : Infinity;
+    if (!directorFramingAllowed(current.framing, settings) || (settings.scales && !settings.scales.includes(current.scale))) live = { invalid: `auto_camera rules out ${current.framing} now` };
+    else if (size < SIZE_KEEP_FACTOR * floor) live = { invalid: `${current.framing} on ${current.label} shrank to ${shipSizeText(size)} (floor ${shipSizeText(floor)})` };
+    else {
+      const row = DIRECTOR_FRAMING_ROWS.get(current.framing);
+      const weight = (row?.weight ?? 1) * (current.framing === 'into-sun' && settings.sun ? 2.5 : 1);
+      const span = Math.max(1e-6, current.max - current.min);
+      const continuity = 1.25 - 0.5 * Math.min(1, Math.max(0, (held - current.min) / span));
+      live = { score: scored.interest * weight * scaleWeight(current.scale, settings.favour) * continuity };
+    }
   }
   return live;
 }
@@ -577,6 +700,8 @@ function toPick(context: PickContext): DirectorPick {
     max,
     ...(arrival == null ? {} : { landing: arrival }),
     score: round(candidate.score, 3),
+    size: candidate.size,
+    ...(candidate.fill == null ? {} : { fill: candidate.fill }),
     why,
     ...(event ? { event } : {}),
     transition,
@@ -616,7 +741,7 @@ export function recordDirectorCut(memory: CameraDirectorMemory, cut: DirectorPic
   else if (DIRECTOR_FRAMING_ROWS.get(cut.framing)?.crossing) side = { value: view === 1 ? -1 : 1, forward: axis.forward, key: axis.key };
   else if (view !== 0) side = { value: view, forward: axis.forward, key: axis.key };
   const recent: DirectorRecentShot = { at: time, framing: cut.framing, subject: cut.subject.key, label: cut.label, scale: cut.scale, side: cut.side, why: cut.why };
-  const entry: DirectorCutLogEntry = { tick, at: round(time, 3), framing: cut.framing, subject: cut.label, scale: cut.scale, side: cut.side, ...(cut.crossing ? { crossing: true } : {}), ...(memory.side == null ? { free: true } : {}), why: cut.why };
+  const entry: DirectorCutLogEntry = { tick, at: round(time, 3), framing: cut.framing, subject: cut.label, scale: cut.scale, side: cut.side, ...(cut.crossing ? { crossing: true } : {}), ...(memory.side == null ? { free: true } : {}), size: roundShipSize(cut.size), why: cut.why };
   return {
     ...memory,
     side,
@@ -637,6 +762,7 @@ function candidateReport(candidate: DirectorCandidate, label: (id: string) => st
     scale: candidate.scale,
     side: sideName(candidate.view),
     score: round(candidate.score, 3),
+    size: roundShipSize(candidate.size),
     why: top?.why ?? subjectLabel(candidate.scored.subject, label)
   };
 }

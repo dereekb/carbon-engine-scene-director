@@ -106,6 +106,8 @@ events and plays the picks through the rig as driver `director`.
 | `director/axis.ts` | the axis (teams a→b in id order, else motion), `viewSideOf` (view direction, 20° neutral), `flybyViewSide`, `leanOf`, `axisResets` (60°) |
 | `director/step.ts` | `stepCameraDirector` (modes drive / take / watch), the cut rules, transitions, `recordDirectorCut`, `eyeInsideLandmark`, `engagementCoreFactor` |
 | `director/report.ts` | `CameraDirectorReport` (get_state `cinema.director`), `describeDirectorPick`, `cameraDirectorText` (HUD) |
+| `director/visibility.ts` | the size floor's measure: `framedShipSize`, `subjectShipRadius` (memoized lower median), `DIRECTOR_FRAMING_REACH`, `SIZE_KEEP_FACTOR`, `TIGHTEN_MARGIN` |
+| `director/document.ts` | the scene's `autoCamera`: `normalizeSceneAutoCamera`, `set_auto_camera` (`applyAutoCameraOperation`) |
 
 - **Hand-offs**: any `auto_camera` call turns it on (a live call picks at once; a cue picks at its boundary's step).
   Claude's and the timeline's shots take precedence: the rig's standby (`SetStandby`) holds their release-ending last
@@ -148,11 +150,76 @@ events and plays the picks through the rig as driver `director`.
   neutral shot before (×0.6), the fly-through's deliberate cross (which flips the kept side), or an axis that turned
   over 60° (`axisResets`). The cut log marks `crossing` and `free` (no kept side) cuts.
 - **Bias** (`auto_camera`): follow, favour (×1.8 on the scale, ×0.6 two away), sun (into-sun ×2.5), teams, pace, hold,
-  letterbox, hud, seed. Per key: a value sets, null resets, omitted keeps; it lasts until the tab reloads.
+  letterbox, hud, seed, and the shot rules below. Per key into the live layer: a value sets, null drops it (back to
+  the scene's `autoCamera`, else the default), omitted keeps; it lasts until the tab reloads.
+
+### Shot rules and the visibility floor
+
+- **Hard rules** (`auto_camera` keys, also in the scene's `autoCamera`): `scales` (allowed scales, a non-empty subset;
+  null all), `framings` (the only framings, by the 20 `DIRECTOR_FRAMING_NAMES`, not hardpoint or library names),
+  `exclude` (never; `[]` none), `minShipSize` (the floor). `buildCandidates` never scores a candidate that fails one,
+  so the opener, ratio, urgent and max-hold cuts and the kill blend all obey (a ruled-out `kill` holds the shot through
+  the blast). A group row can take wide or medium (`framingScales`). A call whose resolved rules leave no framing is
+  refused with the settings unchanged ("the rules leave no framing to pick (framings overlook; scales close)", only
+  when the call set a rule key); scene + live rules that leave nothing, or nothing allowed resolving now, make the
+  director wait with a note ("nothing the rules allow resolves on the scene (ruled out 38 by framing)").
+- **The measure** (`framedShipSize`): the lower median EVE radius of the subject's ships ÷ (eye distance ×
+  `viewHalfExtents(fov, DIRECTOR_ASPECT).halfHeight`): the typical hull's diameter over the frame height, on the
+  director's own scene, so every device and export fps picks alike. Ships: the ship; a pair's shooter; a group's
+  landed members (warp-in adds the arriving ones); an engagement or landmark the axis teams' landed ships, else all.
+  Eye distance to the resolved subject centre (a landmark: `sceneFocus`), times the reach
+  (`DIRECTOR_FRAMING_REACH`, derived from the library's built moves, pinned in `visibility.spec.ts`): the pull-out's
+  push ×2.2 multiplies; the fly-through's radii path is judged at its farthest point, 1.51 R; push-in, zoom and orbit
+  moves leave the base pose. Ship and pair framings measure about their fill (hero 0.59).
+- **`DEFAULT_MIN_SHIP_SIZE` 0.005** (0.5 % of the frame height: ~4 px of an 820 px iPad view, 5.4 px at 1080 p);
+  0 off, at most 0.25. Provisional: the real-page calibration (no-EVE and real hulls) may move it within 0.005–0.01.
+- **Tighten before skipping**: a group framing (not warp-in) or an engagement framing (not the fly-through) under the
+  floor is re-resolved at fill′ = min(`MAX_HARDPOINT_FILL` 1.5, fill × floor ÷ size × 1.05), at most twice, from its
+  own fill (the core factor's) else the row's (engagement fills, groups 0.85); kept if it reaches the floor (the shot
+  carries the fill, `pick.fill`, the why "tightened to fill 1.2"), else skipped. It crops stragglers out of the wide.
+- **The shot on screen** is invalid (cut rule 1, cut at the next boundary) when a call rules it out ("auto_camera rules
+  out overlook now") or its size falls under `SIZE_KEEP_FACTOR` 0.8 × the floor ("flank on fleet red shrank to 0.05 %
+  (floor 0.5 %)"); the margin keeps drift from cutting a shot picked just above the floor.
+- **Why size, not a camera distance**: a distance is not scale-free (a battleship reads at 20 km, a frigate does not;
+  stand-ins are 100 m, a TFI's EVE radius 250 m), and the size covers the lens.
+- **The offline probe** (planning, the package code, two TFIs fleets 30 km apart): typical hull as a share of the frame
+  height, stand-ins (100 m) / EVE radii: overlook 0.16 % / 0.37 %, the pull-out at its end 0.09 % / 0.21 %, into-sun
+  0.13 % / 0.31 %, group-top-down (fleet) 0.27 % / 0.62 %, flank 0.48 % / 1.08 %, behind-fc 0.60 % / 1.36 %,
+  leading-edge 1.32 % / 2.90 %. So the stand-in engagement wides are skipped; the EVE-radius overlook tightens to ~0.6 %.
+
+### The opening, coming back, and "open fire"
+
+- **Opening** (`memory.cuts === 0`: since a load, a jump's clear, or the first turn-on): urgent → the favoured scale's
+  best ("first pick (favour medium)") → `establishing` when calm → the best wide (now readable) → the best. Interest's
+  `first` (a landmark is worth an establishing shot) follows the opening only.
+- **Take-back** (`cuts > 0`: on again after D or `on: false`, after a yield to the user, Claude or the timeline, a
+  `Lost()` re-pick): urgent, else the best ("taking back"); no re-establishing wide.
+- **Engage needs a watched boundary**: `DirectorInterestMemory.observed` is the last interest step's scene seconds; an
+  engage fires only when time − observed ≤ `ENGAGE_WATCH_SECONDS` 2, otherwise the firing pair is recorded silently. A
+  fight already firing when the director starts or comes back is not "opening fire", so the pull-out's 10 s window
+  stays shut (the user's TFIs repro, 2026-10-24: every turn-on opened on `overlook-pull-out` wide). Watch mode
+  (yielded) keeps stepping interest, so a hand-back after a drag is covered.
+- **Memory across off and on**: turning the director on keeps its memory (recent shots, kept side, interest, cut log);
+  only a load (`Clear({ load })`) and a jump (`Clear({ keep: 'settings' })`) clear it.
+
+### Where the settings live
+
+- defaults ← the scene's **`autoCamera`** (`{ favour?, sun?, pace?, hold?, scales?, framings?, exclude?,
+  minShipSize?, letterbox?, hud?, seed? }`; `on`, `follow`, `teams` warned and dropped; edited with `patch_scene
+  set_auto_camera`, merged, null removes a key) ← the live overrides (calls and cues since the tab loaded).
+- On the page `CameraDirector.sceneBias` (set by `Director.ApplyNow` → `SetSceneBias` beside `SetCombat`; wiring, never
+  captured, so a jump keeps the document's block) and `liveBias` (captured); `Settings()` resolves them. An `autoCamera`
+  edit is not a `SimulationChange`: it keeps the time-control window. Saved with the scene, kept by the IndexedDB
+  working copy (a reload restores it) and used by an export (it restarts from the document; `ExportGuard` refuses
+  `auto_camera` and `patch_scene` mid-run).
+- To lift a scene rule for the session pass the open value (`scales` all three, `exclude: []`, `minShipSize: 0`);
+  `favour` has no open value, so only a scene edit clears a scene's favour.
 - **get_state `cinema.director`**: `on`, `state` (off / waiting / driving / paused / yielded), `yieldedTo`, `source`,
-  `bias`, `pick { framing, shot, scale, side, since, holdsFor, score, why, event?, transition }`, 3 `candidates`,
-  `axis`, `cuts`, 5 `recent`, `cost { lastMs, maxMs }`, `note`. auto_camera's result adds the 20-cut `log` (tick from
-  the load, at, framing, subject, scale, side, crossing?, free?, why); verify-page reads it off the page
+  `bias` (+ `scales`, `framings`, `exclude`, `minShipSize`, `layers { scene, live }`: the keys each layer sets),
+  `pick { framing, shot, scale, side, since, holdsFor, score, size, fill?, why, event?, transition }`, 3 `candidates`
+  (with `size`), `axis`, `cuts`, 5 `recent`, `cost { lastMs, maxMs }`, `ruledOut { framings, scales, size }` (the last
+  step's counts, omitted when zero), `note`. auto_camera's result adds the 20-cut `log` (tick from the load, at,
+  framing, subject, scale, side, crossing?, free?, size, why); verify-page reads it off the page
   (`director.cameraDirector.Log()`, ticks + `loadTick`) because any auto_camera call picks again.
 - **The cue**: `auto_camera` is a kind `camera` action; `timeline { camera: false }` skips it and turns a cue-sourced
   director off; removing the followed fleet or ship drops `follow` from the cue.
@@ -166,11 +233,12 @@ events and plays the picks through the rig as driver `director`.
 - **Cost**: `stepCameraDirector` on 500 ships ~4 ms in node (step.spec's 20 ms budget is the best of three); on the page
   ~2 ms per boundary (once a second) for 59 ships, including the picture.
 - **Limits**: a second kill inside a kill framing's hold is not cut to, and the next pick may skip its blast; wides of
-  a whole fleet frame its logi 30 km out (behind-fc and flank read as specks on the TFIs); one
+  a whole fleet frame its logi 30 km out (now tightened, cropping them, or skipped under the size floor; a core frame
+  would compose better); the floor covers the director's own picks only, not Claude's or the timeline's shots; one
   engagement only (the two biggest teams); kill fill by hull radius, not the explosion file's size; a station's eye
   guard is a sphere; holds run in scene time, so 4× fast-forward cuts about every second.
 
-### verify-page `--only director:` (eight checks, headless, real tools-core)
+### verify-page `--only director:` (ten checks, headless, real tools-core; `EveDataChecks` only, not the no-EVE suite)
 
 (a) fast pace on two stats-only fleets: driving within a boundary, 3–7 s gaps (7/7/7/7 seen), no framing + subject
 repeat, two scales in six cuts; (b) a Claude 2 s release-ending shot yields (claude) and hands back by the next boundary
@@ -179,7 +247,12 @@ vs 3 Rifters: each victim framed by its kill tick (a doomed p1 from a tick befor
 (a kill inside another kill's hold is excused, at least one framed);
 (d) the 180° rule over (a)'s and (c)'s logs; (e, SDE) a `warpIn` add_ships group: warp-in 5 s before its first
 landing; (f) a scripted scene (auto_camera cue at 1, engage at 2): equal cut logs across `timeline restart`; (g)
-movement-only: axis `motion`, three scales, one side; (h) camera off skips the cue, `on: false` gives driver `user`.
+movement-only: axis `motion`, three scales, one side; (h) camera off skips the cue, `on: false` gives driver `user`;
+(i) a spread fight (8 + 3 rear per side, rears 25 km back, engaged): the first cut not the pull-out, no "open fire",
+every cut's `size` ≥ the floor over 30 s, then `{ scales: [medium, close], exclude: [over-the-shoulder] }` keeps 20 s
+of cuts to them with `bias.layers.live` listing both; (j) `set_auto_camera { scales: [close], exclude: [flyby] }`
+survives `page.reload()` (`layers.scene`, close cuts, no flyby), a live `scales: [medium]` wins, and `scales: null`
+falls back to close.
 
 ## Across a time-control jump (`sd-time`)
 
@@ -476,7 +549,8 @@ brawler), an `auto_camera { follow: { fleet: 'tfis' } }` cue at 1 and 15 Caracal
   `motion` on the FC, wide / medium / close, one side, mostly FC framings.
 - fps: 15–20 mean in the fight (min 1–2 at the Caracals' warp-in builds); over the same 30–60 s window the director off
   (orbit on the FC) 11.9 and on 14.6, so its pick costs nothing visible; cost ~2 ms mean per boundary, max 6 ms.
-- Open: whole-fleet wides (behind-fc, flank) frame the TFIs' logi 30 km out and draw the hulls as specks.
+- Open: whole-fleet wides (behind-fc, flank) frame the TFIs' logi 30 km out and draw the hulls as specks (since the
+  shot rules, the size floor tightens or skips them: "Shot rules and the visibility floor").
 
 ### The MCP tools and the library (2026-10-22)
 

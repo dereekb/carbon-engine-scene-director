@@ -163,6 +163,52 @@ describe('CameraDirector', () => {
   });
 });
 
+describe('CameraDirector shot rules and layers', () => {
+  it("layers the live overrides over the scene's autoCamera: a live null falls back to the scene", () => {
+    const { director } = Setup();
+    director.SetSceneBias({ scales: ['close'], exclude: ['flyby'] });
+    let report = director.Command({}, { source: 'claude', ...AT(0) }).director;
+    expect(report.bias).toMatchObject({ scales: ['close'], exclude: ['flyby'], layers: { scene: ['scales', 'exclude'], live: [] } });
+    expect(report.pick?.scale).toBe('close');
+    report = director.Command({ scales: ['medium'] }, { source: 'claude', ...AT(1) }).director;
+    expect(report.bias).toMatchObject({ scales: ['medium'], layers: { scene: ['scales', 'exclude'], live: ['scales'] } });
+    report = director.Command({ scales: null }, { source: 'claude', ...AT(2) }).director;
+    expect(report.bias).toMatchObject({ scales: ['close'], layers: { live: [] } });
+    director.SetSceneBias(null);
+    expect(director.Settings()).toMatchObject({ scales: null, exclude: [] });
+  });
+
+  it('refuses rules that leave no framing, and keeps the settings', () => {
+    const { director } = Setup();
+    director.Command({ scales: ['close'] }, { source: 'claude', ...AT(0) });
+    expect(() => director.Command({ framings: ['overlook'] }, { source: 'claude', ...AT(1) })).toThrow('auto_camera: the rules leave no framing to pick (framings overlook; scales close)');
+    expect(director.Settings()).toMatchObject({ scales: ['close'], framings: null });
+  });
+
+  it('keeps its memory across off and on: D off then D on takes back, and the log continues', () => {
+    const { director } = Setup();
+    director.Command({ pace: 'fast' }, { source: 'claude', ...AT(0) });
+    for (let tick = 1; tick <= 10; tick += 1) director.Boundary(tick, tick, tick * 1e7);
+    const before = director.Log().length;
+    expect(director.Toggle(AT(11))).toMatchObject({ on: false });
+    const back = director.Toggle(AT(12));
+    expect(back).toMatchObject({ on: true, state: 'driving' });
+    expect(back.pick?.why).toMatch(/taking back/);
+    expect(director.Log().length).toBe(before + 1);
+  });
+
+  it("snapshots the live layer and keeps the scene's current one", () => {
+    const { director } = Setup();
+    director.SetSceneBias({ exclude: ['flyby'] });
+    director.Command({ scales: ['medium', 'close'] }, { source: 'claude', ...AT(0) });
+    const snapshot = director.Snapshot();
+    director.Command({ scales: null }, { source: 'claude', ...AT(1) });
+    director.SetSceneBias({ exclude: ['hero'] });
+    director.Restore(snapshot);
+    expect(director.Settings()).toMatchObject({ scales: ['medium', 'close'], exclude: ['hero'] });
+  });
+});
+
 describe('CameraDirector snapshots (sd-time)', () => {
   const Boundaries = (director: CameraDirector, from: number, to: number): void => {
     for (let tick = from; tick <= to; tick += 1) director.Boundary(tick, tick, tick * 1e7);

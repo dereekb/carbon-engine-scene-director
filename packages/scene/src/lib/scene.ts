@@ -13,6 +13,7 @@ import { diffAsteroidFields, normalizeAsteroidFields, type SceneAsteroidField, t
 import { diffSceneObjects, normalizeSceneObjects, type SceneObject, type SceneObjectsDiff } from './objects/object';
 import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
+import { AUTO_CAMERA_OPERATIONS, applyAutoCameraOperation, normalizeSceneAutoCamera, type SceneAutoCamera } from './cinema/director/document';
 import { applyCombatOperation, COMBAT_OPERATIONS, normalizeSceneCombat, type SceneCombat } from './combat/document';
 import { applyImmunityOperation, IMMUNITY_OPERATIONS, normalizeShipImmunity, sameImmunity, type ShipImmunity } from './combat/immunity';
 import { normalizeShipStandIn, sameStandIn, type SceneShipStandIn } from './combat/stand-ins';
@@ -194,6 +195,11 @@ export interface SceneDocument {
    */
   combat?: SceneCombat;
   /**
+   * The camera director's settings for this scene (cinema/director/document.ts): its bias and shot rules, layered under
+   * the live auto_camera overrides. Omitted when empty.
+   */
+  autoCamera?: SceneAutoCamera;
+  /**
    * The scene's script (timeline/timeline.ts): cues at a time from play start, each running one lever (a ship or fleet
    * order, prop mods, modules, targets, a camera shot, a document patch). Omitted when it has no cues.
    */
@@ -256,6 +262,10 @@ export interface SceneDiff {
    */
   readonly combat: boolean;
   /**
+   * Whether the camera director's settings changed (the page's SetSceneBias; not a simulation change).
+   */
+  readonly autoCamera: boolean;
+  /**
    * Ships present before and after whose `orders` changed: the page restarts their scripts.
    */
   readonly orders: SceneShip[];
@@ -271,7 +281,7 @@ export interface SceneDiff {
  */
 type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
 
-const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'asteroidFields', 'fits', 'personalities', 'combat', 'timeline']);
+const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'asteroidFields', 'fits', 'personalities', 'combat', 'autoCamera', 'timeline']);
 const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders', 'stance', 'immune', 'standIn']);
 
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
@@ -379,6 +389,10 @@ export function normalizeScene(input: unknown): NormalizedScene {
   problems.push(...combat.problems);
   warnings.push(...combat.warnings);
   if (combat.combat) scene.combat = combat.combat;
+  const autoCamera = normalizeSceneAutoCamera(input['autoCamera']);
+  problems.push(...autoCamera.problems);
+  warnings.push(...autoCamera.warnings);
+  if (autoCamera.autoCamera) scene.autoCamera = autoCamera.autoCamera;
   normalizeScript({ input, scene, scripted, targetIds: new Set([...ids, ...objects.ids]), problems, warnings });
 
   if (problems.length) throw new SceneError(problems);
@@ -450,6 +464,9 @@ export function normalizeScene(input: unknown): NormalizedScene {
  *   { op: "set_combat", seed?: n | null, death?: "explode" | "flag" | null }
  *                                       merged into the document's combat; null resets a field (see
  *                                       combat/document.ts)
+ *   { op: "set_auto_camera", favour?, sun?, pace?, hold?, scales?, framings?, exclude?, minShipSize?, letterbox?, hud?,
+ *     seed? }                             merged into the document's autoCamera (the director's settings for the scene);
+ *                                       null removes a key (see cinema/director/document.ts)
  *   { op: "add_cue", cue }   { op: "update_cue", id, set }   { op: "remove_cue", id }   { op: "set_timeline", timeline }
  *   { op: "clear_timeline" }               the timeline's cues (see timeline/operations.ts); removing a ship, object,
  *                                       fleet, wing or squad prunes the cues and ship steps naming it, with a warning
@@ -548,6 +565,7 @@ function applyOperation(operation: JsonObject, context: FleetOperationContext & 
       else if (ASTEROID_FIELD_OPERATIONS.has(String(operation['op']))) applyAsteroidFieldOperation(operation, context);
       else if (FIT_OPERATIONS.has(String(operation['op']))) applyFitOperation(operation, context);
       else if (COMBAT_OPERATIONS.has(String(operation['op']))) applyCombatOperation(operation, context);
+      else if (AUTO_CAMERA_OPERATIONS.has(String(operation['op']))) applyAutoCameraOperation(operation, context);
       else if (IMMUNITY_OPERATIONS.has(String(operation['op']))) applyImmunityOperation(operation, context);
       else if (PERSONALITY_OPERATIONS.has(String(operation['op']))) applyPersonalityOperation(operation, context);
       else if (TIMELINE_OPERATIONS.has(String(operation['op']))) applyTimelineOperation(operation, context);
@@ -583,6 +601,7 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     objects: diffSceneObjects(before?.objects ?? [], after.objects ?? []),
     asteroidFields: diffAsteroidFields(before?.asteroidFields ?? [], after.asteroidFields ?? []),
     combat: !sameJson(before?.combat ?? null, after.combat ?? null),
+    autoCamera: !sameJson(before?.autoCamera ?? null, after.autoCamera ?? null),
     orders: [],
     immunity: []
   };

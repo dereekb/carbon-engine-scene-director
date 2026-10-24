@@ -908,14 +908,20 @@
               "list_shots",
               "shot library",
               "warp-landing",
-              "warp-in"
+              "warp-in",
+              "auto_camera",
+              "autoCamera",
+              "set_auto_camera",
+              "minShipSize",
+              "camera director"
             ]
           },
           {
             "pathContains": [
               "packages/scene/src/lib/cinema/",
               "packages/scene/src/lib/waypoints/",
-              "packages/viewer-engine/src/lib/cinema"
+              "packages/viewer-engine/src/lib/cinema",
+              "packages/viewer-engine/src/lib/camera-director"
             ],
             "every": 12
           }

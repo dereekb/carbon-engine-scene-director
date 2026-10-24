@@ -26,6 +26,11 @@ import type { CameraDirectorPicture, DirectorArrival, DirectorShip } from './pic
  */
 export const ENGAGE_QUIET_SECONDS = 15;
 /**
+ * An engage fires only when the director watched the boundary before, within this many seconds: a fight already in
+ * progress when it starts or comes back is recorded as firing, not as opening fire.
+ */
+export const ENGAGE_WATCH_SECONDS = 2;
+/**
  * A group's arrival lead fires this many seconds before its first landing.
  */
 export const ARRIVAL_LEAD_SECONDS = 5;
@@ -121,6 +126,10 @@ export interface DirectorInterestMemory {
    * Fleet → its acting commander at the last step.
    */
   readonly commanders: Readonly<Record<string, string>>;
+  /**
+   * Scene seconds of the last interest step (absent on an empty memory).
+   */
+  readonly observed?: number;
 }
 
 export const EMPTY_DIRECTOR_INTEREST: DirectorInterestMemory = { interest: [], firing: {}, passes: {}, arrivals: {}, propMods: [], commanders: {} };
@@ -294,7 +303,7 @@ export interface DirectorInterestInput {
   readonly settings: CameraDirectorSettings;
   readonly memory: DirectorInterestMemory;
   /**
-   * The first pick after on, a hand-back or a load (a landmark is worth an establishing shot).
+   * The opening pick (no cut since a load or a jump; a landmark is worth an establishing shot).
    */
   readonly first: boolean;
   /**
@@ -394,8 +403,10 @@ export function stepDirectorInterest(input: DirectorInterestInput): DirectorInte
     const fresh = interest.some((entry) => entry.subject === fleetSubjectKey(fleet.id) && entry.kind === 'bloom' && time - entry.time < W.propMod.fleet.halfLife);
     if (members.length >= 2 && switched.size * 2 >= members.length && !fresh) add(fleetSubjectKey(fleet.id), 'bloom', W.propMod.fleet, `fleet ${fleet.id} lights its prop mods`, { kind: 'prop-mod', tick: picture.tick, group: fleet.id });
   }
-  // Engage: a team pair opening fire after ENGAGE_QUIET_SECONDS of quiet.
+  // Engage: a team pair opening fire after ENGAGE_QUIET_SECONDS of quiet, on a boundary after one the director watched
+  // (otherwise the pair is recorded as already firing).
   const firing = { ...input.memory.firing };
+  const watched = input.memory.observed != null && time - input.memory.observed <= ENGAGE_WATCH_SECONDS;
   const teamOf = new Map(picture.ships.map((ship) => [ship.id, ship.team]));
   const firingPairs = new Set<string>();
   for (const ship of landed) {
@@ -404,7 +415,7 @@ export function stepDirectorInterest(input: DirectorInterestInput): DirectorInte
   }
   for (const pair of [...firingPairs].sort(compareDirectorKeys)) {
     const last = firing[pair];
-    if (last == null || time - last >= ENGAGE_QUIET_SECONDS) {
+    if (watched && (last == null || time - last >= ENGAGE_QUIET_SECONDS)) {
       const [a, b] = pair.split('|');
       const ref: DirectorEventRef = { kind: 'engage', tick: picture.tick, group: pair };
       add('engagement', 'engage', W.engage.engagement, `teams ${a} and ${b} open fire`, ref);
@@ -454,7 +465,8 @@ export function stepDirectorInterest(input: DirectorInterestInput): DirectorInte
     passes: pruneRecord(passes, (at) => time - at < PASS_REPEAT_SECONDS),
     arrivals: Object.fromEntries(Object.entries(arrivals).filter(([key, at]) => !key.startsWith('warp:') || time - at < WARP_LEAD_KEEP_SECONDS)),
     propMods,
-    commanders: Object.fromEntries(picture.fleets.map((fleet) => [fleet.id, fleet.commander]))
+    commanders: Object.fromEntries(picture.fleets.map((fleet) => [fleet.id, fleet.commander])),
+    observed: time
   };
   const facts = pictureFacts(picture, settings, { landed, fleetOf, teams, focus, interest });
   const subjects = scoreSubjects(picture, settings, memory, facts, input, label);

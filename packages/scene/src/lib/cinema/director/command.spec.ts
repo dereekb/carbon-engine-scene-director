@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { SceneError } from '../../scene';
 import { findTool } from '../../tools';
-import { DEFAULT_CAMERA_DIRECTOR_SETTINGS, directorHold, normalizeAutoCameraCommand, resolveCameraDirectorSettings } from './command';
+import { DEFAULT_CAMERA_DIRECTOR_SETTINGS, DEFAULT_MIN_SHIP_SIZE, directorHold, directorRulesProblem, mergeAutoCameraBias, normalizeAutoCameraCommand, resolveCameraDirectorSettings } from './command';
 
 function problemsOf(input: unknown): string[] {
   try {
@@ -31,12 +31,41 @@ describe('auto_camera command', () => {
     });
   });
 
-  it('merges key by key: a value sets, null resets, an omitted key stays', () => {
-    const first = resolveCameraDirectorSettings(normalizeAutoCameraCommand({ follow: { ship: 'a' }, favour: 'close', pace: 'slow' }));
-    expect(first).toMatchObject({ follow: { ship: 'a' }, favour: 'close', pace: 'slow', sun: false });
-    const second = resolveCameraDirectorSettings(normalizeAutoCameraCommand({ favour: null, sun: true }), first);
-    expect(second).toMatchObject({ follow: { ship: 'a' }, favour: null, pace: 'slow', sun: true });
-    expect(resolveCameraDirectorSettings(normalizeAutoCameraCommand({ follow: null, pace: null }), second)).toMatchObject({ follow: null, pace: DEFAULT_CAMERA_DIRECTOR_SETTINGS.pace });
+  it('merges key by key into a layer: a value sets, null drops, an omitted key stays', () => {
+    const first = mergeAutoCameraBias({}, normalizeAutoCameraCommand({ on: true, follow: { ship: 'a' }, favour: 'close', pace: 'slow' }));
+    expect(first).toEqual({ follow: { ship: 'a' }, favour: 'close', pace: 'slow' });
+    const second = mergeAutoCameraBias(first, normalizeAutoCameraCommand({ favour: null, sun: true }));
+    expect(second).toEqual({ follow: { ship: 'a' }, pace: 'slow', sun: true });
+    expect(resolveCameraDirectorSettings(second)).toMatchObject({ follow: { ship: 'a' }, favour: null, pace: 'slow', sun: true, exclude: [], minShipSize: DEFAULT_MIN_SHIP_SIZE });
+    expect(resolveCameraDirectorSettings(mergeAutoCameraBias(second, normalizeAutoCameraCommand({ follow: null, pace: null })))).toMatchObject({ follow: null, pace: DEFAULT_CAMERA_DIRECTOR_SETTINGS.pace });
+  });
+
+  it('layers the scene under the live overrides: a live null falls back to the scene, the open value lifts it', () => {
+    const scene = { scales: ['medium', 'close'] as const, exclude: ['flyby'] as const, favour: 'close' as const };
+    let live = mergeAutoCameraBias({}, normalizeAutoCameraCommand({ scales: ['close'] }));
+    expect(resolveCameraDirectorSettings(scene, live)).toMatchObject({ scales: ['close'], exclude: ['flyby'], favour: 'close' });
+    live = mergeAutoCameraBias(live, normalizeAutoCameraCommand({ scales: null, exclude: [] }));
+    expect(resolveCameraDirectorSettings(scene, live)).toMatchObject({ scales: ['medium', 'close'], exclude: [] });
+  });
+
+  it('reads the shot rules, and refuses bad ones', () => {
+    expect(normalizeAutoCameraCommand({ scales: ['close', 'wide'], framings: ['chase', 'hero'], exclude: ['overlook-pull-out'], minShipSize: 0.01 })).toEqual({ scales: ['wide', 'close'], framings: ['hero', 'chase'], exclude: ['overlook-pull-out'], minShipSize: 0.01 });
+    expect(normalizeAutoCameraCommand({ exclude: [], minShipSize: 0, scales: null })).toEqual({ exclude: [], minShipSize: 0, scales: null });
+    expect(() => normalizeAutoCameraCommand({ scales: [] })).toThrow(/scales must be a non-empty list of wide, medium, close \(no repeats\), or null/);
+    expect(() => normalizeAutoCameraCommand({ scales: ['close', 'close'] })).toThrow(/scales must be/);
+    expect(() => normalizeAutoCameraCommand({ scales: ['huge'] })).toThrow(/scales must be/);
+    expect(() => normalizeAutoCameraCommand({ framings: [] })).toThrow(/framings must be a non-empty list of director framings \(hero, /);
+    expect(() => normalizeAutoCameraCommand({ exclude: ['zoom'] })).toThrow(/exclude\.0 "zoom" is not a director framing \(hero, rear-quarter, /);
+    expect(() => normalizeAutoCameraCommand({ framings: ['hero', 'chase'], exclude: ['hero'] })).toThrow(/"hero" is in both framings and exclude/);
+    expect(() => normalizeAutoCameraCommand({ minShipSize: 0.3 })).toThrow(/minShipSize must be a share of the frame height in \[0, 0\.25\] \(0 turns it off\), or null/);
+  });
+
+  it('finds rules that leave no framing to pick', () => {
+    expect(directorRulesProblem(resolveCameraDirectorSettings({ framings: ['overlook'], scales: ['close'] }))).toBe('auto_camera: the rules leave no framing to pick (framings overlook; scales close)');
+    expect(directorRulesProblem(resolveCameraDirectorSettings({ framings: ['hero'], exclude: ['flyby'] }))).toBeNull();
+    // A group row can be medium (a wing, squad or handful).
+    expect(directorRulesProblem(resolveCameraDirectorSettings({ framings: ['behind-fc'], scales: ['medium'] }))).toBeNull();
+    expect(directorRulesProblem(resolveCameraDirectorSettings({ scales: ['medium', 'close'] }))).toBeNull();
   });
 
   it('turns the pace into holds, and hold wins over it key by key', () => {

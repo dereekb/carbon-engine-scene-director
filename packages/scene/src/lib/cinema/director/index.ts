@@ -6,3 +6,5 @@ export * from './framings';
 export * from './axis';
 export * from './step';
 export * from './report';
+export * from './visibility';
+export * from './document';
