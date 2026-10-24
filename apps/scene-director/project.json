@@ -31,7 +31,8 @@
       "executor": "nx:run-commands",
       "dependsOn": ["build"],
       "options": {
-        "command": "node dist/apps/scene-director/main.js serve"
+        "command": "node dist/apps/scene-director/main.js serve",
+        "forwardAllArgs": true
       }
     },
     "verify-page": {

@@ -12,6 +12,8 @@
  *                        composition get_fleet_composition returns
  *
  * Options: --port <n> (5520), --host <addr> (127.0.0.1), --tools-core <url> (http://127.0.0.1:5510),
+ *          --eve-data tools-core|off (SCENE_DIRECTOR_EVE_DATA; tools-core by default; off is no-EVE-data mode: the hub
+ *          never touches tools-core and the page asks for no EVE data, sd-dev-env),
  *          --build <exact EVE build> (resolved from tools-core "latest" when omitted),
  *          --viewer <dir> (the built viewer; dist/apps/viewer beside this bundle by default),
  *          --scenes <dir> (saved scene files; a scene-director/scenes folder in the per-user data directory by default),
@@ -25,10 +27,11 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { DEFAULT_EVE_DATA_MODE, type EveDataMode, readEveDataMode } from '@scene-director/scene';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AudioBankCache, DEFAULT_AUDIO_CACHE_DIRECTORY } from './lib/hub/audio-cache';
-import { DEFAULT_PORT, Hub, LogToStderr } from './lib/hub/hub';
+import { DEFAULT_PORT, Hub, type HubOptions, LogToStderr } from './lib/hub/hub';
 import { RemoteHub } from './lib/hub/remote-hub';
 import { SceneOf } from './lib/hub/saved-scenes';
 import { ErrorMessage, ErrorProblems, type ToolCaller } from './lib/hub/tool-call';
@@ -39,7 +42,8 @@ import { DefaultMoviesDirectory, MovieFileStore } from './lib/store/movie-files'
 import { defaultFleetPersonalitiesDirectory, FleetPersonalityFileStore } from './lib/store/personality-files';
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
-const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
+const USAGE =
+  'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -47,7 +51,7 @@ const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] 
 const COMPOSITION_INPUT_TOOLS = new Set(['save_fleet_composition', 'add_fleet_composition']);
 
 /**
- * The value after a command-line flag.
+ * The value after a command-line flag, `--name value` or `--name=value` (nx forwards the second form).
  *
  * @param name - The flag, e.g. "--port".
  * @param fallback - Returned when the flag is absent.
@@ -55,7 +59,9 @@ const COMPOSITION_INPUT_TOOLS = new Set(['save_fleet_composition', 'add_fleet_co
  */
 function Option<T extends Maybe<string>>(name: string, fallback: T): string | T {
   const index = process.argv.indexOf(name);
-  return index < 0 ? fallback : process.argv[index + 1];
+  const joined = process.argv.find((arg) => arg.startsWith(`${name}=`));
+  if (index >= 0) return process.argv[index + 1];
+  return joined ? joined.slice(name.length + 1) : fallback;
 }
 
 const command = process.argv[2];
@@ -67,10 +73,28 @@ const compositions = new FleetCompositionFileStore(Option('--fleets', process.en
 const personalities = new FleetPersonalityFileStore(Option('--personalities', process.env['SCENE_DIRECTOR_PERSONALITIES'] || defaultFleetPersonalitiesDirectory()));
 const movies = new MovieFileStore(Option('--movies', process.env['SCENE_DIRECTOR_MOVIES'] || DefaultMoviesDirectory()));
 const audioCache = new AudioBankCache({ directory: Option('--audio-cache', process.env['SCENE_DIRECTOR_AUDIO_CACHE'] || DEFAULT_AUDIO_CACHE_DIRECTORY), log: LogToStderr });
-const toolsCore = new ToolsCore({
-  url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
-  build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
-});
+
+/**
+ * The options a hub is made with. The EVE data mode is read here, where a hub is made, so `call` ignores it; an
+ * invalid one exits 2. tools-core is configured only with EVE data on.
+ *
+ * @returns The hub's options.
+ */
+function HubOptionsFromCommandLine(): HubOptions {
+  const eveData: Maybe<EveDataMode> = readEveDataMode(Option('--eve-data', process.env['SCENE_DIRECTOR_EVE_DATA'] || DEFAULT_EVE_DATA_MODE));
+  if (!eveData) {
+    process.stderr.write(`--eve-data (or SCENE_DIRECTOR_EVE_DATA) must be tools-core or off\n${USAGE}`);
+    process.exit(2);
+  }
+  const toolsCore =
+    eveData === 'off'
+      ? undefined
+      : new ToolsCore({
+          url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
+          build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
+        });
+  return { host, port, eveData, toolsCore, viewerDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr };
+}
 
 /**
  * Starts a hub on the port, or joins the one already there as a controller.
@@ -78,12 +102,12 @@ const toolsCore = new ToolsCore({
  * @returns The hub to send calls to.
  */
 async function StartHubOrJoin(): Promise<ToolCaller> {
-  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr });
+  const hub = new Hub(HubOptionsFromCommandLine());
   try {
     return await hub.Start();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
-    LogToStderr(`port ${port} is in use; joining the hub there as a controller (its scenes, fleets, personalities and movies directories apply, not ${scenes.directory}, ${compositions.directory}, ${personalities.directory} and ${movies.directory})`);
+    LogToStderr(`port ${port} is in use; joining the hub there as a controller (its EVE data mode and its scenes, fleets, personalities and movies directories apply, not ${scenes.directory}, ${compositions.directory}, ${personalities.directory} and ${movies.directory})`);
     return new RemoteHub({ host, port, log: LogToStderr });
   }
 }
@@ -92,7 +116,7 @@ async function StartHubOrJoin(): Promise<ToolCaller> {
  * Runs the hub until SIGINT or SIGTERM.
  */
 async function Serve(): Promise<void> {
-  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr }).Start();
+  const hub = await new Hub(HubOptionsFromCommandLine()).Start();
   const stop = async (): Promise<void> => {
     await hub.Stop();
     process.exit(0);

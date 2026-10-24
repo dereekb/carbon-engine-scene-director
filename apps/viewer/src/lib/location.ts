@@ -8,6 +8,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { type LocationReport, type LocationStatus, type MapSystemAnswer, type SceneLocation, toLocationReport } from '@scene-director/scene';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 
 export const LOCATION_TIMEOUT_MS = 30_000;
 
@@ -23,6 +24,10 @@ export interface LocationLookupOptions {
    * Called when an answer lands or a fetch fails.
    */
   readonly onChange?: () => void;
+  /**
+   * The tab's EVE data mode; off, a location is `off` with the mode's note at once (no request).
+   */
+  readonly eveData?: PageEveData;
 }
 
 export interface LocationUpdateOptions {
@@ -57,6 +62,7 @@ export function LocationText(report: LocationReport): string {
   let text = system;
   if (report.status === 'loading') text = `${system} (loading)`;
   else if (report.status === 'failed') text = `${system} (failed: ${report.error ?? 'no answer'})`;
+  else if (report.status === 'off') text = `${system} (no EVE data)`;
   else if (anchor && 'distance' in anchor) {
     const off = anchor.surfaceDistance ?? anchor.distance;
     text = `${system} · ${(off / 1000).toFixed(1)} km ${anchor.surfaceDistance == null ? 'from' : 'off'} ${anchor.name}`;
@@ -79,11 +85,17 @@ export class LocationLookup {
   private answer: Maybe<MapSystemAnswer> = null;
   private report: Maybe<LocationReport> = null;
   private pending: Promise<void> = Promise.resolve();
+  /**
+   * The mode's note in no-EVE-data mode; null with EVE data.
+   */
+  private readonly off: Maybe<string>;
 
   constructor(options: LocationLookupOptions = {}) {
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.url = options.url ?? '/map/system';
     this.onChange = options.onChange ?? (() => undefined);
+    const eveData = options.eveData ?? EVE_DATA_ON;
+    this.off = eveData.on ? null : (eveData.note ?? 'no EVE data');
   }
 
   /**
@@ -95,7 +107,10 @@ export class LocationLookup {
    */
   Update(location: Maybe<SceneLocation>, { retry = false }: LocationUpdateOptions = {}): void {
     this.location = location;
-    if (location) {
+    if (location && this.off) {
+      this.key = LocationKey(location);
+      this.status = 'off';
+    } else if (location) {
       const key = LocationKey(location);
       if (key !== this.key || (retry && this.status === 'failed')) this.Fetch(key, location);
     } else {
@@ -158,7 +173,7 @@ export class LocationLookup {
   }
 
   private BuildReport(): Maybe<LocationReport> {
-    return this.location ? toLocationReport({ location: this.location, answer: this.answer, status: this.status, error: this.error }) : null;
+    return this.location ? toLocationReport({ location: this.location, answer: this.answer, status: this.status, error: this.error, note: this.status === 'off' ? this.off : null }) : null;
   }
 }
 

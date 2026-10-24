@@ -358,6 +358,10 @@ function InstancedMeshValues(template: RockTemplate, group: FieldDrawGroup): Rec
 export interface FieldEntryState {
   readonly status: SceneAsteroidFieldStatus;
   readonly error?: Maybe<string>;
+  /**
+   * Why the status is `off` with no EVE data.
+   */
+  readonly note?: Maybe<string>;
   readonly expansion?: Maybe<Pick<AsteroidFieldExpansion, 'requested' | 'placed' | 'envelope' | 'digest' | 'counts'>>;
   readonly models?: Maybe<{ readonly total: number; readonly built: number; readonly failed: number; readonly failedDnas?: readonly string[] }>;
   readonly cells?: number;
@@ -405,6 +409,7 @@ export function AsteroidFieldStateRow(input: { readonly field: SceneAsteroidFiel
     ...(field.name == null ? {} : { name: field.name }),
     status: entry?.status ?? 'queued',
     ...(entry?.error ? { error: entry.error } : {}),
+    ...(entry?.note ? { note: entry.note } : {}),
     position: field.position,
     rotation: field.rotation,
     shape: field.shape,

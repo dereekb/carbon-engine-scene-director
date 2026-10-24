@@ -15,6 +15,7 @@
 import type { Maybe } from '@dereekb/util';
 import { type BakedPropMod, findBakedPropMod, findHullSizedPropMod, HULL_SIZE_CLASSES, type HullSizeClass, normalizePropModName, PROP_MOD_MODULE_AB, PROP_MOD_MODULE_NONE, type PropModKind, type PropModModule, type PropModStats, propModKindOfName, readRigSize, type RigSize } from '@scene-director/scene';
 import type { ShipHull } from './destiny';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import { CLASS_RIG_SIZES, type PublishedHull, ShipClassOf } from './flight';
 
 /**
@@ -142,6 +143,11 @@ export interface PropModLookupOptions {
    */
   readonly fetch?: PropModFetch;
   /**
+   * The tab's EVE data mode; off, every module answers at once with the mode's note (no request), so a named module
+   * flies as the hull-sized stand-in and mwd / ab as their baked numbers.
+   */
+  readonly eveData?: PageEveData;
+  /**
    * The hub route; defaults to `/prop-mod`.
    */
   readonly url?: string;
@@ -160,10 +166,16 @@ export class PropModLookup {
   private readonly url: string;
   private readonly answers = new Map<string, PropModAnswer>();
   private readonly requests = new Map<string, Promise<PropModAnswer>>();
+  /**
+   * The one answer in no-EVE-data mode; null with EVE data.
+   */
+  private readonly off: Maybe<PropModAnswer>;
 
   constructor(options: PropModLookupOptions = {}) {
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.url = options.url ?? '/prop-mod';
+    const eveData = options.eveData ?? EVE_DATA_ON;
+    this.off = eveData.on ? null : Object.freeze({ propMod: null, note: eveData.note });
   }
 
   /**
@@ -173,7 +185,7 @@ export class PropModLookup {
    * @returns The answer, or null before its lookup has settled.
    */
   Cached(module: string | number): Maybe<PropModAnswer> {
-    return this.answers.get(PropModKey(module)) ?? null;
+    return this.off ?? this.answers.get(PropModKey(module)) ?? null;
   }
 
   /**
@@ -183,6 +195,7 @@ export class PropModLookup {
    * @returns The answer; it never rejects.
    */
   Lookup(module: string | number): Promise<PropModAnswer> {
+    if (this.off) return Promise.resolve(this.off);
     const key = PropModKey(module);
     const cached = this.answers.get(key);
     if (cached) return Promise.resolve(cached);

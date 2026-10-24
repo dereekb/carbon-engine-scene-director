@@ -44,6 +44,7 @@ import {
   type ShipTargeting
 } from '@scene-director/scene';
 import type { ShipHull, ShipPhysics, ShipPropMod } from './destiny';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import type { PropModSource, ResolvedShipPropMod } from './prop-mods';
 import { DEFAULT_WARP_SPEED } from './warp';
 
@@ -387,6 +388,10 @@ export interface HullStatsLookupOptions {
    * The hub route; defaults to `/ship-stats`.
    */
   readonly url?: string;
+  /**
+   * The tab's EVE data mode; off, every ship answers its class numbers at once with the mode's note, with no request.
+   */
+  readonly eveData?: PageEveData;
 }
 
 /**
@@ -397,10 +402,16 @@ export class HullStatsLookup {
   private readonly url: string;
   private readonly answers = new Map<string, HullStatsAnswer>();
   private readonly requests = new Map<string, Promise<HullStatsAnswer>>();
+  /**
+   * The one answer in no-EVE-data mode; null with EVE data.
+   */
+  private readonly off: Maybe<HullStatsAnswer>;
 
   constructor(options: HullStatsLookupOptions = {}) {
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.url = options.url ?? '/ship-stats';
+    const eveData = options.eveData ?? EVE_DATA_ON;
+    this.off = eveData.on ? null : Object.freeze({ hull: null, note: eveData.note });
   }
 
   /**
@@ -410,7 +421,7 @@ export class HullStatsLookup {
    * @returns The answer, or null before its lookup has settled.
    */
   Cached(ship: HullStatsShip): Maybe<HullStatsAnswer> {
-    return this.answers.get(HullStatsKey(ship)) ?? null;
+    return this.off ?? this.answers.get(HullStatsKey(ship)) ?? null;
   }
 
   /**
@@ -420,6 +431,7 @@ export class HullStatsLookup {
    * @returns The answer; it never rejects.
    */
   Lookup(ship: HullStatsShip): Promise<HullStatsAnswer> {
+    if (this.off) return Promise.resolve(this.off);
     const key = HullStatsKey(ship);
     const cached = this.answers.get(key);
     if (cached) return Promise.resolve(cached);

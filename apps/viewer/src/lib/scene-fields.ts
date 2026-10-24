@@ -14,6 +14,7 @@ import { expandAsteroidField, type AsteroidFieldExpansion, type SceneAsteroidFie
 import { FIELD_CELL_SIZE, FieldDrawPlan, FieldLodIndex, FieldLodMeshes, FieldReach, FieldRootValues, FieldSphere, RockTemplateOf, type FieldEntryState, type FieldLodMesh, type RockTemplate } from './asteroid-fields';
 import { DocumentRotation } from './destiny';
 import type { Engine } from './engine';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import { ErrorText } from './resources';
 import { CjsSchema, EveChildContainer, EveChildMesh, Tr2InstancedMesh, type CjsModelValues, type EveSpaceObject2 } from './runtime';
 import { BuildShipValues, CreateStaticCurves, HydrateSofObject, PlaceStatic, RetireShips, type DetachAudio, type StaticCurves } from './ships';
@@ -48,6 +49,10 @@ export interface SceneFieldsOptions {
    * Hydrates roots with the audio seams detached (PageAudio.Detached).
    */
   readonly detachAudio: DetachAudio;
+  /**
+   * The tab's EVE data mode; off, fields are placed but build and draw no rock: their status is `off` with the note.
+   */
+  readonly eveData?: PageEveData;
 }
 
 /**
@@ -58,6 +63,10 @@ export interface SceneFieldEntry extends FieldEntryState {
   field: SceneAsteroidField;
   status: SceneAsteroidFieldStatus;
   error: Maybe<string>;
+  /**
+   * Why the status is `off` with no EVE data.
+   */
+  note?: Maybe<string>;
   expansion: Maybe<AsteroidFieldExpansion>;
   models: Maybe<{ total: number; built: number; failed: number; failedDnas: string[] }>;
   cells: number;
@@ -74,6 +83,7 @@ export class SceneFields {
   private readonly retained: () => object[];
   private readonly onChange: () => void;
   private readonly detachAudio: DetachAudio;
+  private readonly eveData: PageEveData;
   private readonly entries = new Map<string, SceneFieldEntry>();
   /**
    * Every hydrated root's instanced children, for DriveLod.
@@ -85,6 +95,7 @@ export class SceneFields {
     this.retained = options.retained;
     this.onChange = options.onChange;
     this.detachAudio = options.detachAudio;
+    this.eveData = options.eveData ?? EVE_DATA_ON;
   }
 
   /**
@@ -141,34 +152,41 @@ export class SceneFields {
       const plan = FieldDrawPlan({ expansion, cellSize: FIELD_CELL_SIZE });
       entry.cells = plan.cells;
       const dnas = [...new Set(plan.groups.map((group) => group.dna))];
-      const built = new Map<string, RockTemplate>();
-      const failedDnas: string[] = [];
-      let firstError: Maybe<string> = null;
-      for (const dna of dnas) {
-        try {
-          built.set(dna, await Template(dna));
-        } catch (error) {
-          failedDnas.push(dna);
-          firstError ??= `${dna}: ${ErrorText(error)}`;
-          console.warn(`asteroid field ${entry.id}: rock ${dna}: ${ErrorText(error)}`);
+      if (!this.eveData.on) {
+        // No EVE data: the rocks are placed (the expansion and the plan are pure) but no model is built or drawn.
+        entry.models = { total: dnas.length, built: 0, failed: 0, failedDnas: [] };
+        entry.status = 'off';
+        entry.note = this.eveData.note;
+      } else {
+        const built = new Map<string, RockTemplate>();
+        const failedDnas: string[] = [];
+        let firstError: Maybe<string> = null;
+        for (const dna of dnas) {
+          try {
+            built.set(dna, await Template(dna));
+          } catch (error) {
+            failedDnas.push(dna);
+            firstError ??= `${dna}: ${ErrorText(error)}`;
+            console.warn(`asteroid field ${entry.id}: rock ${dna}: ${ErrorText(error)}`);
+          }
         }
-      }
-      entry.models = { total: dnas.length, built: built.size, failed: failedDnas.length, failedDnas };
-      if (dnas.length && !built.size) throw new Error(`no rock model built (${firstError})`);
-      if (dnas.length) {
-        const values = FieldRootValues({ plan, templates: built, envelope: expansion.envelope, castShadow: FIELDS_SWITCH === 'shadow' ? undefined : false });
-        if (this.engine && FIELDS_SWITCH !== 'off' && this.Current(entry)) {
-          entry.root = this.detachAudio(() =>
-            HydrateSofObject<EveSpaceObject2>(values as CjsModelValues, (root) => {
-              root.translationCurve = entry.curves.translation;
-              root.rotationCurve = entry.curves.rotation;
-            })
-          );
-          this.lodChildren.set(entry.root, LodChildren(entry.root));
-          if (this.Current(entry)) this.engine.AddObject(entry.root);
+        entry.models = { total: dnas.length, built: built.size, failed: failedDnas.length, failedDnas };
+        if (dnas.length && !built.size) throw new Error(`no rock model built (${firstError})`);
+        if (dnas.length) {
+          const values = FieldRootValues({ plan, templates: built, envelope: expansion.envelope, castShadow: FIELDS_SWITCH === 'shadow' ? undefined : false });
+          if (this.engine && FIELDS_SWITCH !== 'off' && this.Current(entry)) {
+            entry.root = this.detachAudio(() =>
+              HydrateSofObject<EveSpaceObject2>(values as CjsModelValues, (root) => {
+                root.translationCurve = entry.curves.translation;
+                root.rotationCurve = entry.curves.rotation;
+              })
+            );
+            this.lodChildren.set(entry.root, LodChildren(entry.root));
+            if (this.Current(entry)) this.engine.AddObject(entry.root);
+          }
         }
+        entry.status = FIELDS_SWITCH === 'off' && this.engine ? 'off' : entry.root ? 'ready' : 'validated';
       }
-      entry.status = FIELDS_SWITCH === 'off' && this.engine ? 'off' : entry.root ? 'ready' : 'validated';
     } catch (error) {
       entry.status = 'failed';
       entry.error = ErrorText(error);

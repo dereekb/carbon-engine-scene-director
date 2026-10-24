@@ -433,10 +433,14 @@ export interface LocationDressingSunReport {
 export interface LocationDressingReport {
   /**
    * loading: an answer or a load is in flight. ready: everything planned is drawn (validated without a renderer).
-   * partial: something failed. failed: the location could not be read. off: ?dress=off.
+   * partial: something failed. failed: the location could not be read. off: ?dress=off, or no EVE data (`note`).
    */
   readonly state: 'loading' | 'ready' | 'partial' | 'failed' | 'off';
   readonly error?: string;
+  /**
+   * Why the state is `off` with no EVE data.
+   */
+  readonly note?: string;
   readonly notes?: readonly string[];
   readonly parts: LocationDressingParts;
   readonly nebula?: LocationDressingNebulaReport;

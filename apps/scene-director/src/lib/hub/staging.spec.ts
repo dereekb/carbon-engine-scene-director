@@ -148,7 +148,7 @@ describe('add_ships', () => {
 
   it('refuses an unknown hull without dna', async () => {
     const message = await Refused(MakeStaging().staging.AddShips({ scene: { name: 'x' }, hull: 'Nonexistent Hull' }));
-    expect(message).toMatch(/hull "Nonexistent Hull" has no dna and could not be resolved through tools-core/u);
+    expect(message).toMatch(/hull "Nonexistent Hull" has no dna and could not be resolved from the EVE data/u);
   });
 
   it('places the lead off a celestial of the location and faces one', async () => {

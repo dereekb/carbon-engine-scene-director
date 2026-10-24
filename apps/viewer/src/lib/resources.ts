@@ -1,11 +1,14 @@
 /**
  * Resource plumbing: every file the runtime asks for is fetched from the hub's
  * /resource proxy (tools-core behind it), and BePaths is composed from the
- * pinned build's resfileindex so SOF can ask whether a texture exists.
+ * pinned build's resfileindex so SOF can ask whether a texture exists. In
+ * no-EVE-data mode ResourceBytes is the one gate: it refuses every file
+ * without a request and counts the refusals (get_state.eveData.refused).
  */
 
 import type { Maybe } from '@dereekb/util';
 import { DetachObjectRoutes, InAudioDetachScope } from './audio-guard';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import {
   blue,
   BlueResFileSystemRemote,
@@ -39,6 +42,16 @@ const SHADER_MODELS: Record<string, number> = { lo: TR2SHADERMODEL.TR2SM_3_0_LO,
 let configured = false;
 let filesKnown = false;
 let fileIndex: Maybe<Promise<void>> = null;
+/**
+ * The mode's note while EVE data is off; null while on.
+ */
+let noEveData: Maybe<string> = null;
+let refusals = 0;
+/**
+ * Open ExpectRefusals windows: a refusal inside one is the runtime's own construction cost, not a page path asking.
+ */
+let expecting = 0;
+let expectedRefusals = 0;
 
 /**
  * Fetches one logical resource (with or without `res:/`). The client ships red
@@ -46,12 +59,17 @@ let fileIndex: Maybe<Promise<void>> = null;
  *
  * @param path - A res:/ path or a logical path.
  * @returns The file's bytes.
- * @throws {Error} When the hub answers with an error status.
+ * @throws {Error} When the hub answers with an error status, or in no-EVE-data mode (no request is made).
  */
 export async function ResourceBytes(path: string): Promise<Uint8Array> {
   const logical = String(path)
     .replace(/^res:\/+/u, '')
     .replace(/\.red$/iu, '.black');
+  if (noEveData) {
+    if (expecting > 0) expectedRefusals += 1;
+    else if (++refusals === 1) console.warn(`no EVE data: refused res:/${logical} (a page path still asks for EVE files)`);
+    throw new Error(`${logical}: ${noEveData}`);
+  }
   const response = await fetch(`/resource/${logical}`);
   if (!response.ok) throw new Error(`${logical}: ${response.status} ${response.statusText}`);
   return new Uint8Array(await response.arrayBuffer());
@@ -72,6 +90,43 @@ export async function ResourceValues(path: string): Promise<CjsModelValues> {
 }
 
 /**
+ * How many EVE files ResourceBytes refused in no-EVE-data mode: 0 expected (more means a page path still asks).
+ *
+ * @returns The count since the page loaded.
+ */
+export function ResourceRefusals(): number {
+  return refusals;
+}
+
+/**
+ * Runs a build whose runtime objects ask for EVE files on construction (an EveSpaceScene's volumetric fog effects)
+ * with those refusals expected: they are counted apart (ExpectedResourceRefusals) and not warned about. The window
+ * stays open one macrotask past the build, so the resource manager's queued reads land inside it.
+ *
+ * @param build - Builds the objects.
+ * @returns What the build returned.
+ */
+export async function ExpectRefusals<T>(build: () => T): Promise<T> {
+  expecting += 1;
+  try {
+    const built = build();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    return built;
+  } finally {
+    expecting -= 1;
+  }
+}
+
+/**
+ * The refusals ExpectRefusals expected: the runtime's own construction cost in no-EVE-data mode.
+ *
+ * @returns The count since the page loaded.
+ */
+export function ExpectedResourceRefusals(): number {
+  return expectedRefusals;
+}
+
+/**
  * Whether BePaths knows the file. Before the index arrives every file counts as present.
  *
  * @param path - A res:/ path.
@@ -84,21 +139,27 @@ export function FileExists(path: string): boolean {
 /**
  * Starts composing BePaths once.
  *
- * @returns A promise that resolves once BePaths is composed (or composing failed); it never rejects.
+ * @returns A promise that resolves once BePaths is composed (or composing failed, or at once with no EVE data); it
+ * never rejects.
  */
 export function FilesReady(): Promise<void> {
-  fileIndex ??= ComposeBePaths();
+  fileIndex ??= noEveData ? Promise.resolve() : ComposeBePaths();
   return fileIndex;
 }
 
 /**
  * Registers the byte source, resource classes and effect-path defaults once.
  * Effects are requested at their WebGPU paths and translated in memory from the
- * shipped dx11 containers, so no prebuilt shader overlay is needed.
+ * shipped dx11 containers, so no prebuilt shader overlay is needed. With no EVE
+ * data the registrations stay (local, no network), the file index is skipped and
+ * every file read is refused.
+ *
+ * @param eveData - The tab's EVE data mode.
  */
-export function ConfigureResources(): void {
+export function ConfigureResources(eveData: PageEveData = EVE_DATA_ON): void {
   if (configured) return;
   configured = true;
+  noEveData = eveData.on ? null : (eveData.note ?? 'no EVE data');
 
   blue.resMan.Register({
     source: { Read: (path) => ResourceBytes(String(path).replace('graphics/effect.webgpu/', 'graphics/effect.dx11/')) }

@@ -11,6 +11,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { readMissileGraphic, type MissileGraphic } from '@scene-director/scene';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import type { WeaponFetch } from './weapon-lookup';
 
 /**
@@ -22,6 +23,10 @@ export interface MissileAnswer {
 }
 
 export interface MissileLookupOptions {
+  /**
+   * The tab's EVE data mode; off, every lookup answers at once with the mode's note (no request).
+   */
+  readonly eveData?: PageEveData;
   /**
    * Defaults to the global fetch.
    */
@@ -57,8 +62,14 @@ export class MissileLookup {
   private readonly retryDelaysMs: readonly number[];
   private readonly answers = new Map<string, MissileAnswer>();
   private readonly requests = new Map<string, Promise<MissileAnswer>>();
+  /**
+   * The one answer in no-EVE-data mode; null with EVE data.
+   */
+  private readonly off: Maybe<MissileAnswer>;
 
   constructor(options: MissileLookupOptions = {}) {
+    const eveData = options.eveData ?? EVE_DATA_ON;
+    this.off = eveData.on ? null : Object.freeze({ missile: null, note: eveData.note });
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.url = options.url ?? '/missile';
     this.retryDelaysMs = options.retryDelaysMs ?? MISSILE_LOOKUP_RETRY_DELAYS_MS;
@@ -72,7 +83,7 @@ export class MissileLookup {
    * @returns The answer, or null before its lookup has settled.
    */
   Cached(charge: number, launcher: number): Maybe<MissileAnswer> {
-    return this.answers.get(MissileKey(charge, launcher)) ?? null;
+    return this.off ?? this.answers.get(MissileKey(charge, launcher)) ?? null;
   }
 
   /**
@@ -83,6 +94,7 @@ export class MissileLookup {
    * @returns The answer; it never rejects.
    */
   Lookup(charge: number, launcher: number): Promise<MissileAnswer> {
+    if (this.off) return Promise.resolve(this.off);
     const key = MissileKey(charge, launcher);
     const cached = this.answers.get(key);
     if (cached) return Promise.resolve(cached);

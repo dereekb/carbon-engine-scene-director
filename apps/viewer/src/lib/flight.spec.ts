@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { findBakedPropMod } from '@scene-director/scene';
 import { CLASS_RIG_SIZES, HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, ShipClassOf, type PublishedHull } from './flight';
+import { PageEveDataOf } from './eve-data';
 import { ResolveShipPropMod } from './prop-mods';
 
 // Published values (EVE typeDogma via ESI, 2026-10-21), the Ship-stats spec fixtures.
@@ -172,5 +173,26 @@ describe('HullStatsLookup', () => {
     const answer = await lookup.Lookup({ dna: 'mf1_t1:minmatarbase:minmatar' });
     expect(answer.hull).toBeNull();
     expect(answer.note).toMatch(/the hub's \/ship-stats did not answer \(fetch failed\)/);
+  });
+});
+
+describe('HullStatsLookup with no EVE data', () => {
+  const OFF = PageEveDataOf({ hub: { mode: 'off' }, search: '' });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers class numbers at once with the mode, never fetching or warning', async () => {
+    const fetch = vi.fn();
+    const warn = vi.spyOn(console, 'warn');
+    const lookup = new HullStatsLookup({ fetch, eveData: OFF });
+    const ship = { dna: 'af1_t1:minmatarbase:minmatar' };
+    expect(lookup.Cached(ship)).toEqual({ hull: null, note: OFF.note });
+    expect(await lookup.Lookup(ship)).toEqual({ hull: null, note: OFF.note });
+    lookup.ForgetFailures();
+    expect(lookup.Cached(ship)?.note).toMatch(/--eve-data off/u);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

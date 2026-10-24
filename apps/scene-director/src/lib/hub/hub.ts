@@ -2,7 +2,8 @@
  * The hub: one local HTTP + WebSocket server that serves the viewer page,
  * proxies EVE resources from tools-core, and routes tool calls.
  *
- * HTTP routes: /build, /resfileindex.txt, /resource/<path> (tools-core proxies),
+ * HTTP routes: /config (what the page reads before it boots: the EVE data mode), /build, /resfileindex.txt,
+ * /resource/<path> (tools-core proxies; 503 in no-EVE-data mode),
  * /ship-stats?dna=&type=&propMod= (the ship_stats answer as JSON), /prop-mod?module= (a prop mod's numbers by type id
  * or EVE name), /fit/type?name=&hull= (a fit line's EVE type and slot), /dogma/types?ids= (a DogmaBundle of up to 200
  * types) and /dogma/skills (every published skill's), /weapon?type= (a weapon's graphic: its .black, slot collection and
@@ -17,6 +18,7 @@
  *
  * Messages are JSON:
  *   -> { type: "hello", role }
+ *   hub -> any         { type: "hello", role, hub: { url, eveData } }
  *   hub -> page        { type: "call", id, name, args }
  *   page -> hub        { type: "result", id, ok, value | error }
  *   page -> hub        { type: "log", entries: [{ time, level, message }] }
@@ -39,7 +41,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { findTool, isMovieExportMessage, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
+import { DEFAULT_EVE_DATA_MODE, type EveDataMode, findTool, isMovieExportMessage, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { FleetPersonalityFileStore } from '../store/personality-files';
 import { MovieFileStore } from '../store/movie-files';
@@ -50,19 +52,19 @@ import { FleetCompositions } from './fleet-compositions';
 import { FleetPersonalities } from './fleet-personalities';
 import { Locations } from './locations';
 import { Staging } from './staging';
-import { ObjectData, type ObjectDataApi } from './object-data';
+import type { ObjectDataApi } from './object-data';
 import { ObjectTools } from './objects';
-import { AsteroidData, type AsteroidDataApi } from './asteroid-data';
+import type { AsteroidDataApi } from './asteroid-data';
 import { AsteroidFieldTools } from './asteroid-fields';
-import { MapData, type MapDataApi } from './map-data';
+import type { MapDataApi } from './map-data';
 import { SavedScenes } from './saved-scenes';
-import { ShipData, ShipDataError, type ShipDataApi } from './ship-data';
-import { DogmaData, type DogmaDataApi, MAX_DOGMA_TYPE_IDS } from './dogma-data';
-import { WeaponData, type WeaponDataApi } from './weapon-data';
-import { SdeClient } from './sde-client';
+import { ShipDataError, type ShipDataApi } from './ship-data';
+import { type DogmaDataApi, MAX_DOGMA_TYPE_IDS } from './dogma-data';
+import type { WeaponDataApi } from './weapon-data';
+import { EveDataStatusOf, HubEveDataSources } from './eve-data';
 import { AnswerPropMod, AnswerShipStats } from './ship-stats-tool';
 import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolArgs, type ToolCaller } from './tool-call';
-import { ToolsCore, type SofCatalogKind, type ToolsCoreApi } from './tools-core';
+import type { SofCatalogKind, ToolsCoreApi } from './tools-core';
 
 export const DEFAULT_PORT = 5520;
 
@@ -95,6 +97,11 @@ export interface HubOptions {
    * 0 picks a free port.
    */
   readonly port?: number;
+  /**
+   * Where EVE data comes from: tools-core (the default), or `off` (no-EVE-data mode: the hub never touches tools-core,
+   * and `toolsCore` and every data source option below are ignored; eve-data.ts).
+   */
+  readonly eveData?: EveDataMode;
   readonly toolsCore?: ToolsCoreApi;
   /**
    * The built viewer: a directory holding index.html and the page bundle it loads from /app/.
@@ -187,6 +194,7 @@ export function LogToStderr(line: string): void {
 export class Hub implements ToolCaller {
   readonly host: string;
   port: number;
+  readonly eveData: EveDataMode;
   readonly toolsCore: ToolsCoreApi;
   readonly viewerDirectory: Maybe<string>;
   readonly savedScenes: SavedScenes;
@@ -215,7 +223,8 @@ export class Hub implements ToolCaller {
   constructor({
     host = '127.0.0.1',
     port = DEFAULT_PORT,
-    toolsCore = new ToolsCore(),
+    eveData = DEFAULT_EVE_DATA_MODE,
+    toolsCore,
     viewerDirectory = null,
     scenes = new SceneFileStore(),
     compositions = new FleetCompositionFileStore(),
@@ -232,14 +241,15 @@ export class Hub implements ToolCaller {
   }: HubOptions = {}) {
     this.host = host;
     this.port = port;
-    this.toolsCore = toolsCore;
-    this.shipData = shipData ?? new ShipData({ url: toolsCore.url });
-    const sde = this.shipData instanceof ShipData ? this.shipData.sde : new SdeClient({ url: toolsCore.url });
-    this.dogmaData = dogmaData ?? new DogmaData({ sde });
-    this.weaponData = weaponData ?? new WeaponData({ sde });
-    this.mapData = mapData ?? new MapData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), log });
-    this.objectData = objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild(), resourceBuild: () => this.toolsCore.ResolveBuild() });
-    this.asteroidData = asteroidData ?? new AsteroidData({ objectData: this.objectData, url: toolsCore.url, sdeBuild: () => this.shipData.SdeBuild() });
+    this.eveData = eveData;
+    const sources = HubEveDataSources({ mode: eveData, toolsCore, shipData, dogmaData, weaponData, mapData, objectData, asteroidData, log });
+    this.toolsCore = sources.toolsCore;
+    this.shipData = sources.shipData;
+    this.dogmaData = sources.dogmaData;
+    this.weaponData = sources.weaponData;
+    this.mapData = sources.mapData;
+    this.objectData = sources.objectData;
+    this.asteroidData = sources.asteroidData;
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
     const page = {
       Connected: () => this.pages.length > 0,
@@ -292,12 +302,17 @@ export class Hub implements ToolCaller {
       });
     });
     this.port = (server.address() as AddressInfo).port;
-    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory}, fleet personalities in ${this.fleetPersonalities.files.directory}, movies in ${this.movieExports.directory})`);
+    const stores = `saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory}, fleet personalities in ${this.fleetPersonalities.files.directory}, movies in ${this.movieExports.directory}`;
+    const off = this.eveData === 'off';
+    const source = off ? 'no EVE data: tools-core is not used' : 'tools-core ' + this.toolsCore.url;
+    this.log(`viewer at ${this.url} (${source}; ${stores})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
-    this.toolsCore.ResolveBuild().then(
-      (build) => this.log(`EVE resource build ${build}`),
-      (error: unknown) => this.log(ErrorMessage(error))
-    );
+    if (!off) {
+      this.toolsCore.ResolveBuild().then(
+        (build) => this.log(`EVE resource build ${build}`),
+        (error: unknown) => this.log(ErrorMessage(error))
+      );
+    }
     return this;
   }
 
@@ -307,7 +322,11 @@ export class Hub implements ToolCaller {
     this.pending.clear();
     for (const ws of this.wss?.clients ?? []) ws.terminate();
     const server = this.server;
-    await new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    const closed = new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    // Drop the browsers' keep-alive connections too: left open, they keep reaching this stopped hub after a new one took
+    // the port, so a tab reloading for the new hub's EVE data mode would read this one's GET /config and reload again.
+    server?.closeAllConnections();
+    await closed;
   }
 
   /**
@@ -371,7 +390,8 @@ export class Hub implements ToolCaller {
         return {
           viewerUrl: this.url,
           connectedTabs: this.pages.length,
-          toolsCore: await this.toolsCore.Status(),
+          eveData: EveDataStatusOf(this.eveData),
+          toolsCore: this.eveData === 'off' ? null : await this.toolsCore.Status(),
           scenesDirectory: this.savedScenes.files.directory,
           fleetsDirectory: this.fleetCompositions.files.directory,
           personalitiesDirectory: this.fleetPersonalities.files.directory,
@@ -414,7 +434,7 @@ export class Hub implements ToolCaller {
           this.pages.push(ws);
           this.Record('info', `viewer tab connected (${this.pages.length} open)`);
         }
-        ws.send(JSON.stringify({ type: 'hello', role, hub: { url: this.url } }));
+        ws.send(JSON.stringify({ type: 'hello', role, hub: { url: this.url, eveData: EveDataStatusOf(this.eveData) } }));
       } else if (role === 'page' && message.type === 'result') {
         this.Settle(message);
       } else if (role === 'page' && isMovieExportMessage(message)) {
@@ -459,14 +479,17 @@ export class Hub implements ToolCaller {
     const url = new URL(request.url ?? '/', 'http://localhost');
     const pathname = decodeURIComponent(url.pathname);
 
-    if (pathname === '/build') {
+    if (pathname === '/config') {
+      response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+      response.end(JSON.stringify({ eveData: EveDataStatusOf(this.eveData) }));
+    } else if (pathname === '/build') {
       const status = await this.toolsCore.Status();
       response.writeHead(status.reachable ? 200 : 503, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify(status));
     } else if (pathname === '/resfileindex.txt') {
-      await this.Proxy(await this.toolsCore.ResFileIndexUrl(), response);
+      await this.Proxy(() => this.toolsCore.ResFileIndexUrl(), response);
     } else if (pathname.startsWith('/resource/')) {
-      await this.Proxy(await this.toolsCore.ResourceUrl(pathname.slice('/resource/'.length)), response);
+      await this.Proxy(() => this.toolsCore.ResourceUrl(pathname.slice('/resource/'.length)), response);
     } else if (pathname === '/ship-stats') {
       await this.ServeShipStats(url, response);
     } else if (pathname === '/prop-mod') {
@@ -614,7 +637,8 @@ export class Hub implements ToolCaller {
 
   /**
    * A streaming proxy for tools-core's audio: forwards Range and If-None-Match, and answers tools-core's status
-   * (200, 206, 304, 404, 416) with its content headers; an unreachable tools-core is a 502. The resource proxy
+   * (200, 206, 304, 404, 416) with its content headers; an unreachable tools-core is a 502, and no EVE data a 503
+   * (ProxySourceFailure). The resource proxy
    * buffers whole bodies and drops Range, which the 32 MB boosters.bnk cannot afford. A body cut short on either side
    * (tools-core closing, the tab going away mid-read) ends the response and is not an error of the hub's.
    */
@@ -625,9 +649,16 @@ export class Hub implements ToolCaller {
       const value = request.headers[name];
       if (typeof value === 'string') headers[name] = value;
     }
+    let source: string;
+    try {
+      source = await input.source();
+    } catch (error) {
+      ProxySourceFailure('audio proxy', error, response);
+      return;
+    }
     let upstream: Response;
     try {
-      upstream = await fetch(await input.source(), { headers });
+      upstream = await fetch(source, { headers });
     } catch (error) {
       response.writeHead(502, { 'content-type': 'text/plain' });
       response.end(`audio proxy: ${ErrorMessage(error)}`);
@@ -722,7 +753,18 @@ export class Hub implements ToolCaller {
     else await pipeline(createReadStream(file, { start, end }), response);
   }
 
-  private async Proxy(source: string, response: ServerResponse): Promise<void> {
+  /**
+   * A buffering proxy for one tools-core file: the source's URL (an unavailable source, as with no EVE data, is a 503;
+   * any other failure a 502), then tools-core's answer (a 404 stays a 404, other errors are a 502).
+   */
+  private async Proxy(resolve: () => Promise<string>, response: ServerResponse): Promise<void> {
+    let source: string;
+    try {
+      source = await resolve();
+    } catch (error) {
+      ProxySourceFailure('resource proxy', error, response);
+      return;
+    }
     let upstream: Response;
     try {
       upstream = await fetch(source);
@@ -751,6 +793,20 @@ export class Hub implements ToolCaller {
 }
 
 const SHIP_DATA_FAILURE_STATUS: Record<ShipDataError['failure'], number> = { invalid: 400, 'not-found': 404, ambiguous: 409, unavailable: 503 };
+
+/**
+ * Answers a proxy whose source URL could not be had: 503 when the source is unavailable (no EVE data: a
+ * NoEveDataError), 502 for anything else (tools-core unreachable while resolving its build).
+ *
+ * @param proxy - `resource proxy` or `audio proxy`.
+ * @param error - Why the source failed.
+ * @param response - The response.
+ */
+function ProxySourceFailure(proxy: string, error: unknown, response: ServerResponse): void {
+  const unavailable = error instanceof ShipDataError && error.failure === 'unavailable';
+  response.writeHead(unavailable ? 503 : 502, { 'content-type': 'text/plain', 'cache-control': 'no-store' });
+  response.end(`${proxy}: ${ErrorMessage(error)}`);
+}
 
 /**
  * The HTTP status for a failed ship stats answer.

@@ -3,6 +3,7 @@ import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { computeShipStats, defaultWeaponsOf, type DogmaBundle, FLEET_COMPOSITION_EXAMPLES, type FitTypeAnswer, fitTypeCategoryOf, normalizeFleetComposition, readDogmaBundle, type SceneShip } from '@scene-director/scene';
 import { FitLookup, FleetModuleCountsOf, MAX_FIT_DOGMA_TYPE_IDS, ResolveShipFitting, ShipCapacitorReportOf, ShipDefenseReportOf, ShipFitReportOf, ShipModuleSpecsOf, type ResolvedShipFitting, type ShipFitPropMod } from './fittings';
+import { PageEveDataOf } from './eve-data';
 import { ResolveFlight, type PublishedHull } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
 
@@ -366,3 +367,28 @@ describe('get_state reports', () => {
 function Fail(message: string): never {
   throw new Error(message);
 }
+
+describe('FitLookup with no EVE data', () => {
+  const OFF = PageEveDataOf({ hub: { mode: 'off' }, search: '' });
+
+  it('answers every name, type and the skills at once with the mode, never fetching or warning', async () => {
+    const fetch = vi.fn();
+    const warn = vi.spyOn(console, 'warn');
+    try {
+      const lookup = new FitLookup({ fetch, eveData: OFF });
+      await lookup.Prepare({ text: PLATED, typeIDs: [RIFTER] });
+      expect(await lookup.LookupName('Damage Control II', 'Rifter')).toEqual({ type: null, note: OFF.note, unavailable: true });
+      await lookup.LookupSkills();
+      await lookup.LookupTypes([RIFTER]);
+      expect(lookup.TypePending(RIFTER)).toBe(false);
+      expect(lookup.TypeFailure(RIFTER)).toBe(OFF.note);
+      expect(lookup.skillsFailure).toBe(OFF.note);
+      expect(ResolveShipFitting({ doc: Ship(PLATED), scene: null, lookup, hullTypeID: null, hullNote: OFF.note, propMod: null })).toMatchObject({ pending: false, note: `the fit's modules need the EVE data: ${OFF.note}` });
+      expect(ResolveShipFitting({ doc: Ship(PLATED), scene: null, lookup, hullTypeID: RIFTER, propMod: null })).toMatchObject({ pending: false, dogma: null, note: expect.stringContaining('--eve-data off') });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});

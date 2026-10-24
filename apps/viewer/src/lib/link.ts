@@ -27,6 +27,7 @@ interface CallMessage {
   readonly id?: number;
   readonly name?: string;
   readonly args?: Record<string, unknown>;
+  readonly hub?: unknown;
 }
 
 const CONSOLE_LEVELS: [keyof Pick<Console, 'log' | 'info' | 'warn' | 'error'>, LogLevel][] = [
@@ -42,6 +43,10 @@ export interface HubLinkOptions {
    * The hub's movie export messages (`{ type: "export", ... }`: saved, failed; sd-export).
    */
   readonly onExport?: (message: Record<string, unknown>) => void;
+  /**
+   * The hub's hello reply's `hub` ({ url, eveData }), on every (re)connect.
+   */
+  readonly onHello?: (hub: unknown) => void;
 }
 
 export class HubLink {
@@ -52,13 +57,15 @@ export class HubLink {
   onExport: (message: Record<string, unknown>) => void;
   private readonly handlers = new Map<string, ToolHandler>();
   private readonly onStatus: (connected: boolean) => void;
+  private readonly onHello: (hub: unknown) => void;
   private readonly logs: LogEntry[] = [];
   private ws: Maybe<WebSocket> = null;
   private flushTimer: Maybe<ReturnType<typeof setTimeout>> = null;
 
-  constructor({ onStatus = () => undefined, onExport = () => undefined }: HubLinkOptions = {}) {
+  constructor({ onStatus = () => undefined, onExport = () => undefined, onHello = () => undefined }: HubLinkOptions = {}) {
     this.onStatus = onStatus;
     this.onExport = onExport;
+    this.onHello = onHello;
   }
 
   /**
@@ -141,6 +148,10 @@ export class HubLink {
     }
     if (message.type === 'export') {
       this.onExport(message as Record<string, unknown>);
+      return;
+    }
+    if (message.type === 'hello') {
+      this.onHello(message.hub);
       return;
     }
     if (message.type !== 'call') return;

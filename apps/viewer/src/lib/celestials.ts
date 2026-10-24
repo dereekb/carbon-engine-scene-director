@@ -194,18 +194,22 @@ export interface DressingReportInput {
    */
   readonly error?: Maybe<string>;
   readonly notes?: readonly string[];
+  /**
+   * No EVE data: why nothing is dressed (state off).
+   */
+  readonly offNote?: Maybe<string>;
 }
 
 /**
- * Get_state's `location.dressing`. State precedence: off (`?dress=off`) > failed (the location) > loading (the answer or
+ * Get_state's `location.dressing`. State precedence: off (`?dress=off`, or no EVE data) > failed (the location) > loading (the answer or
  * a load in flight) > partial (something failed) > ready.
  *
  * @param input - The parts, the plan, the entries and the nebula and sun dressing.
  * @returns The report.
  */
 export function DressingReport(input: DressingReportInput): LocationDressingReport {
-  const { parts, plan, entries, error, notes } = input;
-  const off = LOCATION_DRESSING_PARTS.every((part) => !parts[part]);
+  const { parts, plan, entries, error, notes, offNote } = input;
+  const off = offNote != null || LOCATION_DRESSING_PARTS.every((part) => !parts[part]);
   const counts = {} as Record<DressedKind, { drawn: number; validated: number; loading: number; failed: number; skipped: number }>;
   for (const kind of DRESSED_KINDS) counts[kind] = { drawn: 0, validated: 0, loading: 0, failed: 0, skipped: 0 };
   const objects: LocationDressingObjectReport[] = [];
@@ -256,6 +260,7 @@ export function DressingReport(input: DressingReportInput): LocationDressingRepo
 
   return {
     state,
+    ...(offNote ? { note: offNote } : {}),
     ...(error && !off ? { error } : {}),
     ...(notes && notes.length > 0 && !off ? { notes: [...notes] } : {}),
     parts,

@@ -154,7 +154,10 @@ export function toMapSystemAnswer(input: ToMapSystemAnswerInput): MapSystemAnswe
   return { system, origin: [origin[0], origin[1], origin[2]], celestials, sdeBuild };
 }
 
-export type LocationStatus = 'loading' | 'ready' | 'failed';
+/**
+ * `off`: no-EVE-data mode, where the page fetches no map (the report's `note` says why).
+ */
+export type LocationStatus = 'loading' | 'ready' | 'failed' | 'off';
 
 export interface LocationCelestialReport {
   readonly id: number;
@@ -211,6 +214,10 @@ export interface LocationReport {
   readonly status: LocationStatus;
   readonly error?: string;
   /**
+   * Why the status is `off`.
+   */
+  readonly note?: string;
+  /**
    * From the answer when ready (actual distances); the document's id, name and kind before that, or when it is not in
    * the system (`note`).
    */
@@ -234,6 +241,10 @@ export interface ToLocationReportInput {
   readonly status: LocationStatus;
   readonly error?: Maybe<string>;
   /**
+   * Why the status is `off`.
+   */
+  readonly note?: Maybe<string>;
+  /**
    * How many nearby celestials to list; LOCATION_NEARBY_LIMIT by default.
    */
   readonly limit?: number;
@@ -247,7 +258,7 @@ export interface ToLocationReportInput {
  * @returns The report.
  */
 export function toLocationReport(input: ToLocationReportInput): LocationReport {
-  const { location, status, error, limit = LOCATION_NEARBY_LIMIT } = input;
+  const { location, status, error, note, limit = LOCATION_NEARBY_LIMIT } = input;
   const answer = status === 'ready' ? input.answer : null;
   const name = answer?.system.name ?? location.name;
   const region = answer?.system.region?.name ?? location.region;
@@ -274,6 +285,7 @@ export function toLocationReport(input: ToLocationReportInput): LocationReport {
     origin: [location.origin[0], location.origin[1], location.origin[2]],
     status,
     ...(error ? { error } : {}),
+    ...(note ? { note } : {}),
     ...(anchor ? { anchor } : {}),
     ...(star ? { star } : {}),
     nearby: (answer?.celestials ?? []).slice(0, Math.max(0, limit)).map(toCelestialReport)

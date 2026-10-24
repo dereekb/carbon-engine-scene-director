@@ -302,10 +302,11 @@ import { ShotQueue, WeaponShotsOf } from './shots';
 import { ShipTargets, type ShipTargetReport } from './targets';
 import { PropModAudioEvents, PropModAudioStops } from './prop-mod-audio';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf, type PropModSource, type ResolvedShipPropMod } from './prop-mods';
-import { ErrorText, ResourceValues } from './resources';
+import { ErrorText, ExpectedResourceRefusals, ResourceRefusals, ResourceValues } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
-import { OBJECT_STAND_IN_COLOR, StandInTeamColor, type StandInCube } from './stand-ins';
+import { DrawsAsCube, OBJECT_STAND_IN_COLOR, StandInTeamColor, type StandInCube } from './stand-ins';
+import { EVE_DATA_ON, EveDataReport, type PageEveData } from './eve-data';
 import { CURRENT_KEY, type SceneStore } from './store';
 import { ShipScripts } from './ship-scripts';
 import { TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
@@ -338,7 +339,11 @@ const LOOKUP_PENDING_NOTE = "waiting for the hub's /ship-stats answer";
  */
 const PREFETCH_FIT_ROUNDS = 3;
 
-export type ShipStatus = 'queued' | 'building' | 'validated' | 'ready' | 'failed' | 'destroyed';
+/**
+ * A ship's build status. `stand-in`: no EVE data (eve-data.ts), so no model is built; the ship flies its class numbers
+ * and draws as a cube on its ball (stand-ins.ts).
+ */
+export type ShipStatus = 'queued' | 'building' | 'validated' | 'ready' | 'stand-in' | 'failed' | 'destroyed';
 
 /**
  * A ship destroyed with death "explode": its kill, the explosion chosen, when the explosion starts (the killing shot's
@@ -708,9 +713,14 @@ export interface DirectorOptions {
    */
   readonly missileGraphics?: MissileLookup;
   /**
-   * `?audio=off`: the page never turns audio on.
+   * The tab's EVE data mode (eve-data.ts): with it off the lookups answer at once, ships and objects are stand-ins, and
+   * nothing draws EVE effects. On by default.
    */
-  readonly audioDisabled?: boolean;
+  readonly eveData?: PageEveData;
+  /**
+   * Why the page never turns audio on (`?audio=off`); null or absent: it may (with EVE data).
+   */
+  readonly audioOff?: Maybe<string>;
 }
 
 interface ApplyOptions {
@@ -900,8 +910,22 @@ interface FrameCameraArgs {
   readonly persist?: boolean;
 }
 
+/**
+ * Whether a ship's build has settled for its formation radius: built (ready or validated), a stand-in, or failed.
+ *
+ * @param status - The ship's build status.
+ * @returns Whether it will not change on its own.
+ */
+export function BuildSettled(status: ShipStatus): boolean {
+  return status === 'ready' || status === 'validated' || status === 'stand-in' || status === 'failed';
+}
+
 export class Director {
   readonly engine: Maybe<Engine>;
+  /**
+   * The tab's EVE data mode.
+   */
+  readonly eveData: PageEveData;
   readonly engineError: Maybe<Error>;
   readonly store: SceneStore;
   readonly world: DestinyWorld;
@@ -1226,7 +1250,22 @@ export class Director {
     return this.silent ? null : this.warpEffectsDrawn;
   }
 
-  constructor({ engine, engineError, store, world, clock, onChange = () => undefined, hullStats = new HullStatsLookup(), propMods = new PropModLookup(), fits = new FitLookup(), weapons = new WeaponLookup(), missileGraphics = new MissileLookup(), audioDisabled = false }: DirectorOptions) {
+  constructor({
+    engine,
+    engineError,
+    store,
+    world,
+    clock,
+    onChange = () => undefined,
+    eveData = EVE_DATA_ON,
+    hullStats = new HullStatsLookup({ eveData }),
+    propMods = new PropModLookup({ eveData }),
+    fits = new FitLookup({ eveData }),
+    weapons = new WeaponLookup({ eveData }),
+    missileGraphics = new MissileLookup({ eveData }),
+    audioOff = null
+  }: DirectorOptions) {
+    this.eveData = eveData;
     this.hullStats = hullStats;
     this.propMods = propMods;
     this.fitLookup = fits;
@@ -1278,15 +1317,18 @@ export class Director {
       retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.fields.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
       onChange: () => this.onChange(),
       onBuilt: (id) => this.ObjectBuilt(id),
-      detachAudio: (build) => this.audio.Detached(build)
+      detachAudio: (build) => this.audio.Detached(build),
+      eveData
     });
     this.fields = new SceneFields({
       engine,
       retained: () => [...this.ShipRoots(), ...this.dressing.Roots(), ...this.objects.Roots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
       onChange: () => this.onChange(),
-      detachAudio: (build) => this.audio.Detached(build)
+      detachAudio: (build) => this.audio.Detached(build),
+      eveData
     });
     this.location = new LocationLookup({
+      eveData,
       onChange: () => {
         this.SimInput('the location answer landed');
         this.Redress();
@@ -1294,19 +1336,22 @@ export class Director {
       }
     });
     // A module already running when audio turns on has played its one-shot activation: nothing to post.
-    this.audio = new PageAudio({ disabled: audioDisabled, onChange: () => this.onChange() });
+    this.audio = new PageAudio({ off: audioOff ?? eveData.note, onChange: () => this.onChange() });
     world.OnPropMod((event) => this.PostPropModAudio(event));
-    this.moduleEffectsDrawn = engine
+    // The EVE effects (module effects, explosions, warp flashes, turrets, missiles) need EVE files: with no EVE data none
+    // is built, as without a renderer.
+    const drawsEve = eveData.on ? engine : null;
+    this.moduleEffectsDrawn = drawsEve
       ? new ModuleEffects({
-          engine,
+          engine: drawsEve,
           ships: { ShipOf: (id) => this.live.get(id)?.ship ?? null, CurvesOf: (id) => world.Curves(id), RadiusOf: (id) => this.live.get(id)?.ship?.boundingSphereRadius || UNBUILT_RADIUS },
           retained: () => [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ExplosionRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build)
         })
       : null;
-    this.explosionsDrawn = engine
+    this.explosionsDrawn = drawsEve
       ? new ShipExplosions({
-          engine,
+          engine: drawsEve,
           files: this.explosionFiles,
           retained: () => [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ModuleEffectRoots(), ...this.WarpEffectRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build),
@@ -1325,18 +1370,18 @@ export class Director {
         return world.tick;
       }
     });
-    this.warpEffectsDrawn = engine
+    this.warpEffectsDrawn = drawsEve
       ? new WarpEffects({
-          engine,
+          engine: drawsEve,
           retained: () => [...this.ShipRoots(), ...this.SceneryRoots(), ...this.ModuleEffectRoots(), ...this.ExplosionRoots(), ...this.MissileRoots()],
           detachAudio: (build) => this.audio.Detached(build),
           DrawnPosition: (id, now) => world.Curves(id)?.translation.GetValueAt__Ticks(now, vec3.create()) ?? null
         })
       : null;
-    this.turretsDrawn = engine ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
-    this.missileDrawingDrawn = engine
+    this.turretsDrawn = drawsEve ? new ShipTurrets({ files: this.turretFiles, detachAudio: (build) => this.audio.Detached(build), drawnTarget: (id) => this.live.get(id)?.ship ?? this.objects.Entry(id)?.object ?? null }) : null;
+    this.missileDrawingDrawn = drawsEve
       ? new ShipMissiles({
-          engine,
+          engine: drawsEve,
           files: this.missileFiles,
           detachAudio: (build) => this.audio.Detached(build),
           tickSeconds: world.master.tickInterval / 1000,
@@ -2917,8 +2962,8 @@ export class Director {
   }
 
   /**
-   * Hands the engine a stand-in cube (stand-ins.ts) for every ship and object drawn without a model, most often for
-   * want of EVE data: a ship whose build failed on its ClientBall at `now`, coloured by team; a failed object at its
+   * Hands the engine a stand-in cube (stand-ins.ts) for every ship and object drawn without a model (DrawsAsCube: a
+   * stand-in with no EVE data, or a failed build): a ship on its ClientBall at `now`, coloured by team; an object at its
    * document placement. Runs between world.Tick and engine.Frame, like DriveBoosters.
    *
    * @param now - The scene clock, in integer 100 ns ticks.
@@ -2928,7 +2973,8 @@ export class Director {
     if (!engine) return;
     const cubes: StandInCube[] = [];
     for (const doc of this.scene?.ships ?? []) {
-      const curves = this.live.get(doc.id)?.status === 'failed' ? this.world.Curves(doc.id) : null;
+      const status = this.live.get(doc.id)?.status;
+      const curves = status && DrawsAsCube(status) ? this.world.Curves(doc.id) : null;
       if (!curves) continue;
       cubes.push({
         position: curves.translation.GetValueAt__Ticks(now, vec3.create()),
@@ -2939,7 +2985,7 @@ export class Director {
     }
     for (const doc of this.scene?.objects ?? []) {
       const entry = this.objects.Entry(doc.id);
-      if (entry?.status !== 'failed') continue;
+      if (!entry || !DrawsAsCube(entry.status)) continue;
       cubes.push({ position: doc.position, rotation: DocumentRotation(doc.rotation), radius: ObjectBallRadius({ radius: doc.radius, sofRadius: entry.sofRadius }).radius, color: OBJECT_STAND_IN_COLOR });
     }
     engine.SetStandIns(cubes);
@@ -3195,8 +3241,21 @@ export class Director {
         this.live.set(doc.id, entry);
       }
       if (this.deaths.get(doc.id)?.hidden) entry.status = 'destroyed';
-      else if (entry.status !== 'failed') entry.status = this.engine && entry.hull ? 'ready' : 'validated';
+      else if (entry.status !== 'failed') entry.status = this.SettledStatus(entry);
     }
+  }
+
+  /**
+   * A restored ship's settled build status: a stand-in with no EVE data, else ready once drawn or validated.
+   *
+   * @param entry - The ship's live entry.
+   * @returns The status.
+   */
+  private SettledStatus(entry: LiveShip): ShipStatus {
+    let status: ShipStatus = 'validated';
+    if (!this.eveData.on) status = 'stand-in';
+    else if (this.engine && entry.hull) status = 'ready';
+    return status;
   }
 
   /**
@@ -3969,6 +4028,7 @@ export class Director {
       ? { available: true, ...this.engine.Stats(), moduleEffects: this.moduleEffects?.Report() ?? null, turrets: this.turrets?.Report() ?? null, missiles: this.missileDrawing?.Report() ?? null, warpEffects: this.warpEffects?.Report() ?? null }
       : { available: false, reason: this.engineError?.message ?? 'not started' };
     return {
+      eveData: { ...EveDataReport(this.eveData), ...(this.eveData.on ? {} : { refused: ResourceRefusals(), expected: ExpectedResourceRefusals() }) },
       renderer,
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0, asteroidFields: this.scene.asteroidFields?.length ?? 0 } : null,
       location: this.LocationState(),
@@ -4319,7 +4379,8 @@ export class Director {
       this.deaths.delete(doc.id);
     }
     const alive = (doc: SceneShip): boolean => !this.IsDead(doc.id);
-    // A ship that failed before is retried whenever the scene is applied again.
+    // A ship that failed before is retried whenever the scene is applied again; a stand-in is no failure (no EVE data
+    // stays off until the tab reloads into another mode).
     const changed = new Set([...diff.rebuilt, ...diff.added].map((doc) => doc.id));
     const retried = scene.ships.filter((doc) => !changed.has(doc.id) && (this.live.get(doc.id)?.status ?? 'failed') === 'failed');
     const builds = [...diff.rebuilt, ...diff.added, ...retried].filter(alive);
@@ -4517,6 +4578,15 @@ export class Director {
     entry.status = 'building';
     this.onChange();
     try {
+      if (!this.eveData.on) {
+        // No EVE data: no model to build; the ship flies class numbers and draws as a stand-in cube (stand-ins.ts).
+        if (this.deaths.get(doc.id)?.hidden) entry.status = 'destroyed';
+        else {
+          this.Retune(doc.id);
+          entry.status = 'stand-in';
+        }
+        return;
+      }
       const { values, diagnostics, hull } = await BuildShipValues(doc.dna);
       entry.diagnostics = diagnostics.slice(0, 10).map((item) => (typeof item === 'string' ? item : JSON.stringify(item)));
       if (this.live.get(doc.id) !== entry) return;
@@ -5485,7 +5555,7 @@ export class Director {
     const doc = this.scene?.ships.find((ship) => ship.id === id);
     const answer = doc ? this.hullStats.Cached(doc) : null;
     const status = this.live.get(id)?.status;
-    const settled = Boolean(answer) && ((answer?.hull?.published.radius ?? 0) > 0 || status === 'validated' || status === 'ready' || status === 'failed');
+    const settled = Boolean(answer) && ((answer?.hull?.published.radius ?? 0) > 0 || (status != null && BuildSettled(status)));
     return settled ? (this.flights.get(id)?.radius ?? this.world.Motion(id)?.physics.radius ?? null) : null;
   }
 
@@ -6642,7 +6712,7 @@ export class Director {
    */
   private Redress(location: Maybe<SceneLocation> = this.scene?.location ?? null): void {
     const report = this.location.Report();
-    this.dressing.Update({ location, answer: this.location.Answer(), status: report?.status ?? 'loading', error: report?.error });
+    this.dressing.Update({ location, answer: this.location.Answer(), status: report?.status ?? 'loading', error: report?.error, note: report?.note });
     this.SyncCelestialTargets(report?.status === 'ready' ? location : null);
   }
 

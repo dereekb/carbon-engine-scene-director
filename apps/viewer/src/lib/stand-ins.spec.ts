@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { quat, vec3 } from './runtime-sim';
-import { NEUTRAL_STAND_IN_COLOR, PackStandInCubes, STAND_IN_FLOATS, StandInTeamColor, StandInViewProjection, type StandInCube } from './stand-ins';
+import { DrawsAsCube, NEUTRAL_STAND_IN_COLOR, PackStandInCubes, STAND_IN_FLOATS, StandInTeamColor, StandInViewProjection, type StandInCube } from './stand-ins';
 
 /**
  * A column-major 4×4 times a point.
@@ -63,5 +63,13 @@ describe('StandInViewProjection', () => {
     const expected = Transform(projection, Transform(view, world));
     const actual = Transform(combined, [world[0] - eye[0], world[1] - eye[1], world[2] - eye[2]]);
     for (let index = 0; index < 4; index++) expect(actual[index]).toBeCloseTo(expected[index], 2);
+  });
+});
+
+describe('DrawsAsCube', () => {
+  it('draws stand-ins and failed builds only', () => {
+    expect(DrawsAsCube('stand-in')).toBe(true);
+    expect(DrawsAsCube('failed')).toBe(true);
+    for (const status of ['queued', 'building', 'ready', 'validated', 'destroyed']) expect(DrawsAsCube(status)).toBe(false);
   });
 });

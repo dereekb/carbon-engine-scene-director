@@ -6,13 +6,19 @@
  * saves a screenshot to .scratch/verify.png.
  *
  *   node dist/apps/scene-director/verify-page.js [--tools-core http://127.0.0.1:5510] [--viewer <dir>] [--headed]
+ *
+ * `--eve-data off` is the no-EVE-data run (sd-dev-env): it starts its own hub in the mode, needs no tools-core, and runs
+ * only the "no EVE data:" checks (statuses, refusals, zero EVE requests, a quiet page_log):
+ *
+ *   node dist/apps/scene-director/verify-page.js --eve-data off
+ *   npx nx run scene-director:verify-page --eve-data off
  */
 
 import type { Maybe } from '@dereekb/util';
 import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { chromium } from 'playwright';
+import { chromium, type Page } from 'playwright';
 import {
   DEFAULT_UNIVERSE,
   MAX_SCENE_DISTANCE,
@@ -47,7 +53,7 @@ import { ReadMp4 } from './lib/hub/mp4-reader.testing';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
 import { ErrorMessage, ErrorProblems } from './lib/hub/tool-call';
-import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
+import { DEFAULT_TOOLS_CORE, ToolsCore, type ToolsCoreStatus } from './lib/hub/tools-core';
 import { FleetCompositionFileStore } from './lib/store/composition-files';
 import { MovieFileStore } from './lib/store/movie-files';
 import { FleetPersonalityFileStore } from './lib/store/personality-files';
@@ -774,7 +780,7 @@ const TFI_DNA = 'mb2_t1:minmatarnavy:minmatar';
 const GUARDIAN_DNA = 'ac3_t2:carthum:amarr';
 
 /**
- * The value after a command-line flag.
+ * The value after a command-line flag, `--name value` or `--name=value` (nx forwards the second form).
  *
  * @param name - The flag.
  * @param fallback - Returned when the flag is absent.
@@ -782,7 +788,9 @@ const GUARDIAN_DNA = 'ac3_t2:carthum:amarr';
  */
 function Option(name: string, fallback: string): string {
   const index = process.argv.indexOf(name);
-  return index < 0 ? fallback : process.argv[index + 1];
+  const joined = process.argv.find((arg) => arg.startsWith(`${name}=`));
+  if (index >= 0) return process.argv[index + 1];
+  return joined ? joined.slice(name.length + 1) : fallback;
 }
 
 /**
@@ -890,8 +898,12 @@ const toolsCore = new ToolsCore({ url: Option('--tools-core', DEFAULT_TOOLS_CORE
  */
 const ONLY = Option('--only', '').toLowerCase();
 const CONNECT_CHECK = 'the tab connects to the hub';
-const status = await toolsCore.Status();
-if (!status.reachable) {
+/**
+ * `--eve-data off`: the hub runs in no-EVE-data mode and only the "no EVE data:" checks run; tools-core is never asked.
+ */
+const EVE_DATA_OFF = Option('--eve-data', '') === 'off';
+const status = EVE_DATA_OFF ? null : await toolsCore.Status();
+if (status && !status.reachable) {
   console.error(status.error);
   process.exit(1);
 }
@@ -902,7 +914,18 @@ const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tm
 const personalities = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-personalities-')));
 const movies = new MovieFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-movies-')));
 // The audio cache is shared with every hub on the machine (a copy of tools-core's banks, not a store).
-const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, personalities, movies, audioCache: new AudioBankCache(), log: () => undefined }).Start();
+const hub = await new Hub({
+  port: 0,
+  eveData: EVE_DATA_OFF ? 'off' : 'tools-core',
+  toolsCore,
+  viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')),
+  scenes,
+  compositions,
+  personalities,
+  movies,
+  audioCache: EVE_DATA_OFF ? null : new AudioBankCache(),
+  log: () => undefined
+}).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 // Autoplay lets the page turn audio on without a gesture, so the audio check sees the engine stems post.
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] });
@@ -947,34 +970,12 @@ function NotInFormation(state: ViewerState, ids: readonly string[]): Maybe<strin
 }
 
 /**
- * Runs one check and records its outcome.
+ * The checks with EVE data (tools-core reachable, the normal run).
  *
- * @param label - What is checked.
- * @param action - The check; its string result is reported as detail.
+ * @param page - The viewer tab.
+ * @param status - tools-core's status (its build).
  */
-async function Check(label: string, action: () => Promise<string | void>): Promise<void> {
-  if (ONLY && label !== CONNECT_CHECK && !ONLY.split('|').some((text) => label.toLowerCase().includes(text))) return;
-  try {
-    const detail = await action();
-    results.push(detail ? `ok    ${label} - ${detail}` : `ok    ${label}`);
-  } catch (error) {
-    if (error instanceof Skipped) {
-      results.push(`skip  ${label} - ${error.message}`);
-    } else {
-      failed += 1;
-      results.push(`FAIL  ${label} - ${ErrorMessage(error)}`);
-    }
-  }
-}
-
-try {
-  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
-  await page.goto(hub.url);
-  await Check(CONNECT_CHECK, async () => {
-    for (let attempt = 0; attempt < 100 && (await call<ViewerStatus>('viewer_status')).connectedTabs === 0; attempt++) await Delay(200);
-    Expect((await call<ViewerStatus>('viewer_status')).connectedTabs === 1, 'no tab after 20 s');
-  });
-
+async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void> {
   const state = await call<ViewerState>('get_state');
   const rendering = state.renderer.available;
   const renderer = rendering ? state.renderer.adapter : `unavailable (${state.renderer.reason})`;
@@ -5958,6 +5959,279 @@ try {
   const unexpected = errors.filter((entry) => !/bogus|nosuchhull|renderer unavailable/u.test(entry.message));
   results.push(`info  page errors: ${errors.length} (${unexpected.length} unexpected)`);
   for (const entry of unexpected.slice(0, 8)) results.push(`        ${entry.message.split('\n')[0].slice(0, 200)}`);
+}
+
+/**
+ * What the no-EVE-data checks read from get_state.
+ */
+interface NoEveState {
+  readonly eveData?: { readonly mode: string; readonly from?: string; readonly note?: string; readonly refused: number };
+  readonly renderer: { readonly available: boolean; readonly standIns?: { readonly greenScreen: boolean; readonly cubes: number } };
+  readonly ships: readonly {
+    readonly id: string;
+    readonly status: string;
+    readonly speed?: number;
+    readonly physics?: { readonly source?: string; readonly note?: string };
+    readonly propMod?: Maybe<{ readonly source?: string }>;
+    readonly fit?: Maybe<{ readonly note?: Maybe<string> }>;
+  }[];
+  readonly fleets?: readonly { readonly id: string; readonly formation?: { readonly ready: boolean } }[];
+  readonly objects?: readonly { readonly id: string; readonly status: string }[];
+  readonly asteroidFields?: readonly { readonly id: string; readonly status: string; readonly note?: string }[];
+  readonly location?: Maybe<{ readonly status: string; readonly note?: string }>;
+  readonly audio?: { readonly state: string; readonly note?: string };
+  readonly timeline?: Maybe<{ readonly state: string }>;
+}
+
+/**
+ * The paths a tab must never ask for in no-EVE-data mode.
+ */
+const EVE_DATA_PATHS = ['/resource/', '/resfileindex.txt', '/ship-stats', '/prop-mod', '/fit/', '/dogma/', '/weapon', '/missile', '/map/', '/audio/'];
+
+/**
+ * The no-EVE-data run's checks (`--eve-data off`): each loads its own scene, so `--only` can pick any of them.
+ *
+ * @param requests - Every path the tab asked the hub for, from the first load.
+ */
+async function NoEveDataChecks(requests: readonly string[]): Promise<void> {
+  const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
+  const NoEve = (): Promise<NoEveState> => call<NoEveState>('get_state');
+  const WaitNoEve = async (what: string, seconds: number, test: (state: NoEveState) => Maybe<string>): Promise<NoEveState> => {
+    const end = Date.now() + seconds * 1000;
+    let last = 'never polled';
+    while (Date.now() < end) {
+      const state = await NoEve();
+      const problem = test(state);
+      if (problem == null) return state;
+      last = problem;
+      await Delay(250);
+    }
+    throw new Error(`${what} within ${seconds} s: ${last}`);
+  };
+  const Settled = (state: NoEveState): Maybe<string> => {
+    const building = [...state.ships, ...(state.objects ?? [])].find((entry) => entry.status === 'queued' || entry.status === 'building');
+    return building ? `${building.id} ${building.status}` : null;
+  };
+  const DNA = 'mf4_t1:minmatarbase:minmatar';
+  const STATS = { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35 };
+  const ROCKS = { small: ['rock_01_s_v1a_whiteyellow:ore_veldspar:asteroid'], medium: ['rock_01_m_v1a_whiteyellow:ore_veldspar:asteroid'], large: ['rock_01_l_v1a_whiteyellow:ore_veldspar:asteroid'] };
+  const MODE = /--eve-data off/u;
+  // Headless Chromium's WebGPU on this Mac has an adapter but loses its device on the first stand-in pass (2026-10-24);
+  // drawing is checked in a real Chrome tab (sd-dev-env), so headless GPU errors are reported, not failed.
+  const HEADLESS = !process.argv.includes('--headed');
+  const HeadlessGpu = (message: string): boolean => HEADLESS && /WebGPU|is invalid due to a previous error|valid external Instance/u.test(message);
+
+  await Check('no EVE data: viewer_status, /config and get_state report the mode', async () => {
+    const viewer = await call<{ readonly eveData: { readonly mode: string }; readonly toolsCore: unknown }>('viewer_status');
+    Expect(viewer.eveData.mode === 'off' && viewer.toolsCore === null, Show(viewer));
+    const config = (await (await fetch(`${hub.url}config`)).json()) as { readonly eveData: { readonly mode: string } };
+    Expect(config.eveData.mode === 'off', Show(config));
+    const state = await NoEve();
+    Expect(state.eveData?.mode === 'off' && state.eveData.from === 'hub' && state.eveData.refused === 0, Show(state.eveData));
+    Expect(!state.renderer.available || state.renderer.standIns?.greenScreen === true, Show(state.renderer.standIns));
+    return `get_state.eveData ${Show(state.eveData)}`;
+  });
+
+  await Check('no EVE data: a scene loads as stand-ins on class numbers', async () => {
+    await call('load_scene', {
+      scene: {
+        name: 'verify-no-eve-data',
+        location: { system: 30000142, name: 'Jita', origin: [0, 0, 0] },
+        ships: [
+          { id: 'plain', dna: DNA, position: [0, 0, 0] },
+          { id: 'named', dna: DNA, position: [0, 0, 3000], propMod: { module: '5MN Microwarpdrive II' } },
+          { id: 'fitted', dna: DNA, position: [0, 0, 6000], fit: '[Rifter, Plated]\n200mm Steel Plates II\n' },
+          { id: 'fc', dna: DNA, team: 'red', position: [10000, 0, 0] },
+          { id: 'm1', dna: DNA, team: 'red', position: [10000, 0, 2000] },
+          { id: 'm2', dna: DNA, team: 'red', position: [10000, 0, 4000] }
+        ],
+        fleets: [{ id: 'reds', commander: 'fc', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['m1', 'm2'] }] }] }],
+        objects: [{ id: 'keep', dna: 'ahbs_t1:amarrbase:amarr', radius: 5000, position: [0, 0, 60000] }],
+        asteroidFields: [{ id: 'belt', position: [0, 0, -80000], radius: 20000, count: 40, ores: [{ rocks: ROCKS }] }]
+      }
+    });
+    const state = await WaitNoEve('the builds settle', 15, Settled);
+    const odd = state.ships.find((ship) => ship.status !== 'stand-in' || ship.physics?.source !== 'class' || !MODE.test(ship.physics.note ?? ''));
+    Expect(!odd, `ship ${Show(odd)}`);
+    const named = state.ships.find((ship) => ship.id === 'named');
+    Expect(['baked', 'default'].includes(named?.propMod?.source ?? ''), `named prop mod ${Show(named?.propMod)}`);
+    const fitted = state.ships.find((ship) => ship.id === 'fitted');
+    Expect(MODE.test(fitted?.fit?.note ?? ''), `fit ${Show(fitted?.fit?.note)}`);
+    Expect(state.objects?.[0]?.status === 'stand-in', `object ${Show(state.objects?.[0])}`);
+    Expect(state.asteroidFields?.[0]?.status === 'off' && MODE.test(state.asteroidFields[0].note ?? ''), `field ${Show(state.asteroidFields?.[0])}`);
+    Expect(state.location?.status === 'off' && state.audio?.state === 'off', `location ${Show(state.location)}, audio ${Show(state.audio)}`);
+    const formed = await WaitNoEve('the fleet forms', 10, (polled) => (polled.fleets?.[0]?.formation?.ready ? null : Show(polled.fleets?.[0]?.formation)));
+    return `${formed.ships.length} stand-ins, 1 object, field off, location off, audio off; the fleet formed`;
+  });
+
+  await Check('no EVE data: a scripted load prepares and plays', async () => {
+    await call('load_scene', {
+      scene: {
+        name: 'verify-no-eve-data-script',
+        ships: [
+          { id: 'a', dna: DNA, position: [0, 0, 0], stats: STATS, orders: [{ type: 'goto', point: [0, 0, 3000] }] },
+          { id: 'b', dna: DNA, position: [0, 0, 5000], stats: STATS }
+        ],
+        timeline: [{ id: 'go', at: 1, order_ship: { id: 'b', order: { type: 'direction', direction: [1, 0, 0] } } }]
+      }
+    });
+    const ready = await WaitNoEve('the timeline is ready or playing', 10, (state) => (['ready', 'playing', 'done'].includes(state.timeline?.state ?? '') ? null : Show(state.timeline)));
+    if (ready.timeline?.state === 'ready') await call('timeline', { action: 'play' });
+    const report = await WaitNoEveTimeline();
+    return `the cue fired at tick ${report}`;
+  });
+
+  await Check('no EVE data: orders fly at class numbers', async () => {
+    await call('load_scene', {
+      scene: {
+        name: 'verify-no-eve-data-orders',
+        ships: [
+          { id: 'a', dna: DNA, position: [0, 0, 0] },
+          { id: 'b', dna: DNA, position: [0, 0, 20000] }
+        ]
+      }
+    });
+    await WaitNoEve('the builds settle', 10, Settled);
+    await call('order_ship', { id: 'a', order: { type: 'approach', target: 'b' } });
+    const moving = await WaitNoEve('a speeds up', 8, (state) => ((state.ships.find((ship) => ship.id === 'a')?.speed ?? 0) > 0 ? null : 'still at 0 m/s'));
+    return `a at ${Math.round(moving.ships.find((ship) => ship.id === 'a')?.speed ?? 0)} m/s`;
+  });
+
+  await Check('no EVE data: tools that need EVE data refuse with the mode', async () => {
+    const scene = { name: 'verify-no-eve-data-refusals' };
+    const calls: [string, Record<string, unknown>][] = [
+      ['search_hulls', { query: 'af1' }],
+      ['search_map', { query: 'Jita' }],
+      ['get_system', { system: 'Jita' }],
+      ['set_location', { system: 'Jita', scene }],
+      ['search_objects', { query: 'Astrahus' }],
+      ['ship_stats', { dna: DNA }],
+      ['add_ships', { hull: 'Rifter', scene }],
+      ['add_objects', { type: 'Astrahus', scene }],
+      ['add_asteroid_field', { ores: ['Veldspar'], scene }]
+    ];
+    const wrong: string[] = [];
+    for (const [name, args] of calls) {
+      const message = await call(name, args).then(
+        () => 'succeeded',
+        (error: unknown) => [ErrorMessage(error), ...(ErrorProblems(error) ?? [])].join(' ')
+      );
+      if (!MODE.test(message) || /Start it with|tools-core at/u.test(message)) wrong.push(`${name}: ${message.slice(0, 160)}`);
+    }
+    Expect(wrong.length === 0, wrong.join('; '));
+    return `${calls.length} tools refused naming --eve-data off`;
+  });
+
+  await Check('no EVE data: tools that need none still work', async () => {
+    await call('load_scene', { scene: { name: 'verify-no-eve-data-tools' } });
+    await call('ship_stats', { dna: DNA, stats: STATS });
+    await call('add_ships', { dna: DNA, count: 3, position: [0, 0, 0] });
+    await call('add_fleet_composition', { name: 'tfis', position: [0, 0, 40000] });
+    await call('add_objects', { objects: [{ dna: 'ahbs_t1:amarrbase:amarr', radius: 5000, id: 'keep', position: [0, 0, 90000] }] });
+    await call('stage_engagement', {
+      sides: [
+        { team: 'blue', ships: [{ dna: DNA, count: 2 }] },
+        { team: 'red', ships: [{ dna: DNA, count: 2 }] }
+      ]
+    });
+    const state = await WaitNoEve('the builds settle', 15, Settled);
+    const odd = [...state.ships, ...(state.objects ?? [])].find((entry) => entry.status !== 'stand-in');
+    Expect(!odd, `not a stand-in: ${Show(odd)}`);
+    return `${state.ships.length} ships and ${state.objects?.length ?? 0} object(s), all stand-ins`;
+  });
+
+  await Check('no EVE data: the tab asked for no EVE data', async () => {
+    const asked = requests.filter((pathname) => EVE_DATA_PATHS.some((prefix) => pathname.startsWith(prefix)));
+    const state = await NoEve();
+    Expect(asked.length === 0, `asked for ${[...new Set(asked)].slice(0, 8).join(', ')}`);
+    Expect(state.eveData?.refused === 0, `refused ${state.eveData?.refused}`);
+    return `${requests.length} requests, none for EVE data; refused 0`;
+  });
+
+  await Check('no EVE data: page_log is quiet', async () => {
+    // The hub is this run's own, so its page_log starts at the tab's boot.
+    const log = await call<{ readonly level: string; readonly message: string }[]>('page_log', { limit: 500 });
+    const gpu = log.filter((entry) => entry.level !== 'info' && HeadlessGpu(entry.message));
+    const loud = log.filter((entry) => entry.level !== 'info' && !HeadlessGpu(entry.message));
+    if (gpu.length) results.push(`info  headless WebGPU: ${gpu.length} error(s), first: ${gpu[0].message.split('\n')[0].slice(0, 120)}`);
+    const mode = log.filter((entry) => /ships and objects draw as stand-in cubes on a green screen/u.test(entry.message));
+    Expect(
+      loud.length === 0,
+      loud
+        .slice(0, 5)
+        .map((entry) => `${entry.level}: ${entry.message.split('\n')[0].slice(0, 160)}`)
+        .join('; ')
+    );
+    Expect(mode.length === 1, `the mode's info line appeared ${mode.length} time(s)`);
+    return `${log.length} entries, no warn or error`;
+  });
+
+  await Check('no EVE data: a screenshot draws', async () => {
+    const state = await NoEve();
+    if (!state.renderer.available) throw new Skipped('no renderer (headless Chromium has no WebGPU adapter)');
+    const lost = (await call<{ readonly message: string }[]>('page_log', { level: 'error', limit: 50 })).some((entry) => HeadlessGpu(entry.message));
+    if (lost) throw new Skipped('headless WebGPU failed; check drawing in a real Chrome tab');
+    const shot = await call<{ readonly width?: number; readonly height?: number }>('screenshot');
+    const cubes = state.ships.length + (state.objects?.length ?? 0);
+    Expect(state.renderer.standIns?.cubes === cubes, `cubes ${state.renderer.standIns?.cubes}, ships and objects ${cubes}`);
+    return `${shot.width ?? '?'}x${shot.height ?? '?'}, ${cubes} cubes`;
+  });
+
+  /**
+   * Waits until the scripted load's cue fired.
+   *
+   * @returns The tick it fired on.
+   */
+  async function WaitNoEveTimeline(): Promise<number> {
+    const end = Date.now() + 15_000;
+    let last = 'never polled';
+    while (Date.now() < end) {
+      const report = await call<TimelineToolReport>('timeline');
+      const go = report.list.find((cue) => cue.id === 'go');
+      if (go?.tick != null) return go.tick;
+      last = Show({ state: report.state, cues: report.cues });
+      await Delay(250);
+    }
+    throw new Error(`the cue fires within 15 s: ${last}`);
+  }
+}
+
+/**
+ * Runs one check and records its outcome.
+ *
+ * @param label - What is checked.
+ * @param action - The check; its string result is reported as detail.
+ */
+async function Check(label: string, action: () => Promise<string | void>): Promise<void> {
+  if (ONLY && label !== CONNECT_CHECK && !ONLY.split('|').some((text) => label.toLowerCase().includes(text))) return;
+  try {
+    const detail = await action();
+    results.push(detail ? `ok    ${label} - ${detail}` : `ok    ${label}`);
+  } catch (error) {
+    if (error instanceof Skipped) {
+      results.push(`skip  ${label} - ${error.message}`);
+    } else {
+      failed += 1;
+      results.push(`FAIL  ${label} - ${ErrorMessage(error)}`);
+    }
+  }
+}
+
+try {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
+  // Every path the tab asks the hub for, from the first load: the no-EVE-data run checks none is EVE data.
+  const requests: string[] = [];
+  page.on('request', (request) => {
+    requests.push(new URL(request.url()).pathname);
+  });
+  await page.goto(hub.url);
+  await Check(CONNECT_CHECK, async () => {
+    for (let attempt = 0; attempt < 100 && (await call<ViewerStatus>('viewer_status')).connectedTabs === 0; attempt++) await Delay(200);
+    Expect((await call<ViewerStatus>('viewer_status')).connectedTabs === 1, 'no tab after 20 s');
+  });
+
+  if (status) await EveDataChecks(page, status);
+  else await NoEveDataChecks(requests);
 } finally {
   await browser.close();
   await hub.Stop();

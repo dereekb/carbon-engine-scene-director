@@ -11,6 +11,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { readWeaponGraphic, type WeaponGraphic } from '@scene-director/scene';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 
 /**
  * A weapon type's graphic, or why there is none.
@@ -26,6 +27,10 @@ export interface WeaponAnswer {
 export type WeaponFetch = (url: string, init: { readonly signal: AbortSignal }) => Promise<Pick<Response, 'status' | 'json'>>;
 
 export interface WeaponLookupOptions {
+  /**
+   * The tab's EVE data mode; off, every lookup answers at once with the mode's note (no request).
+   */
+  readonly eveData?: PageEveData;
   /**
    * Defaults to the global fetch.
    */
@@ -61,8 +66,14 @@ export class WeaponLookup {
   private readonly retryDelaysMs: readonly number[];
   private readonly answers = new Map<number, WeaponAnswer>();
   private readonly requests = new Map<number, Promise<WeaponAnswer>>();
+  /**
+   * The one answer in no-EVE-data mode; null with EVE data.
+   */
+  private readonly off: Maybe<WeaponAnswer>;
 
   constructor(options: WeaponLookupOptions = {}) {
+    const eveData = options.eveData ?? EVE_DATA_ON;
+    this.off = eveData.on ? null : Object.freeze({ weapon: null, note: eveData.note });
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.url = options.url ?? '/weapon';
     this.retryDelaysMs = options.retryDelaysMs ?? WEAPON_LOOKUP_RETRY_DELAYS_MS;
@@ -75,7 +86,7 @@ export class WeaponLookup {
    * @returns The answer, or null before its lookup has settled.
    */
   Cached(typeID: number): Maybe<WeaponAnswer> {
-    return this.answers.get(typeID) ?? null;
+    return this.off ?? this.answers.get(typeID) ?? null;
   }
 
   /**
@@ -85,6 +96,7 @@ export class WeaponLookup {
    * @returns The answer; it never rejects.
    */
   Lookup(typeID: number): Promise<WeaponAnswer> {
+    if (this.off) return Promise.resolve(this.off);
     const cached = this.answers.get(typeID);
     if (cached) return Promise.resolve(cached);
     let request = this.requests.get(typeID);

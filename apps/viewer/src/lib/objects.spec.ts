@@ -59,3 +59,9 @@ describe('objects', () => {
     expect(PlanCelestialTargetSync({ currentKey: 'k', current: ['celestial:1'], nextKey: null, targets })).toEqual({ remove: ['celestial:1'], add: [] });
   });
 });
+
+describe('ObjectsText stand-ins', () => {
+  it('counts stand-in objects', () => {
+    expect(ObjectsText([{ status: 'stand-in' }, { status: 'stand-in' }, { status: 'ready' }])).toBe('3 · 1 ready · 2 stand-in');
+  });
+});

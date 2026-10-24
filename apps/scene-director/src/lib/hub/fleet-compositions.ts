@@ -210,10 +210,10 @@ function fillHullGroup(group: HullGroup, resolved: ResolvedCompositionHulls): vo
   if (hull && !hull.dna && dnaMissing) failure = `the EVE data has no DNA for type ${hull.typeID}`;
 
   if (failure && dnaMissing) {
-    resolved.problems.push(`hull "${label}" has no dna and could not be resolved through tools-core: ${failure}`);
+    resolved.problems.push(`hull "${label}" has no dna and could not be resolved from the EVE data: ${failure}`);
     return;
   }
-  if (failure) resolved.warnings.push(`hull "${label}" could not be looked up through tools-core (${failure}); its radius defaults to ${DEFAULT_FORMATION_RADIUS} m`);
+  if (failure) resolved.warnings.push(`hull "${label}" could not be looked up (${failure}); its radius defaults to ${DEFAULT_FORMATION_RADIUS} m`);
   const sdeRadius = hull?.published.radius ?? null;
   let radiusFrom: CompositionHullReport['radiusFrom'] = 'composition';
   if (ships.some((ship) => ship.radius == null)) radiusFrom = sdeRadius == null ? 'default' : 'sde';

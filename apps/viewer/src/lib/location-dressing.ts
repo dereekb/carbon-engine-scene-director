@@ -37,6 +37,10 @@ export interface LocationDressingInput {
   readonly answer: Maybe<MapSystemAnswer>;
   readonly status: LocationStatus;
   readonly error?: Maybe<string>;
+  /**
+   * Why the status is `off` (no EVE data).
+   */
+  readonly note?: Maybe<string>;
 }
 
 interface DressingEntry {
@@ -74,6 +78,10 @@ export class LocationDressing {
   private plan: Maybe<LocationDressingPlan> = null;
   private failure: Maybe<string> = null;
   private notes: string[] = [];
+  /**
+   * No EVE data: why nothing is dressed.
+   */
+  private offNote: Maybe<string> = null;
 
   constructor(options: LocationDressingOptions) {
     this.engine = options.engine;
@@ -92,7 +100,8 @@ export class LocationDressing {
     const { location, answer, status, error } = input;
     const off = LOCATION_DRESSING_PARTS.every((part) => !this.parts[part]);
     this.located = location != null;
-    if (!location || off) {
+    this.offNote = status === 'off' ? (input.note ?? 'no EVE data') : null;
+    if (!location || off || status === 'off') {
       this.Undress();
     } else if (status === 'failed') {
       this.Undress();
@@ -113,7 +122,7 @@ export class LocationDressing {
     let report: Maybe<LocationDressingReport> = null;
     if (this.located) {
       const entries = new Map<string, DressingEntryState>([...this.entries].map(([slot, entry]) => [slot, { state: entry.state, error: entry.error, sofRadius: entry.sofRadius }]));
-      report = DressingReport({ parts: this.parts, plan: this.plan, entries, nebula: this.NebulaReport(), sunDressing: this.SunDressing(), error: this.failure, notes: this.notes });
+      report = DressingReport({ parts: this.parts, plan: this.plan, entries, nebula: this.NebulaReport(), sunDressing: this.SunDressing(), error: this.failure, notes: this.notes, offNote: this.offNote });
     }
     return report;
   }

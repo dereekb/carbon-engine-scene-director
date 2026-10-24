@@ -23,3 +23,4 @@ export * from './lib/timeline';
 export * from './lib/time';
 export * from './lib/export';
 export * from './lib/piloting';
+export * from './lib/eve-data';

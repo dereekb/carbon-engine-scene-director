@@ -24,13 +24,14 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { MAX_TIME_RATE, MIN_TIME_RATE, normalizeScene, SCENE_SCHEMA } from '@scene-director/scene';
+import { MAX_TIME_RATE, MIN_TIME_RATE, normalizeScene, readEveDataStatus, SCENE_SCHEMA } from '@scene-director/scene';
 import { InAudioDetachScope, SetAudioDetachScope } from './lib/audio-guard';
 import { DressingText } from './lib/celestials';
 import { SceneClock } from './lib/clock';
 import { DestinyWorld } from './lib/destiny';
 import { Director } from './lib/director';
 import { Engine } from './lib/engine';
+import { EVE_DATA_ON, EveDataText, FetchHubConfig, HubModeChanged, PageEveDataOf, type PageEveData } from './lib/eve-data';
 import { HubLink } from './lib/link';
 import { LocationText } from './lib/location';
 import { AsteroidFieldsText } from './lib/asteroid-fields';
@@ -62,6 +63,7 @@ const SCOPE_ASPECT = 2.39;
 
 interface OverlayState {
   hub: boolean;
+  eveData: PageEveData;
   renderer: string;
   director: Maybe<Director>;
   time: Maybe<TimeControl>;
@@ -73,7 +75,7 @@ interface OverlayState {
  */
 class Overlay {
   private readonly element: HTMLElement;
-  private readonly state: OverlayState = { hub: false, renderer: 'starting', director: null, time: null };
+  private readonly state: OverlayState = { hub: false, eveData: EVE_DATA_ON, renderer: 'starting', director: null, time: null };
 
   constructor(element: HTMLElement) {
     this.element = element;
@@ -97,8 +99,10 @@ class Overlay {
   Render(director: Maybe<Director> = this.state.director): void {
     this.state.director = director;
     const scene = director?.scene;
+    const eveData = EveDataText(this.state.eveData);
     const rows: [string, string][] = [
       ['hub', this.state.hub ? 'connected' : 'connecting...'],
+      ...(eveData ? [['EVE data', eveData] as [string, string]] : []),
       ['renderer', this.RendererText(director)],
       ['scene', scene ? `${scene.name} · ${scene.ships.length} ship(s)` + (scene.objects?.length ? ` · ${scene.objects.length} object(s)` : '') : 'none']
     ];
@@ -158,7 +162,9 @@ class Overlay {
     let text: string;
     if (engine) {
       const frameError = engine.lastError ? ` · frame error: ${engine.lastError}` : '';
-      const greenScreen = engine.greenScreen ? ' · no EVE data: green screen and cubes' : '';
+      let greenScreen = '';
+      if (!engine.eveData.on) greenScreen = ' · stand-in cubes on a green screen';
+      else if (engine.greenScreen) greenScreen = ' · the universe file did not load: green screen and cubes';
       text = `${engine.adapterInfo} · ${engine.Stats().fps} fps${greenScreen}${frameError}`;
     } else {
       text = director?.engineError?.message ?? this.state.renderer;
@@ -335,14 +341,25 @@ async function Start(): Promise<void> {
   let liveDirector: Maybe<Director> = null;
   // First, so its capture listeners run before every other handler while an export locks the tab.
   new InputLock(() => liveDirector);
+  let booted: Maybe<PageEveData> = null;
   const link = new HubLink({
     onStatus: (connected) => {
       overlay.Set({ hub: connected });
       liveDirector?.LinkStatus(connected);
+    },
+    // A hub restarted in another EVE data mode (the MCP hub with SCENE_DIRECTOR_EVE_DATA): reload into its mode.
+    onHello: (hub) => {
+      const mode = hub !== null && typeof hub === 'object' ? readEveDataStatus((hub as Record<string, unknown>)['eveData']) : null;
+      if (booted && HubModeChanged(booted, mode)) location.reload();
     }
   });
   link.CaptureConsole();
-  ConfigureResources();
+  // The EVE data mode, before anything asks for EVE data: the hub's (GET /config), or this tab's ?eve=off.
+  const eveData = PageEveDataOf({ hub: (await FetchHubConfig())?.eveData ?? null, search: location.search });
+  if (eveData.note) console.info(`${eveData.note}: ships and objects draw as stand-in cubes on a green screen; the page asks for no EVE file, lookup, map or sound`);
+  booted = eveData;
+  overlay.Set({ eveData });
+  ConfigureResources(eveData);
 
   const store = new SceneStore();
   let initial: unknown = WELCOME_SCENE;
@@ -402,15 +419,15 @@ async function Start(): Promise<void> {
 
   try {
     const universe = normalizeScene(initial).scene.environment.universe;
-    engine = await Engine.Create({ canvas: RequireElement<HTMLCanvasElement>('view'), universe });
+    engine = await Engine.Create({ canvas: RequireElement<HTMLCanvasElement>('view'), universe, eveData });
     console.info(`renderer: ${engine.adapterInfo}; features ${engine.features.join(', ') || 'none'}`);
   } catch (error) {
     engineError = error instanceof Error ? error : new Error(String(error));
     console.error(`renderer unavailable: ${engineError.message}`);
   }
 
-  const audioDisabled = new URLSearchParams(location.search).get('audio') === 'off';
-  const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), audioDisabled });
+  const audioOff = new URLSearchParams(location.search).get('audio') === 'off' ? '?audio=off' : null;
+  const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), eveData, audioOff });
   liveDirector = director;
   director.AttachTime(timeControl);
   director.AttachLink(link);

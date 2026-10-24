@@ -188,6 +188,10 @@ export interface SceneAsteroidFieldStateReport {
   readonly name?: string;
   readonly status: SceneAsteroidFieldStatus;
   readonly error?: string;
+  /**
+   * Why the status is `off` (no-EVE-data mode: the rocks are placed but no model is built).
+   */
+  readonly note?: string;
   readonly position: SceneVector;
   readonly rotation: SceneVector;
   readonly shape: AsteroidFieldShape;

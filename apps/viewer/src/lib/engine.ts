@@ -13,8 +13,9 @@ import { AnimationClock } from './animation-clock';
 import { DriveEveCamera, OrbitFitDistance, PanMetresPerPixel } from './camera';
 import { TICKS_PER_MS } from './clock';
 import type { CinemaFrame } from './cinema';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import { CountBackgroundQuads, EnvironmentReport, ReadRenderOptions, SceneDresser, type SceneDressing, type SceneEnvironmentReport } from './environment';
-import { ErrorText, ResourceValues } from './resources';
+import { ErrorText, ExpectRefusals, ResourceValues } from './resources';
 import { GREEN_SCREEN, StandInPass, type StandInCube } from './stand-ins';
 import {
   addChild,
@@ -130,8 +131,12 @@ export interface EngineEnvironment extends SceneEnvironmentReport {
 export interface EngineNebula {
   readonly path: Maybe<string>;
   readonly source: 'universe' | 'location';
-  readonly state: 'applied' | 'loading' | 'failed';
+  /**
+   * `off`: no-EVE-data mode, where no universe file is read (`note` says why).
+   */
+  readonly state: 'applied' | 'loading' | 'failed' | 'off';
   readonly error?: string;
+  readonly note?: string;
 }
 
 /**
@@ -178,11 +183,19 @@ export interface EngineCreateOptions {
    * res:/ path of the EveSpaceScene whose values dress the scene.
    */
   readonly universe: string;
+  /**
+   * The tab's EVE data mode; with it off the engine reads no universe, particles or dressing and runs no runtime frame:
+   * StandInPass draws every frame (the green screen and the cubes).
+   */
+  readonly eveData?: PageEveData;
 }
 
 interface EngineParts {
   readonly scene: EveSpaceScene;
-  readonly driver: EveSpaceSceneRenderDriver;
+  /**
+   * The runtime's render driver; null with no EVE data (nothing renders the scene then).
+   */
+  readonly driver: Maybe<EveSpaceSceneRenderDriver>;
   readonly camera: OrbitCamera;
   readonly renderTarget: CjsWebgpuRenderTarget;
   readonly al: CjsWebgpuRenderContextAL;
@@ -218,9 +231,13 @@ export class Engine {
   lastError: Maybe<string> = null;
   deviceLost: Maybe<string> = null;
   /**
-   * The universe file did not load (no EVE data): the backdrop is GREEN_SCREEN instead of a nebula.
+   * No EVE data (the mode, or a universe file that did not load): the backdrop is GREEN_SCREEN instead of a nebula.
    */
   greenScreen = false;
+  /**
+   * The tab's EVE data mode, from Create.
+   */
+  eveData: PageEveData = EVE_DATA_ON;
   /**
    * Whether the last Frame drew into a swap-chain image (no error, not lost): a movie export captures only such a
    * frame (sd-export).
@@ -270,7 +287,7 @@ export class Engine {
    * @returns The running engine.
    * @throws {Error} When WebGPU or a suitable adapter is unavailable.
    */
-  static async Create({ canvas, universe }: EngineCreateOptions): Promise<Engine> {
+  static async Create({ canvas, universe, eveData = EVE_DATA_ON }: EngineCreateOptions): Promise<Engine> {
     if (!navigator.gpu) throw new Error('this browser has no WebGPU (navigator.gpu is missing); use a current Chrome or Edge');
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error('WebGPU found no adapter; check chrome://gpu');
@@ -286,6 +303,7 @@ export class Engine {
       }
     });
     const engine = new Engine(canvas, adapter, device, features);
+    engine.eveData = eveData;
     await engine.Initialize(universe);
     return engine;
   }
@@ -563,9 +581,17 @@ export class Engine {
       return this.presented;
     };
 
-    const scene = new EveSpaceScene();
+    const noEveData = this.eveData.on ? null : (this.eveData.note ?? 'no EVE data');
+    // A new EveSpaceScene asks for its volumetric fog effects (the runtime's field initializers): with no EVE data the
+    // gate refuses them as expected (resources.ts ExpectRefusals), and nothing ever draws the scene.
+    const scene = noEveData ? await ExpectRefusals(() => new EveSpaceScene()) : new EveSpaceScene();
     let universeValues: Maybe<CjsModelValues> = null;
-    if (universe) {
+    if (noEveData) {
+      // No-EVE-data mode: nothing to read. StandInPass draws the green screen and the cubes every frame.
+      this.universe = universe || null;
+      this.nebula = { path: universe || null, source: 'universe', state: 'off', note: noEveData };
+      this.greenScreen = true;
+    } else if (universe) {
       this.universe = universe;
       try {
         // Applied as values: loading it as an object would run Initialize before the device exists.
@@ -586,10 +612,12 @@ export class Engine {
     // attachment lights never reach a shader. The client also turns new bloom off.
     Tr2Renderer.getSettings().SetValue('eveSpaceSceneDynamicLighting', true);
     Tr2Renderer.getSettings().SetValue('newBloom', false);
-    try {
-      scene.gpuParticleSystem = await blue.resMan.LoadObject('res:/fisfx/gpuparticles/system.black');
-    } catch (error) {
-      console.warn(`gpu particles unavailable: ${ErrorText(error)}`);
+    if (!noEveData) {
+      try {
+        scene.gpuParticleSystem = await blue.resMan.LoadObject('res:/fisfx/gpuparticles/system.black');
+      } catch (error) {
+        console.warn(`gpu particles unavailable: ${ErrorText(error)}`);
+      }
     }
 
     // The canvas texture must be copyable for capture. The context is
@@ -608,30 +636,34 @@ export class Engine {
     al.CreateDevice();
     const renderContext = Tr2RenderContext_GetMainThreadRenderContext();
     renderContext.SetRenderContextAL(al);
-    scene.Initialize(renderContext);
-    // What TriDevice.CreateDevice does once the device is up: prepare every
-    // device resource registered before it existed.
-    gTriDev.device.PrepareDeviceResources();
-
-    const driver = new EveSpaceSceneRenderDriver().SetBatchManager(batchManager);
-    driver.SSAO = new Tr2SSAO();
-    driver.enableDistortion = true;
-    driver.clearColor = [...(this.greenScreen ? GREEN_SCREEN : SPACE_CLEAR_COLOR)];
-    driver.scene = scene;
-
     const camera = new OrbitCamera(canvas);
-    driver.view = camera.eve.GetViewMatrix();
-    driver.projection = camera.eve.GetProjection();
+    const options = ReadRenderOptions();
+    // Without EVE data the scene is never drawn: initializing it, preparing the device resources or building the render
+    // driver (its post process, fog, TAA and distortion) would ask for effect files ResourceBytes refuses (2026-10-24).
+    let driver: Maybe<EveSpaceSceneRenderDriver> = null;
+    if (!noEveData) {
+      scene.Initialize(renderContext);
+      // What TriDevice.CreateDevice does once the device is up: prepare every
+      // device resource registered before it existed.
+      gTriDev.device.PrepareDeviceResources();
+      driver = new EveSpaceSceneRenderDriver().SetBatchManager(batchManager);
+      driver.SSAO = new Tr2SSAO();
+      driver.enableDistortion = true;
+      driver.clearColor = [...(this.greenScreen ? GREEN_SCREEN : SPACE_CLEAR_COLOR)];
+      driver.scene = scene;
+      driver.view = camera.eve.GetViewMatrix();
+      driver.projection = camera.eve.GetProjection();
+      if (!options.antiAliasing) driver.antiAliasingQuality = EveSpaceSceneRenderDriver.AntiAliasingQuality.Disabled;
+    }
 
     // The client's post process and sun flare (environment.ts), applied to the
     // live scene once they load; the first frames draw without them. A
     // location's star re-dresses them (DressSun).
-    const options = ReadRenderOptions();
-    if (!options.antiAliasing) driver.antiAliasingQuality = EveSpaceSceneRenderDriver.AntiAliasingQuality.Disabled;
     CountBackgroundQuads();
     const dresser = new SceneDresser(options);
     this.dresser = dresser;
-    void dresser.Dress(scene, null);
+    if (noEveData) dresser.Off(noEveData);
+    else void dresser.Dress(scene, null);
 
     // Blue's frame clock follows the scene clock, so the runtime's own animations (controllers, lights, the shaders'
     // Time) hold while paused and slow in slow motion (sd-time, sd-runtime → The clocks the runtime reads).
@@ -643,7 +675,7 @@ export class Engine {
       al.SetRenderTarget(0, renderTarget);
       al.SetDepthStencil(null);
       // The scene clock's tick, the same value the Destiny parks were just evolved to (destiny.ts).
-      driver.Execute([renderTarget], null, this.frameNow, this.frameNow, null, renderContext);
+      driver?.Execute([renderTarget], null, this.frameNow, this.frameNow, null, renderContext);
     });
     this.parts = { scene, driver, camera, renderTarget, al, pump, context, format };
     // The background effect setValues hydrated above draws black on the GPU (2026-10-22: no location, ?dress=off, or
@@ -690,11 +722,16 @@ export class Engine {
       camera.Update(Math.round(timestamp * TICKS_PER_MS));
       // The orbit camera updates underneath a cinematic shot, so its release blend has a live target.
       this.drawn = this.cinematic ? this.free.Apply(camera, this.cinematic, this.Aspect()) : camera.Drawn();
-      // The runtime's batch count is cumulative: this frame's is the difference.
-      const batches = al.GetDrawnBatchCount?.() ?? 0;
-      pump.Render();
-      this.DrawStandIns(camera, context, format, (al.GetDrawnBatchCount?.() ?? 0) - batches);
-      this.CheckAnimationClock();
+      if (this.eveData.on) {
+        // The runtime's batch count is cumulative: this frame's is the difference.
+        const batches = al.GetDrawnBatchCount?.() ?? 0;
+        pump.Render();
+        this.DrawStandIns(camera, context, format, (al.GetDrawnBatchCount?.() ?? 0) - batches);
+        this.CheckAnimationClock();
+      } else {
+        // No EVE data: no runtime frame (it has no shaders to draw with); the stand-in pass draws the whole image.
+        this.DrawStandIns(camera, context, format, 0);
+      }
       this.capture.AfterFrame(this.presented, this.canvas.width, this.canvas.height, format);
       al.DrainTransitions?.();
       this.lastError = null;

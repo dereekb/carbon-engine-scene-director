@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { findBakedPropMod, type RigSize } from '@scene-director/scene';
+import { PageEveDataOf } from './eve-data';
 import type { PublishedHull } from './flight';
 import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, RigSizeOf } from './prop-mods';
 
@@ -74,5 +75,23 @@ describe('PropModLookup', () => {
     await lookup.Lookup('x');
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(warn).toHaveBeenCalled();
+  });
+});
+
+describe('PropModLookup with no EVE data', () => {
+  const OFF = PageEveDataOf({ hub: { mode: 'off' }, search: '' });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers at once with the mode, never fetching or warning', async () => {
+    const fetch = vi.fn();
+    const warn = vi.spyOn(console, 'warn');
+    const lookup = new PropModLookup({ fetch, eveData: OFF });
+    expect(lookup.Cached('10MN Afterburner II')).toEqual({ propMod: null, note: OFF.note });
+    expect(await lookup.Lookup(12076)).toEqual({ propMod: null, note: OFF.note });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

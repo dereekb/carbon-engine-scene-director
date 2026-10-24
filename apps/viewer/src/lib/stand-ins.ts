@@ -76,6 +76,16 @@ export interface StandInCube {
 }
 
 /**
+ * Whether a ship or object of this build status draws as a cube: a stand-in (no EVE data) or a failed build.
+ *
+ * @param status - The ship's or object's build status.
+ * @returns Whether to draw its cube.
+ */
+export function DrawsAsCube(status: string): boolean {
+  return status === 'stand-in' || status === 'failed';
+}
+
+/**
  * A cube's colour by team: a team named after a colour takes it, any other a palette colour by its name's hash, no
  * team neutral grey.
  *

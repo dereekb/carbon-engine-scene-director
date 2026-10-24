@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdtemp } from 'node:fs/promises';
 import os from 'node:os';
@@ -117,5 +118,36 @@ describe('mcp server', () => {
     } finally {
       await client.close();
     }
+  });
+
+  it('runs in no-EVE-data mode with --eve-data off', async () => {
+    const stores = await Promise.all(['scenes', 'fleets', 'personalities', 'movies'].map((name) => mkdtemp(path.join(os.tmpdir(), `scene-director-mcp-${name}-`))));
+    const [scenes, fleets, personalities, movies] = stores;
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: [CLI, 'mcp', '--port', '0', '--eve-data', 'off', '--scenes', scenes, '--fleets', fleets, '--personalities', personalities, '--movies', movies],
+      stderr: 'ignore'
+    });
+    const client = new Client({ name: 'scene-director-test', version: '0.0.0' });
+    await client.connect(transport);
+    try {
+      expect(client.getInstructions()).toMatch(/viewer_status\.eveData says whether the hub has EVE data/u);
+      const status = (await client.callTool({ name: 'viewer_status', arguments: {} })) as { content: { text: string }[] };
+      const body = JSON.parse(status.content[0].text) as { eveData: { mode: string }; toolsCore: unknown };
+      expect(body.eveData.mode).toBe('off');
+      expect(body.toolsCore).toBeNull();
+      const hulls = (await client.callTool({ name: 'search_hulls', arguments: { query: 'af1' } })) as { isError?: boolean; content: { text: string }[] };
+      expect(hulls.isError).toBe(true);
+      expect(hulls.content[0].text).toMatch(/--eve-data off/u);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('refuses an unknown --eve-data on stderr, exiting 2 with nothing on stdout', () => {
+    const run = spawnSync(process.execPath, [CLI, 'serve', '--port', '0', '--eve-data', 'bogus'], { encoding: 'utf8', timeout: 20000 });
+    expect(run.status).toBe(2);
+    expect(run.stdout).toBe('');
+    expect(run.stderr).toMatch(/--eve-data \(or SCENE_DIRECTOR_EVE_DATA\) must be tools-core or off/u);
   });
 });

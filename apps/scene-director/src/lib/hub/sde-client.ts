@@ -8,6 +8,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { NO_TOOLS_CORE_HINT } from './tools-core';
 import { ErrorMessage, ToolError } from './tool-call';
 
 export const REQUEST_TIMEOUT_MS = 30000;
@@ -25,6 +26,19 @@ export class ShipDataError extends ToolError {
     this.name = 'ShipDataError';
     this.failure = failure;
   }
+}
+
+/**
+ * A tools-core request that never got an answer (network error or timeout), with how to start tools-core or run
+ * without it.
+ *
+ * @param url - tools-core's origin.
+ * @param what - What the request was for.
+ * @param error - The fetch error.
+ * @returns An 'unavailable' ShipDataError.
+ */
+export function ToolsCoreUnreachableError(url: string, what: string, error: unknown): ShipDataError {
+  return new ShipDataError('unavailable', `tools-core at ${url} is unreachable for ${what}: ${ErrorMessage(error)}. ${NO_TOOLS_CORE_HINT}`);
 }
 
 export type JsonObject = Record<string, unknown>;
@@ -201,7 +215,7 @@ export class SdeClient {
       const init: RequestInit = body == null ? { signal: AbortSignal.timeout(timeoutMs) } : { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body), signal: AbortSignal.timeout(timeoutMs) };
       response = await this.fetchImpl(path, init);
     } catch (error) {
-      throw new ShipDataError('unavailable', `tools-core at ${this.url} is unreachable for ${what}: ${ErrorMessage(error)}`);
+      throw ToolsCoreUnreachableError(this.url, what, error);
     }
     const raw: unknown = await response.json().catch(() => null);
     return { ok: response.ok, status: response.status, json: ReadObject(raw), raw };

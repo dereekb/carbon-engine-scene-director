@@ -9,6 +9,7 @@ import type { Maybe } from '@dereekb/util';
 import type { SceneDocument, SceneObject, SceneObjectsDiff, SceneObjectStatus, SceneVector } from '@scene-director/scene';
 import { DocumentRotation } from './destiny';
 import type { Engine } from './engine';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import { ObjectBallRadius, ObjectReach, type ObjectEntryState } from './objects';
 import { ErrorText } from './resources';
 import { vec3, type EveSpaceObject2 } from './runtime';
@@ -29,6 +30,10 @@ export interface SceneObjectsOptions {
    * Hydrates objects with the audio seams detached (PageAudio.Detached).
    */
   readonly detachAudio: DetachAudio;
+  /**
+   * The tab's EVE data mode; off, no model is built: every object is a `stand-in` (a cube on its ball).
+   */
+  readonly eveData?: PageEveData;
 }
 
 /**
@@ -52,6 +57,7 @@ export class SceneObjects {
   private readonly onChange: () => void;
   private readonly onBuilt: (id: string, sofRadius: Maybe<number>) => void;
   private readonly detachAudio: DetachAudio;
+  private readonly eveData: PageEveData;
   private readonly entries = new Map<string, SceneObjectEntry>();
 
   constructor(options: SceneObjectsOptions) {
@@ -60,6 +66,7 @@ export class SceneObjects {
     this.onChange = options.onChange;
     this.onBuilt = options.onBuilt;
     this.detachAudio = options.detachAudio;
+    this.eveData = options.eveData ?? EVE_DATA_ON;
   }
 
   /**
@@ -105,6 +112,13 @@ export class SceneObjects {
    * @param entry - The entry Apply returned.
    */
   async Build(entry: SceneObjectEntry): Promise<void> {
+    if (!this.eveData.on) {
+      // No EVE data: no model to build; the ball takes the document's radius (else the default) and draws as a cube.
+      entry.status = 'stand-in';
+      this.onBuilt(entry.id, null);
+      this.onChange();
+      return;
+    }
     entry.status = 'building';
     this.onChange();
     try {

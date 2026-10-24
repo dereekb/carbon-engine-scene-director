@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { MissileGraphic } from '@scene-director/scene';
+import { PageEveDataOf } from './eve-data';
 import { MissileLookup } from './missile-lookup';
 
 // The hub's /missile answer for Scourge Heavy Missile in a Heavy Missile Launcher II (SDE 3632936).
@@ -71,5 +72,23 @@ describe('MissileLookup', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     expect((await lookup.Lookup(34, 2410)).missile).toBeNull();
     expect(fetch).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('MissileLookup with no EVE data', () => {
+  const OFF = PageEveDataOf({ hub: { mode: 'off' }, search: '' });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers at once with the mode, never fetching or warning', async () => {
+    const fetch = vi.fn();
+    const warn = vi.spyOn(console, 'warn');
+    const lookup = new MissileLookup({ fetch, eveData: OFF });
+    expect(lookup.Cached(1, 2)).toEqual({ missile: null, note: OFF.note });
+    expect(await lookup.Lookup(1, 2)).toEqual({ missile: null, note: OFF.note });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

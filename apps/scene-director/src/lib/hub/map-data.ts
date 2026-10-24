@@ -12,7 +12,7 @@
 import type { Maybe } from '@dereekb/util';
 import { type CelestialKind, isCelestialKind, type MapCelestial, type MapCelestialGraphics, type MapNamedRecord, type MapStar, type MapSystem, type SceneVector } from '@scene-director/scene';
 import { ShipDataError } from './ship-data';
-import { ErrorMessage } from './tool-call';
+import { ToolsCoreUnreachableError } from './sde-client';
 
 const REQUEST_TIMEOUT_MS = 30000;
 const DEFAULT_SEARCH_LIMIT = 20;
@@ -271,7 +271,7 @@ export class MapData implements MapDataApi {
     try {
       response = await this.fetchImpl(`${this.url}/eve/${build}/${route}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (error) {
-      throw new ShipDataError('unavailable', `tools-core at ${this.url} is unreachable for ${what}: ${ErrorMessage(error)}`);
+      throw ToolsCoreUnreachableError(this.url, what, error);
     }
     const json = ReadObject(await response.json().catch(() => null));
     const error = typeof json['error'] === 'string' ? json['error'] : `answered ${response.status}`;

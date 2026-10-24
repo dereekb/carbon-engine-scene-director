@@ -135,7 +135,7 @@ export function ObjectStateRow(input: ObjectStateRowInput): SceneObjectStateRepo
 export function ObjectsText(rows: readonly Pick<SceneObjectStateReport, 'status'>[]): Maybe<string> {
   const counts = new Map<SceneObjectStatus, number>();
   for (const row of rows) counts.set(row.status, (counts.get(row.status) ?? 0) + 1);
-  const order: SceneObjectStatus[] = ['ready', 'validated', 'building', 'queued', 'failed'];
+  const order: SceneObjectStatus[] = ['ready', 'validated', 'stand-in', 'building', 'queued', 'failed'];
   return rows.length ? [String(rows.length), ...order.filter((status) => counts.has(status)).map((status) => `${counts.get(status)} ${status}`)].join(' · ') : null;
 }
 

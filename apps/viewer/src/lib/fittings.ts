@@ -16,6 +16,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { EVE_DATA_ON, type PageEveData } from './eve-data';
 import type { ShipModuleSpec } from './modules';
 import type { TurretMountReport } from './turret-plan';
 import {
@@ -111,6 +112,11 @@ export type FitFetch = (url: string, init: { readonly signal: AbortSignal }) => 
 
 export interface FitLookupOptions {
   /**
+   * The tab's EVE data mode; off, every name is unavailable and every type and the skills fail at once with the mode's
+   * note (no request): fits fly as their hull's class numbers.
+   */
+  readonly eveData?: PageEveData;
+  /**
    * Defaults to the global fetch.
    */
   readonly fetch?: FitFetch;
@@ -173,8 +179,14 @@ export class FitLookup {
   private bundle: Maybe<DogmaBundle> = null;
   private readonly stats = new WeakMap<DogmaBundle, Map<string, ShipStats>>();
   private readonly ships = new WeakMap<DogmaBundle, Map<string, DogmaShip>>();
+  /**
+   * The one name answer in no-EVE-data mode; null with EVE data.
+   */
+  private readonly off: Maybe<FitNameAnswer>;
 
   constructor(options: FitLookupOptions = {}) {
+    const eveData = options.eveData ?? EVE_DATA_ON;
+    this.off = eveData.on ? null : Object.freeze({ type: null, note: eveData.note, unavailable: true });
     this.fetch = options.fetch ?? ((url, init) => globalThis.fetch(url, init));
     this.typeUrl = options.typeUrl ?? '/fit/type';
     this.typesUrl = options.typesUrl ?? '/dogma/types';
@@ -204,7 +216,7 @@ export class FitLookup {
    * @returns The answer, or null before its lookup has settled.
    */
   Name(name: string): Maybe<FitNameAnswer> {
-    return this.names.get(name) ?? null;
+    return this.off ?? this.names.get(name) ?? null;
   }
 
   /**
@@ -227,7 +239,7 @@ export class FitLookup {
    * Why the skills did not land.
    */
   get skillsFailure(): Maybe<string> {
-    return this.skillsNote;
+    return this.off?.note ?? this.skillsNote;
   }
 
   /**
@@ -237,7 +249,7 @@ export class FitLookup {
    * @returns The reason, or null when it is in the bundle or still to be looked up.
    */
   TypeFailure(id: number): Maybe<string> {
-    return this.typeFailures.get(id) ?? null;
+    return this.off?.note ?? this.typeFailures.get(id) ?? null;
   }
 
   /**
@@ -247,7 +259,7 @@ export class FitLookup {
    * @returns True while it is pending or not asked for yet.
    */
   TypePending(id: number): boolean {
-    return this.bundle?.types[id] == null && !this.typeFailures.has(id);
+    return !this.off && this.bundle?.types[id] == null && !this.typeFailures.has(id);
   }
 
   /**
@@ -257,6 +269,7 @@ export class FitLookup {
    * @returns Settles when every lookup has; never rejects.
    */
   async Prepare(input: PrepareFitInput): Promise<void> {
+    if (this.off) return;
     const fit = this.Parse(input.text);
     const skills = this.LookupSkills();
     await Promise.all(eftTypeNames(fit).map((name) => this.LookupName(name, fit.hull)));
@@ -273,6 +286,7 @@ export class FitLookup {
    * @returns The answer; it never rejects.
    */
   LookupName(name: string, hull: string): Promise<FitNameAnswer> {
+    if (this.off) return Promise.resolve(this.off);
     const cached = this.names.get(name);
     if (cached) return Promise.resolve(cached);
     let request = this.nameRequests.get(name);
@@ -314,7 +328,7 @@ export class FitLookup {
    * @returns Settles when they have landed or failed; never rejects.
    */
   LookupSkills(): Promise<void> {
-    if (this.skillsLoaded || this.skillsNote) return Promise.resolve();
+    if (this.off || this.skillsLoaded || this.skillsNote) return Promise.resolve();
     this.skillsRequest ??= this.Get(this.skillsUrl, '/dogma/skills').then(({ body, note }) => {
       const read = body ? readDogmaBundle(body) : null;
       if (read?.bundle) {

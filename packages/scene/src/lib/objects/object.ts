@@ -54,7 +54,10 @@ export const DEFAULT_OBJECT_RADIUS = 1000;
  */
 export const OBJECT_NEAREST_SHIPS = 3;
 
-export type SceneObjectStatus = 'queued' | 'building' | 'ready' | 'validated' | 'failed';
+/**
+ * `stand-in`: no-EVE-data mode, where the page builds no model and draws the object as a cube on its ball.
+ */
+export type SceneObjectStatus = 'queued' | 'building' | 'ready' | 'validated' | 'stand-in' | 'failed';
 
 /**
  * Where an object's ball radius came from.

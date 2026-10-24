@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { WeaponGraphic } from '@scene-director/scene';
+import { PageEveDataOf } from './eve-data';
 import { WeaponLookup } from './weapon-lookup';
 
 // The hub's /weapon answer for the 425mm AutoCannon II (SDE 3632936).
@@ -61,5 +62,23 @@ describe('WeaponLookup', () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     expect((await lookup.Lookup(34)).weapon).toBeNull();
     expect(fetch).toHaveBeenCalledTimes(4);
+  });
+});
+
+describe('WeaponLookup with no EVE data', () => {
+  const OFF = PageEveDataOf({ hub: { mode: 'off' }, search: '' });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('answers at once with the mode, never fetching or warning', async () => {
+    const fetch = vi.fn();
+    const warn = vi.spyOn(console, 'warn');
+    const lookup = new WeaponLookup({ fetch, eveData: OFF });
+    expect(lookup.Cached(2929)).toEqual({ weapon: null, note: OFF.note });
+    expect(await lookup.Lookup(2929)).toEqual({ weapon: null, note: OFF.note });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

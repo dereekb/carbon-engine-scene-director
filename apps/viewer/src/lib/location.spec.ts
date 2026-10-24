@@ -1,5 +1,6 @@
 import { type MapCelestial, type MapSystem, type SceneLocation, toMapSystemAnswer } from '@scene-director/scene';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PageEveDataOf } from './eve-data';
 import { LocationLookup, LocationText } from './location';
 
 const ORIGIN: [number, number, number] = [-107303331552.681, -18744969943.288, 436488926028.301];
@@ -85,5 +86,26 @@ describe('LocationLookup', () => {
     lookup.Update(null);
     expect(lookup.Report()).toBeNull();
     expect(lookup.Answer()).toBeNull();
+  });
+});
+
+describe('LocationLookup with no EVE data', () => {
+  const OFF = PageEveDataOf({ hub: { mode: 'off' }, search: '' });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('reads off with the mode at once, never fetching or warning', async () => {
+    const fetch = vi.fn();
+    const warn = vi.spyOn(console, 'warn');
+    const lookup = new LocationLookup({ fetch, eveData: OFF });
+    lookup.Update({ system: 30000142, name: 'Jita', origin: [1, 2, 3] }, { retry: true });
+    await lookup.Settled();
+    const report = lookup.Report();
+    expect(report).toMatchObject({ status: 'off', note: OFF.note, nearby: [] });
+    expect(report ? LocationText(report) : null).toBe('Jita (no EVE data)');
+    expect(fetch).not.toHaveBeenCalled();
+    expect(warn).not.toHaveBeenCalled();
   });
 });

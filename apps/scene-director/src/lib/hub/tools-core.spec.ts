@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ToolsCore } from './tools-core';
+import { NO_TOOLS_CORE_HINT, ToolsCore } from './tools-core';
 
 /** A fetch stand-in whose answer to /eve/latest/build the test switches. */
 function FakeFetch(): { fetch: typeof fetch; answer: (build: string | Error) => void; calls: string[] } {
@@ -30,6 +30,8 @@ describe('ToolsCore.Status', () => {
     expect(status.build).toBe('1234');
     expect(status.error).toContain('fetch failed');
     expect(fake.calls).toHaveLength(2);
+    expect(status.error?.endsWith(NO_TOOLS_CORE_HINT)).toBe(true);
+    expect(NO_TOOLS_CORE_HINT).toContain('--eve-data off');
   });
 
   it('keeps the pinned build and reports the one tools-core moved on to', async () => {

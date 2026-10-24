@@ -148,15 +148,15 @@ describe('resolveCompositionHulls', () => {
 
   it('makes an unresolvable hull without dna a problem, and one with dna a warning', async () => {
     const unknown = await resolveCompositionHulls({ composition: requireFleetComposition({ id: 'x', commander: { hull: 'Nopeship' } }), shipData: MakeFakeShipData().shipData });
-    expect(unknown.problems).toEqual([expect.stringMatching(/^hull "Nopeship" has no dna and could not be resolved through tools-core: /u)]);
+    expect(unknown.problems).toEqual([expect.stringMatching(/^hull "Nopeship" has no dna and could not be resolved from the EVE data: /u)]);
 
     const offline = MakeFakeShipData({ '/eve/latest/build': 'network-error' }).shipData;
     const missing = await resolveCompositionHulls({ composition: requireFleetComposition({ id: 'x', commander: { hull: 'Guardian' } }), shipData: offline });
-    expect(missing.problems).toEqual([expect.stringMatching(/^hull "Guardian" has no dna and could not be resolved through tools-core: .*tools-core/u)]);
+    expect(missing.problems).toEqual([expect.stringMatching(/^hull "Guardian" has no dna and could not be resolved from the EVE data: .*tools-core/u)]);
 
     const withDna = await resolveCompositionHulls({ composition: requireFleetComposition({ id: 'x', commander: { hull: 'Guardian', dna: GUARDIAN } }), shipData: offline });
     expect(withDna.problems).toEqual([]);
-    expect(withDna.warnings).toEqual([expect.stringMatching(/^hull "Guardian" could not be looked up through tools-core .*its radius defaults to 500 m$/u)]);
+    expect(withDna.warnings).toEqual([expect.stringMatching(/^hull "Guardian" could not be looked up .*its radius defaults to 500 m$/u)]);
     expect(withDna.hulls).toEqual([{ hull: 'Guardian', dna: GUARDIAN, radius: 500, dnaFrom: 'composition', radiusFrom: 'default' }]);
   });
 

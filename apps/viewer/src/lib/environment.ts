@@ -88,6 +88,10 @@ export interface SceneDressing {
    */
   star: Maybe<string>;
   errors: string[];
+  /**
+   * Why the state is `off` with no EVE data (SceneDresser.Off).
+   */
+  note?: string;
 }
 
 export interface BackgroundTextureReport {
@@ -206,10 +210,23 @@ export class SceneDresser {
   private flareErrors: string[] = [];
   private clientTonemapping: Maybe<Tr2PPTonemappingEffect> = null;
   private clientExposure: Maybe<Tr2PPDynamicExposureEffect> = null;
+  private off = false;
 
   constructor(options: RenderOptions) {
     this.options = options;
     this.report = CreateSceneDressing(options);
+  }
+
+  /**
+   * Turns the dressing off for good (no-EVE-data mode): no template or flare is ever loaded, and later Dress calls do
+   * nothing.
+   *
+   * @param note - Why, for the report.
+   */
+  Off(note: string): void {
+    this.off = true;
+    this.report.state = 'off';
+    this.report.note = note;
   }
 
   /**
@@ -220,6 +237,7 @@ export class SceneDresser {
    * @param sun - The location's dressed star, or null.
    */
   async Dress(scene: EveSpaceScene, sun: Maybe<DressedSun>): Promise<void> {
+    if (this.off) return;
     this.sun = sun;
     const templates = Candidates(this.options.post, sun?.templates, DEFAULT_SUN_TEMPLATE);
     const flares = Candidates(this.options.flare, sun?.flares, DEFAULT_LENS_FLARE);

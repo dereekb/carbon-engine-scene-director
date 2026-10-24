@@ -15,6 +15,7 @@
 import type { Maybe } from '@dereekb/util';
 import { NormalizeMapName } from './locations';
 import { ShipDataError } from './ship-data';
+import { ToolsCoreUnreachableError } from './sde-client';
 import { ErrorMessage } from './tool-call';
 
 const REQUEST_TIMEOUT_MS = 30000;
@@ -454,7 +455,7 @@ export class ObjectData implements ObjectDataApi {
     try {
       response = await this.fetchImpl(`${this.url}/eve/${build}/${route}`, { signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
     } catch (error) {
-      throw new ShipDataError('unavailable', `tools-core at ${this.url} is unreachable for ${what}: ${ErrorMessage(error)}`);
+      throw ToolsCoreUnreachableError(this.url, what, error);
     }
     return { status: response.status, json: ReadObject(await response.json().catch(() => null)) };
   }

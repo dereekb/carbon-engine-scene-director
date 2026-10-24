@@ -65,6 +65,10 @@ export interface PageAudioReport {
   readonly state: PageAudioState;
   readonly error?: string;
   /**
+   * Why the state is `off`.
+   */
+  readonly note?: string;
+  /**
    * Ships with an emitter.
    */
   readonly emitters: number;
@@ -137,9 +141,9 @@ export interface PageAudioFrame {
 
 export interface PageAudioOptions {
   /**
-   * `?audio=off`: never turn on.
+   * Why audio never turns on (`?audio=off`, or no EVE data: the mode's note); null or absent: it may.
    */
-  readonly disabled?: boolean;
+  readonly off?: Maybe<string>;
   /**
    * Called once audio is on.
    */
@@ -176,6 +180,10 @@ const PATH_URL = '/audio/path/';
 export class PageAudio {
   state: PageAudioState;
   error: Maybe<string> = null;
+  /**
+   * Why audio is off for good (?audio=off, or no EVE data); null when it may turn on.
+   */
+  private readonly offNote: Maybe<string>;
   private readonly onReady: () => void;
   private readonly onChange: () => void;
   private context: Maybe<AudioContext> = null;
@@ -219,7 +227,8 @@ export class PageAudio {
   };
 
   constructor(options: PageAudioOptions = {}) {
-    this.state = options.disabled ? 'off' : 'waiting-for-gesture';
+    this.offNote = options.off ?? null;
+    this.state = this.offNote ? 'off' : 'waiting-for-gesture';
     this.onReady = options.onReady ?? (() => undefined);
     this.onChange = options.onChange ?? (() => undefined);
   }
@@ -449,6 +458,7 @@ export class PageAudio {
     return {
       state: this.state,
       ...(this.error ? { error: this.error } : {}),
+      ...(this.state === 'off' && this.offNote ? { note: this.offNote } : {}),
       emitters: this.emitters.size,
       gameObjects: objects.length,
       ...(Object.keys(foreign).length ? { foreign } : {}),
@@ -466,7 +476,7 @@ export class PageAudio {
    */
   Text(): string {
     const texts: Record<PageAudioState, string> = {
-      off: 'off (?audio=off)',
+      off: `off (${this.offNote ?? '?audio=off'})`,
       'waiting-for-gesture': 'click the view to turn audio on',
       loading: 'loading the audio library...',
       on: this.OnText(),

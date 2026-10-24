@@ -34,7 +34,7 @@ import { MatchCelestialName } from './locations';
 import type { MapDataApi } from './map-data';
 import type { SavedScenesPage } from './saved-scenes';
 import type { ShipDataApi } from './ship-data';
-import { ToolError, type ToolArgs } from './tool-call';
+import { ErrorMessage, ToolError, type ToolArgs } from './tool-call';
 
 export interface ScenePlacesOptions {
   readonly shipData: ShipDataApi;
@@ -224,17 +224,22 @@ export class ScenePlaces {
     }
     const radii: Record<string, number> = {};
     const failed: string[] = [];
+    const reasons: string[] = [];
     await Promise.all(
       [...byKey.values()].map(async (entry) => {
         const radius = await this.shipData.Hull({ type: entry.type, dna: entry.dna }).then(
           (hull) => hull.published.radius ?? null,
-          () => null
+          (error: unknown) => {
+            reasons.push(ErrorMessage(error));
+            return null;
+          }
         );
         if (radius != null && radius > 0) for (const id of entry.ids) radii[id] = radius;
         else failed.push(String(entry.type ?? entry.dna));
       })
     );
-    const warnings = failed.length ? [`no EVE radius for ${failed.sort().join(', ')} through tools-core; those ships' formation slots assume ${DEFAULT_FORMATION_RADIUS} m`] : [];
+    const why = reasons.length ? ` (${reasons[0]})` : '';
+    const warnings = failed.length ? [`no EVE radius for ${failed.sort().join(', ')}${why}; those ships' formation slots assume ${DEFAULT_FORMATION_RADIUS} m`] : [];
     return { radii, warnings };
   }
 

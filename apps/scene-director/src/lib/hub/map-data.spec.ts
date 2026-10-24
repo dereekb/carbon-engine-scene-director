@@ -76,6 +76,7 @@ describe('MapData', () => {
     const unreachable = await CaughtShipDataFailure(() => offline.System(30000142));
     expect(unreachable.failure).toBe('unavailable');
     expect(unreachable.message).toContain('unreachable');
+    expect(unreachable.message).toContain('or run the hub with --eve-data off');
     expect(await offline.Index()).toEqual({ present: true, degraded: false });
   });
 

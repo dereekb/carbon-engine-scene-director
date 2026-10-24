@@ -860,3 +860,102 @@ describe('movie export', () => {
     }
   });
 });
+
+describe('no EVE data', () => {
+  const DNA = 'ac3_t2:carthum:amarr';
+
+  /** A hub with the mode off: the injected fake tools-core must never be asked anything. */
+  async function StartNoEveHub(): Promise<{ readonly offHub: Hub; readonly asked: string[] }> {
+    const asked: string[] = [];
+    const watched = new Proxy(toolsCore, {
+      get(target, key, receiver) {
+        if (typeof key === 'string' && key !== 'url') asked.push(key);
+        return Reflect.get(target, key, receiver) as unknown;
+      }
+    });
+    return { offHub: await StartHub({ eveData: 'off', toolsCore: watched }), asked };
+  }
+
+  it('reports the mode in viewer_status, GET /config and the hello reply', async () => {
+    const { offHub, asked } = await StartNoEveHub();
+    try {
+      const status = (await offHub.Call('viewer_status')) as { eveData: { mode: string; note: string }; toolsCore: unknown };
+      expect(status.eveData.mode).toBe('off');
+      expect(status.eveData.note).toMatch(/--eve-data off/u);
+      expect(status.toolsCore).toBeNull();
+      const config = (await (await fetch(`${offHub.url}config`)).json()) as { eveData: { mode: string } };
+      expect(config.eveData.mode).toBe('off');
+      expect(((await (await fetch(`${hub.url}config`)).json()) as { eveData: unknown }).eveData).toEqual({ mode: 'tools-core' });
+      const ws = new WebSocket(`ws://127.0.0.1:${offHub.port}/ws`);
+      await new Promise((resolve) => ws.once('open', resolve));
+      const hello = new Promise<string>((resolve) => ws.once('message', (data) => resolve(String(data))));
+      ws.send(JSON.stringify({ type: 'hello', role: 'controller' }));
+      expect(JSON.parse(await hello)).toMatchObject({ type: 'hello', hub: { eveData: { mode: 'off' } } });
+      ws.close();
+      expect(asked).toEqual([]);
+    } finally {
+      await offHub.Stop();
+    }
+  });
+
+  it('answers the EVE routes 503 naming the mode, without touching tools-core', async () => {
+    const { offHub, asked } = await StartNoEveHub();
+    try {
+      for (const route of ['resource/x.black', 'resfileindex.txt', 'audio/library', 'audio/path/x', 'build']) {
+        const response = await fetch(`${offHub.url}${route}`);
+        expect(response.status, route).toBe(503);
+        expect(await response.text(), route).toMatch(/--eve-data off/u);
+      }
+      for (const route of [`ship-stats?dna=${DNA}`, 'map/system?id=30000142', 'prop-mod?module=10MN%20AB%20II', 'fit/type?name=Damage%20Control%20II']) {
+        const response = await fetch(`${offHub.url}${route}`);
+        expect(response.status, route).toBe(503);
+        expect(((await response.json()) as { failure: string }).failure, route).toBe('unavailable');
+      }
+      expect(asked).toEqual([]);
+    } finally {
+      await offHub.Stop();
+    }
+  });
+
+  it('refuses the tools that need EVE data with the mode, not "start tools-core"', async () => {
+    const { offHub, asked } = await StartNoEveHub();
+    try {
+      const calls: [string, Record<string, unknown>][] = [
+        ['search_hulls', { query: 'af1' }],
+        ['search_map', { query: 'Jita' }],
+        ['get_system', { system: 'Jita' }],
+        ['set_location', { system: 'Jita', scene: { name: 'x' } }],
+        ['search_objects', { query: 'Astrahus' }],
+        ['ship_stats', { dna: DNA }],
+        ['add_ships', { hull: 'Rifter', scene: { name: 'x' } }],
+        ['add_objects', { type: 'Astrahus', scene: { name: 'x' } }],
+        ['add_asteroid_field', { ores: ['Veldspar'], scene: { name: 'x' } }]
+      ];
+      for (const [name, args] of calls) {
+        const error = (await offHub.Call(name, args).catch((caught: unknown) => caught)) as Error & { details?: { problems?: string[] } };
+        const text = [error.message, ...(error.details?.problems ?? [])].join(' ');
+        expect(text, name).toMatch(/--eve-data off/u);
+        expect(text, name).not.toMatch(/Start it with|tools-core at/u);
+      }
+      expect(asked).toEqual([]);
+    } finally {
+      await offHub.Stop();
+    }
+  });
+
+  it('runs the tools that need no EVE data', async () => {
+    const { offHub, asked } = await StartNoEveHub();
+    const page = await ConnectPage({ get_scene: () => createEmptyScene(), patch_scene: (args) => applySceneOperations(createEmptyScene(), args['operations']) }, offHub);
+    try {
+      const stats = (await offHub.Call('ship_stats', { dna: DNA, stats: { maxVelocity: 300, agility: 3, mass: 1e6, signatureRadius: 40 } })) as { stats: unknown };
+      expect(stats).toBeTruthy();
+      await expect(offHub.Call('add_ships', { dna: DNA, count: 3 })).resolves.toBeTruthy();
+      await expect(offHub.Call('add_fleet_composition', { name: 'tfis', position: [0, 0, 0] })).resolves.toBeTruthy();
+      await expect(offHub.Call('add_objects', { dna: 'ahbs_t1:amarrbase:amarr', radius: 5000 })).resolves.toBeTruthy();
+      expect(asked).toEqual([]);
+    } finally {
+      page.close();
+      await offHub.Stop();
+    }
+  });
+});

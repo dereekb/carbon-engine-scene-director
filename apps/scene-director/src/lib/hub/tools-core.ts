@@ -10,6 +10,11 @@ import { ErrorMessage } from './tool-call';
 export const DEFAULT_TOOLS_CORE = 'http://127.0.0.1:5510';
 
 /**
+ * How to get EVE data when tools-core is unreachable: start it, or run without it (no-EVE-data mode).
+ */
+export const NO_TOOLS_CORE_HINT = 'Start it with: node bin/cjs-tools-service.js in the tools-core checkout, or run the hub with --eve-data off on a machine without EVE data.';
+
+/**
  * How long a status probe waits for tools-core.
  */
 const STATUS_PROBE_TIMEOUT_MS = 3000;
@@ -168,7 +173,7 @@ export class ToolsCore implements ToolsCoreApi {
   private Unreachable(error: unknown): Error {
     // A failed resolve already carries the full message.
     if (error instanceof Error && error.message === this.lastError) return error;
-    this.lastError = `tools-core at ${this.url} is not reachable (${ErrorMessage(error)}). Start it with: node bin/cjs-tools-service.js in the tools-core checkout.`;
+    this.lastError = `tools-core at ${this.url} is not reachable (${ErrorMessage(error)}). ${NO_TOOLS_CORE_HINT}`;
     return new Error(this.lastError, { cause: error });
   }
 }
