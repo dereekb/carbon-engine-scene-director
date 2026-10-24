@@ -206,7 +206,7 @@ connected tab.
 | `engage` | page | arms ships' turrets and launchers on a target: they lock it and keep firing until `cease_fire` |
 | `cease_fire` | page | ends ships' engagements (their turrets and launchers stop at their cycle end); `unlock` drops the targets |
 | `set_hp` | page | sets ships' shield, armor and structure HP live: per layer or the total, as HP, a percent of max or a seeded random draw; cinematic never kills, gameplay can |
-| `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, and called targets (a primary and a queue the group focuses fire on) |
+| `order_fleet` | page | a fleet, wing or squad order: move, warp in formation, anchor, break-off, regroup, called targets (a primary and a queue the group focuses fire on; `until: "gone"` lends an FC brain only its call), free fire, a stance (including `align` to retreat), and `engage` (a personality fleet back to its FC brain) |
 | `auto_repair` | page | a fleet's, wing's or squad's logi auto-repair on or off, and how they pick: most urgent, most damaged or most shot-at |
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |

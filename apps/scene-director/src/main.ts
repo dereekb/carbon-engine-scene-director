@@ -16,6 +16,8 @@
  *          never touches tools-core and the page asks for no EVE data, sd-dev-env),
  *          --build <exact EVE build> (resolved from tools-core "latest" when omitted),
  *          --viewer <dir> (the built viewer; dist/apps/viewer beside this bundle by default),
+ *          --console <dir> (the built battle console, served at /console/; dist/apps/battle-console/browser beside
+ *          this bundle when it exists, else not served),
  *          --scenes <dir> (saved scene files; a scene-director/scenes folder in the per-user data directory by default),
  *          --fleets <dir> (saved fleet compositions; a scene-director/fleets folder in the per-user data directory by default),
  *          --personalities <dir> (saved fleet personalities; a scene-director/personalities folder in the per-user data
@@ -28,6 +30,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { DEFAULT_EVE_DATA_MODE, type EveDataMode, readEveDataMode } from '@scene-director/scene';
+import { existsSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AudioBankCache, DEFAULT_AUDIO_CACHE_DIRECTORY } from './lib/hub/audio-cache';
@@ -43,7 +46,7 @@ import { defaultFleetPersonalitiesDirectory, FleetPersonalityFileStore } from '.
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
 const USAGE =
-  'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
+  'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -68,6 +71,8 @@ const command = process.argv[2];
 const host = Option('--host', process.env['SCENE_DIRECTOR_HOST'] ?? '127.0.0.1');
 const port = Number(Option('--port', process.env['SCENE_DIRECTOR_PORT'] ?? String(DEFAULT_PORT)));
 const viewerDirectory = Option('--viewer', process.env['SCENE_DIRECTOR_VIEWER'] ?? path.resolve(import.meta.dirname, '../viewer'));
+const defaultConsoleDirectory = path.resolve(import.meta.dirname, '../battle-console/browser');
+const consoleDirectory = Option('--console', process.env['SCENE_DIRECTOR_CONSOLE'] || (existsSync(defaultConsoleDirectory) ? defaultConsoleDirectory : null));
 const scenes = new SceneFileStore(Option('--scenes', process.env['SCENE_DIRECTOR_SCENES'] || DefaultScenesDirectory()));
 const compositions = new FleetCompositionFileStore(Option('--fleets', process.env['SCENE_DIRECTOR_FLEETS'] || defaultFleetCompositionsDirectory()));
 const personalities = new FleetPersonalityFileStore(Option('--personalities', process.env['SCENE_DIRECTOR_PERSONALITIES'] || defaultFleetPersonalitiesDirectory()));
@@ -93,7 +98,7 @@ function HubOptionsFromCommandLine(): HubOptions {
           url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
           build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
         });
-  return { host, port, eveData, toolsCore, viewerDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr };
+  return { host, port, eveData, toolsCore, viewerDirectory, consoleDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr };
 }
 
 /**

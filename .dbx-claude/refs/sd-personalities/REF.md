@@ -130,8 +130,9 @@ tool calls that come back. Specs on synthetic pictures: `personalities.spec-help
   direction turning > ~25°. Prop mods: `never` off; `closing` on beyond 1.25 × range, off inside 1.1 ×, unchanged
   between (a hold never closes); `always` also on while engaged; nothing when no member has one.
 - **`stepFleetBrain({ picture, personality, memory, tick, readyAt, seed, manual?, held? })`**: levers `call`
-  (`order_fleet targets set | clear`), `free-fire` (`order_fleet { type: 'free-fire', on: true }` once engaged, never
-  off), `move` (`order_fleet` with the FC's ship order), `prop-mods` (`switch_prop_mods { fleet, active }`); every
+  (`order_fleet targets set | clear`; none with `targeting.calls: false`, which instead clears a call it finds once),
+  `free-fire` (`order_fleet { type: 'free-fire', on: true }` once engaged; `on: false` whenever the personality's
+  `freeFire` is false and free fire is on, engaged or not, unless the lever is manual or the fleet held), `move` (`order_fleet` with the FC's ship order), `prop-mods` (`switch_prop_mods { fleet, active }`); every
   `order_fleet` carries `by: <acting FC>`. A want that differs from the picture opens a pending decision due after
   the FC delay (jitter keyed `seed | fleet | lever | tick − readyAt`); at due the want is recomputed and returned as
   an action; a want that goes away drops it. `manual` levers are skipped, `held` (cease_fire) skips call and free
@@ -193,10 +194,23 @@ OrderOf, CallOf, PropMods, Run, HandOver), so the brain is node-tested with a fa
   `set_fleet_personality` (any `update_fleet` whose `set` has `personality`, `AfterOperations` from `Edit` and
   `CueEdit`) clears `manual`, `held` and the pending decisions; a held fleet's members get their holds lifted
   (`FleetTargets.Rearm`) so the brain's call is shot again.
+- **`order_fleet { type: "engage" }`** (fleet level, a personality fleet only: refused otherwise with "give it a
+  personality first") is the console's Engage and needs no document edit: `FleetCommanders.Engage` drops the fleet's
+  live stances (its own, its wings' and squads', so the document's apply again; the members' pilots are released),
+  clears `manual`, `held`, the lent call and the pending decisions, and sets `engaged` with `engagedBy: "ordered"`; a
+  held fleet's members re-arm as above (`Director.EngageOrder`). `TakeLevers` takes nothing for it, so the brain calls,
+  moves and runs the prop mods from its next step.
+- **A lent call** (`order_fleet targets { ..., until: "gone" }`, the console's Call primary): `TakeLevers` →
+  `LendCall` takes only `call` (not free fire), lets a cease_fire hold go, and records the ids the order named
+  (`primary`, `set`, `queue`; `next` / `drop`: the call they leave). `StepFleet` releases it at the first step where
+  none of them is `live` (`FleetBrainPort.TargetStatus` = `Director.CalledTargetStatus`: destroyed, missing or
+  warping), and the brain calls again that same step; `{ clear: true, until: "gone" }` releases it at once;
+  set_fleet_personality and engage drop it. get_state `fc.lent` `{ lever: "call", targets }`; the time-control
+  snapshot carries it (a brain field).
 - **get_state `fleets[].fc`** (personality fleets): `personality`, `ship` (the live commander: the formation root;
   during an explode handover already the designate), `ability`, `state` (`handover` > `leaderless` > `waiting` >
   `no-team` > `commanding`), `successor` / `takesOverIn` (seconds) during a handover, `readyAt`, `engaged` /
-  `engagedBy`, `hostiles` and `reach` (the last picture), `stance`, `manual`, `held`, `pending` (`lever`, `dueIn`,
+  `engagedBy`, `hostiles` and `reach` (the last picture), `stance`, `manual`, `lent`, `held`, `pending` (`lever`, `dueIn`,
   `why`), `decisions` (`tick`, `lever`, `tool`, `args`, `why`, `refused?`; the latest 20), `note`. **`ships[].pilot`**:
   `{ command?, reaction?, source }` for a personality fleet's members and ships with authored traits.
 - **Reset**: a load clears every brain, acting commander, gate memory and the trait book (`Clear`); a fleet removed

@@ -1,11 +1,12 @@
 import type { Maybe, SuggestedString } from '@dereekb/util';
+import type { SceneVector } from '../scene';
 
 /**
  * A stance: how a pilot (or a group's leader) flies against its focus. The document's `stance` on fleets, wings,
  * squads and ships, and the live stance orders, resolve to one PilotStance per piloted ship (sd-piloting).
  */
 
-export const SHIP_STANCE_TYPES = ['in-line', 'hold', 'orbit', 'keep-at-range', 'approach', 'kite', 'brawl', 'snipe', 'tackle', 'support', 'auto'] as const;
+export const SHIP_STANCE_TYPES = ['in-line', 'hold', 'orbit', 'keep-at-range', 'approach', 'kite', 'brawl', 'snipe', 'tackle', 'support', 'align', 'auto'] as const;
 
 export type ShipStanceType = (typeof SHIP_STANCE_TYPES)[number];
 
@@ -47,11 +48,27 @@ export type ShipStanceFormation = (typeof SHIP_STANCE_FORMATIONS)[number];
 export type ShipStanceOn = SuggestedString<'focus'> | { readonly squad: string } | { readonly wing: string };
 
 /**
+ * Where an `align` stance points: a ship or object id, `celestial:<id>`, a place name (resolved on the page as order
+ * targets are), or a point (origin-relative metres). Unset: away from the hostiles.
+ */
+export type ShipStanceTo = string | SceneVector;
+
+/**
+ * An align stance counts as aligned once the ship's speed along its line reaches this share of its top speed now
+ * (Destiny's warp threshold): a warp given then leaves at once.
+ */
+export const ALIGNED_SPEED_SHARE = 0.75;
+
+/**
  * A stance as written on a fleet, wing, squad or ship (every key optional; the levels resolve key by key).
  */
 export interface ShipStance {
   readonly type?: ShipStanceType;
   readonly on?: ShipStanceOn;
+  /**
+   * `align`: where it points (travels with type, as on and range do).
+   */
+  readonly to?: ShipStanceTo;
   readonly range?: ShipStanceRange;
   readonly propMods?: ShipStancePropMods;
   readonly formation?: ShipStanceFormation;
@@ -81,6 +98,10 @@ export interface PilotStance {
    * The ship the stance flies on (a lever's anchor, a support's friend); null flies on the focus.
    */
   readonly on?: Maybe<string>;
+  /**
+   * `align`: where it points, as written (the page resolves it to a point for the pilot's picture).
+   */
+  readonly to?: Maybe<ShipStanceTo>;
   readonly range: ShipStanceRange;
   readonly propMods: ShipStancePropMods;
   readonly disengage: number;

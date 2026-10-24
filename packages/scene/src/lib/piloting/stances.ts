@@ -15,27 +15,14 @@
 import type { Maybe } from '@dereekb/util';
 import { ID_PATTERN, isPlainObject, type JsonObject, reportUnknownKeys } from '../json';
 import { MAX_ORDER_RANGE } from '../orders';
-import type { SceneDocument } from '../scene';
+import type { SceneDocument, SceneVector } from '../scene';
 import type { SceneFleet, SquadRole } from '../fleets/fleet';
 import { type FleetGroup, toFleetGroupKey } from '../fleets/group';
 import type { FleetOperationContext } from '../fleets/operations';
 import { type ShipFleetMembership, toFleetMemberships } from '../fleets/membership';
 import { fleetGroupLeaderOf } from '../fleets/orders';
 import type { TimelineRemoval } from '../timeline/prune';
-import {
-  DEFAULT_DISENGAGE,
-  type PilotStance,
-  SHIP_STANCE_FORMATIONS,
-  SHIP_STANCE_PROP_MODS,
-  SHIP_STANCE_RANGE_KEYWORDS,
-  SHIP_STANCE_TYPES,
-  type ShipStance,
-  type ShipStanceFormation,
-  type ShipStanceOn,
-  type ShipStancePropMods,
-  type ShipStanceRange,
-  type ShipStanceType
-} from './stance';
+import { DEFAULT_DISENGAGE, type PilotStance, SHIP_STANCE_FORMATIONS, SHIP_STANCE_PROP_MODS, SHIP_STANCE_RANGE_KEYWORDS, SHIP_STANCE_TYPES, type ShipStance, type ShipStanceFormation, type ShipStanceOn, type ShipStancePropMods, type ShipStanceRange, type ShipStanceTo, type ShipStanceType } from './stance';
 
 /**
  * What a loose member with no stance type flies: its squad's role picks (logi support, tackle tackle, the rest auto).
@@ -49,11 +36,11 @@ export const STANCE_ROLE_DEFAULTS: Readonly<Record<SquadRole, Exclude<ShipStance
   support: 'auto'
 };
 
-const STANCE_KEYS = new Set<string>(['type', 'on', 'range', 'propMods', 'formation', 'disengage']);
+const STANCE_KEYS = new Set<string>(['type', 'on', 'to', 'range', 'propMods', 'formation', 'disengage']);
 const STANCE_ORDER_KEYS = new Set<string>(['type', 'set', 'clear']);
 const ON_GROUP_KINDS = ['squad', 'wing'] as const;
 
-const STANCE_SHAPE = '{ type?, on?, range?, propMods?, formation?, disengage? }';
+const STANCE_SHAPE = '{ type?, on?, to?, range?, propMods?, formation?, disengage? }';
 
 /**
  * Where a stance sits: on a fleet, wing or squad (`group`), or on one ship, which flies it alone (no `formation`).
@@ -132,6 +119,21 @@ export function readSceneStance(value: unknown, context: ReadSceneStanceContext)
 type MutableStance = { -readonly [K in keyof ShipStance]: ShipStance[K] };
 
 /**
+ * An align stance's `to`: a ship or object id, `celestial:<id>` or a place name (1-200 characters), or a point.
+ *
+ * @returns The value; null with a problem when it is neither, or the stance's type is not align.
+ */
+function readStanceTo(value: JsonObject, where: string, problems: string[]): Maybe<ShipStanceTo> {
+  const { to, type } = value;
+  let read: Maybe<ShipStanceTo> = null;
+  if (type != null && type !== 'align') problems.push(`${where} is for type "align" (got type "${String(type)}")`);
+  else if (typeof to === 'string' && to.trim().length > 0 && to.length <= 200) read = to;
+  else if (Array.isArray(to) && to.length === 3 && to.every((n) => typeof n === 'number' && Number.isFinite(n))) read = [to[0], to[1], to[2]] as SceneVector;
+  else problems.push(`${where} must be a ship or object id, celestial:<id>, a place name, or a point [x, y, z] in metres`);
+  return read;
+}
+
+/**
  * A stance's enumerated keys: type, propMods, formation.
  *
  * @param value - The stance object.
@@ -161,9 +163,10 @@ function readStanceChoices(value: JsonObject, context: ReadSceneStanceContext): 
  */
 function readStanceTerms(value: JsonObject, context: ReadSceneStanceContext): MutableStance {
   const { where, problems } = context;
-  const { on, range, disengage } = value;
+  const { on, to, range, disengage } = value;
   const read: MutableStance = {};
   if (on != null) read.on = readStanceOn(on, `${where}.on`, problems) ?? undefined;
+  if (to != null) read.to = readStanceTo(value, `${where}.to`, problems) ?? undefined;
   if (range != null) read.range = readStanceRange(range, `${where}.range`, problems) ?? undefined;
   if (disengage != null && (typeof disengage !== 'number' || !Number.isFinite(disengage) || disengage < 0 || disengage >= 1)) problems.push(`${where}.disengage must be a number in [0, 1): the HP fraction its pilots burn out at`);
   else if (disengage != null) read.disengage = disengage;
@@ -264,6 +267,10 @@ export interface ResolvedShipStance {
    */
   readonly type: ShipStanceType;
   readonly on: ShipStanceOn;
+  /**
+   * `align`: where it points, from the level that set the type; unset aligns away from the hostiles.
+   */
+  readonly to?: ShipStanceTo;
   readonly range: ShipStanceRange;
   readonly propMods: ShipStancePropMods;
   readonly formation: ShipStanceFormation;
@@ -361,8 +368,9 @@ function resolveStanceChain(input: ResolveStanceChainInput): Omit<ResolvedShipSt
   return {
     type,
     on: typeFrom?.[1]?.on ?? 'focus',
+    ...(typeFrom?.[1]?.to != null ? { to: typeFrom[1].to } : {}),
     range: typeFrom?.[1]?.range ?? 'ideal',
-    propMods: propModsFrom?.[1]?.propMods ?? 'auto',
+    propMods: propModsFrom?.[1]?.propMods ?? (type === 'align' ? 'always' : 'auto'),
     formation,
     disengage: disengageFrom?.[1]?.disengage ?? DEFAULT_DISENGAGE,
     sources: { type: typeSource, propMods: propModsFrom?.[0] ?? 'default', formation: formationFrom?.[0] ?? 'default', disengage: disengageFrom?.[0] ?? 'default' },
@@ -407,6 +415,7 @@ function toPilotStance(stance: Omit<ResolvedShipStance, 'pilot'>, context: Pilot
   return {
     type: stance.type as PilotStance['type'],
     on: ship === context.self ? null : ship,
+    ...(stance.to != null ? { to: stance.to } : {}),
     range: stance.range,
     propMods: stance.propMods,
     disengage: stance.disengage
@@ -507,6 +516,11 @@ export function removeStanceReferences(removal: TimelineRemoval, context: Pick<F
       delete stance['on'];
       if (!Object.keys(stance).length) delete holder['stance'];
       warnings.push(`${label}'s stance now flies on its focus (its on ${gone} was removed)`);
+    }
+    const to = isPlainObject(stance) ? stance['to'] : undefined;
+    if (typeof to === 'string' && ships.has(to) && isPlainObject(stance)) {
+      delete stance['to'];
+      warnings.push(`${label}'s align stance now aligns away from the hostiles (its to ship "${to}" was removed)`);
     }
   };
   for (const ship of objectsOf(draft['ships'])) prune(ship, `ship "${String(ship['id'])}"`);

@@ -73,8 +73,18 @@ const CONTENT_TYPES: Record<string, string> = {
   '.js': 'text/javascript; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
-  '.txt': 'text/plain; charset=utf-8'
+  '.txt': 'text/plain; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.ico': 'image/x-icon',
+  '.woff2': 'font/woff2'
 };
+/**
+ * Where the battle console is served (`--console <dir>`): every path under it, index.html for a route with no file.
+ */
+const CONSOLE_PREFIX = '/console/';
 const LOG_LIMIT = 2000;
 /**
  * Building ships fetches many files on first use, so scene edits get a long deadline, and so do document fleet orders
@@ -107,6 +117,10 @@ export interface HubOptions {
    * The built viewer: a directory holding index.html and the page bundle it loads from /app/.
    */
   readonly viewerDirectory?: Maybe<string>;
+  /**
+   * The built battle console (`dist/apps/battle-console/browser`), served at /console/; not served when omitted.
+   */
+  readonly consoleDirectory?: Maybe<string>;
   /**
    * Saved scenes on disk; the per-user default directory when omitted.
    */
@@ -197,6 +211,7 @@ export class Hub implements ToolCaller {
   readonly eveData: EveDataMode;
   readonly toolsCore: ToolsCoreApi;
   readonly viewerDirectory: Maybe<string>;
+  readonly consoleDirectory: Maybe<string>;
   readonly savedScenes: SavedScenes;
   readonly fleetCompositions: FleetCompositions;
   readonly fleetPersonalities: FleetPersonalities;
@@ -226,6 +241,7 @@ export class Hub implements ToolCaller {
     eveData = DEFAULT_EVE_DATA_MODE,
     toolsCore,
     viewerDirectory = null,
+    consoleDirectory = null,
     scenes = new SceneFileStore(),
     compositions = new FleetCompositionFileStore(),
     personalities = new FleetPersonalityFileStore(),
@@ -251,6 +267,7 @@ export class Hub implements ToolCaller {
     this.objectData = sources.objectData;
     this.asteroidData = sources.asteroidData;
     this.viewerDirectory = viewerDirectory ? path.resolve(viewerDirectory) : null;
+    this.consoleDirectory = consoleDirectory ? path.resolve(consoleDirectory) : null;
     const page = {
       Connected: () => this.pages.length > 0,
       NotConnected: () => this.NotConnected(),
@@ -307,6 +324,7 @@ export class Hub implements ToolCaller {
     const source = off ? 'no EVE data: tools-core is not used' : 'tools-core ' + this.toolsCore.url;
     this.log(`viewer at ${this.url} (${source}; ${stores})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
+    if (this.consoleDirectory) this.log(`battle console at ${this.url}${CONSOLE_PREFIX.slice(1)} (${this.consoleDirectory})`);
     if (!off) {
       this.toolsCore.ResolveBuild().then(
         (build) => this.log(`EVE resource build ${build}`),
@@ -340,6 +358,21 @@ export class Hub implements ToolCaller {
     const tool = findTool(name);
     if (!tool) throw new ToolError(`unknown tool "${name}"`);
     return tool.where === 'hub' ? this.CallHubTool(name, args) : this.CallPage(name, args);
+  }
+
+  /**
+   * Runs a hub tool a page asked for (`HubLink.Call`: the console staging a scenario on a passed scene). Page tools are
+   * refused: the page answers its own through its director, and forwarding them would land in the newest tab instead.
+   *
+   * @param name - Tool name.
+   * @param args - Tool arguments.
+   * @returns The tool's value.
+   */
+  private async CallFromPage(name: string, args: ToolArgs = {}): Promise<unknown> {
+    const tool = findTool(name);
+    if (!tool) throw new ToolError(`unknown tool "${name}"`);
+    if (tool.where !== 'hub') throw new ToolError(`"${name}" is a page tool: a page calls its own (ViewerApi.Call), not through the hub`);
+    return this.CallHubTool(name, args);
   }
 
   /**
@@ -441,6 +474,11 @@ export class Hub implements ToolCaller {
         this.movieExports.Message(ws, message as unknown as Record<string, unknown>);
       } else if (role === 'page' && message.type === 'log') {
         for (const entry of message.entries ?? []) this.Record(entry.level, entry.message, entry.time);
+      } else if (role === 'page' && message.type === 'call') {
+        this.CallFromPage(String(message.name), message.args).then(
+          (value) => ws.send(JSON.stringify({ type: 'result', id: message.id, ok: true, value })),
+          (error: unknown) => ws.send(JSON.stringify({ type: 'result', id: message.id, ok: false, error: ErrorToJson(error) }))
+        );
       } else if (role === 'controller' && message.type === 'call') {
         this.Call(String(message.name), message.args).then(
           (value) => ws.send(JSON.stringify({ type: 'result', id: message.id, ok: true, value })),
@@ -512,6 +550,8 @@ export class Hub implements ToolCaller {
     } else if (pathname === '/health') {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ ok: true, tabs: this.pages.length }));
+    } else if (pathname === '/console' || pathname.startsWith(CONSOLE_PREFIX)) {
+      await this.ServeConsoleFile(pathname, response);
     } else {
       await this.ServeViewerFile(pathname, response);
     }
@@ -713,17 +753,53 @@ export class Hub implements ToolCaller {
     }
     const info = file ? await stat(file).catch(() => null) : null;
     if (file && info?.isFile()) {
-      response.writeHead(200, {
-        'content-type': CONTENT_TYPES[path.extname(file)] ?? 'application/octet-stream',
-        'content-length': info.size,
-        'cache-control': 'no-store'
-      });
-      createReadStream(file).pipe(response);
+      this.SendFile(file, info.size, response);
     } else if (file) {
       this.NotFound(response, `${pathname} (run "npx nx build viewer" first)`);
     } else {
       this.NotFound(response, pathname);
     }
+  }
+
+  /**
+   * The battle console under /console/: its files, and index.html for `/console` and any route without a file
+   * extension (the app's own routes). Nothing outside the console directory is served.
+   *
+   * @param pathname - The decoded request path, `/console` or under /console/.
+   * @param response - The response.
+   */
+  private async ServeConsoleFile(pathname: string, response: ServerResponse): Promise<void> {
+    const directory = this.consoleDirectory;
+    const relative = path.posix.normalize(`/${pathname.slice(CONSOLE_PREFIX.length)}`);
+    let file: Maybe<string> = null;
+    if (directory) {
+      const resolved = path.resolve(directory, `.${relative}`);
+      if (resolved === directory || resolved.startsWith(directory + path.sep)) file = resolved;
+    }
+    let info = file ? await stat(file).catch(() => null) : null;
+    if (directory && file && !info?.isFile() && !path.extname(file)) {
+      file = path.join(directory, 'index.html');
+      info = await stat(file).catch(() => null);
+    }
+    if (file && info?.isFile()) {
+      this.SendFile(file, info.size, response);
+    } else if (directory) {
+      this.NotFound(response, `${pathname} (run "npx nx build battle-console" first)`);
+    } else {
+      this.NotFound(response, `${pathname} (no battle console directory is configured: --console <dir>)`);
+    }
+  }
+
+  /**
+   * Streams one static file with its content type, never cached (a rebuild shows on reload).
+   */
+  private SendFile(file: string, size: number, response: ServerResponse): void {
+    response.writeHead(200, {
+      'content-type': CONTENT_TYPES[path.extname(file)] ?? 'application/octet-stream',
+      'content-length': size,
+      'cache-control': 'no-store'
+    });
+    createReadStream(file).pipe(response);
   }
 
   /**

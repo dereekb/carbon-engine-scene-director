@@ -119,12 +119,15 @@ function toWanted(input: FleetBrainStepInput, engaged: boolean): Map<FleetBrainL
   const wanted = new Map<FleetBrainLever, FleetBrainAction>();
   const orderFleet = (lever: FleetBrainLever, order: JsonObject, why: string) => wanted.set(lever, { lever, tool: 'order_fleet', args: { fleet: picture.fleet, by, order }, why });
   let primary: Maybe<string> = null;
-  if (engaged && !held) {
+  if (engaged && !held && targeting.calls) {
     const { call, why } = toFleetCall({ picture, targeting });
     primary = call[0];
     if (call.length !== picture.call.length || call.some((id, index) => id !== picture.call[index])) orderFleet('call', call.length ? { type: 'targets', set: call } : { type: 'targets', clear: true }, why);
-    if (targeting.freeFire && !picture.freeFire) orderFleet('free-fire', { type: 'free-fire', on: true }, 'engaged: members without a call pick their own targets');
+  } else if (!held && !targeting.calls && picture.call.length) {
+    orderFleet('call', { type: 'targets', clear: true }, 'calls are off in this doctrine: the FC calls no targets');
   }
+  if (engaged && !held && targeting.freeFire && !picture.freeFire) orderFleet('free-fire', { type: 'free-fire', on: true }, 'engaged: members without a call pick their own targets');
+  else if (!held && !targeting.freeFire && picture.freeFire) orderFleet('free-fire', { type: 'free-fire', on: false }, 'free fire is off in this doctrine');
   const focus = picture.hostiles.find((ship) => ship.id === picture.call[0]) ?? picture.hostiles.find((ship) => ship.id === primary) ?? picture.hostiles[0];
   const range = fleetReachMetres(movement.range, picture.reach);
   const move = toFleetMove({ stance: movement.stance, range, focus, order: picture.order });

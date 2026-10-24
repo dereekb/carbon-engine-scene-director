@@ -28,10 +28,11 @@ export type FleetStructureOrderType = (typeof FLEET_STRUCTURE_ORDER_TYPES)[numbe
 
 /**
  * What a fleet, wing or squad can be ordered: order_ship's movement orders and warp, then the document orders (the
- * anchor orders, then the called targets), then free fire and the group's stance. Written out rather than spread from
- * SHIP_ORDER_TYPES: `../orders` and this module import each other through `../scene`.
+ * anchor orders, then the called targets), then free fire, the group's stance and engage (a fleet's, back to its FC
+ * brain). Written out rather than spread from SHIP_ORDER_TYPES: `../orders` and this module import each other through
+ * `../scene`.
  */
-export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets', 'free-fire', 'stance'] as const;
+export const FLEET_ORDER_TYPES = ['direction', 'goto', 'approach', 'keep-at-range', 'orbit', 'warp', 'stop', 'anchor', 'break-off', 'regroup', 'targets', 'free-fire', 'stance', 'engage'] as const;
 
 export type FleetOrderType = (typeof FLEET_ORDER_TYPES)[number];
 
@@ -98,10 +99,20 @@ export interface FleetFreeFireOrder {
 }
 
 /**
- * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, a document order, free fire, or
- * the group's stance (piloting/stances.ts: live, like free fire; the page keeps it in its stance book).
+ * Hands a personality fleet back to its FC brain and engages it now: the fleet's live stance is dropped (the
+ * document's applies again), every lever a model or a command took and a cease_fire hold are let go, and the brain is
+ * engaged (`engagedBy: "ordered"`). Fleet level only, and only for a fleet with a personality. Live: the page runs it
+ * (FleetCommanders.Engage), never the document.
  */
-export type FleetOrder = ShipOrder | FleetDocumentOrder | FleetFreeFireOrder | StanceOrder;
+export interface FleetEngageOrder {
+  readonly type: 'engage';
+}
+
+/**
+ * What a fleet, wing or squad can be ordered: a movement order (order_ship's), a warp, a document order, free fire,
+ * the group's stance (piloting/stances.ts: live, like free fire; the page keeps it in its stance book), or engage.
+ */
+export type FleetOrder = ShipOrder | FleetDocumentOrder | FleetFreeFireOrder | StanceOrder | FleetEngageOrder;
 
 /**
  * What order_fleet takes: one plain object, which a timeline beat will embed unchanged.
@@ -195,13 +206,23 @@ export function isFleetStanceOrder(order: FleetOrder): order is StanceOrder {
 }
 
 /**
+ * Whether a fleet order hands the fleet back to its FC brain (engage).
+ *
+ * @param order - A normalized fleet order.
+ * @returns True for engage.
+ */
+export function isFleetEngageOrder(order: FleetOrder): order is FleetEngageOrder {
+  return order.type === 'engage';
+}
+
+/**
  * Whether a fleet order flies the group: order_ship's movement orders and warp.
  *
  * @param order - A normalized fleet order.
- * @returns False for the document orders, free fire and stances.
+ * @returns False for the document orders, free fire, stances and engage.
  */
 export function isFleetShipOrder(order: FleetOrder): order is ShipOrder {
-  return !isFleetDocumentOrder(order) && !isFleetFreeFireOrder(order) && !isFleetStanceOrder(order);
+  return !isFleetDocumentOrder(order) && !isFleetFreeFireOrder(order) && !isFleetStanceOrder(order) && !isFleetEngageOrder(order);
 }
 
 /**
@@ -230,6 +251,7 @@ export function normalizeFleetOrderRequest(input: unknown, context: FleetOrderRe
     if (by != null && (typeof by !== 'string' || !ID_PATTERN.test(by))) problems.push(`${where}.by ${ID_MESSAGE}`);
     if (delay != null && (typeof delay !== 'number' || !Number.isFinite(delay) || delay < 0 || delay > 1)) problems.push(`${where}.delay must be a number in [0, 1]: 0 the pilots respond at once, 1 very delayed (up to ${MAX_FLEET_ORDER_DELAY} s)`);
     const order = readFleetOrder(input['order'], { ships: context.ships, objects: context.objects, where: `${where}.order` }, problems);
+    if (order?.type === 'engage' && (wing != null || squad != null)) problems.push(`${where}.order: engage hands a whole fleet back to its FC brain; drop wing and squad`);
     if (selection?.fleet && order) {
       request = {
         fleet: selection.fleet,
@@ -263,6 +285,7 @@ function readFleetOrder(input: unknown, context: ReadOrderContext, problems: str
   else if (type === 'targets') order = readFleetTargetsOrder(input, context, problems);
   else if (type === 'free-fire') order = readFreeFireOrder(input, where, problems);
   else if (type === 'stance') order = readStanceOrder(input, { where, ships: context.ships }, problems);
+  else if (type === 'engage') order = readEngageOrder(input, where, problems);
   else order = readStructureOrder(input, type as FleetStructureOrderType, context, problems);
   return order;
 }
@@ -284,6 +307,12 @@ function readFreeFireOrder(input: JsonObject, where: string, problems: string[])
   const on = input['on'];
   if (typeof on !== 'boolean') problems.push(`${where}.on must be true (each member without a call picks its own target) or false (free fire ends)`);
   return problems.length > before ? null : { type: 'free-fire', on: on === true };
+}
+
+function readEngageOrder(input: JsonObject, where: string, problems: string[]): Maybe<FleetEngageOrder> {
+  const before = problems.length;
+  for (const key of Object.keys(input)) if (key !== 'type') problems.push(`${where}.${key} is not an engage order field (engage takes only its type)`);
+  return problems.length > before ? null : { type: 'engage' };
 }
 
 const STRUCTURE_KEYS: Readonly<Record<FleetStructureOrderType, ReadonlySet<string>>> = {

@@ -199,7 +199,8 @@ function BrainRig(initial: SceneDocument, piloted: ReadonlySet<string> = new Set
       handovers.push({ fleet, from, to });
       apply();
     },
-    Piloted: (id) => piloted.has(id)
+    Piloted: (id) => piloted.has(id),
+    TargetStatus: (id) => (dead.has(id) ? 'destroyed' : arriving.has(id) ? 'warping' : 'live')
   };
   const commanders = new FleetCommanders({ port });
   holder.commanders = commanders;
@@ -459,6 +460,54 @@ describe('FleetCommanders: the FC brain', () => {
     // The brain keeps the live primary the model called and refills the queue behind it.
     rig.Steps(5, 5);
     expect(rig.runs.at(-1)).toMatchObject({ tick: 5, args: CallArgs('fc', ['r2', 'r1']) });
+  });
+
+  it("engage hands every lever back, drops the fleet's live stances and engages the brain at once", () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 1);
+    rig.commanders.TakeLevers('cease_fire', { fleet: FLEET });
+    rig.commanders.SetCall(WHOLE, ['r2']);
+    rig.commanders.TakeLevers('order_ship', { id: 'fc', order: { type: 'stop' } });
+    rig.commanders.SetStance(WHOLE, { type: 'hold' }, { tick: 1, delays: new Map() });
+    rig.commanders.SetStance(DPS, { type: 'kite' }, { tick: 1, delays: new Map() });
+    expect(rig.commanders.Report(FLEET, 1)).toMatchObject({ manual: ['call', 'free-fire', 'move'], held: true });
+    // The engage order itself takes no lever.
+    rig.commanders.TakeLevers('order_fleet', { fleet: FLEET, order: { type: 'engage' } });
+
+    expect(rig.commanders.Engage(FLEET)).toEqual({ released: true });
+    expect(rig.commanders.StanceOf(WHOLE)).toBeNull();
+    expect(rig.commanders.StanceOf(DPS)).toBeNull();
+    const report = rig.commanders.Report(FLEET, 1);
+    expect(report).toMatchObject({ manual: [], engaged: true, engagedBy: 'ordered', pending: [] });
+    expect(report).not.toHaveProperty('held');
+    expect(rig.commanders.Engage('no-such-fleet')).toBeNull();
+    // The brain calls again at its next step: the live primary kept, the queue refilled behind it.
+    rig.Steps(2, 2);
+    expect(rig.runs.at(-1)).toMatchObject({ tick: 2, lever: 'call', args: CallArgs('fc', ['r2', 'r1']) });
+  });
+
+  it('targets until gone lends only the call lever; the brain calls again once its targets are gone, or at a clear', () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    rig.Steps(1, 1);
+    expect(rig.runs.at(-1)).toMatchObject({ tick: 1, args: CallArgs('fc', ['r1', 'r2']) });
+    rig.commanders.TakeLevers('order_fleet', { fleet: FLEET, order: { type: 'targets', primary: 'r2', until: 'gone' } });
+    rig.commanders.SetCall(WHOLE, ['r2']);
+    expect(rig.commanders.Report(FLEET, 1)).toMatchObject({ manual: ['call'], lent: { lever: 'call', targets: ['r2'] } });
+    const runs = rig.runs.length;
+    rig.Steps(2, 3);
+    expect(rig.runs).toHaveLength(runs);
+
+    rig.Kill('r2', 4);
+    rig.Steps(4, 4);
+    expect(rig.runs.at(-1)).toMatchObject({ tick: 4, lever: 'call', args: CallArgs('fc', ['r1']) });
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ manual: [] });
+    expect(rig.commanders.Report(FLEET, 4)).not.toHaveProperty('lent');
+
+    rig.commanders.TakeLevers('order_fleet', { fleet: FLEET, order: { type: 'targets', primary: 'r1', until: 'gone' } });
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ manual: ['call'], lent: { targets: ['r1'] } });
+    rig.commanders.TakeLevers('order_fleet', { fleet: FLEET, order: { type: 'targets', clear: true, until: 'gone' } });
+    expect(rig.commanders.Report(FLEET, 4)).toMatchObject({ manual: [] });
+    expect(rig.commanders.Report(FLEET, 4)).not.toHaveProperty('lent');
   });
 
   it('gives pilots their traits: personality draws under authored ones, authored traits outside personality fleets', () => {

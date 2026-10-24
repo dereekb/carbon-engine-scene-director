@@ -8,6 +8,10 @@ import type { Maybe } from '@dereekb/util';
 const RECONNECT_MS = 2000;
 const LOG_FLUSH_MS = 250;
 const LOG_BUFFER_LIMIT = 500;
+/**
+ * How long a page→hub call waits for its answer by default: staging a scenario resolves hulls and places first.
+ */
+const HUB_CALL_TIMEOUT_MS = 120_000;
 
 /**
  * Answers one tool call; it may return a value or a promise.
@@ -28,6 +32,35 @@ interface CallMessage {
   readonly name?: string;
   readonly args?: Record<string, unknown>;
   readonly hub?: unknown;
+  readonly ok?: boolean;
+  readonly value?: unknown;
+  readonly error?: { readonly message?: string; readonly problems?: string[] };
+}
+
+interface PendingHubCall {
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: Error) => void;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
+export interface HubCallOptions {
+  /**
+   * Milliseconds to wait for the hub's answer; 120 s by default.
+   */
+  readonly timeout?: number;
+}
+
+/**
+ * A hub tool's refusal, with its problem list when it gave one.
+ */
+export class HubCallError extends Error {
+  readonly problems?: string[];
+
+  constructor(message: string, problems?: string[]) {
+    super(message);
+    this.name = 'HubCallError';
+    if (problems) this.problems = problems;
+  }
 }
 
 const CONSOLE_LEVELS: [keyof Pick<Console, 'log' | 'info' | 'warn' | 'error'>, LogLevel][] = [
@@ -59,6 +92,8 @@ export class HubLink {
   private readonly onStatus: (connected: boolean) => void;
   private readonly onHello: (hub: unknown) => void;
   private readonly logs: LogEntry[] = [];
+  private readonly calls = new Map<number, PendingHubCall>();
+  private nextCallId = 1;
   private ws: Maybe<WebSocket> = null;
   private flushTimer: Maybe<ReturnType<typeof setTimeout>> = null;
 
@@ -106,6 +141,31 @@ export class HubLink {
     this.handlers.set(name, handler);
   }
 
+  /**
+   * Runs a hub tool from the page (the battle console staging a scenario on a passed scene). The hub runs `where:
+   * 'hub'` tools only and refuses page tools: the page calls its own through its director.
+   *
+   * @param name - The hub tool.
+   * @param args - Its arguments.
+   * @param options - The answer's deadline.
+   * @returns The tool's value; rejects with a HubCallError (and its problems) when the hub refuses, the socket is not
+   * open, it closes first, or the deadline passes.
+   */
+  Call(name: string, args: Record<string, unknown> = {}, { timeout = HUB_CALL_TIMEOUT_MS }: HubCallOptions = {}): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      const id = this.nextCallId++;
+      if (!this.SendMessage({ type: 'call', id, name, args })) {
+        reject(new HubCallError(`the hub is not connected; "${name}" was not sent`));
+        return;
+      }
+      const timer = setTimeout(() => {
+        this.calls.delete(id);
+        reject(new HubCallError(`the hub did not answer "${name}" within ${timeout} ms`));
+      }, timeout);
+      this.calls.set(id, { resolve, reject, timer });
+    });
+  }
+
   Connect(): void {
     const ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
     this.ws = ws;
@@ -120,6 +180,7 @@ export class HubLink {
       if (this.ws !== ws) return;
       this.connected = false;
       this.onStatus(false);
+      this.RejectCalls('the hub connection closed before answering');
       setTimeout(() => this.Connect(), RECONNECT_MS);
     });
   }
@@ -154,6 +215,10 @@ export class HubLink {
       this.onHello(message.hub);
       return;
     }
+    if (message.type === 'result') {
+      this.SettleCall(message);
+      return;
+    }
     if (message.type !== 'call') return;
 
     const handler = this.handlers.get(String(message.name));
@@ -166,6 +231,23 @@ export class HubLink {
       reply = { type: 'result', id: message.id, ok: false, error: { message: error instanceof Error ? error.message : String(error), ...(problems ? { problems } : {}) } };
     }
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify(reply));
+  }
+
+  private SettleCall(message: CallMessage): void {
+    const pending = message.id === undefined ? undefined : this.calls.get(message.id);
+    if (!pending || message.id === undefined) return;
+    this.calls.delete(message.id);
+    clearTimeout(pending.timer);
+    if (message.ok) pending.resolve(message.value);
+    else pending.reject(new HubCallError(message.error?.message ?? 'the hub reported an error', message.error?.problems));
+  }
+
+  private RejectCalls(reason: string): void {
+    for (const [id, pending] of this.calls) {
+      this.calls.delete(id);
+      clearTimeout(pending.timer);
+      pending.reject(new HubCallError(reason));
+    }
   }
 
   private Log(level: LogLevel, message: string): void {

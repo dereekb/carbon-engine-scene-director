@@ -34,6 +34,12 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 - **One hub per port.** `scene-director mcp` starts the hub or, when 5520 is taken, joins it through `RemoteHub`
   (`hub/remote-hub.ts`, same `Call` surface as `Hub`; `hub/tool-call.ts`). A joined hub keeps the owner's scenes and
   fleets directories.
+- **Page → hub calls.** A page runs a **hub** tool over its own socket: `HubLink.Call(name, args, { timeout })`
+  (`ViewerApi.CallHub` for a host page) sends `{ type: "call", id, name, args }` and the hub answers `{ type: "result",
+  id, ok, value | error }` (`Hub.CallFromPage`, the error's `problems` kept). Only `where: 'hub'` tools run; a page tool
+  is refused (the page calls its own through `ViewerApi.Call`, else it would land in the newest tab). Pending calls
+  reject when the socket closes or the deadline (120 s by default) passes. The battle console stages a scenario this
+  way, on a passed `scene` (`sd-console`).
 - **WebSocket messages** are JSON (`hello`, `call`, `result`, `log`; the hub's hello reply is
   `{ type, role, hub: { url, eveData } }`, and a hub-sourced tab reloads when its mode differs), plus a movie export's (`sd-export`): page → hub
   `{ type: "export", id, kind: config | progress | end | failed | cancelled }` and binary chunk packets (`SDX1` + u32
@@ -41,7 +47,10 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 - **HTTP routes** (`hub.ts`): `/config` (`{ eveData }`, read by the page before it boots: `sd-dev-env`), `/build`, `/resfileindex.txt`, `/resource/<path>`, `/ship-stats`, `/prop-mod`,
   `/fit/type`, `/dogma/types`, `/dogma/skills` (`sd-fittings`), `/weapon` (`sd-weapons`), `/audio/library`,
   `/audio/path/<encoded res:/ path>` (streams, forwards `Range`), `/map/system`, `/movies/<file>` (an exported movie
-  from the movies directory, GET / HEAD with `Range`: `sd-export`), `/ws`. The hub's HTTP layer is GET-only (and HEAD
+  from the movies directory, GET / HEAD with `Range`: `sd-export`), `/console/` (the built battle console:
+  `--console <dir>` / `SCENE_DIRECTOR_CONSOLE`, by default `dist/apps/battle-console/browser` beside the CLI bundle
+  when it exists; any path under it, index.html for `/console` and extensionless routes, nothing outside the
+  directory), `/ws`. The hub's HTTP layer is GET-only (and HEAD
   on `/movies`); tools-core POSTs go through `hub/sde-client.ts` (`SdeClient`, shared by `ShipData`, `DogmaData` and
   `WeaponData`: the SDE build pin, the cache, the failure mapping).
 

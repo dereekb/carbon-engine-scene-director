@@ -136,8 +136,13 @@ export interface FleetPersonalityTargeting {
   queue: number;
   switch: FleetTargetSwitch;
   /**
+   * Whether the FC calls targets once engaged. False: it calls none and clears its own call once (a fleet left to
+   * free fire, or to a model's or the console's calls).
+   */
+  calls: boolean;
+  /**
    * Whether the fleet turns free fire on once engaged: a member with no live call picks the nearest hostile it can
-   * reach.
+   * reach. False: the brain turns it off when it finds it on (a lever no model took).
    */
   freeFire: boolean;
 }

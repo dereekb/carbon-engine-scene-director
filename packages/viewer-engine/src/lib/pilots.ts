@@ -34,11 +34,13 @@ import {
   type PilotContact,
   PILOT_REFRESH_TICKS,
   type ResolvedShipStance,
+  type SceneVector,
   type ShipOrder,
   type ShipPilotCall,
   type ShipPilotMemory,
   type ShipPilotPicture,
   type ShipPilotState,
+  type ShipStanceTo,
   stepShipPilot,
   surfaceDistanceOf,
   toFleetGroupKey,
@@ -143,6 +145,11 @@ export interface ShipPilotsPort {
    * groups apart whose stance ended.
    */
   Formation(input: PilotFormation): void;
+  /**
+   * An align stance's `to` (a ship, object or celestial target id, or a place name) as a point, measured from the
+   * ship; null when nothing matches (the pilot aligns away from the hostiles).
+   */
+  AlignPoint?(to: string, from: string): Maybe<SceneVector>;
 }
 
 export interface PilotFormation {
@@ -477,7 +484,7 @@ export class ShipPilots {
       record.why = selfFacts.away ? 'away: in warp, arriving or destroyed' : 'its numbers have not settled';
       return;
     }
-    const picture = this.PictureOf({ id, self, selfFacts, facts, boundary, on: stance.on ?? null });
+    const picture = this.PictureOf({ id, self, selfFacts, facts, boundary, on: stance.on ?? null, to: stance.type === 'align' ? (stance.to ?? null) : null });
     const refreshTicks = PILOT_REFRESH_TICKS * port.tickSeconds;
     const step = stepShipPilot({ picture, stance, memory: record.memory, refreshTicks });
     let memory = step.memory;
@@ -491,8 +498,8 @@ export class ShipPilots {
     this.SyncTackle(id, record, picture, boundary);
   }
 
-  private PictureOf(input: { readonly id: string; readonly self: PilotContact; readonly selfFacts: FleetShipFacts; readonly facts: ReadonlyMap<string, FleetShipFacts>; readonly boundary: number; readonly on: Maybe<string> }): ShipPilotPicture {
-    const { id, self, selfFacts, facts, boundary, on } = input;
+  private PictureOf(input: { readonly id: string; readonly self: PilotContact; readonly selfFacts: FleetShipFacts; readonly facts: ReadonlyMap<string, FleetShipFacts>; readonly boundary: number; readonly on: Maybe<string>; readonly to: Maybe<ShipStanceTo> }): ShipPilotPicture {
+    const { id, self, selfFacts, facts, boundary, on, to } = input;
     const port = this.port;
     const hostiles: PilotContact[] = [];
     const friends: PilotContact[] = [];
@@ -511,10 +518,14 @@ export class ShipPilots {
     const nearest = [...hostiles].sort((a, b) => surfaceDistanceOf(self, a) - surfaceDistanceOf(self, b))[0] ?? null;
     const focus = byId(selfFacts.target) ?? byId(port.CalledOf(id)) ?? nearest;
     const seconds = port.tickSeconds;
+    let alignTo: Maybe<SceneVector> = null;
+    if (Array.isArray(to)) alignTo = to as SceneVector;
+    else if (typeof to === 'string') alignTo = facts.get(to)?.position ?? port.AlignPoint?.(to, id) ?? null;
     return {
       self: { ...self, health: selfFacts.health, order: port.OrderOf(id) },
       focus,
       anchor,
+      ...(to != null ? { alignTo } : {}),
       hostiles,
       friends,
       incomingReps: selfFacts.incomingReps ?? 0,

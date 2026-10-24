@@ -75,10 +75,22 @@ export interface FleetTargetsOrder {
   readonly drop?: readonly string[];
   readonly next?: true;
   readonly clear?: true;
+  /**
+   * `gone`: the order lends only the call lever of a personality fleet, until none of the ids it names is live (killed,
+   * removed or warped off); then the FC brain calls again. With `clear` it hands the lever back at once.
+   */
+  readonly until?: FleetTargetsUntil;
 }
 
+/**
+ * How long a targets order holds a personality fleet's call: `gone`, until the targets it names are.
+ */
+export const FLEET_TARGETS_UNTIL = ['gone'] as const;
+
+export type FleetTargetsUntil = (typeof FLEET_TARGETS_UNTIL)[number];
+
 const ID_MESSAGE = 'must be an id (1-64 letters, digits, "_", "-" or ".")';
-const TARGETS_ORDER_KEYS = new Set<string>(['type', ...FLEET_TARGETS_ACTIONS]);
+const TARGETS_ORDER_KEYS = new Set<string>(['type', 'until', ...FLEET_TARGETS_ACTIONS]);
 
 /**
  * Why an id cannot be called, as a message suffix.
@@ -422,6 +434,9 @@ export function readFleetTargetsOrder(input: JsonObject, context: ReadFleetTarge
       if (ids) order = { type: 'targets', [action]: ids };
     }
   }
+  const until = input['until'];
+  if (until != null && !(FLEET_TARGETS_UNTIL as readonly unknown[]).includes(until)) problems.push(`${where}.until must be "gone": the call holds until the targets it names are killed, removed or warp off`);
+  else if (order && until != null) order = { ...order, until: until as FleetTargetsUntil };
   return problems.length > before ? null : order;
 }
 

@@ -25,6 +25,7 @@
 import type { Maybe } from '@dereekb/util';
 import {
   calledTargetsOf,
+  type CalledTargetStatus,
   EMPTY_FLEET_BRAIN_MEMORY,
   FLEET_BRAIN_LEVERS,
   FLEET_TARGETING_LEVERS,
@@ -200,6 +201,11 @@ export interface FleetBrainPort {
    * mods levers.
    */
   Piloted?(id: string): boolean;
+  /**
+   * A called target's status (Director.CalledTargetStatus): a lent call lever comes back once none of its targets is
+   * `live`.
+   */
+  TargetStatus?(id: string): CalledTargetStatus;
 }
 
 /**
@@ -244,6 +250,11 @@ export interface FleetCommandReport {
   readonly reach: FleetReachNumbers;
   readonly stance: string;
   readonly manual: readonly FleetBrainLever[];
+  /**
+   * The call lever lent by a targets order with `until: "gone"`: the targets it named; the brain calls again once
+   * none of them is live.
+   */
+  readonly lent?: { readonly lever: 'call'; readonly targets: readonly string[] };
   readonly held?: true;
   readonly pending: readonly { readonly lever: FleetBrainLever; readonly dueIn: number; readonly why: string }[];
   readonly decisions: readonly FleetBrainLogEntry[];
@@ -296,6 +307,10 @@ interface FleetBrain {
    */
   piloted?: boolean;
   held: boolean;
+  /**
+   * The targets a lent call lever (targets `until: "gone"`) waits on; null when the call is not lent.
+   */
+  lent: Maybe<readonly string[]>;
   handover: Maybe<FleetHandover>;
   leaderless: boolean;
   hostiles: number;
@@ -781,8 +796,10 @@ export class FleetCommanders {
     };
     if (tool === 'order_fleet') {
       const order = record['order'];
-      const type = order !== null && typeof order === 'object' ? (order as Readonly<Record<string, unknown>>)['type'] : null;
-      if (type === 'targets' || type === 'free-fire') take(record['fleet'], FLEET_TARGETING_LEVERS, false);
+      const fields = order !== null && typeof order === 'object' ? (order as Readonly<Record<string, unknown>>) : {};
+      const type = fields['type'];
+      if (type === 'targets' && fields['until'] === 'gone') this.LendCall(record['fleet'], fields);
+      else if (type === 'targets' || type === 'free-fire') take(record['fleet'], FLEET_TARGETING_LEVERS, false);
       else if (typeof type === 'string' && FLEET_MOVE_ORDERS.has(type) && record['wing'] == null && record['squad'] == null) take(record['fleet'], ['move']);
     } else if (tool === 'order_ship' && !isStanceOrder(record['order'])) {
       for (const fleet of live.fleets ?? []) if (fleet.commander === record['id']) take(fleet.id, ['move']);
@@ -794,6 +811,47 @@ export class FleetCommanders {
         else take(fleet, FLEET_TARGETING_LEVERS, tool === 'cease_fire');
       }
     }
+  }
+
+  /**
+   * A targets order with `until: "gone"` lends a personality fleet's call lever alone, until none of the targets it
+   * names is live (StepFleet); `clear` hands it back at once. Either lets a cease_fire hold go, as a targets order does.
+   */
+  private LendCall(fleet: unknown, order: Readonly<Record<string, unknown>>): void {
+    if (typeof fleet !== 'string' || !this.Book()?.personalities.has(fleet)) return;
+    const brain = this.BrainOf(fleet);
+    // primary, set and queue name their targets; next and drop wait on the call they leave.
+    const given = [order['primary'], order['set'], order['queue']].flatMap((value) => (Array.isArray(value) ? value : value == null ? [] : [value])).filter((id): id is string => typeof id === 'string');
+    const named = given.length ? given : [...(this.port?.CallOf(fleet) ?? [])];
+    brain.held = false;
+    if (order['clear'] === true || !named.length) {
+      brain.manual.delete('call');
+      brain.lent = null;
+    } else {
+      brain.manual.add('call');
+      brain.lent = [...new Set(named)];
+    }
+  }
+
+  /**
+   * order_fleet engage: hands a personality fleet back to its brain and engages it now. The fleet's live stances (its
+   * own, its wings' and squads') are dropped so the document's apply again; every manual and lent lever, the cease_fire
+   * hold and the pending decisions are let go; the brain is engaged (`engagedBy: "ordered"`).
+   *
+   * @param fleet - The fleet id.
+   * @returns Whether a cease_fire hold was let go (its members' holds lift too); null for a fleet with no personality.
+   */
+  Engage(fleet: string): Maybe<{ readonly released: boolean }> {
+    if (!this.Book()?.personalities.has(fleet)) return null;
+    for (const [key, entry] of this.stances) if (entry.group.fleet === fleet) this.stances.delete(key);
+    const brain = this.BrainOf(fleet);
+    const released = brain.held;
+    brain.manual.clear();
+    brain.held = false;
+    brain.lent = null;
+    brain.memory = { ...brain.memory, engaged: true, engagedBy: 'ordered', pending: [] };
+    this.Changed();
+    return { released };
   }
 
   /**
@@ -814,6 +872,7 @@ export class FleetCommanders {
       if (brain.held) released.push(fleet);
       brain.manual.clear();
       brain.held = false;
+      brain.lent = null;
       brain.memory = { ...brain.memory, pending: [] };
     }
     return released;
@@ -866,6 +925,7 @@ export class FleetCommanders {
       reach: brain?.reach ?? NO_REACH,
       stance: personality.movement.stance,
       manual,
+      ...(brain?.lent ? { lent: { lever: 'call' as const, targets: [...brain.lent] } } : {}),
       ...(brain?.piloted ? { piloted: [...FLEET_PILOTED_LEVERS] } : {}),
       ...(brain?.held ? { held: true as const } : {}),
       pending: memory.pending.map((each) => ({ lever: each.lever, dueIn: Math.max(0, each.due - tick), why: each.why })),
@@ -934,6 +994,11 @@ export class FleetCommanders {
     brain.hostiles = picture.hostiles.length;
     brain.reach = picture.reach;
     brain.targets = { ranked: rankFleetTargets({ hostiles: picture.hostiles, targeting: personality.targeting, reach: Number.POSITIVE_INFINITY }), reach: toFleetTargetingReach(personality.targeting.reach, picture.reach) };
+    // A lent call comes back once none of the targets it named is live: the brain calls again this step.
+    if (brain.lent && port.TargetStatus && !brain.lent.some((id) => port.TargetStatus?.(id) === 'live')) {
+      brain.manual.delete('call');
+      brain.lent = null;
+    }
     // A stance flown by the acting FC moves it and runs the prop mods; the brain still calls targets and free fire.
     const piloted = fc != null && port.Piloted?.(fc.ship) === true;
     const manual = piloted ? [...new Set<FleetBrainLever>([...brain.manual, ...FLEET_PILOTED_LEVERS])] : [...brain.manual];
@@ -1012,7 +1077,7 @@ export class FleetCommanders {
   private BrainOf(fleet: string): FleetBrain {
     let brain = this.brains.get(fleet);
     if (!brain) {
-      brain = { since: null, readyAt: null, memory: EMPTY_FLEET_BRAIN_MEMORY, refusals: new Map(), manual: new Set(), held: false, handover: null, leaderless: false, hostiles: 0, reach: NO_REACH, team: null };
+      brain = { since: null, readyAt: null, memory: EMPTY_FLEET_BRAIN_MEMORY, refusals: new Map(), manual: new Set(), held: false, lent: null, handover: null, leaderless: false, hostiles: 0, reach: NO_REACH, team: null };
       this.brains.set(fleet, brain);
     }
     return brain;

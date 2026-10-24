@@ -182,6 +182,16 @@ export interface ViewerApi {
    */
   Call(tool: string, args?: unknown): Promise<unknown>;
   /**
+   * Runs a hub tool over the page's link (`where: 'hub'`: staging on a passed scene, the libraries, lookups). The hub
+   * refuses page tools; call those with Call.
+   *
+   * @param tool - The tool name (packages/scene tools.ts, `where: 'hub'`).
+   * @param args - Its arguments.
+   * @param options - `timeout` in milliseconds (120 s by default).
+   * @returns Its result; a refusal rejects with an Error carrying the hub's `problems` when it gave them.
+   */
+  CallHub(tool: string, args?: Record<string, unknown>, options?: { readonly timeout?: number }): Promise<unknown>;
+  /**
    * Every fleet in the live scene, as panel views.
    */
   Fleets(): FleetView[];

@@ -33,7 +33,7 @@ import { DestinyWorld } from './destiny';
 import { Director } from './director';
 import { Engine } from './engine';
 import { FetchHubConfig, HubModeChanged, PageEveDataOf, type PageEveData } from './eve-data';
-import { HubLink, type ToolHandler } from './link';
+import { HubLink, type HubCallOptions, type ToolHandler } from './link';
 import { MoviePresentation, type FramePresentation, type MovieRunOverrides } from './movie';
 import { ConfigureResources, ErrorText } from './resources';
 import { SceneStore } from './store';
@@ -259,6 +259,10 @@ export class ViewerSession implements ViewerApi {
     const handler = this.handlers[tool];
     if (!handler) throw new Error(`"${tool}" is not a page tool`);
     return handler((args ?? {}) as Record<string, unknown>);
+  }
+
+  CallHub(tool: string, args: Record<string, unknown> = {}, options: HubCallOptions = {}): Promise<unknown> {
+    return this.link.Call(tool, args, options);
   }
 
   Fleets(): FleetView[] {

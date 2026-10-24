@@ -202,7 +202,7 @@ export class FleetOrders {
     let result: FleetOrderResult;
     if (order.type === 'warp') result = this.Warp(resolved, order, delays);
     else if (order.type === 'regroup') result = this.Regroup(resolved, delays);
-    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets' || order.type === 'free-fire' || order.type === 'stance') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
+    else if (order.type === 'anchor' || order.type === 'break-off' || order.type === 'targets' || order.type === 'free-fire' || order.type === 'stance' || order.type === 'engage') result = { ...this.Result(resolved, { ships: resolved.ships }), tick };
     else result = this.Move(resolved, order, delays);
     const waits = (request.delay ?? 0) > 0 || [...delays.values()].some((delay) => delay > 0);
     if (waits && order.type !== 'anchor' && order.type !== 'break-off') result = { ...result, delays: Object.fromEntries(delays) };

@@ -5,7 +5,22 @@ import { applySceneOperations, normalizeScene, type SceneDocument } from '../sce
 import { catchSceneError, makeFleetScene, TFI_FLEET_SCENE } from './fleets.spec-helper';
 import { toFleetMemberships } from './membership';
 import { CELESTIAL_TARGET_REFUSAL } from '../weapons/target';
-import { DEFAULT_BREAK_OFF_RANGE, FLEET_ORDER_TYPES, FLEET_STRUCTURE_ORDER_TYPES, isFleetDocumentOrder, isFleetFreeFireOrder, isFleetShipOrder, isFleetStructureOrder, MAX_FLEET_ORDER_DELAY, normalizeFleetOrderRequest, toPilotDelays, resolveFleetOrderRequest, toFleetGroupKey, toFleetOrderOperations } from './orders';
+import {
+  DEFAULT_BREAK_OFF_RANGE,
+  FLEET_ORDER_TYPES,
+  FLEET_STRUCTURE_ORDER_TYPES,
+  isFleetDocumentOrder,
+  isFleetEngageOrder,
+  isFleetFreeFireOrder,
+  isFleetShipOrder,
+  isFleetStructureOrder,
+  MAX_FLEET_ORDER_DELAY,
+  normalizeFleetOrderRequest,
+  toPilotDelays,
+  resolveFleetOrderRequest,
+  toFleetGroupKey,
+  toFleetOrderOperations
+} from './orders';
 import { FLEET_TARGETS_ACTIONS, MAX_CALLED_TARGETS } from './targets';
 
 /**
@@ -53,7 +68,21 @@ const WARP = { type: 'warp', point: [0, 0, 400000] } as const;
 
 describe('normalizeFleetOrderRequest', () => {
   it('lists the ship orders, then the document orders', () => {
-    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets', 'free-fire', 'stance']);
+    expect([...FLEET_ORDER_TYPES]).toEqual([...SHIP_ORDER_TYPES, ...FLEET_STRUCTURE_ORDER_TYPES, 'targets', 'free-fire', 'stance', 'engage']);
+  });
+
+  it('reads engage for a whole fleet only, with no fields of its own', () => {
+    expect(normalizeFleetOrderRequest({ fleet: 'blue', order: { type: 'engage' } })).toEqual({ fleet: 'blue', order: { type: 'engage' } });
+    expect(isFleetEngageOrder({ type: 'engage' })).toBe(true);
+    expect(isFleetShipOrder({ type: 'engage' })).toBe(false);
+    expect(() => normalizeFleetOrderRequest({ fleet: 'blue', wing: 'w', order: { type: 'engage' } })).toThrow(/engage hands a whole fleet back to its FC brain; drop wing and squad/);
+    expect(() => normalizeFleetOrderRequest({ fleet: 'blue', order: { type: 'engage', target: 'x' } })).toThrow(/order.target is not an engage order field/);
+  });
+
+  it('reads until "gone" on a targets order, and refuses any other until', () => {
+    expect(normalizeFleetOrderRequest({ fleet: 'blue', order: { type: 'targets', primary: 'r1', until: 'gone' } }).order).toEqual({ type: 'targets', primary: 'r1', until: 'gone' });
+    expect(normalizeFleetOrderRequest({ fleet: 'blue', order: { type: 'targets', clear: true, until: 'gone' } }).order).toEqual({ type: 'targets', clear: true, until: 'gone' });
+    expect(() => normalizeFleetOrderRequest({ fleet: 'blue', order: { type: 'targets', primary: 'r1', until: 'dead' } })).toThrow(/order.until must be "gone"/);
   });
 
   it('round-trips every order type with its defaults filled', () => {

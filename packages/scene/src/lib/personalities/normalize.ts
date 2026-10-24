@@ -30,7 +30,7 @@ import {
 const PERSONALITY_KEYS = new Set<string>(['schema', 'id', 'extends', 'name', 'description', 'command', 'pilots', 'engage', 'targeting', 'movement']);
 const COMMAND_KEYS = new Set<string>(['ability', 'backups', 'succession', 'handover']);
 const PILOTS_KEYS = new Set<string>(['reaction']);
-const TARGETING_KEYS = new Set<string>(['priority', 'prefer', 'reach', 'queue', 'switch', 'freeFire']);
+const TARGETING_KEYS = new Set<string>(['priority', 'prefer', 'reach', 'queue', 'switch', 'calls', 'freeFire']);
 const MOVEMENT_KEYS = new Set<string>(['stance', 'range', 'propMods']);
 
 /**
@@ -255,6 +255,10 @@ function readTargeting(input: JsonObject, where: string, problems: string[]): Pa
   if (input['reach'] != null) targeting.reach = readReach(input['reach'], `${where}.reach`, problems);
   if (input['queue'] != null) targeting.queue = readCount(input['queue'], { where: `${where}.queue`, max: MAX_FLEET_TARGET_QUEUE, problems });
   if (input['switch'] != null) targeting.switch = readChoice(input['switch'], { where: `${where}.switch`, choices: FLEET_TARGET_SWITCHES, problems });
+  if (input['calls'] != null) {
+    if (typeof input['calls'] === 'boolean') targeting.calls = input['calls'];
+    else problems.push(`${where}.calls must be true or false`);
+  }
   if (input['freeFire'] != null) {
     if (typeof input['freeFire'] === 'boolean') targeting.freeFire = input['freeFire'];
     else problems.push(`${where}.freeFire must be true or false`);

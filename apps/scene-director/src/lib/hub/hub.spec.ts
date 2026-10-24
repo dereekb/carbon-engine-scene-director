@@ -1,4 +1,4 @@
-import { mkdtemp, readdir, readFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -193,6 +193,70 @@ describe('hub', () => {
     expect(await page.text()).toMatch(/<canvas id="view">/);
     const escape = await fetch(`http://127.0.0.1:${hub.port}/app/..%2F..%2Fpackage.json`);
     expect(escape.status).toBe(404);
+  });
+
+  it('a page calls hub tools over its link; page tools and unknown tools are refused', async () => {
+    const page = await ConnectPage({});
+    const replies = new Map<number, { ok: boolean; value?: unknown; error?: { message: string; problems?: string[] } }>();
+    page.on('message', (data) => {
+      const message = JSON.parse(String(data)) as { type: string; id: number; ok: boolean; value?: unknown; error?: { message: string } };
+      if (message.type === 'result') replies.set(message.id, message);
+    });
+    async function CallFromPage(id: number, name: string, args: Record<string, unknown> = {}) {
+      page.send(JSON.stringify({ type: 'call', id, name, args }));
+      await expect.poll(() => replies.has(id)).toBe(true);
+      return replies.get(id);
+    }
+    try {
+      expect(await CallFromPage(1, 'search_hulls', { query: 'af1' })).toEqual({ type: 'result', id: 1, ok: true, value: { kind: 'hulls', total: 2, names: ['af1_t1', 'af1_t2'] } });
+      const staged = await CallFromPage(2, 'stage_engagement', {
+        scene: { name: 'from the page' },
+        sides: [
+          { ships: [{ dna: TFI_DNA, count: 2 }], fleet: 'blue' },
+          { ships: [{ dna: TFI_DNA, count: 2 }], fleet: 'red', team: 'red' }
+        ],
+        range: 20000
+      });
+      const result = staged?.value as { loaded: boolean; scene: { ships: { id: string }[] } };
+      expect(staged?.ok).toBe(true);
+      expect(result.loaded).toBe(false);
+      expect(result.scene.ships).toHaveLength(4);
+      const pageTool = await CallFromPage(3, 'get_state');
+      expect(pageTool?.ok).toBe(false);
+      expect(pageTool?.error?.message).toMatch(/"get_state" is a page tool/);
+      expect((await CallFromPage(4, 'no_such_tool'))?.error?.message).toMatch(/unknown tool "no_such_tool"/);
+    } finally {
+      page.close();
+    }
+  });
+
+  it('serves the battle console under /console/ with an index fallback, and nothing outside its directory', async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), 'scene-director-console-'));
+    await writeFile(path.join(directory, 'index.html'), '<base href="/console/"><app-root></app-root>');
+    await writeFile(path.join(directory, 'main.js'), 'export {};');
+    await writeFile(path.join(directory, 'styles.css'), 'body {}');
+    await mkdir(path.join(directory, 'media'));
+    await writeFile(path.join(directory, 'media', 'symbols.woff2'), 'w');
+    const withConsole = await StartHub({ consoleDirectory: directory });
+    const base = `http://127.0.0.1:${withConsole.port}`;
+    try {
+      for (const route of ['/console/', '/console', '/console/fleets/blue']) {
+        const index = await fetch(base + route);
+        expect([route, index.status, index.headers.get('content-type')]).toEqual([route, 200, 'text/html; charset=utf-8']);
+        expect(await index.text()).toMatch(/<app-root>/);
+      }
+      const types = await Promise.all(['/console/main.js', '/console/styles.css', '/console/media/symbols.woff2'].map(async (route) => (await fetch(base + route)).headers.get('content-type')));
+      expect(types).toEqual(['text/javascript; charset=utf-8', 'text/css; charset=utf-8', 'font/woff2']);
+      expect((await fetch(`${base}/console/missing.js`)).status).toBe(404);
+      expect((await fetch(`${base}/console/..%2F..%2Fpackage.json`)).status).toBe(404);
+      const viewer = await fetch(`${base}/`);
+      expect(await viewer.text()).toMatch(/<canvas id="view">/);
+    } finally {
+      await withConsole.Stop();
+    }
+    const none = await fetch(`http://127.0.0.1:${hub.port}/console/`);
+    expect(none.status).toBe(404);
+    expect(await none.text()).toMatch(/--console/);
   });
 
   it('screenshot values become MCP image content', () => {

@@ -21,7 +21,9 @@ the tool runs them; anchor / break-off / regroup edit the **live scene only** (`
   a squad whose only member is the FC is refused.
 - **Orders**: `order_ship`'s movement orders (`direction`, `goto`, `approach`, `keep-at-range`, `orbit`, `stop`) and
   `warp`; the document orders `anchor`, `break-off`, `regroup` and `targets` (the group's called targets: sub-doc
-  `targets`). `rejoin` is refused ("use regroup").
+  `targets`), then the live ones: `free-fire`, `stance` (`sd-piloting`) and `engage` (a whole personality fleet back to
+  its FC brain, engaged now: `sd-personalities` "order_fleet engage"; a wing or squad is refused). `rejoin` is refused
+  ("use regroup").
 - **Targets** must be outside the group (the FC is a fine target for a squad); a `targets` order may not call one of
   the group's ships either. A target that is no id is tried as a
   name first (`Director.NamedTarget`, `sd-locations` "Order targets by name"), measured from the fleet's FC; the result

@@ -5996,7 +5996,7 @@ const EVE_DATA_PATHS = ['/resource/', '/resfileindex.txt', '/ship-stats', '/prop
  *
  * @param requests - Every path the tab asked the hub for, from the first load.
  */
-async function NoEveDataChecks(requests: readonly string[]): Promise<void> {
+async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise<void> {
   const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
   const NoEve = (): Promise<NoEveState> => call<NoEveState>('get_state');
   const WaitNoEve = async (what: string, seconds: number, test: (state: NoEveState) => Maybe<string>): Promise<NoEveState> => {
@@ -6141,6 +6141,77 @@ async function NoEveDataChecks(requests: readonly string[]): Promise<void> {
     const odd = [...state.ships, ...(state.objects ?? [])].find((entry) => entry.status !== 'stand-in');
     Expect(!odd, `not a stand-in: ${Show(odd)}`);
     return `${state.ships.length} ships and ${state.objects?.length ?? 0} object(s), all stand-ins`;
+  });
+
+  await Check('no EVE data: the page calls a hub tool over its link (stage_engagement on a passed scene)', async () => {
+    const answer = await page.evaluate(async (dna) => {
+      const session = (globalThis as unknown as { readonly sceneDirector: { readonly session: { CallHub(tool: string, args?: Record<string, unknown>): Promise<unknown> } } }).sceneDirector.session;
+      const staged = (await session.CallHub('stage_engagement', {
+        scene: { name: 'verify-page-to-hub' },
+        sides: [
+          { fleet: 'blue', ships: [{ dna, count: 2 }] },
+          { fleet: 'red', team: 'red', ships: [{ dna, count: 2 }] }
+        ],
+        range: 20000
+      })) as { readonly loaded: boolean; readonly scene: { readonly name: string; readonly ships: { readonly id: string }[] } };
+      const refused = await session.CallHub('get_state').then(
+        () => 'answered',
+        (error: Error) => error.message
+      );
+      return { loaded: staged.loaded, name: staged.scene.name, ships: staged.scene.ships.length, refused };
+    }, DNA);
+    Expect(answer.loaded === false && answer.name === 'verify-page-to-hub' && answer.ships === 4, Show(answer));
+    Expect(/page tool/.test(answer.refused), `get_state through the hub: ${answer.refused}`);
+    return `${answer.ships} ships staged on a passed scene from the page; get_state refused (${answer.refused})`;
+  });
+
+  await Check('no EVE data: the FC brain takes engage back from a hold, lends its call until the target is gone, and aligns', async () => {
+    const quick = { schema: 'cjs-fleet-personality/1', extends: 'line', command: { ability: 1 }, engage: 'on-sight', targeting: { reach: 30_000 }, movement: { stance: 'hold' } };
+    const ships = (team: string, z: number) => [1, 2, 3].map((n) => ({ id: `${team}-${n}`, dna: DNA, team, position: [n * 300, 0, z] }));
+    const fleet = (team: string) => ({ id: team, commander: `${team}-1`, personality: 'quick', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: [`${team}-2`, `${team}-3`] }] }] });
+    await call('load_scene', { scene: { name: 'verify-no-eve-data-brain', personalities: { quick }, ships: [...ships('blue', 0), ...ships('red', 15_000)], fleets: [fleet('blue'), fleet('red')] } });
+    await WaitNoEve('the builds settle', 10, Settled);
+    interface Fc {
+      readonly engaged?: boolean;
+      readonly engagedBy?: string;
+      readonly manual?: readonly string[];
+      readonly held?: boolean;
+      readonly lent?: { readonly targets: readonly string[] };
+    }
+    interface BrainState {
+      readonly fleets?: readonly { readonly id: string; readonly fc?: Fc }[];
+      readonly ships: readonly { readonly id: string; readonly stance?: { readonly state?: string } }[];
+    }
+    const Blue = async (what: string, seconds: number, test: (fc: Fc, state: BrainState) => Maybe<string>): Promise<BrainState> => {
+      const end = Date.now() + seconds * 1000;
+      let last = 'never polled';
+      while (Date.now() < end) {
+        const state = await call<BrainState>('get_state');
+        const problem = test(state.fleets?.find((each) => each.id === 'blue')?.fc ?? {}, state);
+        if (problem == null) return state;
+        last = problem;
+        await Delay(250);
+      }
+      throw new Error(`${what} within ${seconds} s: ${last}`);
+    };
+    await call('order_fleet', { fleet: 'blue', order: { type: 'stance', set: { type: 'hold' } } });
+    await call('cease_fire', { fleet: 'blue' });
+    await Blue('blue held by cease_fire', 5, (fc) => (fc.held ? null : Show(fc)));
+    const engaged = await call<{ readonly engagedBy?: string; readonly released?: boolean }>('order_fleet', { fleet: 'blue', order: { type: 'engage' } });
+    await Blue('blue back with its brain', 5, (fc) => (fc.engaged && fc.engagedBy === 'ordered' && !fc.held && !(fc.manual ?? []).length ? null : Show(fc)));
+    await call('order_fleet', { fleet: 'blue', order: { type: 'targets', primary: 'red-3', until: 'gone' } });
+    await Blue('the call lent', 5, (fc) => (fc.lent?.targets.includes('red-3') && (fc.manual ?? []).join() === 'call' ? null : Show(fc)));
+    await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'red-3' }] });
+    await Blue('the lent call back', 8, (fc) => (!fc.lent && !(fc.manual ?? []).includes('call') ? null : Show(fc)));
+    await call('order_fleet', { fleet: 'blue', order: { type: 'stance', set: { type: 'align', to: [0, 0, -5_000_000] } } });
+    const states: string[] = [];
+    await Blue('blue-1 aligned', 30, (_fc, state) => {
+      const now = state.ships.find((ship) => ship.id === 'blue-1')?.stance?.state ?? 'none';
+      if (states.at(-1) !== now) states.push(now);
+      return now === 'aligned' ? null : `blue-1 ${now}`;
+    });
+    Expect(engaged.engagedBy === 'ordered' && engaged.released === true, Show(engaged));
+    return `engage (released the hold), the lent call came back after red-3 went, blue-1 ${states.join(' → ')}`;
   });
 
   await Check('no EVE data: the tab asked for no EVE data', async () => {
@@ -6433,7 +6504,7 @@ try {
   });
 
   if (status) await EveDataChecks(page, status);
-  else await NoEveDataChecks(requests);
+  else await NoEveDataChecks(page, requests);
   await RecordChecks(page);
 } finally {
   await browser.close();

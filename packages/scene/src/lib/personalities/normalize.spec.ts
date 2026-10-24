@@ -45,7 +45,7 @@ describe('fleet personalities', () => {
     }
     const line = resolveFleetPersonality({ name: 'line' }).personality;
     expect(Object.keys(line?.command ?? {}).sort()).toEqual(['ability', 'backups', 'handover', 'succession']);
-    expect(Object.keys(line?.targeting ?? {}).sort()).toEqual(['freeFire', 'prefer', 'priority', 'queue', 'reach', 'switch']);
+    expect(Object.keys(line?.targeting ?? {}).sort()).toEqual(['calls', 'freeFire', 'prefer', 'priority', 'queue', 'reach', 'switch']);
     expect(Object.keys(line?.movement ?? {}).sort()).toEqual(['propMods', 'range', 'stance']);
     expect(line?.chain).toEqual(['line']);
   });

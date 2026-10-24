@@ -41,6 +41,24 @@ describe('stepFleetBrain', () => {
     expect(memory.pending).toEqual([]);
   });
 
+  it('with calls off it makes no call and clears its own once; free fire still goes on', () => {
+    const quiet = { ...line, targeting: { ...line.targeting, calls: false } };
+    const fresh = step({ picture: fight, personality: quiet });
+    expect(fresh.actions.map((action) => action.lever)).toEqual(['free-fire', 'move', 'prop-mods']);
+    const called = step({ picture: picture({ ...fight, call: ['l1'] }), personality: quiet, memory: { ...EMPTY_FLEET_BRAIN_MEMORY, engaged: true } });
+    expect(called.actions[0]).toMatchObject({ lever: 'call', args: { order: { type: 'targets', clear: true } }, why: expect.stringMatching(/calls are off/) });
+    expect(step({ picture: picture({ ...fight, call: ['l1'] }), personality: quiet, held: true }).actions.some((action) => action.lever === 'call')).toBe(false);
+  });
+
+  it('turns free fire off when its personality has none, unless the lever is manual or the fleet held', () => {
+    const noFree = { ...line, targeting: { ...line.targeting, freeFire: false } };
+    const on = picture({ ...fight, freeFire: true });
+    expect(step({ picture: on, personality: noFree }).actions.find((action) => action.lever === 'free-fire')?.args).toEqual({ fleet: 'f', by: 'fc', order: { type: 'free-fire', on: false } });
+    expect(step({ picture: on, personality: noFree, manual: ['free-fire'] }).actions.some((action) => action.lever === 'free-fire')).toBe(false);
+    expect(step({ picture: on, personality: noFree, held: true }).actions.some((action) => action.lever === 'free-fire')).toBe(false);
+    expect(step({ picture: picture({ ...fight, freeFire: false }), personality: noFree }).actions.some((action) => action.lever === 'free-fire')).toBe(false);
+  });
+
   it('does nothing once the fleet already does what it wants', () => {
     const settled = picture({ ...fight, call: ['l1', 'd1'], freeFire: true, order: { type: 'keep-at-range', target: 'l1', range: 30_000, speed: 1 }, propMods: 'off' });
     expect(step({ picture: settled, memory: { ...EMPTY_FLEET_BRAIN_MEMORY, engaged: true } }).actions).toEqual([]);

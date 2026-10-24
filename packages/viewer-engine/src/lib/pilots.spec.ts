@@ -359,6 +359,31 @@ describe('ShipPilots on the parks', () => {
     expect(port.propMods.some((each) => each.active)).toBe(true);
   });
 
+  it('aligns a Rifter on its MWD: aligning, then aligned once 75 % of its top speed is along the line', () => {
+    const stance = Own('rifter', { type: 'align', to: [0, 0, 10_000_000], propMods: 'always' });
+    const states: string[] = [];
+    const along: number[] = [];
+    let flying: Maybe<DestinyWorld> = null;
+    const { port } = FlyPilots(
+      (world) => {
+        flying = world;
+        return { ...RifterOnPunisher(world), stances: new Map([['rifter', stance]]) };
+      },
+      40,
+      (second, _port, pilots) => {
+        states.push(pilots.Report('rifter', stance, second).state);
+        along.push(flying?.Motion('rifter')?.velocity[2] ?? 0);
+      }
+    );
+    const top = RIFTER_PROFILE.propMod?.speed ?? Number.NaN;
+    const first = states.indexOf('aligned');
+    expect(states.slice(0, 2)).toContain('aligning');
+    expect(first).toBeGreaterThan(0);
+    expect(along[first]).toBeGreaterThanOrEqual(0.75 * top - 1);
+    expect(states.slice(first).every((state) => state === 'aligned')).toBe(true);
+    expect(port.propMods.some((each) => each.id === 'rifter' && each.active)).toBe(true);
+  });
+
   it('flies the same run twice to the same ball states', () => {
     const first = FlyPilots(RifterOnPunisher, 60);
     const second = FlyPilots(RifterOnPunisher, 60);

@@ -43,6 +43,16 @@ describe('readSceneStance', () => {
     expect(warnings[1]).toContain('y.formation is dropped');
   });
 
+  it("reads an align stance's to: a name or a point, only with type align", () => {
+    const problems: string[] = [];
+    expect(readSceneStance({ type: 'align', to: 'Jita IV - Moon 4' }, { where: 's', problems, warnings: [] })).toEqual({ type: 'align', to: 'Jita IV - Moon 4' });
+    expect(readSceneStance({ type: 'align', to: [0, 0, 1e6] }, { where: 's', problems, warnings: [] })).toEqual({ type: 'align', to: [0, 0, 1e6] });
+    expect(problems).toEqual([]);
+    readSceneStance({ type: 'kite', to: 'x' }, { where: 'a', problems, warnings: [] });
+    readSceneStance({ type: 'align', to: [1, 2] }, { where: 'b', problems, warnings: [] });
+    expect(problems).toEqual([expect.stringMatching(/^a.to is for type "align"/), expect.stringMatching(/^b.to must be a ship or object id/)]);
+  });
+
   it('refuses bad values and reads an empty stance as none', () => {
     const problems: string[] = [];
     readSceneStance({ type: 'charge', on: 7, range: [5, 1], propMods: 'sometimes', formation: 'scattered', disengage: 1 }, { where: 's', problems, warnings: [] });
@@ -90,6 +100,13 @@ describe('stances in the document', () => {
     expect(cleared.ships.find((ship) => ship.id === 'tfi-3')?.stance).toBeUndefined();
   });
 
+  it("drops an align stance's to when the ship it names is removed", () => {
+    const scene = stanceScene({ fleet: { type: 'align', to: 'guardian-2' } });
+    const removed = applySceneOperations(scene, [{ op: 'remove_ship', id: 'guardian-2' }]);
+    expect(removed.scene.fleets?.[0].stance).toEqual({ type: 'align' });
+    expect(removed.warnings).toContain(`fleet "tfi"'s align stance now aligns away from the hostiles (its to ship "guardian-2" was removed)`);
+  });
+
   it('falls an on back to the focus when its ship or squad is removed', () => {
     const scene = stanceScene({ fleet: { type: 'orbit', on: 'guardian-2', range: 5000 }, logi: { type: 'orbit', on: { squad: 'dps' } }, ships: { 'tfi-1': { type: 'keep-at-range', on: { squad: 'dps' } } } });
     const removedShip = applySceneOperations(scene, [{ op: 'remove_ship', id: 'guardian-2' }]);
@@ -117,6 +134,12 @@ describe('resolveShipStances', () => {
     expect(resolved.get('fc')).toMatchObject({ type: 'kite', flownBy: 'fc', group: { kind: 'fleet', id: 'tfi' }, pilot: { type: 'kite', on: null, range: 'ideal', propMods: 'auto', disengage: 0.5 } });
     expect(resolved.get('tfi-2')).toMatchObject({ type: 'kite', flownBy: 'fc', sources: { type: 'fleet', disengage: 'fleet' } });
     expect(resolved.get('tfi-2')?.pilot).toBeUndefined();
+  });
+
+  it("carries align's to with its type, and runs its prop mods always unless a level sets them", () => {
+    const resolved = resolveShipStances(stanceScene({ fleet: { type: 'align', to: [0, 0, 5e6] }, dps: { propMods: 'never' } }));
+    expect(resolved.get('fc')).toMatchObject({ type: 'align', to: [0, 0, 5e6], propMods: 'always', pilot: { type: 'align', to: [0, 0, 5e6], propMods: 'always' } });
+    expect(resolved.get('tfi-1')).toMatchObject({ type: 'align', propMods: 'never', flownBy: 'fc' });
   });
 
   it('takes type, on and range together from the nearest level that sets type; the rest key by key', () => {
@@ -197,8 +220,20 @@ describe('stance orders', () => {
     const shipArgs = TIMELINE_ACTIONS.order_ship.read({ id: 'tfi-1', order: { type: 'stance', set: { type: 'orbit', on: 'guardian-1' } } }, 'cue').args;
     expect(shipArgs && TIMELINE_ACTIONS.order_ship.references(shipArgs)).toEqual(expect.arrayContaining([{ kind: 'ship', id: 'guardian-1', path: 'order.set.on' }]));
     expect(shipStepCompletion('stance')).toBe('given');
-    const steps = normalizeShipOrderSteps({ input: [{ type: 'stance', set: { type: 'kite' } }, { after: 30, type: 'stance', clear: true }], where: 'ships[1].orders', self: 'tfi-1', targets: ships, inFleet: true });
+    const steps = normalizeShipOrderSteps({
+      input: [
+        { type: 'stance', set: { type: 'kite' } },
+        { after: 30, type: 'stance', clear: true }
+      ],
+      where: 'ships[1].orders',
+      self: 'tfi-1',
+      targets: ships,
+      inFleet: true
+    });
     expect(steps.problems).toEqual([]);
-    expect(steps.steps).toEqual([{ type: 'stance', set: { type: 'kite' } }, { after: 30, type: 'stance', clear: true }]);
+    expect(steps.steps).toEqual([
+      { type: 'stance', set: { type: 'kite' } },
+      { after: 30, type: 'stance', clear: true }
+    ]);
   });
 });

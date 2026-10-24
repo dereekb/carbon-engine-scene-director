@@ -65,7 +65,10 @@ document: it edits a live call book, synchronously, as moves and warps fly at on
 
 ## The order: `order_fleet { order: { type: "targets", … } }`
 
-Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`):
+Exactly one action per order (`readFleetTargetsOrder`, from `readFleetOrder`), plus an optional `until: "gone"`
+(`FLEET_TARGETS_UNTIL`; anything else is a problem): on a personality fleet it lends the brain's call lever only until
+the targets the order named are gone, instead of taking call and free fire until set_fleet_personality
+(`sd-personalities` "A lent call"). It changes nothing about the list the action leaves.
 
 | Action | The group's list becomes (`toFleetTargetList`) |
 |---|---|

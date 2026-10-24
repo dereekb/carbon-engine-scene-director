@@ -4,6 +4,7 @@ import type { SceneVector } from '../scene';
 import { BURN_OUT_DEGREES, KITE_AWAY_DEGREES, SPIRAL_DEGREES, supportPointOf } from './maneuvers';
 import { legacyOrbitOf } from './orbit';
 import { stepShipPilot, type ShipPilotPicture, type ShipPilotSelf } from './pilot';
+import { flightOf } from './profile';
 import { contactOf, PUNISHER_PROFILE, RIFTER_PROFILE, type ContactConfig } from './piloting.spec-helper';
 import type { PilotStance } from './stance';
 import { angleBetween, subtractVectors } from './vectors';
@@ -27,6 +28,25 @@ function directionOf(step: ReturnType<typeof stepShipPilot>): SceneVector {
 }
 
 describe('stepShipPilot', () => {
+  it('aligns toward its to with the prop mod on, aligned at 75 % of its top speed along the line, and never disengages', () => {
+    const ALIGN: PilotStance = { type: 'align', to: [0, 0, 200_000], range: 'ideal', propMods: 'always', disengage: 0.35 };
+    const alignTo: SceneVector = [0, 0, 200_000];
+    const top = flightOf(RIFTER_PROFILE, true).speed;
+    const still = stepShipPilot({ picture: pictureOf(selfOf({}), { alignTo }), stance: ALIGN });
+    expect(still.state).toBe('aligning');
+    expect(directionOf(still)[2]).toBeCloseTo(1);
+    expect(still.calls).toContainEqual(expect.objectContaining({ tool: 'switch_prop_mods', args: { ships: ['rifter'], active: true } }));
+    const slow = stepShipPilot({ picture: pictureOf(selfOf({ propModOn: true, velocity: [0, 0, 0.7 * top] }), { alignTo }), stance: ALIGN });
+    expect(slow.state).toBe('aligning');
+    const fast = stepShipPilot({ picture: pictureOf(selfOf({ propModOn: true, velocity: [0, 0, 0.8 * top], health: 0.1 }), { alignTo }), stance: ALIGN });
+    expect(fast.state).toBe('aligned');
+    expect(fast.why).toMatch(/aligned/);
+    // No to: straight away from the hostiles (the Punisher sits at the origin, the Rifter on +z).
+    const away = stepShipPilot({ picture: pictureOf(selfOf({})), stance: { ...ALIGN, to: null } });
+    expect(directionOf(away)[2]).toBeCloseTo(1);
+    expect(away.why).toMatch(/away from the hostiles/);
+  });
+
   it('holds its ideal on the focus, then leaves it be while it flies inside the window', () => {
     const first = stepShipPilot({ picture: pictureOf(selfOf({ propModOn: false })), stance: KITE });
     expect(first.state).toMatch(/holding|orbiting/);

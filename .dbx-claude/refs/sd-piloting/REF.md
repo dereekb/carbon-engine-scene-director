@@ -24,8 +24,9 @@ tackle `tackle`, logi `support`). A ship's own stance flies that ship alone.
 
 | key | values |
 |---|---|
-| `type` | `in-line` (default) · `hold` · levers `orbit` / `keep-at-range` / `approach` · ideal types `kite` / `brawl` / `snipe` / `tackle` / `support` · `auto` |
+| `type` | `in-line` (default) · `hold` · levers `orbit` / `keep-at-range` / `approach` · ideal types `kite` / `brawl` / `snipe` / `tackle` / `support` · `align` · `auto` |
 | `on` | `focus` (own target > the group's primary > nearest hostile) · a ship id · `{ squad }` / `{ wing }` (its leader) |
+| `to` | `align` only (a problem with another type): a ship or object id, `celestial:<id>`, a place name, or a point `[x, y, z]`; travels with `type` as `on` and `range` do; unset aligns away from the hostiles |
 | `range` | metres · `[min, max]` · `ideal` · `optimal` · `falloff` · `lock` · `point` · `scram` · `web` · `reps` |
 | `propMods` | `never` · `closing` · `always` · `auto` |
 | `disengage` | HP fraction to burn out at (`DEFAULT_DISENGAGE` 0.35; re-engage at + `REENGAGE_MARGIN` 0.15) |
@@ -228,8 +229,18 @@ and disengages. Drones are not modelled, so a lone battleship cannot touch a fri
 Input: the picture (self with health and its order, focus, the `on` anchor, hostiles, friends, incoming reps, who shot
 it and when, `now` in scene seconds), the `PilotStance` and the memory from the last step. Output: `calls` (each a
 real tool call: `order_ship { id, order }` or `switch_prop_mods { ships, active }`, with `why`), the new memory,
-`state` (`closing`, `holding`, `orbiting`, `kiting`, `disengaging`, `waiting`, `idle`; `in-line` and `manual` are the
-page's) and `why`.
+`state` (`closing`, `holding`, `orbiting`, `kiting`, `aligning`, `aligned`, `disengaging`, `waiting`, `idle`; `in-line`
+and `manual` are the page's) and `why`.
+
+**`align`** (the console's Retreat; `alignIntentOf`): a `direction` toward the picture's `alignTo` (else straight away
+from the hostiles' centre, else on along its velocity), re-aimed past `REAIM_DEGREES`, prop mods per the stance
+(`always` when no level sets `propMods`: `resolveShipStances`). State `aligning`, then `aligned` once the speed along
+the line is at least `ALIGNED_SPEED_SHARE` (0.75, Destiny's warp threshold) of its top speed now (prop mod as it runs,
+times webs), so a warp given then leaves at once. Disengage never applies (it already flies out); targets and free fire
+go on. The page resolves `to` (`ShipPilots.PictureOf`): a point as is, a ship's position from the facts, else
+`ShipPilotsPort.AlignPoint` = `Director.AlignPoint` (a ball's position by id, else the name through `NamedTarget` as a
+warp: a body gives its point); nothing matching aligns away. Removing the ship a document `to` names drops `to` with a
+warning (`removeStanceReferences`).
 
 - **Refresh**: the ideal is cached in memory and recomputed every `PILOT_REFRESH_TICKS` (5), or at once on a new
   focus, more hostiles, or an HP drop of 15 %. Staggering by ship is the page's job (P4).

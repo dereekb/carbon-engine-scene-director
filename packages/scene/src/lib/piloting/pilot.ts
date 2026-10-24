@@ -6,10 +6,10 @@ import { maxWeaponReachOf } from './application';
 import type { PilotContact } from './envelope';
 import { idealRangeOf, type IdealRange } from './ideal';
 import { burnOutDirectionOf, closeInDirectionOf, isOutOfReachOf, isReaim, kiteAwayDirectionOf, leverBandOf, leverOrderOf, supportPointOf, SUPPORT_POINT_SLACK_SHARE } from './maneuvers';
-import { canRunPropModOf, repairReachOf, tackleRangeOf } from './profile';
+import { canRunPropModOf, flightOf, repairReachOf, tackleRangeOf } from './profile';
 import { relativeMotionOf, surfaceDistanceOf } from './relative';
-import { isLeverStanceType, REENGAGE_MARGIN, type IdealStanceType, type PilotStance, type ShipStanceRange } from './stance';
-import { vectorLength } from './vectors';
+import { ALIGNED_SPEED_SHARE, isLeverStanceType, REENGAGE_MARGIN, type IdealStanceType, type PilotStance, type ShipStanceRange } from './stance';
+import { dotVectors, scaleVector, subtractVectors, unitVector, vectorLength } from './vectors';
 
 /**
  * One pilot's step: from its picture, its resolved stance and its memory, the tool calls it makes this tick (each with
@@ -18,7 +18,7 @@ import { vectorLength } from './vectors';
  * REAIM_DEGREES, or its prop mod state should change.
  */
 
-export type ShipPilotState = 'in-line' | 'closing' | 'holding' | 'orbiting' | 'kiting' | 'disengaging' | 'waiting' | 'manual' | 'idle';
+export type ShipPilotState = 'in-line' | 'closing' | 'holding' | 'orbiting' | 'kiting' | 'aligning' | 'aligned' | 'disengaging' | 'waiting' | 'manual' | 'idle';
 
 /**
  * Ticks between a pilot's ideal refreshes (a new focus, a new hostile or an HP drop refreshes at once).
@@ -66,6 +66,10 @@ export interface ShipPilotPicture {
    * The stance's `on` ship (a lever's target, a support's friend), resolved; null flies on the focus.
    */
   readonly anchor?: Maybe<PilotContact>;
+  /**
+   * An align stance's `to`, resolved to a point (origin-relative metres); null aligns away from the hostiles.
+   */
+  readonly alignTo?: Maybe<SceneVector>;
   readonly hostiles: readonly PilotContact[];
   readonly friends: readonly PilotContact[];
   /**
@@ -309,6 +313,36 @@ function fightIntentOf(input: ShipPilotInput, focus: PilotContact, ideal: IdealR
 }
 
 /**
+ * An align stance: a direction toward its `to` (else straight away from the hostiles' centre, else on along its
+ * velocity), re-aimed past REAIM_DEGREES, the prop mod per the stance; aligned once its speed along that line is
+ * ALIGNED_SPEED_SHARE of its top speed now, so a warp then leaves at once. Disengage does not apply: it already flies out.
+ */
+function alignIntentOf(input: ShipPilotInput): PilotIntent {
+  const { picture, stance } = input;
+  const { self, alignTo, hostiles } = picture;
+  let direction: SceneVector;
+  let where: string;
+  if (alignTo && vectorLength(subtractVectors(alignTo, self.position)) > self.radius) {
+    direction = unitVector(subtractVectors(alignTo, self.position));
+    where = `toward ${typeof stance.to === 'string' ? stance.to : 'its point'}`;
+  } else if (hostiles.length) {
+    const centre = scaleVector(
+      hostiles.reduce<SceneVector>((sum, hostile) => [sum[0] + hostile.position[0], sum[1] + hostile.position[1], sum[2] + hostile.position[2]], [0, 0, 0]),
+      1 / hostiles.length
+    );
+    direction = unitVector(subtractVectors(self.position, centre), unitVector(self.velocity));
+    where = 'away from the hostiles';
+  } else {
+    direction = unitVector(self.velocity);
+    where = 'on its heading (nothing to align to or from)';
+  }
+  const along = dotVectors(self.velocity, direction);
+  const top = flightOf(self.profile, self.propModOn, self.scrammed).speed * (self.webFactor ?? 1);
+  const aligned = top > 0 && along >= ALIGNED_SPEED_SHARE * top;
+  return { direction, propMod: wantedPropModOf(stance, true, null), state: aligned ? 'aligned' : 'aligning', why: `align ${where}: ${Math.round(along)} of ${Math.round(top)} m/s along the line${aligned ? ', aligned' : ''}` };
+}
+
+/**
  * One pilot's step.
  *
  * @param input - Its picture, resolved stance, memory and refresh interval.
@@ -321,7 +355,8 @@ export function stepShipPilot(input: ShipPilotInput): ShipPilotStep {
   let ideal: Maybe<IdealRange> = memory?.ideal ?? null;
   let idealAt = memory?.idealAt;
   let intent: PilotIntent;
-  if (disengage.intent) intent = disengage.intent;
+  if (stance.type === 'align') intent = alignIntentOf(input);
+  else if (disengage.intent) intent = disengage.intent;
   else if (stance.type === 'hold') intent = { order: self.order?.type === 'stop' ? null : { type: 'stop' }, propMod: false, state: 'holding', why: 'hold: stop where it is' };
   else if (isLeverStanceType(stance.type)) {
     const target = anchor ?? focus;

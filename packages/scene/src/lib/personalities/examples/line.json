@@ -6,6 +6,6 @@
   "command": { "ability": [0.5, 0.8], "backups": 2, "succession": ["most-able", "chain", "anyone"], "handover": 30 },
   "pilots": { "reaction": [0.5, 0.85] },
   "engage": "in-range",
-  "targeting": { "priority": ["logi", "ewar", "tackle", "dps", "fc", "boost", "support"], "prefer": "nearest", "reach": "falloff", "queue": 2, "switch": "on-kill", "freeFire": true },
+  "targeting": { "priority": ["logi", "ewar", "tackle", "dps", "fc", "boost", "support"], "prefer": "nearest", "reach": "falloff", "queue": 2, "switch": "on-kill", "calls": true, "freeFire": true },
   "movement": { "stance": "brawl", "range": "falloff", "propMods": "closing" }
 }

@@ -93,6 +93,7 @@ import {
   diffScenes,
   fitTextOf,
   isFleetDocumentOrder,
+  isFleetEngageOrder,
   isFleetFreeFireOrder,
   isFleetStanceOrder,
   type ResolvedShipStance,
@@ -1531,7 +1532,8 @@ export class Director {
           InheritFleetOrders(world, heirs);
           this.onChange();
         },
-        Piloted: (id) => this.pilots.Flies(id)
+        Piloted: (id) => this.pilots.Flies(id),
+        TargetStatus: (id) => this.CalledTargetStatus(id)
       }
     });
     this.pilots = new ShipPilots({
@@ -1541,6 +1543,7 @@ export class Director {
         },
         Stances: () => this.ResolvedStances(),
         StanceDue: (id) => this.commanders.StanceDueOf(id),
+        AlignPoint: (to, from) => this.AlignPoint(to, from),
         Facts: () => this.BrainFacts(),
         Settled: (id) => this.ShipSettled(id),
         OrderOf: (id) => {
@@ -2030,6 +2033,7 @@ export class Director {
     if (isFleetTargetsOrder(request.order)) return Promise.resolve({ ...this.CallTargets(request), ...resolved });
     if (isFleetFreeFireOrder(request.order)) return Promise.resolve({ ...this.FreeFireOrder(request), ...resolved });
     if (isFleetStanceOrder(request.order)) return Promise.resolve({ ...this.StanceOrder(request), ...resolved });
+    if (isFleetEngageOrder(request.order)) return Promise.resolve(this.EngageOrder(request));
     if (!isFleetDocumentOrder(request.order)) return Promise.resolve({ ...this.orders.Fly(this.orders.Resolve(request)), ...resolved });
     return this.Serialize(async () => {
       // Resolved against the document current at its turn in the queue; the tick is captured before the edit, which
@@ -2069,6 +2073,7 @@ export class Director {
     if (isFleetTargetsOrder(request.order)) return { ...this.CallTargets(request, { boundary }), ...named };
     if (isFleetFreeFireOrder(request.order)) return { ...this.FreeFireOrder(request, { boundary }), ...named };
     if (isFleetStanceOrder(request.order)) return { ...this.StanceOrder(request), ...named };
+    if (isFleetEngageOrder(request.order)) return this.EngageOrder(request);
     const resolved = this.orders.Resolve(request);
     if (!isFleetDocumentOrder(request.order)) return { ...this.orders.Fly(resolved), ...named };
     if (!cue) throw new SceneError([`order_fleet.order.type: "${request.order.type}" edits the document; only a tool call or a timeline cue gives it`]);
@@ -2215,6 +2220,26 @@ export class Director {
       return { id, type: stance?.type ?? 'in-line', flownBy: stance?.flownBy ?? null, ...(respondsIn > 0 ? { respondsIn } : {}) };
     });
     return { ...result, stance: stanceOfOrder(order), ships };
+  }
+
+  /**
+   * order_fleet engage: the fleet back to its FC brain and engaged now (FleetCommanders.Engage). Its live stances go,
+   * so its pilots take up the document's again; a cease_fire hold it lets go lifts the members' holds, as
+   * FleetLeversBack does.
+   *
+   * @throws {SceneError} When the fleet has no personality (no FC brain to hand it to).
+   */
+  private EngageOrder(request: FleetOrderRequest): object {
+    const engaged = this.commanders.Engage(request.fleet);
+    if (!engaged) throw new SceneError([`order_fleet.order: engage hands a fleet to its FC brain, and fleet "${request.fleet}" has none; give it a personality first (set_fleet_personality)`]);
+    const memberships = toFleetMemberships(this.LiveFleets()?.scene ?? this.Current());
+    const members = [...memberships].filter(([, membership]) => membership.fleet === request.fleet).map(([id]) => id);
+    this.pilots.Release(members);
+    if (engaged.released) {
+      this.fleetTargets.Rearm(members);
+      this.SyncFleetTargets();
+    }
+    return { fleet: request.fleet, engaged: true, engagedBy: 'ordered', ships: members.length, ...(engaged.released ? { released: true } : {}) };
   }
 
   /**
@@ -6458,6 +6483,29 @@ export class Director {
       named = { order, resolved: result.resolved };
     } else if (result) named = { order: { ...record, target: result.resolved.target }, resolved: result.resolved };
     return named;
+  }
+
+  /**
+   * An align stance's `to` as a point: a ship's, object's or celestial target's ball, else a place name resolved as an
+   * order target is (NamedTarget, as a warp: a body gives its point); null when nothing matches or the name is
+   * ambiguous (the pilot then aligns away from the hostiles).
+   *
+   * @param to - The stance's `to`.
+   * @param from - The aligning ship (names resolve nearest it).
+   * @returns Origin-relative metres.
+   */
+  private AlignPoint(to: string, from: string): Maybe<SceneVector> {
+    let point: Maybe<SceneVector> = this.world.Motion(to)?.position ?? null;
+    if (!point) {
+      try {
+        const named = this.NamedTarget({ order: { type: 'warp', target: to }, from, where: 'stance.to' }).order as Readonly<Record<string, unknown>>;
+        if (Array.isArray(named['point'])) point = named['point'] as SceneVector;
+        else if (typeof named['target'] === 'string' && named['target'] !== to) point = this.world.Motion(named['target'])?.position ?? null;
+      } catch {
+        point = null;
+      }
+    }
+    return point;
   }
 
   /**
