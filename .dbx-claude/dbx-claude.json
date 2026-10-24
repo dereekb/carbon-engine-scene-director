@@ -792,7 +792,7 @@
         "tone": "hint",
         "triggers": [
           {
-            "words": ["timeline", "cue", "cues", "add_cue", "update_cue", "remove_cue", "set_timeline", "clear_timeline", "ship orders", "TimelinePlayer", "ShipScripts", "OnBeforeBoundary", "liveEdits", "play start"]
+            "words": ["timeline", "cue", "cues", "add_cue", "update_cue", "remove_cue", "set_timeline", "clear_timeline", "ship orders", "TimelinePlayer", "ShipScripts", "OnBeforeBoundary", "liveEdits", "play start", "movie", "movie mode", "event cue", "event cues", "beat", "beats", "set_movie"]
           },
           {
             "pathContains": ["packages/scene/src/lib/timeline/", "apps/viewer/src/lib/timeline", "apps/viewer/src/lib/ship-scripts"],

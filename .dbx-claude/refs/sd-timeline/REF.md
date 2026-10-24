@@ -9,15 +9,22 @@
 the real-GPU scripted fight). The page plays the script on Destiny ticks, reports it, and replays it the same, and every
 lever tool authors a cue with `at`.
 
+**Movie mode** (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`,
+slices M1 the document → M2 the page plays event cues → M3 edit-resimulate → M4 the movie camera across jumps → M5 the
+`movie` tool → M6 verify-page and the real-GPU movie): the movie *is* this timeline, plus event cues, a `movie` block
+and script edits that re-simulate. **M1 has landed** (event cues and the movie block in the document, below); until M2
+the page keeps an event cue `waiting` and never fires it.
+
 ## Files (`packages/scene/src/lib/timeline/`, runtime-free, node-tested in `timeline.spec.ts`)
 
 | File | Holds |
 |---|---|
-| `timeline.ts` | types, limits, `TIMELINE_ACTION_NAMES`, `cueActionOf`, `cueDueSecond` (ceil), the script thresholds the page uses. **No run-time imports**: the folder and `../scene` import each other |
+| `timeline.ts` | types, limits, `TIMELINE_ACTION_NAMES`, `cueActionOf`, `cueDueSecond` (ceil), `isEventCue`, `cueCheckSecond`, `describeCue` / `describeCueTiming`, `SceneMovie`, `DEFAULT_MOVIE_LETTERBOX`, the script thresholds the page uses. **No run-time imports but `events.ts`**: the folder and `../scene` import each other |
+| `events.ts` | event cues (Movie mode): `CUE_EVENT_KINDS`, the phases, `FIRE_QUIET_SECONDS`, `MAX_TIMELINE_EVENTS`, `MAX_EVENT_COUNT`, `CueTrigger`, the `TimelineEvent` facts, `normalizeCueTrigger`, `cueTriggerReferences`, `cueTriggerMatches`, `cueEventDueSecond`, `resolveCueTrigger` (over an event log), `describeCueTrigger`, `describeTimelineEvent`; `events.spec.ts`. Imports only `../json` at run time |
 | `actions.ts` | `TIMELINE_ACTIONS`, one registry entry per lever (`kind`, `read`, `references`, `advise`), `toTimelineScope`, `checkCueReferences` |
 | `steps.ts` | ship `orders`: `SceneShipStep`, `shipStepCompletion`, `normalizeShipOrderSteps` |
 | `projection.ts` | `sceneAtTimelineTime`, `timelinePatchScenes` (the scene after each patch cue: the page's prefetch), `sceneAddsBetween`, the `ApplySceneOperations` type |
-| `normalize.ts` | `normalizeSceneTimeline`: read, ids, sort, the projection walk, `adds` pinning |
+| `normalize.ts` | `normalizeSceneTimeline`: read, ids, chains, the movie block, the check-second walk (derived `arms`, the projection, `adds` pinning), the deferred event-cue checks, the stored order |
 | `operations.ts` | `TIMELINE_OPERATIONS` + `applyTimelineOperation` (wired into `applyOperation`'s `default:`) |
 | `prune.ts` | `removeTimelineReferences`, called by `remove_ship`, `remove_object`, `remove_fleet`, `remove_wing`, `remove_squad` |
 | `report.ts` | `TIMELINE_STATES`, `CUE_STATES`, `SHIP_SCRIPT_STATES` and the report shapes (get_state, the `timeline` tool) |
@@ -37,10 +44,13 @@ The director is both ports.
 ] }
 ```
 
-- **A cue** is `{ id, at, name?, <one action>, adds? }`. `at` is seconds from play start in [0, 86,400]; it fires on
-  the first 1 s tick at or after it (`cueDueSecond`). A missing id gets the lowest free `cue-<n>`, in input order. A bare
-  array is shorthand for `{ cues }`; a timeline without cues is omitted. Cues are sorted by `at`, stably: same-time cues
-  keep their document order, which is the order they fire in. Messages index the **input** position.
+- **A cue** is timed, `{ id, at, name?, <one action>, adds? }`, or an event cue, `{ id, when, at?, arms, name?, <one
+  action>, adds? }` ("Event cues" below). `at` is seconds from play start in [0, 86,400]; a timed cue fires on the
+  first 1 s tick at or after it (`cueDueSecond`). A cue needs `at` or `when` ("needs at (seconds from play start) or
+  when (an event)"). A missing id gets the lowest free `cue-<n>`, in input order. A bare array is shorthand for
+  `{ cues }`; a timeline without cues or a `movie` block is omitted. **The stored order**: by check second
+  (`cueCheckSecond`: a timed cue's due second, an event cue's `arms`), stably, timed cues before event cues at the same
+  second, then document order, which is the order they fire in on a shared tick. Messages index the **input** position.
 - **Actions** are the lever tools' names with the tool's arguments as the value: `order_ship` (`{ id, order }`),
   `order_fleet`, `switch_prop_mods`, `switch_modules`, `set_target`, `engage`, `cease_fire`, `auto_repair`,
   `play_shot`, `play_sequence`, `stop_shot`, `auto_camera` (kind camera: `sd-cinema`'s director; removing the followed
@@ -56,10 +66,63 @@ The director is both ports.
   `Director.FleetOrderNow(args, { cue })`, free-fire and stance orders included (both `live`; a stance's `on` is a
   reference, so removing that ship, squad or wing prunes the cue). A ship step may be a stance order (`given`).
 - **Limits**: 1,000 cues, 50 patch cues (each costs a projection step), 32 ops per patch cue, 64 steps per ship.
-- **Event cues are reserved for Movie mode** (decision): `when` is refused with "reserved for Movie mode's event cues;
-  give at". Movie mode owns "cued by time or events" together with re-simulating from snapshots, which is what makes
-  editing an event-dependent script sensible. Room left: the `when` slot, and T2's player keeps a due tick per cue that
-  event sources (`OnKill`, warp exits, arrivals) can feed. Ship `orders` already chain one ship's steps on completion.
+- **Event cues and the `movie` block** are Movie mode's (below). Ship `orders` keep their own completion chaining: a
+  ship step waiting for an event is an `order_ship` event cue.
+
+## Event cues (Movie mode M1)
+
+```json
+{ "id": "go", "when": { "arrival": { "fleet": "red" }, "after": 1 }, "arms": 5, "order_fleet": { "fleet": "blue", "order": { "type": "approach", "target": "red-fc" } } },
+{ "id": "next", "when": { "kill": { "primary": "blue" } }, "arms": 0, "order_fleet": { "fleet": "blue", "order": { "type": "targets", "next": true } } },
+{ "id": "logi-out", "when": { "kill": { "ship": "blue-fc" }, "latest": 70 }, "arms": 0, "order_fleet": { "fleet": "blue", "squad": "logi", "order": { "type": "break-off" } } }
+```
+
+- **`when`** holds exactly one kind with its filter (`{}` matches any), plus `count` (the nth match, 1–1,000, default
+  1, omitted when 1), `after` (seconds in [0, 86,400], omitted when 0) and `latest` (timeline seconds: the cue fires then
+  if its event has not come; refused before `arms`). Kinds and filters (`normalizeCueTrigger`; unknown kinds and keys,
+  bad phases, `wing` with `squad` or without `fleet`, `primary` without a fleet are problems):
+  - `kill { ship?, team?, fleet?, wing? | squad?, primary?: "<fleet>" (the victim was a live called primary of that
+    fleet, any level), by?: { ship?, team?, fleet? } }`;
+  - `arrival { fleet?, ship? (its group), phase?: first | landed (default) | formed }`;
+  - `warp { ship?, team?, fleet?, phase?: exit (default) | enter, arrival?: bool }`;
+  - `cue: "<id>"` (that cue fired: not skipped, not failed);
+  - `primary { fleet, wing? | squad?, ship? }` (that group's own call changes; without wing or squad, the fleet's);
+  - `fire { ship?, team?, fleet?, target? }` (a ship's first shot after `FIRE_QUIET_SECONDS` 10 without shooting).
+- **When it fires**: an event in timeline second `p` makes the cue due at `p + max(1, ceil(after))`
+  (`cueEventDueSecond`): the first tick at or after event + after, never the event's own tick. `resolveCueTrigger` reads
+  an event log (`TimelineEventEntry { second, event, text }`): the nth match with `second ≥ arms` and before
+  `ceil(latest)` resolves it; else `latest` makes it due then (`late`). Texts: `describeCueTrigger` (`the 1st kill`,
+  `the kill of blue's called primary`, `fleet red landed + 2 s`, `red-fc's warp exit`, `cue go fired`, `blue calling
+  red-fc`, `team red opening fire, at 70 s at the latest`); `describeCue` gives `"next" (order_fleet when …)`.
+- **`arms`** (derived and stored, like `adds`; a written one is re-derived; `update_cue` refuses it): `at` when given,
+  else the first second everything the cue names exists: each id in its action and its filter (the check second of the
+  patch cue adding it; 0 for the base scene; a place name needs nothing) and, for a `cue` chain, the chained cue's check
+  second.
+- **The walk** (`projectCues`) visits cues in check-second order and derives each waiting event cue's `arms` as soon as
+  what it names exists, so an event cue armed at 5 sees a patch cue at 5 whatever their document order. Its action is
+  checked against the scene at `arms`. An event cue with an `at` too early is refused with the fix: `timeline.cues[1]
+  ("go").order_fleet.fleet: no fleet "red" at 0 s, when the cue arms: give at 5 or later (cue "adds" adds it), or leave
+  at out`. Filter ids are checked after the walk against everything the scene ever holds (base + every patch cue's
+  adds): "not yet" is fine, never is `… no ship "ghost", now or added by any cue (…)`.
+- **Event patch cues** (a warp-in "when blue's FC dies") apply in the walk at their check second (the earliest they can
+  fire) and pin `adds` as usual; a timed cue (or event cue with an `at`) naming what one adds warns `… ship "late" is
+  added by event cue "reinforce" (when the kill of blue-1): it may not exist yet at 40 s`. An `arms` that cannot be
+  derived because cues wait on each other's adds is a problem ("give at").
+- **Chains**: a `cue` filter must name another cue (`cue "c" waits for cue "gone", which is not in the timeline: remove
+  or re-cue "c" first`; this is also how `remove_cue` of a waited-for cue is refused); a cycle is a problem naming the
+  cues (`cues "a" → "b" → "a" wait for each other: none of them can fire`).
+- **Cost (measured 2026-10-23)**: 250 ships with 20 patch cues normalize in ~19 ms, and with 20 event cues added ~15
+  ms (noise): the event checks are one more pass over the cues, nothing per ship.
+
+## The movie block
+
+- `timeline.movie: { letterbox?: number in [0.5, 4] | false, hud?: boolean, end?: timeline seconds in (0, 86,400] }`.
+  `{}` is a movie with the defaults: letterbox `DEFAULT_MOVIE_LETTERBOX` 2.39, HUD off, no end. Unknown keys warn and
+  are dropped; a timeline with a movie block and no cues is kept (a movie being started).
+- `set_movie { movie }` merges into it (a `null` key resets that key; `movie: null` removes the block; it creates `{
+  cues: [] }` when there is no timeline). Like the other timeline ops a patch cue may not carry it.
+- It lives in the authored document only (the live scene has no timeline). What the page does with it (the look while
+  the timeline plays, the end through `TimeControl.StopAt`) lands in M5.
 
 ## Validation at cue time: the projection and `adds`
 
@@ -87,7 +150,7 @@ The director is both ports.
 - **Cost (measured 2026-10-23)**: a 250-ship document (two `add_ships` fleets of 50 and 200) with 20 patch cues of 5
   ships each normalizes in **21 ms** (1 ms without the timeline), so the projection is not memoized.
 - `sceneAtTimelineTime(scene, seconds, apply)`: the document without its timeline plus every patch cue with
-  `cueDueSecond(at) ≤ seconds`. The hub tools given `at` resolve against it (`get_scene { at }`, "Authoring").
+  `cueCheckSecond ≤ seconds` (an event patch cue from its `arms`), in the stored order (`timelinePatchScenes` alike). The hub tools given `at` resolve against it (`get_scene { at }`, "Authoring").
 
 ## Ship `orders`
 
@@ -116,10 +179,11 @@ The director is both ports.
 | Op | Does |
 |---|---|
 | `add_cue { cue }` | appends; an existing id is a problem; a missing id is assigned at normalize |
-| `update_cue { id, set }` | merged: `at`, `name` (`null` clears), or one action key, which replaces the cue's action and clears `adds`; `id`, `adds` and a `null` action are problems |
+| `update_cue { id, set }` | merged: `at`, `when`, `name` (`null` clears), or one action key, which replaces the cue's action and clears `adds`; `at: null` on an event cue leaves it to derive `arms`, `when: null` makes it timed (each refused when the cue would have neither); `id`, `adds`, `arms` and a `null` action are problems |
 | `remove_cue { id }` | an unknown id is a problem |
 | `set_timeline { timeline }` | replaces it whole; `null` removes it |
 | `clear_timeline` | removes it; a no-op without one |
+| `set_movie { movie }` | merged into `timeline.movie`; a `null` key resets it; `null` removes the block |
 
 ## Removal pruning (as called targets prune)
 
@@ -130,17 +194,24 @@ The director is both ports.
   `remove_wing` passes its squads), a target, a targets `primary`, `by`, an anchor or break-off ship, a camera subject.
 - A `ships` selection and a targets `queue` / `set` / `drop` lose the id (`… no longer names "x" (it was removed)`); the
   cue goes when the selection, queue or drop empties (an emptied `set` stays: it clears the list).
+- An event cue whose **filter** names what was removed goes too: `timeline: cue "dies" (stop_shot when the kill of
+  blue-1) was removed with ship "blue-1"`. Cues chained on a dropped cue go with it, transitively: `timeline: cue
+  "after" (stop_shot when cue dies fired + 2 s) was removed with cue "dies", which it waited for`. An explicit
+  `remove_cue` of a waited-for cue is refused instead (an explicit edit gets an explicit fix). Team references are never
+  pruned (a removal that empties a team is refused).
 - Ship steps aimed at a removed ship or object are dropped: `ships[2].orders[1] (orbit "red-fc") was dropped`.
-- **`patch_scene` cues are never pruned**: a patch that no longer applies refuses the removal (above), the same rule as
-  "a fleet commander is never removed implicitly".
+- **`patch_scene` cues are never pruned** (nor cascaded): a patch that no longer applies, or that waits on a removed
+  subject or a dropped cue, refuses the removal (above), the same rule as "a fleet commander is never removed
+  implicitly".
 
 ## Playing it (the page)
 
 - **When cues fire.** `DestinyWorld.OnBeforeBoundary` runs at the top of a due boundary, **before `ApplyPropMods`**
   (`sd-destiny`), so a cue is exactly the MCP call made just before that tick: an order applies at this boundary, a prop
   mod switch-on is active since this boundary, a module activation lands in this boundary's cycle, a lock starts at the
-  next. Within one tick the ship scripts step first (`ships[]` order), then the due cues fire in document order (sorted
-  by `at`). Fast-forward (`sd-time`) steps `Tick` once per boundary, so it fires every cue on its tick; pause runs no boundary, so the cursor waits.
+  next. Within one tick the ship scripts step first (`ships[]` order), then the due cues fire in the stored order (by
+  check second). An event cue is `waiting` (`CUE_STATES`), with no due second, until its event resolves it (M2; until
+  then it never fires and the timeline never reads `done`). Fast-forward (`sd-time`) steps `Tick` once per boundary, so it fires every cue on its tick; pause runs no boundary, so the cursor waits.
 - **Timeline time** is whole seconds played (`played` boundaries since t = 0; get_state `time` = played − 1). A cue fires
   at played tick `cueDueSecond(at)`. Pause stops `played`: later cues and step waits shift by the pause while the ships
   fly on.
@@ -195,14 +266,15 @@ target cue-added ships as names; the user sees the authored document's warnings,
 ## Reporting
 
 - **get_state** `timeline` (null when idle): `state`, `time`, `startedAt` (world tick of t = 0), `camera`, `cues` (total
-  and per state), `next` (≤ 5 pending, with `in`), `last` (≤ 5 processed), `failed` (≤ 10 with `error`), `scripts`
+  and per state, `waiting` included), `next` (≤ 5 pending with a due second, with `in`), `waiting` (≤ 5 event cues: `id`,
+  `when` text, `armsIn`; M2 adds `latestIn`, `beat`, `events`), `last` (≤ 5 processed), `failed` (≤ 10 with `error`), `scripts`
   (counts per state), `liveEdits { count, last }`, `preparing { seconds, waiting: lookups, fits, builds, fleets,
   objects, location }`, `note`. Each scripted ship: `script { state, step, steps, order, startsIn, endsIn, note }`.
-  `simulation.held: true` while the clock is held. The HUD row: `playing · 42 s · 7/12 cues (1 failed)` or
+  `simulation.held: true` while the clock is held. The HUD row: `playing · 42 s · 7/12 cues (1 failed) · 2 waiting` or
   `preparing · 3 builds and 1 lookup`.
 - **The `timeline` tool** (page, in the hub's `SLOW_TOOLS`): `{ action?: status | play | pause | restart, paused?
-  (restart only), camera? }` → the summary plus `list` (every cue: id, at, name, action, kind, state, tick, note, error,
-  result), `ships` (every script), `liveEdits` (source, cue, tick, operation count, adds) and `held`; `restart` adds the
+  (restart only), camera? }` → the summary plus `list` (every cue: id, at, `whenText` and `arms` (event cues), `due`,
+  name, action, kind, state, tick, note, error, result), `ships` (every script), `liveEdits` (source, cue, tick, operation count, adds) and `held`; `restart` adds the
   load's `warnings` and `changes`. `play` on an idle scene throws "the scene has no timeline or ship orders".
 
 ## Authoring with `at` (T4)
@@ -275,8 +347,8 @@ director's). Lever cues need no journal and patch cues do not cut the window (th
 A cue's warp-in plans on flight numbers (`waitForBuild: false`), so its builds landing do not cut and a jump crosses it:
 the group lands again on the same ticks (T3, verify-page `time:`). Limit: a cue-added ship's build landing still cuts the
 window when the hub has no SDE radius for it (the build gives its formation radius). `SceneClock.Hold` and Time
-control's pause (`clock.paused`, `sd-time`) both stop the clock; they are independent. Due ticks per cue are where event cues (`when`, reserved) plug in; Movie
-mode replaces `missed` with re-simulation.
+control's pause (`clock.paused`, `sd-time`) both stop the clock; they are independent. A record's due second is where event cues plug in (null while `waiting`; M2
+resolves it from the page's events); Movie mode replaces `missed` with re-simulation (M3).
 
 ## verify-page (`--only timeline:`, headless, real tools-core)
 

@@ -1,17 +1,19 @@
 /**
  * Removal pruning, as called targets prune (fleets/targets.ts removeCalledTarget): when an edit removes a ship, object,
- * fleet, wing or squad, every cue whose subject or target it was goes, a `ships` selection or a targets order's list
- * loses the id (the cue goes once it empties), and ship steps aimed at it are dropped, each with a warning. patch_scene
- * cues are not pruned (their ops are arbitrary): a patch that no longer applies refuses the removal at normalize, with
- * the cue named. Tolerant of a draft: a cue that does not read is left for normalize to report.
+ * fleet, wing or squad, every cue whose subject or target it was goes (an event cue's filter subject too), a `ships`
+ * selection or a targets order's list loses the id (the cue goes once it empties), cues chained on a dropped cue go with
+ * it, and ship steps aimed at it are dropped, each with a warning. patch_scene cues are not pruned (their ops are
+ * arbitrary): a patch that no longer applies refuses the removal at normalize, with the cue named. Tolerant of a draft:
+ * a cue that does not read is left for normalize to report.
  */
 
 import type { Maybe } from '@dereekb/util';
 import { isPlainObject, type JsonObject } from '../json';
 import type { FleetOperationContext } from '../fleets/operations';
 import { type CueReference, TIMELINE_ACTIONS } from './actions';
+import { type CueTrigger, cueTriggerReferences, normalizeCueTrigger } from './events';
 import { draftTimelineCues } from './operations';
-import { TIMELINE_ACTION_NAMES, type TimelineActionName } from './timeline';
+import { describeCueTiming, TIMELINE_ACTION_NAMES, type TimelineActionName } from './timeline';
 
 /**
  * What an edit removed. Wings and squads are `<fleet>/<id>` keys; a removed fleet takes its wings and squads with it.
@@ -53,14 +55,46 @@ export function removeTimelineReferences(removal: TimelineRemoval, context: Pick
   const { draft, warnings } = context;
   const cues = draftTimelineCues(draft);
   if (cues) {
-    const kept = cues.filter((cue) => {
+    const dropped = new Set<string>();
+    let kept = cues.filter((cue) => {
       const pruned = isPlainObject(cue) ? pruneCue(cue, removal) : null;
       warnings.push(...(pruned?.messages ?? []));
+      if (pruned?.removed) dropped.add(String(cue['id']));
       return !pruned?.removed;
     });
+    kept = cascadeChains(kept, dropped, warnings);
     cues.splice(0, cues.length, ...kept);
   }
   pruneShipSteps(removal, context);
+}
+
+/**
+ * A cue's trigger, read tolerantly: null when it has none or it does not read (normalize reports it).
+ */
+function triggerOf(cue: JsonObject): Maybe<CueTrigger> {
+  return cue['when'] == null ? null : normalizeCueTrigger(cue['when'], 'when').trigger;
+}
+
+/**
+ * Drops the cues chained (`when: { cue }`) on a dropped cue, and on those, with a warning each. Patch cues are not
+ * pruned: one chained on a dropped cue refuses the removal at normalize.
+ */
+function cascadeChains(cues: JsonObject[], dropped: Set<string>, warnings: string[]): JsonObject[] {
+  let kept = cues;
+  let changed = dropped.size > 0;
+  while (changed) {
+    changed = false;
+    kept = kept.filter((cue) => {
+      const trigger = isPlainObject(cue) && cue['patch_scene'] == null ? triggerOf(cue) : null;
+      if (trigger?.cue == null || !dropped.has(trigger.cue)) return true;
+      const action = TIMELINE_ACTION_NAMES.find((key) => cue[key] != null) ?? 'cue';
+      warnings.push(`timeline: cue "${String(cue['id'] ?? '?')}" (${action} ${describeCueTiming({ when: trigger })}) was removed with cue "${trigger.cue}", which it waited for`);
+      dropped.add(String(cue['id']));
+      changed = true;
+      return false;
+    });
+  }
+  return kept;
 }
 
 interface PruneResult {
@@ -75,8 +109,10 @@ function pruneCue(cue: JsonObject, removal: TimelineRemoval): Maybe<PruneResult>
   const entry = TIMELINE_ACTIONS[name];
   const read = entry.read(cue[name], name);
   if (!read.args) return null;
-  const label = `timeline: cue "${String(cue['id'] ?? '?')}" (${name} at ${String(cue['at'])} s)`;
-  const references = entry.references(read.args);
+  const trigger = triggerOf(cue);
+  const timing = trigger ? describeCueTiming({ when: trigger }) : `at ${String(cue['at'])} s`;
+  const label = `timeline: cue "${String(cue['id'] ?? '?')}" (${name} ${timing})`;
+  const references = [...entry.references(read.args), ...(trigger ? cueTriggerReferences(trigger).references : [])];
   const fatal = references.find((reference) => !reference.entry && removes(removal, reference));
   if (fatal) return { removed: true, messages: [`${label} was removed with ${removedLabel(fatal)}`] };
   const entries = references.filter((reference) => reference.entry && removes(removal, reference));

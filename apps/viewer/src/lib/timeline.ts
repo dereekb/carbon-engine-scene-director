@@ -2,7 +2,8 @@
  * The timeline player: plays the authored document's `timeline` cues (@scene-director/scene's timeline/) on Destiny
  * ticks, and steps the ships' scripts (ship-scripts.ts). The director calls Boundary from DestinyWorld.OnBeforeBoundary,
  * so a cue is exactly the MCP call made just before that tick: within one tick the scripts step first (in `ships[]`
- * order), then the due cues fire in document order (sorted by `at`).
+ * order), then the due cues fire in the stored order (by check second). An event cue (`when`) is `waiting` with no due
+ * second until its event resolves it (Movie mode; the page's event sources land next).
  *
  * A scripted load prepares with the scene clock held (HoldClock) until the port says the scene settled (every hull's
  * numbers, fit and build), capped at TIMELINE_PREPARE_LIMIT_SECONDS of wall time; t = 0 is the next boundary. Timeline
@@ -13,7 +14,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { cueActionOf, cueDueSecond, TIMELINE_ACTIONS, type CueReport, type CueState, type SceneCue, type ShipScriptReport, type TimelineActionKind, type TimelineActionName, type TimelineState, type TimelineSummary } from '@scene-director/scene';
+import { cueActionOf, cueDueSecond, describeCueTrigger, TIMELINE_ACTIONS, type CueReport, type CueState, type SceneCue, type ShipScriptReport, type TimelineActionKind, type TimelineActionName, type TimelineState, type TimelineSummary } from '@scene-director/scene';
 import type { ScriptedShip, ShipScriptRecord, ShipScripts } from './ship-scripts';
 
 /**
@@ -61,8 +62,16 @@ export interface TimelinePort {
  */
 export interface CueRecord {
   readonly id: string;
-  readonly at: number;
-  readonly due: number;
+  readonly at?: number;
+  /**
+   * An event cue's trigger text and arm time.
+   */
+  readonly when?: string;
+  readonly arms?: number;
+  /**
+   * The timeline second it fires at; null while an event cue waits for its event.
+   */
+  due: Maybe<number>;
   readonly name?: string;
   readonly action: TimelineActionName;
   readonly kind: TimelineActionKind;
@@ -215,7 +224,7 @@ export class TimelinePlayer {
     this.scripts.Step(played, ships);
     const cues = new Map(this.data.cues.map((cue) => [cue.id, cue]));
     for (const record of this.data.records) {
-      if (record.state !== 'pending' || record.due > played) continue;
+      if (record.state !== 'pending' || record.due == null || record.due > played) continue;
       const cue = cues.get(record.id);
       if (cue) this.FireOne(record, cue, boundary, time);
     }
@@ -255,7 +264,7 @@ export class TimelinePlayer {
         continue;
       }
       const record = NewRecord(cue);
-      if (started && record.due < this.data.played) {
+      if (started && record.due != null && record.due < this.data.played) {
         record.state = 'missed';
         record.note = old ? 'retimed into the past while playing: it plays from the next restart' : 'added after its time: it plays from the next restart';
       }
@@ -327,7 +336,9 @@ export class TimelinePlayer {
     if (this.data.state === 'idle') return null;
     const records = this.data.records.filter((record) => !record.removed);
     const time = this.time;
-    const pending = records.filter((record) => record.state === 'pending');
+    const pending = records.filter((record) => record.state === 'pending' || record.state === 'waiting');
+    const due = records.filter((record) => record.state === 'pending' && record.due != null);
+    const waiting = records.filter((record) => record.state === 'waiting');
     const processed = this.data.records.filter((record) => record.seq != null).sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0));
     const failed = processed.filter((record) => record.state === 'failed');
     const counts = this.scripts.Counts();
@@ -339,7 +350,8 @@ export class TimelinePlayer {
       ...(this.data.startTick != null ? { startedAt: this.data.startTick } : {}),
       camera: this.data.camera,
       cues: CountCues(records),
-      ...(pending.length ? { next: pending.slice(0, 5).map((record) => ({ id: record.id, at: record.at, action: record.action, in: Math.max(0, record.due - time) })) } : {}),
+      ...(due.length ? { next: due.slice(0, 5).map((record) => ({ id: record.id, ...(record.at != null ? { at: record.at } : {}), action: record.action, in: Math.max(0, (record.due ?? time) - time) })) } : {}),
+      ...(waiting.length ? { waiting: waiting.slice(0, 5).map((record) => ({ id: record.id, when: record.when ?? 'its event', ...(record.arms != null && record.arms > time ? { armsIn: record.arms - time } : {}) })) } : {}),
       ...(processed.length ? { last: processed.slice(0, 5).map((record) => ({ id: record.id, at: record.at, action: record.action, ...(record.tick != null ? { tick: record.tick } : {}), state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
       ...(failed.length ? { failed: failed.slice(0, 10).map((record) => ({ id: record.id, at: record.at, action: record.action, ...(record.tick != null ? { tick: record.tick } : {}), error: record.error ?? 'failed' })) } : {}),
       ...(counts.ships ? { scripts: counts } : {}),
@@ -359,7 +371,9 @@ export class TimelinePlayer {
       ...summary,
       list: this.data.records.map((record) => ({
         id: record.id,
-        at: record.at,
+        ...(record.at != null ? { at: record.at } : {}),
+        ...(record.when ? { whenText: record.when, ...(record.arms != null ? { arms: record.arms } : {}) } : {}),
+        ...(record.due != null ? { due: record.due } : {}),
         ...(record.name ? { name: record.name } : {}),
         action: record.action,
         kind: record.kind,
@@ -419,11 +433,14 @@ export class TimelinePlayer {
 
 function NewRecord(cue: SceneCue): CueRecord {
   const { name, args } = cueActionOf(cue);
-  return { id: cue.id, at: cue.at, due: cueDueSecond(cue.at), ...(cue.name ? { name: cue.name } : {}), action: name, kind: TIMELINE_ACTIONS[name].kind(args as never), state: 'pending', key: JSON.stringify(cue) };
+  const base = { id: cue.id, ...(cue.at != null ? { at: cue.at } : {}), ...(cue.name ? { name: cue.name } : {}), action: name, kind: TIMELINE_ACTIONS[name].kind(args as never), key: JSON.stringify(cue) };
+  // An event cue waits with no due second; nothing resolves it until the page's event sources land.
+  if (cue.when) return { ...base, when: describeCueTrigger(cue.when), arms: cue.arms ?? cue.at ?? 0, due: null, state: 'waiting' };
+  return { ...base, due: cueDueSecond(cue.at ?? 0), state: 'pending' };
 }
 
 function CountCues(records: readonly CueRecord[]): Record<'total' | CueState, number> {
-  const counts: Record<'total' | CueState, number> = { total: 0, pending: 0, fired: 0, failed: 0, skipped: 0, missed: 0 };
+  const counts: Record<'total' | CueState, number> = { total: 0, waiting: 0, pending: 0, fired: 0, failed: 0, skipped: 0, missed: 0 };
   for (const record of records) {
     counts.total += 1;
     counts[record.state] += 1;
@@ -445,7 +462,7 @@ export function DescribeWaiting(waiting: Readonly<Record<string, number>>): stri
 }
 
 /**
- * The overlay's timeline row: `playing · 42 s · 7/12 cues (1 failed)`, `preparing · 3 builds and 1 lookup`.
+ * The overlay's timeline row: `playing · 42 s · 7/12 cues (1 failed) · 2 waiting`, `preparing · 3 builds and 1 lookup`.
  *
  * @param summary - get_state's timeline.
  * @returns The row, or null without a script.
@@ -455,5 +472,6 @@ export function TimelineText(summary: Maybe<TimelineSummary>): Maybe<string> {
   if (summary.state === 'preparing') return `preparing · ${DescribeWaiting(summary.preparing?.waiting ?? {})}`;
   const done = summary.cues.fired + summary.cues.skipped + summary.cues.failed;
   const failed = summary.cues.failed ? ` (${summary.cues.failed} failed)` : '';
-  return `${summary.state} · ${summary.time} s · ${done}/${summary.cues.total} cues${failed}`;
+  const waiting = summary.cues.waiting ? ` · ${summary.cues.waiting} waiting` : '';
+  return `${summary.state} · ${summary.time} s · ${done}/${summary.cues.total} cues${failed}${waiting}`;
 }

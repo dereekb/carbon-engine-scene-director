@@ -97,6 +97,7 @@ describe('normalizeSceneTimeline', () => {
           { id: 'dup', at: 1, stop_shot: {}, order_ship: { id: 'blue-1', order: { type: 'stop' } } },
           { at: 2 },
           { id: 'event', when: { landed: 'red' }, at: 3, stop_shot: {} },
+          { id: 'never', name: 'no time', stop_shot: {} },
           {
             at: 4,
             patch_scene: {
@@ -113,7 +114,8 @@ describe('normalizeSceneTimeline', () => {
     expect(problems).toMatch(/cues\[0\] \("dup"\)\.at must be a number of seconds/);
     expect(problems).toMatch(/cues\[1\] \("dup"\) needs exactly one action .*got order_ship, stop_shot/);
     expect(problems).toMatch(/cues\[2\] needs exactly one action/);
-    expect(problems).toMatch(/cues\[3\] \("event"\)\.when is reserved for Movie mode's event cues/);
+    expect(problems).toMatch(/cues\[3\] \("event"\)\.when\.landed is not an event kind/);
+    expect(problems).toMatch(/cues\[4\] \("never"\) needs at \(seconds from play start\) or when \(an event\)/);
     expect(problems).toMatch(/set_environment reloads the page; it cannot be cued/);
     expect(problems).toMatch(/a cue cannot edit the timeline \(add_cue\)/);
     expect(problems).toMatch(/order_ship\.order\.type must be one of/);
@@ -354,5 +356,150 @@ describe('auto_camera cues', () => {
     const result = applySceneOperations(document, [{ op: 'remove_fleet', fleet: 'blue' }]);
     expect(cueActionOf(cues(result.scene)[0]).args).toEqual({ favour: 'wide' });
     expect(result.warnings).toContain('timeline: cue "director" (auto_camera at 30 s) no longer names "blue" (it was removed)');
+  });
+});
+
+describe('event cues', () => {
+  const edit = (document: SceneDocument, operations: unknown[]): SceneDocument => applySceneOperations(document, operations).scene;
+  const stop = (id: string): Record<string, unknown> => ({ order_ship: { id, order: { type: 'stop' } } });
+
+  it('derives arms from adds and chains, and stores cues by check second, timed before event cues', () => {
+    const { scene: document } = scene({
+      timeline: [
+        { id: 'go', when: { arrival: { fleet: 'red' } }, ...stop('late') },
+        { id: 'then', when: { cue: 'go', after: 3 }, stop_shot: {} },
+        { id: 'adds', at: 5, patch_scene: { operations: [late, redFleet] } },
+        { id: 'kill', when: { kill: {} }, stop_shot: {} },
+        { id: 'early', at: 5, when: { kill: { ship: 'late' } }, ...stop('late') }
+      ]
+    });
+    expect(cues(document).map((cue) => [cue.id, cue.at, cue.arms])).toEqual([
+      ['kill', undefined, 0],
+      ['adds', 5, undefined],
+      ['go', undefined, 5],
+      ['then', undefined, 5],
+      ['early', 5, 5]
+    ]);
+    expect(cues(document)[2]).toEqual({ id: 'go', when: { arrival: { fleet: 'red' } }, arms: 5, order_ship: { id: 'late', order: { type: 'stop' } } });
+  });
+
+  it('refuses an arm time before what the cue names exists, naming the cue that adds it', () => {
+    const problems = problemsOf(() =>
+      scene({
+        timeline: [
+          { id: 'adds', at: 5, patch_scene: { operations: [late, redFleet] } },
+          { id: 'go', at: 0, when: { kill: {} }, order_fleet: { fleet: 'red', order: { type: 'approach', target: 'blue-fc' } } }
+        ]
+      })
+    ).join('\n');
+    expect(problems).toMatch(/timeline\.cues\[1\] \("go"\)\.order_fleet\.fleet: no fleet "red" at 0 s, when the cue arms: give at 5 or later \(cue "adds" adds it\), or leave at out/);
+  });
+
+  it('applies an event patch cue at its arm second, pins its adds and warns the timed cues on them', () => {
+    const { scene: document, warnings } = scene({
+      timeline: [
+        { id: 'reinforce', when: { kill: { ship: 'blue-1' } }, patch_scene: { operations: [late] } },
+        { id: 'use', at: 40, ...stop('late') }
+      ]
+    });
+    expect(cues(document)[0].adds).toEqual({ ships: ['late'] });
+    expect(warnings).toContain('timeline.cues[1] ("use").order_ship.id: ship "late" is added by event cue "reinforce" (when the kill of blue-1): it may not exist yet at 40 s');
+    expect(sceneAtTimelineTime(document, 0, applySceneOperations).ships.map((ship) => ship.id)).toContain('late');
+    const armed = scene({ timeline: [{ id: 'r', at: 3, when: { kill: {} }, patch_scene: { operations: [late] } }] }).scene;
+    expect(sceneAtTimelineTime(armed, 2, applySceneOperations).ships.map((ship) => ship.id)).not.toContain('late');
+    expect(sceneAtTimelineTime(armed, 3, applySceneOperations).ships.map((ship) => ship.id)).toContain('late');
+  });
+
+  it('refuses a chain cycle, a missing chained cue, a filter naming what never exists and latest before arms', () => {
+    const cycle = problemsOf(() =>
+      scene({
+        timeline: [
+          { id: 'a', when: { cue: 'b' }, stop_shot: {} },
+          { id: 'b', when: { cue: 'a' }, stop_shot: {} },
+          { id: 'c', when: { cue: 'gone' }, stop_shot: {} }
+        ]
+      })
+    ).join('\n');
+    expect(cycle).toMatch(/cues "a" → "b" → "a" wait for each other: none of them can fire/);
+    expect(cycle).toMatch(/cue "c" waits for cue "gone", which is not in the timeline: remove or re-cue "c" first/);
+    const filters = problemsOf(() =>
+      scene({
+        timeline: [
+          { id: 'ghost', when: { kill: { ship: 'ghost' } }, stop_shot: {} },
+          { id: 'soon', at: 10, when: { kill: {}, latest: 5 }, stop_shot: {} }
+        ]
+      })
+    ).join('\n');
+    expect(filters).toMatch(/cues\[0\] \("ghost"\)\.when\.kill\.ship: no ship "ghost", now or added by any cue/);
+    expect(filters).toMatch(/cues\[1\] \("soon"\)\.when\.latest \(5 s\) is before the cue arms \(10 s\)/);
+  });
+
+  it('prunes a cue whose filter subject is removed, cascading to the cues chained on it; refuses remove_cue of a waited-for cue', () => {
+    const document = scene({
+      timeline: [
+        { id: 'dies', when: { kill: { ship: 'blue-1' } }, stop_shot: {} },
+        { id: 'after', when: { cue: 'dies', after: 2 }, stop_shot: {} },
+        { id: 'keep', at: 3, stop_shot: {} }
+      ]
+    }).scene;
+    const result = applySceneOperations(document, [{ op: 'remove_ship', id: 'blue-1' }]);
+    expect(cues(result.scene).map((cue) => cue.id)).toEqual(['keep']);
+    expect(result.warnings).toContain('timeline: cue "dies" (stop_shot when the kill of blue-1) was removed with ship "blue-1"');
+    expect(result.warnings).toContain('timeline: cue "after" (stop_shot when cue dies fired + 2 s) was removed with cue "dies", which it waited for');
+    expect(problemsOf(() => applySceneOperations(document, [{ op: 'remove_cue', id: 'dies' }])).join('\n')).toMatch(/cue "after" waits for cue "dies", which is not in the timeline: remove or re-cue "after" first/);
+  });
+
+  it('update_cue moves a cue between at and when; arms cannot be set', () => {
+    let document = scene({ timeline: [{ id: 'go', at: 4, stop_shot: {} }] }).scene;
+    document = edit(document, [{ op: 'update_cue', id: 'go', set: { when: { kill: {} }, at: null } }]);
+    expect(cues(document)[0]).toEqual({ id: 'go', when: { kill: {} }, arms: 0, stop_shot: {} });
+    document = edit(document, [{ op: 'update_cue', id: 'go', set: { at: 6, when: null } }]);
+    expect(cues(document)[0]).toEqual({ id: 'go', at: 6, stop_shot: {} });
+    const problems = problemsOf(() =>
+      edit(document, [
+        { op: 'update_cue', id: 'go', set: { arms: 3 } },
+        { op: 'update_cue', id: 'go', set: { at: null } }
+      ])
+    ).join('\n');
+    expect(problems).toMatch(/set\.arms is derived/);
+    expect(problems).toMatch(/set\.at cannot be null on a timed cue/);
+  });
+});
+
+describe('the movie block', () => {
+  const edit = (document: SceneDocument, operations: unknown[]): SceneDocument => applySceneOperations(document, operations).scene;
+
+  it('set_movie merges, resets a key with null and removes the block with null; a movie without cues is kept', () => {
+    let document = edit(scene().scene, [{ op: 'set_movie', movie: { letterbox: 2, end: 95 } }]);
+    expect(document.timeline).toEqual({ cues: [], movie: { letterbox: 2, end: 95 } });
+    document = edit(document, [{ op: 'set_movie', movie: { hud: true, letterbox: null } }]);
+    expect(document.timeline?.movie).toEqual({ end: 95, hud: true });
+    expect(edit(document, [{ op: 'set_movie', movie: null }]).timeline).toBeUndefined();
+    expect(edit(scene().scene, [{ op: 'set_movie', movie: {} }]).timeline).toEqual({ cues: [], movie: {} });
+  });
+
+  it('refuses bad values and warns about unknown keys; a patch cue may not carry set_movie', () => {
+    const problems = problemsOf(() => scene({ timeline: { cues: [{ at: 1, patch_scene: { operations: [{ op: 'set_movie', movie: {} }] } }], movie: { letterbox: 9, hud: 'off', end: 0 } } })).join('\n');
+    expect(problems).toMatch(/movie\.letterbox must be an aspect ratio in \[0\.5, 4\]/);
+    expect(problems).toMatch(/movie\.hud must be true or false/);
+    expect(problems).toMatch(/movie\.end must be timeline seconds/);
+    expect(problems).toMatch(/a cue cannot edit the timeline \(set_movie\)/);
+    expect(scene({ timeline: { cues: [], movie: { letterbox: false, fps: 24 } } }).warnings).toContain('timeline.movie.fps is not a known field and was dropped');
+  });
+});
+
+describe('the cost of event cues', () => {
+  it('normalizes 250 ships with 20 patch cues and 20 event cues quickly', () => {
+    const fleet = (prefix: string, count: number): Record<string, unknown> => ({ op: 'add_ships', dna: MINMATAR, count, prefix, team: prefix, position: [0, 0, 30000] });
+    const document = applySceneOperations(scene().scene, [fleet('red', 50), fleet('blue', 200)]).scene;
+    const timeline = [
+      ...Array.from({ length: 20 }, (_, index) => ({ id: `p${index}`, at: index * 5, patch_scene: { operations: [fleet(`r${index}`, 5)] } })),
+      ...Array.from({ length: 20 }, (_, index) => ({ id: `e${index}`, when: { kill: { team: `r${index}` } }, set_target: { ships: [`r${index}-01`], target: 'blue-fc' } }))
+    ];
+    const started = performance.now();
+    const result = normalizeScene({ ...document, timeline });
+    const elapsed = performance.now() - started;
+    expect(cues(result.scene).find((cue) => cue.id === 'e7')?.arms).toBe(35);
+    expect(elapsed).toBeLessThan(2000);
   });
 });

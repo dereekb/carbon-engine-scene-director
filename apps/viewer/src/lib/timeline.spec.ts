@@ -1,7 +1,7 @@
 import type { SceneCue, SceneShipStep, ShipOrderRequest } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { ShipScripts, type ShipScriptsPort } from './ship-scripts';
-import { DescribeWaiting, TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, type TimelinePort, type TimelineSettled } from './timeline';
+import { DescribeWaiting, TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, TimelineText, type CueFireResult, type TimelinePort, type TimelineSettled } from './timeline';
 
 function OrderCue(id: string, at: number): SceneCue {
   return { id, at, order_ship: { id: 'a', order: { type: 'stop' } } } as SceneCue;
@@ -116,6 +116,19 @@ describe('TimelinePlayer', () => {
     const start = paused.tick();
     paused.Run(1);
     expect(paused.port.fired).toEqual([`go@${start}`]);
+  });
+
+  it('keeps an event cue waiting with no due second: it never fires until the event sources land', () => {
+    const event = { id: 'first-blood', when: { kill: {}, after: 1 }, arms: 0, order_ship: { id: 'a', order: { type: 'stop' } } } as SceneCue;
+    const { port, player, Run } = Setup([OrderCue('go', 0), event]);
+    port.settled = { settled: true, waiting: {} };
+    Run(6);
+    expect(port.fired.map((fired) => fired.split('@')[0])).toEqual(['go']);
+    const summary = player.Summary();
+    expect(summary).toMatchObject({ state: 'playing', cues: { total: 2, fired: 1, waiting: 1, pending: 0 }, waiting: [{ id: 'first-blood', when: 'the 1st kill + 1 s' }] });
+    expect(summary?.next).toBeUndefined();
+    expect(TimelineText(summary)).toBe('playing · 5 s · 1/2 cues · 1 waiting');
+    expect(player.Report()?.list.find((cue) => cue.id === 'first-blood')).toMatchObject({ state: 'waiting', whenText: 'the 1st kill + 1 s', arms: 0 });
   });
 
   it('steps the scripts first, then fires due cues in document order, each on the first tick at or after its time', () => {

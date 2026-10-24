@@ -7,7 +7,7 @@
 
 import type { Maybe } from '@dereekb/util';
 import { type NormalizedScene, type SceneDocument, SceneError } from '../scene';
-import { cueDueSecond, SCENE_CUE_ADDS_KEYS, type SceneCueAdds, type SceneCueAddsKey, type SceneTimeline } from './timeline';
+import { cueCheckSecond, SCENE_CUE_ADDS_KEYS, type SceneCueAdds, type SceneCueAddsKey, type SceneTimeline } from './timeline';
 
 /**
  * applySceneOperations' signature.
@@ -61,8 +61,9 @@ export function describeCueAdds(adds: Maybe<SceneCueAdds>): string[] {
 }
 
 /**
- * The scene after each patch cue, in time order: the document without its timeline, then each patch cue due by
- * `seconds` (cueDueSecond(at) ≤ seconds) applied in order. A patch that no longer applies is skipped (normalize reports
+ * The scene after each patch cue, in time order: the document without its timeline, then each patch cue checked by
+ * `seconds` (cueCheckSecond ≤ seconds: a timed cue's due second, an event patch cue's arm second, the earliest it can
+ * fire) applied in the stored order. A patch that no longer applies is skipped (normalize reports
  * it). The page prefetches the lookups of the ships these scenes add (Director.Prefetch).
  *
  * @param scene - A normalized document.
@@ -75,7 +76,7 @@ export function timelinePatchScenes(scene: SceneDocument, apply: ApplySceneOpera
   const scenes: { readonly cueId: string; readonly scene: SceneDocument }[] = [];
   let current: SceneDocument = rest;
   for (const cue of (timeline as Maybe<SceneTimeline>)?.cues ?? []) {
-    if (cueDueSecond(cue.at) > seconds) break;
+    if (cueCheckSecond(cue) > seconds) break;
     if (!('patch_scene' in cue)) continue;
     try {
       current = apply(current, cue.patch_scene.operations).scene;
@@ -88,8 +89,8 @@ export function timelinePatchScenes(scene: SceneDocument, apply: ApplySceneOpera
 }
 
 /**
- * The scene as the timeline will have it at a time: the document without its timeline, with every patch cue due by then
- * (cueDueSecond(at) ≤ seconds) applied in order. A patch that no longer applies is skipped (normalize reports it).
+ * The scene as the timeline will have it at a time: the document without its timeline, with every patch cue checked by
+ * then (cueCheckSecond ≤ seconds; an event patch cue from its arm second) applied in order. A patch that no longer applies is skipped (normalize reports it).
  *
  * @param scene - A normalized document.
  * @param seconds - Timeline time, seconds from play start.

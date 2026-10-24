@@ -1,4 +1,5 @@
 export * from './timeline';
+export * from './events';
 export * from './actions';
 export * from './steps';
 export * from './projection';
