@@ -79,7 +79,7 @@ locations, audio. Every ship carries stand-in guns, HP and targeting by class in
 |---|---|
 | offline tests (`dbx-claude-test`) | `node_modules` (runtime + server install-links copies built at their pins, see `sd-workspace` and "A second machine") |
 | build | the same |
-| page draws ships | tools-core on `127.0.0.1:5510` (every resource goes through the hub's `/resource` proxy to it); without it, a green screen and a stand-in cube per ship and object (below) |
+| page draws ships | tools-core on `127.0.0.1:5510` (every resource goes through the hub's `/resource` proxy to it), or another machine's through its hub ("Another machine's EVE data" below); without it, a green screen and a stand-in cube per ship and object (below) |
 | UI, camera and cinema work with no tools-core | no-EVE-data mode: `--eve-data off` / `SCENE_DIRECTOR_EVE_DATA=off` ("No-EVE-data mode" above) |
 | `ship_stats`, `/ship-stats`, SDE radii, hull names, `add_fleet_composition` without inline dna | a **prepared** SDE in tools-core |
 | locations (`search_map`, `get_system`, `set_location`, dressing) | tools-core's map routes over the SDE (a healthy map index) |
@@ -185,7 +185,7 @@ verify-page are unchanged. No Tailscale, proxy or Docker is involved. The assess
   the profile, or AirDrop `ca.crt`. Then Settings → General → VPN & Device Management → install it. Then Settings →
   General → About → Certificate Trust Settings → full trust for "scene-director dev CA (<host>.local)". Then open the
   link with the token.
-- **dbxpc** (where the EVE data is; not set up yet). WSL2 is in NAT mode, so the LAN can't reach a hub inside WSL,
+- **dbxpc** (where the EVE data is; serving on 5521 at Windows' 10.0.0.58 since 2026-10-24). WSL2 is in NAT mode, so the LAN can't reach a hub inside WSL,
   and WSL can't see Windows' LAN address.
   1. Copy `ca.key`, and `token` to keep the same access token, from the Mac to `~/.local/share/scene-director/https/`
      and `chmod 600` them. `https-cert` keeps a token it finds. The Mac's HTTPS folder has a `DBXPC-SETUP.txt` with
@@ -218,6 +218,40 @@ verify-page are unchanged. No Tailscale, proxy or Docker is involved. The assess
   - Still open: Stage B (real EVE content: WebKit on the runtime's WGSL and CORTAO's storage-texture limits),
     per-tab memory on a long or big scene, and HEVC.
   - Close the desktop tabs first: page tools go to the newest tab.
+
+## Another machine's EVE data (tools-core through its hub)
+
+A machine without tools-core (the Mac) can use dbxpc's. dbxpc's hub shares its tools-core at `/tools-core/eve/<rest>`
+over its HTTPS listener and token, and the Mac's hub points `--tools-core` at that. The hub, the MCP server, the page,
+the simulation and drawing all stay on the Mac; only EVE files, SDE, map and audio lookups cross the LAN.
+
+- **The passthrough** (`hub.ts` `ServeToolsCore`): tools-core's `/eve/<rest>` with the path and query as they came
+  (an audio path stays encoded). It takes GET, HEAD and POST (a body up to 4 MB), forwards Range, the validators and
+  the content type, and streams the answer back. Any other path is a 404 and any other method a 405. With EVE data
+  off it answers 503; when tools-core is down, 502. It is on the loopback listener too, which is harmless: tools-core
+  is already reachable there. dbxpc's `viewer_status.https.toolsCore` lists its URLs.
+- **The Mac's hub**: `CJS_TOOLS_CORE=https://10.0.0.58:5521/tools-core` (or `--tools-core`), with
+  `SCENE_DIRECTOR_EVE_DATA` unset. For an https URL it does two things:
+  - It sends the token as `authorization: Bearer` on every tools-core request (`ToolsCoreApi.fetch`, which the
+    proxies, the data clients and the audio cache all use). The token comes from `--tools-core-token` /
+    `SCENE_DIRECTOR_TOOLS_CORE_TOKEN`, else the Mac's own HTTPS `token`, which is the same one dbxpc uses since it was
+    copied over.
+  - It adds the shared CA beside the bundle to Node's default TLS trust (`TrustHttpsCa`). `--https-ca <file>|none`
+    picks another; with `none`, set `NODE_EXTRA_CA_CERTS` instead.
+
+  For the hub an MCP session starts, export these in the shell profile Claude Code starts from, then restart Claude
+  Code. `viewer_status.toolsCore` shows the URL, `reachable` and the build.
+- **When it fails**:
+  - A 401 is the token.
+  - "not reachable … It is another machine's" means one of three things: dbxpc's hub isn't running, it is a build
+    from before the passthrough (it answers 401, since it doesn't read Bearer, or 404), or the WSL IP moved and
+    broke the portproxy (dbxpc step 4 above).
+  - dbxpc's hub has to be up (a session's MCP server or `serve --https-port 5521`) whenever the Mac wants EVE data.
+- **Costs**: the audio cache downloads each bank whole over the LAN, once per build (about 372 MB for
+  `turrets.bnk`). Resources are buffered by both hubs.
+- **Checked (Mac, 2026-10-24)**: specs cover the passthrough, the Bearer admission and a hub drawing resources, ranges
+  and the build through another hub. A spare Mac hub reached dbxpc's hub over TLS with the shared CA and got a 401:
+  that hub predates the passthrough. The end-to-end run waits on dbxpc's hub being rebuilt.
 
 ## verify-page (everything but drawing)
 

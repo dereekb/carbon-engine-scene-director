@@ -8,8 +8,9 @@
  * else a device would trust.
  *
  * Every request on the listener needs the access token: a `?token=` link once (answered with a cookie and a redirect
- * to the same URL without the token), then the cookie. A WebSocket upgrade also needs the page's own Origin when it
- * sends one. `/ca.crt` (the CA certificate, DER) is the one path served without the token, so a device can fetch it to
+ * to the same URL without the token), then the cookie; another machine's hub (using this one's tools-core through the
+ * `/tools-core/` passthrough) sends it as `authorization: Bearer <token>`. A WebSocket upgrade also needs the page's
+ * own Origin when it sends one. `/ca.crt` (the CA certificate, DER) is the one path served without the token, so a device can fetch it to
  * trust it.
  */
 
@@ -19,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import type { IncomingHttpHeaders } from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { getCACertificates, setDefaultCACertificates } from 'node:tls';
 import { defaultDataDirectory } from '../store/document-files';
 
 export const DEFAULT_HTTPS_PORT = 5521;
@@ -108,6 +110,17 @@ function CookieToken(header: Maybe<string>): Maybe<string> {
 }
 
 /**
+ * The token in an `authorization: Bearer <token>` header.
+ *
+ * @param header - The request's Authorization header.
+ * @returns The token, or null without one.
+ */
+function BearerToken(header: Maybe<string>): Maybe<string> {
+  const match = /^Bearer\s+(\S+)$/iu.exec((header ?? '').trim());
+  return match ? match[1] : null;
+}
+
+/**
  * Admits a request to the HTTPS listener by its token (HTTPS_CA_PATH is served before this is asked).
  *
  * @param token - The access token.
@@ -122,7 +135,8 @@ export function AdmitHttpsRequest(token: string, request: HttpsRequestLike): Htt
     const cookie = `${HTTPS_TOKEN_COOKIE}=${token}; Path=/; Max-Age=${TOKEN_COOKIE_MAX_AGE_SECONDS}; Secure; HttpOnly; SameSite=Lax`;
     admission = { kind: 'redirect', location: `${url.pathname}${url.search}`, cookie };
   } else {
-    admission = TokenMatches(token, CookieToken(request.headers.cookie)) ? { kind: 'pass' } : { kind: 'refuse' };
+    const carried = TokenMatches(token, CookieToken(request.headers.cookie)) || TokenMatches(token, BearerToken(request.headers.authorization));
+    admission = carried ? { kind: 'pass' } : { kind: 'refuse' };
   }
   return admission;
 }
@@ -141,6 +155,17 @@ export function AdmitHttpsUpgrade(token: string, request: HttpsRequestLike): boo
 }
 
 /**
+ * Adds a CA to the certificates Node's TLS clients trust by default (fetch's included), beside the system's: how a hub
+ * reaches another machine's HTTPS listener, as for a tools-core shared through it. The shared CA is name-constrained to
+ * private names and addresses, so it vouches for nothing public.
+ *
+ * @param ca - The CA certificate, PEM.
+ */
+export function TrustHttpsCa(ca: string): void {
+  setDefaultCACertificates([...getCACertificates('default'), ca]);
+}
+
+/**
  * Where `scene-director https-cert` writes and the hub reads the HTTPS files: a `scene-director/https` folder in the
  * per-user data directory.
  *
@@ -151,6 +176,22 @@ export function AdmitHttpsUpgrade(token: string, request: HttpsRequestLike): boo
  */
 export function DefaultHttpsDirectory(env: NodeJS.ProcessEnv = process.env, platform: NodeJS.Platform = process.platform, home: string = os.homedir()): string {
   return defaultDataDirectory({ folder: 'https', env, platform, home });
+}
+
+/**
+ * The access token in an HTTPS directory, which machines copy from each other so one token opens every hub.
+ *
+ * @param directory - The directory `scene-director https-cert` wrote.
+ * @returns The token, or null when there is none.
+ */
+export function ReadHttpsToken(directory: string): Maybe<string> {
+  let token: Maybe<string> = null;
+  try {
+    token = readFileSync(path.join(directory, HTTPS_FILES.token), 'utf8').trim() || null;
+  } catch {
+    token = null;
+  }
+  return token;
 }
 
 /**

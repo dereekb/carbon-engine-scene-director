@@ -45,6 +45,13 @@ describe('https: admitting requests', () => {
     expect(AdmitHttpsRequest(TOKEN, { url: '/config', headers: { cookie: `theme=dark; ${COOKIE}; other=1` } })).toEqual({ kind: 'pass' });
   });
 
+  it("passes another hub's Bearer token, and refuses a wrong one", () => {
+    expect(AdmitHttpsRequest(TOKEN, { url: '/tools-core/eve/latest/build', headers: { authorization: `Bearer ${TOKEN}` } })).toEqual({ kind: 'pass' });
+    expect(AdmitHttpsRequest(TOKEN, { url: '/tools-core/eve/latest/build', headers: { authorization: `bearer  ${TOKEN}` } })).toEqual({ kind: 'pass' });
+    expect(AdmitHttpsRequest(TOKEN, { url: '/tools-core/eve/latest/build', headers: { authorization: `Bearer ${TOKEN}x` } })).toEqual({ kind: 'refuse' });
+    expect(AdmitHttpsRequest(TOKEN, { url: '/tools-core/eve/latest/build', headers: { authorization: `Basic ${TOKEN}` } })).toEqual({ kind: 'refuse' });
+  });
+
   it('admits a WebSocket upgrade with the cookie and the listener origin, or no origin', () => {
     const host = 'mac.local:5521';
     expect(AdmitHttpsUpgrade(TOKEN, { headers: { host, cookie: COOKIE, origin: `https://${host}` } })).toBe(true);

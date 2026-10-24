@@ -63,18 +63,20 @@ export interface HubEveDataSourcesInput extends Partial<EveDataSources> {
 export function HubEveDataSources(input: HubEveDataSourcesInput): EveDataSources {
   if (input.mode === 'off') return NoEveDataSources();
   const toolsCore = input.toolsCore ?? new ToolsCore();
-  const shipData = input.shipData ?? new ShipData({ url: toolsCore.url });
-  const sde = shipData instanceof ShipData ? shipData.sde : new SdeClient({ url: toolsCore.url });
+  // Every client reaches tools-core through its fetch: a shared tools-core's token rides along.
+  const { url, fetch } = toolsCore;
+  const shipData = input.shipData ?? new ShipData({ url, fetch });
+  const sde = shipData instanceof ShipData ? shipData.sde : new SdeClient({ url, fetch });
   const sdeBuild = () => shipData.SdeBuild();
-  const objectData = input.objectData ?? new ObjectData({ url: toolsCore.url, sdeBuild, resourceBuild: () => toolsCore.ResolveBuild() });
+  const objectData = input.objectData ?? new ObjectData({ url, fetch, sdeBuild, resourceBuild: () => toolsCore.ResolveBuild() });
   return {
     toolsCore,
     shipData,
     dogmaData: input.dogmaData ?? new DogmaData({ sde }),
     weaponData: input.weaponData ?? new WeaponData({ sde }),
-    mapData: input.mapData ?? new MapData({ url: toolsCore.url, sdeBuild, log: input.log }),
+    mapData: input.mapData ?? new MapData({ url, fetch, sdeBuild, log: input.log }),
     objectData,
-    asteroidData: input.asteroidData ?? new AsteroidData({ objectData, url: toolsCore.url, sdeBuild })
+    asteroidData: input.asteroidData ?? new AsteroidData({ objectData, url, fetch, sdeBuild })
   };
 }
 
@@ -90,6 +92,7 @@ export function NoEveDataSources(): EveDataSources {
   return {
     toolsCore: {
       url: 'none',
+      fetch: () => refuse('tools-core'),
       ResolveBuild: () => refuse('the EVE build'),
       ResourceUrl: () => refuse('EVE files'),
       ResFileIndexUrl: () => refuse('EVE files'),

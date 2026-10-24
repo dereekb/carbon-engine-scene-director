@@ -58,14 +58,15 @@ export class AudioBankCache {
   /**
    * Answers a ranged read of a tools-core audio file from the local copy, downloading it whole first when needed.
    *
-   * @param input - The file's tools-core URL, the request's Range header and the response.
+   * @param input - The file's tools-core URL, the request's Range header, the response, and the fetch that downloads
+   *   from tools-core (the global one by default; ToolsCoreApi.fetch carries a shared tools-core's token).
    * @returns Whether it answered; false (nothing written) for a Range it does not serve (not one `bytes=a-b` or
    *   `bytes=a-`) or a file it could not download, which the caller then proxies.
    */
-  async Serve(input: { readonly url: string; readonly range: string; readonly response: ServerResponse }): Promise<boolean> {
+  async Serve(input: { readonly url: string; readonly range: string; readonly response: ServerResponse; readonly fetch?: typeof fetch }): Promise<boolean> {
     const range = /^bytes=(\d+)-(\d*)$/u.exec(input.range.trim());
     if (!range) return false;
-    const entry = await this.Entry(input.url);
+    const entry = await this.Entry(input.url, input.fetch ?? fetch);
     if (!entry) return false;
     const { response } = input;
     const start = Number(range[1]);
@@ -92,12 +93,13 @@ export class AudioBankCache {
    * The local copy of a file, downloaded once.
    *
    * @param url - Its tools-core URL.
+   * @param fetchFile - The fetch that downloads it.
    * @returns Its sidecar, or null when it could not be downloaded.
    */
-  private Entry(url: string): Promise<AudioCacheEntry | null> {
+  private Entry(url: string, fetchFile: typeof fetch): Promise<AudioCacheEntry | null> {
     let entry = this.entries.get(url);
     if (!entry) {
-      entry = this.ReadEntry(url).then((cached) => cached ?? this.Download(url));
+      entry = this.ReadEntry(url).then((cached) => cached ?? this.Download(url, fetchFile));
       this.entries.set(url, entry);
       void entry.then((value) => {
         if (!value) this.entries.delete(url);
@@ -116,12 +118,12 @@ export class AudioBankCache {
     }
   }
 
-  private async Download(url: string): Promise<AudioCacheEntry | null> {
+  private async Download(url: string, fetchFile: typeof fetch): Promise<AudioCacheEntry | null> {
     const part = `${this.DataPath(url)}.${randomUUID()}.part`;
     const started = Date.now();
     try {
       await mkdir(this.directory, { recursive: true });
-      const upstream = await fetch(url);
+      const upstream = await fetchFile(url);
       if (upstream.status !== 200 || !upstream.body) {
         await upstream.body?.cancel();
         return null;

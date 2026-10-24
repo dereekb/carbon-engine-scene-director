@@ -20,13 +20,13 @@ import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
 import { MakeFakeShipData, SDE, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
 import { MakeFakeMapData, MakeUnpreparedMapData } from './map-data.testing';
-import type { ToolsCoreApi } from './tools-core';
+import { ToolsCore, type ToolsCoreApi } from './tools-core';
 import { MakeFakeObjectData } from './object-data.testing';
 import { MakeFakeAsteroidData } from './asteroid-data.testing';
 import { MakeFakeDogmaData } from './dogma-data.testing';
 import { MakeFakeWeaponData } from './weapon-data.testing';
 import { AudioBankCache } from './audio-cache';
-import { HTTPS_TOKEN_COOKIE, ReadHttpsFiles } from './https';
+import { HTTPS_TOKEN_COOKIE, ReadHttpsFiles, TrustHttpsCa } from './https';
 import { MakeHttpsCertificate } from './https-cert';
 
 /** Where the fake tools-core's audio URLs point: a local server a spec starts. */
@@ -35,6 +35,7 @@ let audioUpstream = 'http://127.0.0.1:9';
 /** A tools-core stand-in: no network, one pinned build, a small hull catalog. */
 const toolsCore: ToolsCoreApi = {
   url: 'http://tools-core.test',
+  fetch: (input, init) => fetch(input, init),
   async ResolveBuild() {
     return '1234';
   },
@@ -57,6 +58,55 @@ const toolsCore: ToolsCoreApi = {
     return { reachable: true, url: this.url, build: '1234' };
   }
 };
+
+/** One request a fake tools-core saw. */
+interface SeenRequest {
+  readonly method: string;
+  readonly url: string;
+  readonly range?: string;
+  readonly contentType?: string;
+  readonly authorization?: string;
+  readonly body: string;
+}
+
+/**
+ * A real tools-core stand-in over HTTP: build 1234 at /eve/latest/build, a 256-byte file at any other GET (a Range as
+ * a 206), and a POST's body echoed back as JSON. It records every request.
+ */
+async function StartFakeToolsCore(): Promise<{ readonly url: string; readonly seen: SeenRequest[]; Stop(): Promise<void> }> {
+  const file = Buffer.from(Array.from({ length: 256 }, (_, index) => index));
+  const seen: SeenRequest[] = [];
+  const server = createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on('data', (chunk: Buffer) => chunks.push(chunk));
+    request.on('end', () => {
+      const { range, authorization } = request.headers;
+      const contentType = request.headers['content-type'];
+      const body = Buffer.concat(chunks).toString();
+      seen.push({ method: request.method ?? '', url: request.url ?? '', ...(range ? { range } : {}), ...(contentType ? { contentType } : {}), ...(authorization ? { authorization } : {}), body });
+      if (request.url === '/eve/latest/build') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ build: '1234' }));
+      } else if (request.method === 'POST') {
+        response.writeHead(200, { 'content-type': 'application/json' });
+        response.end(JSON.stringify({ echoed: JSON.parse(body) as unknown }));
+      } else if (range) {
+        const [from, to] = range.slice('bytes='.length).split('-').map(Number);
+        response.writeHead(206, { 'content-type': 'application/octet-stream', 'content-range': `bytes ${from}-${to}/256`, 'content-length': String(to - from + 1), 'accept-ranges': 'bytes', etag: '"bank"' });
+        response.end(file.subarray(from, to + 1));
+      } else {
+        response.writeHead(200, { 'content-type': 'application/octet-stream', 'content-length': '256' });
+        response.end(file);
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    seen,
+    Stop: () => new Promise<void>((resolve) => server.close(() => resolve()))
+  };
+}
 
 /** The viewer source holds index.html, which is all these tests fetch. */
 const VIEWER_SOURCE = path.resolve(import.meta.dirname, '../../../../viewer/src');
@@ -597,6 +647,78 @@ describe('prop mods and audio', () => {
   });
 });
 
+describe('the tools-core passthrough', () => {
+  it("passes tools-core's /eve/ routes as they came: the encoded path, the query, Range and a POST body", async () => {
+    const upstream = await StartFakeToolsCore();
+    const sharing = await StartHub({ toolsCore: new ToolsCore({ url: upstream.url }) });
+    try {
+      const audio = `/eve/1234/audio/path/${encodeURIComponent('res:/audio/essential_media/boosters.bnk')}?v=1`;
+      const part = await fetch(`${sharing.url}tools-core${audio}`, { headers: { range: 'bytes=16-31' } });
+      expect(part.status).toBe(206);
+      expect(part.headers.get('content-range')).toBe('bytes 16-31/256');
+      expect(part.headers.get('etag')).toBe('"bank"');
+      expect([...new Uint8Array(await part.arrayBuffer())]).toEqual(Array.from({ length: 16 }, (_, index) => index + 16));
+      expect(upstream.seen.at(-1)).toMatchObject({ method: 'GET', url: audio, range: 'bytes=16-31' });
+      const posted = await fetch(`${sharing.url}tools-core/eve/3632936/dna/resolve`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ dna: ['af1_t1:amarrbase:amarr'] }) });
+      expect(await posted.json()).toEqual({ echoed: { dna: ['af1_t1:amarrbase:amarr'] } });
+      expect(upstream.seen.at(-1)).toMatchObject({ method: 'POST', url: '/eve/3632936/dna/resolve', contentType: 'application/json' });
+      const head = await fetch(`${sharing.url}tools-core/eve/1234/resources/a.dds`, { method: 'HEAD' });
+      expect(head.status).toBe(200);
+      expect(head.headers.get('content-length')).toBe('256');
+    } finally {
+      await sharing.Stop();
+      await upstream.Stop();
+    }
+  });
+
+  it('refuses paths outside /eve/ and other methods without asking tools-core, and is a 502 when tools-core is down', async () => {
+    const upstream = await StartFakeToolsCore();
+    const sharing = await StartHub({ toolsCore: new ToolsCore({ url: upstream.url }) });
+    try {
+      for (const route of ['tools-core/admin', 'tools-core/eve/../admin', 'tools-core/']) {
+        const response = await fetch(`${sharing.url}${route}`);
+        expect(response.status, route).toBe(404);
+        expect(await response.text(), route).toMatch(/only tools-core's \/eve\/ routes pass/);
+      }
+      const deleted = await fetch(`${sharing.url}tools-core/eve/latest/build`, { method: 'DELETE' });
+      expect(deleted.status).toBe(405);
+      expect(deleted.headers.get('allow')).toBe('GET, HEAD, POST');
+      // Only the hub's own build lookup at its start reached tools-core.
+      expect(upstream.seen.filter((request) => request.url !== '/eve/latest/build' || request.method !== 'GET')).toEqual([]);
+      await upstream.Stop();
+      const down = await fetch(`${sharing.url}tools-core/eve/latest/build`);
+      expect(down.status).toBe(502);
+      expect(await down.text()).toMatch(new RegExp(`tools-core at ${upstream.url}`));
+    } finally {
+      await sharing.Stop();
+    }
+  });
+
+  it("lets another hub draw from this one's tools-core: resources, audio ranges and the build come through it", async () => {
+    const upstream = await StartFakeToolsCore();
+    const sharing = await StartHub({ toolsCore: new ToolsCore({ url: upstream.url }) });
+    const working = await StartHub({ toolsCore: new ToolsCore({ url: `${sharing.url}tools-core` }) });
+    try {
+      const status = (await (await fetch(`${working.url}build`)).json()) as { reachable: boolean; url: string; build: string };
+      expect(status).toEqual({ reachable: true, url: `${sharing.url}tools-core`, build: '1234' });
+      const resource = await fetch(`${working.url}resource/graphics/a.dds`);
+      expect(resource.status).toBe(200);
+      expect((await resource.arrayBuffer()).byteLength).toBe(256);
+      const resPath = encodeURIComponent('res:/audio/essential_media/boosters.bnk');
+      const part = await fetch(`${working.url}audio/path/${resPath}`, { headers: { range: 'bytes=0-7' } });
+      expect(part.status).toBe(206);
+      expect([...new Uint8Array(await part.arrayBuffer())]).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+      // Both hubs ask for the build (at their start, and the status probe) in no set order.
+      const files = upstream.seen.map((request) => request.url).filter((url) => url !== '/eve/latest/build');
+      expect(files).toEqual(['/eve/1234/resources/graphics/a.dds', `/eve/1234/audio/path/${resPath}`]);
+    } finally {
+      await working.Stop();
+      await sharing.Stop();
+      await upstream.Stop();
+    }
+  });
+});
+
 describe('fleet compositions', () => {
   it('add_fleet_composition resolves hull names, then forwards one patch_scene op to the tab', async () => {
     const fleets = await StartHub({ shipData: MakeFakeShipData().shipData });
@@ -971,7 +1093,7 @@ describe('no EVE data', () => {
   it('answers the EVE routes 503 naming the mode, without touching tools-core', async () => {
     const { offHub, asked } = await StartNoEveHub();
     try {
-      for (const route of ['resource/x.black', 'resfileindex.txt', 'audio/library', 'audio/path/x', 'build']) {
+      for (const route of ['resource/x.black', 'resfileindex.txt', 'audio/library', 'audio/path/x', 'build', 'tools-core/eve/latest/build']) {
         const response = await fetch(`${offHub.url}${route}`);
         expect(response.status, route).toBe(503);
         expect(await response.text(), route).toMatch(/--eve-data off/u);
@@ -1257,10 +1379,27 @@ describe.skipIf(spawnSync('openssl', ['version']).status !== 0)('the HTTPS liste
   });
 
   it('viewer_status gives the HTTPS URLs, the token links and the CA', async () => {
-    const status = (await target.Call('viewer_status')) as { https: { urls: string[]; links: string[]; ca: string[] } };
+    const status = (await target.Call('viewer_status')) as { https: { urls: string[]; links: string[]; ca: string[]; toolsCore: string[] } };
     const url = `https://127.0.0.1:${target.httpsPort}/`;
-    expect(status.https).toEqual({ urls: [url], links: [`${url}?token=${files.token}`], ca: [`${url}ca.crt`] });
+    expect(status.https).toEqual({ urls: [url], links: [`${url}?token=${files.token}`], ca: [`${url}ca.crt`], toolsCore: [`${url}tools-core`] });
     expect(((await hub.Call('viewer_status')) as { https: unknown }).https).toBeNull();
+  });
+
+  it('shares tools-core with another hub that sends the token as a Bearer header and trusts the CA', async () => {
+    const upstream = await StartFakeToolsCore();
+    const sharing = await StartHub({ toolsCore: new ToolsCore({ url: upstream.url }), https: { host: '127.0.0.1', port: 0, ...files } });
+    try {
+      TrustHttpsCa(ca);
+      const url = `https://127.0.0.1:${sharing.httpsPort}/tools-core`;
+      expect(await new ToolsCore({ url, token: files.token }).Status()).toEqual({ reachable: true, url, build: '1234' });
+      // The listener's token stays at the listener: tools-core never sees it.
+      expect(upstream.seen.every((request) => request.authorization === undefined)).toBe(true);
+      const refused = await new ToolsCore({ url, token: 'wrong' }).Status();
+      expect(refused.error).toMatch(/HTTP 401: the hub sharing it refused the access token/);
+    } finally {
+      await sharing.Stop();
+      await upstream.Stop();
+    }
   });
 
   it('a hub whose HTTPS port is taken does not start, and frees its HTTP port', async () => {

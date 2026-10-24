@@ -50,8 +50,10 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
   from the movies directory, GET / HEAD with `Range`: `sd-export`), `/console/` (the built battle console:
   `--console <dir>` / `SCENE_DIRECTOR_CONSOLE`, by default `dist/apps/battle-console/browser` beside the CLI bundle
   when it exists; any path under it, index.html for `/console` and extensionless routes, nothing outside the
-  directory), `/ws`. The hub's HTTP layer is GET-only (and HEAD
-  on `/movies`); tools-core POSTs go through `hub/sde-client.ts` (`SdeClient`, shared by `ShipData`, `DogmaData` and
+  directory), `/tools-core/eve/<rest>` (this hub's tools-core shared with another machine's hub over the HTTPS
+  listener: `sd-dev-env` → Another machine's EVE data), `/ws`. The hub's HTTP layer is GET-only (HEAD on `/movies`;
+  GET, HEAD and POST on the `/tools-core/` passthrough). Every tools-core request goes through `ToolsCoreApi.fetch`
+  (it carries a shared tools-core's token); tools-core POSTs go through `hub/sde-client.ts` (`SdeClient`, shared by `ShipData`, `DogmaData` and
   `WeaponData`: the SDE build pin, the cache, the failure mapping).
 
 ## Layout

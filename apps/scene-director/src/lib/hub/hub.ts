@@ -10,10 +10,12 @@
  * SOF faction), /missile?charge=&launcher= (a missile's EveMissile and impact effect), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
  * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range;
  * with an audio cache, ranged reads come from local copies of the banks: audio-cache.ts), /movies/<file> (an exported
- * movie, GET and HEAD with Range: movie-files.ts), /health, and the viewer files.
+ * movie, GET and HEAD with Range: movie-files.ts), /tools-core/eve/<rest> (this hub's tools-core shared with another
+ * machine's hub: GET, HEAD and POST passed through), /health, and the viewer files.
  *
  * An optional HTTPS listener (https.ts, `--https-port`) serves the same routes and /ws to other devices on the LAN,
- * behind an access token, plus /ca.crt (its CA certificate) without one.
+ * behind an access token, plus /ca.crt (its CA certificate) without one. Another machine's hub uses this one's EVE data
+ * with `--tools-core https://<this machine>:<https port>/tools-core` and the token (tools-core.ts).
  *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
@@ -73,6 +75,24 @@ import { ErrorMessage, ErrorToJson, ToolError, type SerializedError, type ToolAr
 import type { SofCatalogKind, ToolsCoreApi } from './tools-core';
 
 export const DEFAULT_PORT = 5520;
+
+/**
+ * The tools-core passthrough's path prefix: another machine's hub reaches this hub's tools-core under it, through the
+ * HTTPS listener and its token (`--tools-core https://<this machine>:<https port>/tools-core`).
+ */
+export const TOOLS_CORE_PREFIX = '/tools-core/';
+/**
+ * The request headers the passthrough sends on to tools-core.
+ */
+const PASSTHROUGH_REQUEST_HEADERS = ['range', 'if-none-match', 'if-modified-since', 'content-type', 'accept'];
+/**
+ * The response headers it brings back (content-length only for a body fetch did not decompress).
+ */
+const PASSTHROUGH_RESPONSE_HEADERS = ['content-type', 'content-range', 'accept-ranges', 'etag', 'last-modified'];
+/**
+ * The largest POST body it passes: tools-core's POSTs are small JSON queries.
+ */
+const MAX_PASSTHROUGH_BODY_BYTES = 4 * 1024 * 1024;
 
 const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -511,7 +531,14 @@ export class Hub implements ToolCaller {
           fleetsDirectory: this.fleetCompositions.files.directory,
           personalitiesDirectory: this.fleetPersonalities.files.directory,
           moviesDirectory: this.movieExports.directory,
-          https: this.https ? { urls: this.httpsUrls, links: this.httpsLinks, ca: this.httpsUrls.map((url) => `${url}${HTTPS_CA_PATH.slice(1)}`) } : null,
+          https: this.https
+            ? {
+                urls: this.httpsUrls,
+                links: this.httpsLinks,
+                ca: this.httpsUrls.map((url) => `${url}${HTTPS_CA_PATH.slice(1)}`),
+                toolsCore: this.eveData === 'off' ? [] : this.httpsUrls.map((url) => `${url}${TOOLS_CORE_PREFIX.slice(1, -1)}`)
+              }
+            : null,
           hint: this.pages.length ? undefined : `Open ${this.url} in Chrome or Edge on this machine.`
         };
       case 'page_log': {
@@ -611,6 +638,8 @@ export class Hub implements ToolCaller {
       await this.Proxy(() => this.toolsCore.ResFileIndexUrl(), response);
     } else if (pathname.startsWith('/resource/')) {
       await this.Proxy(() => this.toolsCore.ResourceUrl(pathname.slice('/resource/'.length)), response);
+    } else if (url.pathname.startsWith(TOOLS_CORE_PREFIX)) {
+      await this.ServeToolsCore(request, response);
     } else if (pathname === '/ship-stats') {
       await this.ServeShipStats(url, response);
     } else if (pathname === '/prop-mod') {
@@ -755,7 +784,7 @@ export class Hub implements ToolCaller {
     const cache = this.audioCache;
     if (!cache || typeof range !== 'string') return false;
     const url = await this.toolsCore.AudioPathUrl(resPath).catch(() => null);
-    return url ? cache.Serve({ url, range, response }) : false;
+    return url ? cache.Serve({ url, range, response, fetch: this.toolsCore.fetch }) : false;
   }
 
   /**
@@ -781,7 +810,7 @@ export class Hub implements ToolCaller {
     }
     let upstream: Response;
     try {
-      upstream = await fetch(source, { headers });
+      upstream = await this.toolsCore.fetch(source, { headers });
     } catch (error) {
       response.writeHead(502, { 'content-type': 'text/plain' });
       response.end(`audio proxy: ${ErrorMessage(error)}`);
@@ -795,6 +824,68 @@ export class Hub implements ToolCaller {
     response.writeHead(upstream.status, forwarded);
     // pipeline, not pipe: an upstream error mid-body would otherwise be an unhandled stream error that ends the hub.
     if (upstream.body) await pipeline(Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>), response).catch(() => response.destroy());
+    else response.end();
+  }
+
+  /**
+   * Shares this hub's tools-core with another machine's hub: `/tools-core/eve/<rest>` is tools-core's `/eve/<rest>`,
+   * the path and query passed as they came (an audio path stays encoded). GET, HEAD and POST (a body of at most
+   * MAX_PASSTHROUGH_BODY_BYTES): Range, the validators and the content type go up; the status, the content headers and
+   * the streamed body come back. Only tools-core's `/eve/` routes pass (404 for anything else). No EVE data is a 503
+   * and an unreachable tools-core a 502. On the HTTPS listener the token admits it, as it does every route.
+   *
+   * @param request - The request.
+   * @param response - The response.
+   */
+  private async ServeToolsCore(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const url = new URL(request.url ?? '/', 'http://localhost');
+    const rest = url.pathname.slice(TOOLS_CORE_PREFIX.length - 1);
+    const method = request.method ?? 'GET';
+    const refuse = (status: number, message: string, headers: OutgoingHttpHeaders = {}): void => {
+      response.writeHead(status, { 'content-type': 'text/plain', 'cache-control': 'no-store', ...headers });
+      response.end(`tools-core passthrough: ${message}`);
+    };
+    if (this.eveData === 'off') {
+      refuse(503, 'this hub has no EVE data (--eve-data off), so it shares no tools-core');
+      return;
+    }
+    if (!rest.startsWith('/eve/')) {
+      refuse(404, `only tools-core's /eve/ routes pass, not ${rest}`);
+      return;
+    }
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'POST') {
+      refuse(405, `${method} is not passed`, { allow: 'GET, HEAD, POST' });
+      return;
+    }
+    const body = method === 'POST' ? await ReadBody(request, MAX_PASSTHROUGH_BODY_BYTES) : null;
+    if (method === 'POST' && !body) {
+      refuse(413, `a body over ${MAX_PASSTHROUGH_BODY_BYTES} bytes`);
+      return;
+    }
+    const headers: Record<string, string> = {};
+    for (const name of PASSTHROUGH_REQUEST_HEADERS) {
+      const value = request.headers[name];
+      if (typeof value === 'string') headers[name] = value;
+    }
+    // The other hub giving up (its own timeout) ends the read here too.
+    const abort = new AbortController();
+    response.once('close', () => abort.abort());
+    let upstream: Response;
+    try {
+      upstream = await this.toolsCore.fetch(`${this.toolsCore.url}${rest}${url.search}`, { method, headers, signal: abort.signal, ...(body ? { body: new Uint8Array(body) } : {}) });
+    } catch (error) {
+      refuse(502, `tools-core at ${this.toolsCore.url}: ${ErrorMessage(error)}`);
+      return;
+    }
+    const forwarded: OutgoingHttpHeaders = { 'cache-control': 'no-store' };
+    for (const name of PASSTHROUGH_RESPONSE_HEADERS) {
+      const value = upstream.headers.get(name);
+      if (value != null) forwarded[name] = value;
+    }
+    const length = upstream.headers.get('content-length');
+    if (length != null && !upstream.headers.has('content-encoding')) forwarded['content-length'] = length;
+    response.writeHead(upstream.status, forwarded);
+    if (upstream.body && method !== 'HEAD') await pipeline(Readable.fromWeb(upstream.body as WebReadableStream<Uint8Array>), response).catch(() => response.destroy());
     else response.end();
   }
 
@@ -926,7 +1017,7 @@ export class Hub implements ToolCaller {
     }
     let upstream: Response;
     try {
-      upstream = await fetch(source);
+      upstream = await this.toolsCore.fetch(source);
     } catch (error) {
       response.writeHead(502, { 'content-type': 'text/plain' });
       response.end(`resource proxy: ${ErrorMessage(error)}`);
@@ -966,6 +1057,24 @@ async function Listen(server: Server, port: number, host: string): Promise<void>
       resolve();
     });
   });
+}
+
+/**
+ * Reads a request's body, up to a limit.
+ *
+ * @param request - The request.
+ * @param limit - The most bytes to read.
+ * @returns The body, or null when it is over the limit.
+ */
+async function ReadBody(request: IncomingMessage, limit: number): Promise<Maybe<Buffer>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  for await (const chunk of request as AsyncIterable<Buffer>) {
+    size += chunk.length;
+    if (size > limit) return null;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks);
 }
 
 const SHIP_DATA_FAILURE_STATUS: Record<ShipDataError['failure'], number> = { invalid: 400, 'not-found': 404, ambiguous: 409, unavailable: 503 };

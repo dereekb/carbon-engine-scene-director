@@ -107,6 +107,8 @@ What works today:
 - **Other devices over HTTPS** (`--https-port`, `scene-director https-cert`): a second listener for an iPad or
   another machine on the LAN (WebGPU needs a secure context), signed by a local CA the device trusts once, behind an
   access token.
+- **Shared EVE data** (`--tools-core https://<machine>:5521/tools-core`): a machine without tools-core uses another
+  machine's through that machine's hub, and does everything else itself.
 - **Battle console** (`/console/`, `--console`): drop a scenario (a zip, JSON parts, fits or a folder) and the
   console stages and starts the battle with no agent; per-fleet cards steer it (Engage, Hold, Pull range, Dive,
   Retreat, Warp out, Hold fire, call a primary), FC settings and settings drops apply live, and Reset re-stages it.

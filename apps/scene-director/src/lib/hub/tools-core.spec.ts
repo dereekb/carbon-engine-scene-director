@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { NO_TOOLS_CORE_HINT, ToolsCore } from './tools-core';
+import { NO_TOOLS_CORE_HINT, SHARED_TOOLS_CORE_HINT, ToolsCore } from './tools-core';
 
 /** A fetch stand-in whose answer to /eve/latest/build the test switches. */
 function FakeFetch(): { fetch: typeof fetch; answer: (build: string | Error) => void; calls: string[] } {
@@ -41,5 +41,30 @@ describe('ToolsCore.Status', () => {
     const status = await toolsCore.Status();
     expect(status).toEqual({ reachable: true, url: 'http://tools-core.test', build: '1234', latestBuild: '5678' });
     expect(await toolsCore.ResourceUrl('graphics/a.dds')).toBe('http://tools-core.test/eve/1234/resources/graphics/a.dds');
+  });
+});
+
+describe('ToolsCore with a token', () => {
+  it('sends it as a Bearer header on every request, through its fetch too', async () => {
+    const seen: (string | null)[] = [];
+    const fake = (async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+      seen.push(new Headers(init?.headers).get('authorization'));
+      return new Response(JSON.stringify({ build: '1234' }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }) as typeof fetch;
+    const toolsCore = new ToolsCore({ url: 'https://dbxpc.local:5521/tools-core/', token: 's3cret', fetch: fake });
+    expect(toolsCore.url).toBe('https://dbxpc.local:5521/tools-core');
+    await toolsCore.ResolveBuild();
+    await toolsCore.fetch(await toolsCore.ResourceUrl('graphics/a.dds'), { headers: { range: 'bytes=0-1' } });
+    expect(seen).toEqual(['Bearer s3cret', 'Bearer s3cret']);
+    await new ToolsCore({ url: 'http://tools-core.test', fetch: fake }).ResolveBuild();
+    expect(seen.at(-1)).toBeNull();
+  });
+
+  it('names the token when the hub sharing tools-core refuses it', async () => {
+    const refused = (async () => new Response('needs its access token', { status: 401 })) as typeof fetch;
+    const status = await new ToolsCore({ url: 'https://dbxpc.local:5521/tools-core', token: 'wrong', fetch: refused }).Status();
+    expect(status.reachable).toBe(false);
+    expect(status.error).toMatch(/HTTP 401: the hub sharing it refused the access token \(--tools-core-token/);
+    expect(status.error?.endsWith(SHARED_TOOLS_CORE_HINT)).toBe(true);
   });
 });

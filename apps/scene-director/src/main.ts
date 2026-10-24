@@ -16,7 +16,10 @@
  *                        (apps/scene-director/https/ca.crt beside this bundle, whose ca.key is copied into --https-dir
  *                        by hand; or a local CA, made once, with --https-ca none), and an access token (kept)
  *
- * Options: --port <n> (5520), --host <addr> (127.0.0.1), --tools-core <url> (http://127.0.0.1:5510),
+ * Options: --port <n> (5520), --host <addr> (127.0.0.1), --tools-core <url> (CJS_TOOLS_CORE; http://127.0.0.1:5510; an
+ *          https URL is another machine's tools-core shared through its hub, https://<machine>:5521/tools-core, whose
+ *          token is --tools-core-token <token> (SCENE_DIRECTOR_TOOLS_CORE_TOKEN; this machine's HTTPS token by default)
+ *          and whose certificate the shared CA vouches for (--https-ca <file>|none, SCENE_DIRECTOR_HTTPS_CA),
  *          --eve-data tools-core|off (SCENE_DIRECTOR_EVE_DATA; tools-core by default; off is no-EVE-data mode: the hub
  *          never touches tools-core and the page asks for no EVE data, sd-dev-env),
  *          --build <exact EVE build> (resolved from tools-core "latest" when omitted),
@@ -39,12 +42,12 @@
 
 import type { Maybe } from '@dereekb/util';
 import { DEFAULT_EVE_DATA_MODE, type EveDataMode, readEveDataMode } from '@scene-director/scene';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { AudioBankCache, DEFAULT_AUDIO_CACHE_DIRECTORY } from './lib/hub/audio-cache';
 import { DEFAULT_PORT, Hub, type HubOptions, LogToStderr } from './lib/hub/hub';
-import { DEFAULT_HTTPS_HOST, DEFAULT_HTTPS_PORT, DefaultHttpsDirectory, HTTPS_CA_PATH, type HubHttpsOptions, ReadHttpsFiles } from './lib/hub/https';
+import { DEFAULT_HTTPS_HOST, DEFAULT_HTTPS_PORT, DefaultHttpsDirectory, HTTPS_CA_PATH, type HubHttpsOptions, ReadHttpsFiles, ReadHttpsToken, TrustHttpsCa } from './lib/hub/https';
 import { HTTPS_CERT_DAYS, MakeHttpsCertificate } from './lib/hub/https-cert';
 import { RemoteHub } from './lib/hub/remote-hub';
 import { SceneOf } from './lib/hub/saved-scenes';
@@ -57,7 +60,7 @@ import { defaultFleetPersonalitiesDirectory, FleetPersonalityFileStore } from '.
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
 const USAGE =
-  'usage: scene-director serve|mcp|call <tool> [json]|https-cert [--https-ca <file>|none] [--san <name|ip>,...] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--https-port <n>] [--https-host 0.0.0.0] [--https-dir <dir>] [--in scene.json] [--out file]\n';
+  'usage: scene-director serve|mcp|call <tool> [json]|https-cert [--https-ca <file>|none] [--san <name|ip>,...] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--tools-core-token <token>] [--eve-data tools-core|off] [--build <n>] [--viewer <dir>] [--console <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--https-port <n>] [--https-host 0.0.0.0] [--https-dir <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -121,6 +124,31 @@ function HttpsOptionsFromCommandLine(): Maybe<HubHttpsOptions> {
 }
 
 /**
+ * The tools-core client a hub uses. An https URL is another machine's tools-core shared through its hub's HTTPS
+ * listener (`https://<machine>:5521/tools-core`): the client sends that listener's token (--tools-core-token or
+ * SCENE_DIRECTOR_TOOLS_CORE_TOKEN, else this machine's own HTTPS token, which machines copy from each other) and trusts
+ * the shared CA (--https-ca or SCENE_DIRECTOR_HTTPS_CA; `none` leaves it to NODE_EXTRA_CA_CERTS). A CA file that
+ * cannot be read exits 2.
+ *
+ * @returns The client.
+ */
+function ToolsCoreFromCommandLine(): ToolsCore {
+  const url = Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE);
+  let token: Maybe<string> = Option('--tools-core-token', process.env['SCENE_DIRECTOR_TOOLS_CORE_TOKEN'] || null);
+  if (url.startsWith('https:')) {
+    token ??= ReadHttpsToken(httpsDirectory);
+    const ca = Option('--https-ca', process.env['SCENE_DIRECTOR_HTTPS_CA'] || (existsSync(DEFAULT_SHARED_CA) ? DEFAULT_SHARED_CA : 'none'));
+    try {
+      if (ca !== 'none') TrustHttpsCa(readFileSync(ca, 'utf8'));
+    } catch (error) {
+      process.stderr.write(`the CA for tools-core at ${url} (--https-ca ${ca}) could not be read: ${ErrorMessage(error)}\n`);
+      process.exit(2);
+    }
+  }
+  return new ToolsCore({ url, token, build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null) });
+}
+
+/**
  * The options a hub is made with. The EVE data mode is read here, where a hub is made, so `call` ignores it; an
  * invalid one exits 2. tools-core is configured only with EVE data on.
  *
@@ -132,13 +160,7 @@ function HubOptionsFromCommandLine(): HubOptions {
     process.stderr.write(`--eve-data (or SCENE_DIRECTOR_EVE_DATA) must be tools-core or off\n${USAGE}`);
     process.exit(2);
   }
-  const toolsCore =
-    eveData === 'off'
-      ? undefined
-      : new ToolsCore({
-          url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
-          build: Option('--build', process.env['SCENE_DIRECTOR_BUILD'] ?? null)
-        });
+  const toolsCore = eveData === 'off' ? undefined : ToolsCoreFromCommandLine();
   return { host, port, eveData, toolsCore, viewerDirectory, consoleDirectory, scenes, compositions, personalities, movies, audioCache, https: HttpsOptionsFromCommandLine(), log: LogToStderr };
 }
 
