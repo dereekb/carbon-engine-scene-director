@@ -152,6 +152,8 @@ describe('MovieRecording', () => {
     Frames(200, 300);
     expect(ends).toMatchObject([{ endedBy: 'played', played: 1 }]);
     expect(recording.Report().frame).toBe(11);
+    // The hold after the beat sends the count at once (the hub's status), not up to a second later.
+    expect(messages.filter((message) => message['kind'] === 'progress').at(-1)).toMatchObject({ report: { frame: 11 } });
     rig.control.PlayFor(1, () => undefined);
     Frames(200, 300);
     expect(recording.Report()).toMatchObject({ state: 'finishing', frame: 15, seconds: 1.5, note: 'stopped: its duration (1.5 s of video)' });

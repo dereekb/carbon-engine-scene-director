@@ -78,6 +78,10 @@ export class MovieRecording {
    * A grid frame whose capture failed: drawn again at its clock before the clock moves on.
    */
   private redraw: Maybe<{ readonly clock: number; readonly tick: number }> = null;
+  /**
+   * The last locked frame was a hold (paused, held, a stop): the first one after grid frames forces a progress message.
+   */
+  private holding = false;
   private frame = 0;
   private lastClock: Maybe<number> = null;
   private readonly log: ExportStepLog[] = [];
@@ -154,6 +158,9 @@ export class MovieRecording {
     const locked = this.port.time.LockedFrame(timestamp);
     if (locked.kind === 'wait') return hold;
     if (locked.kind === 'grid') this.pending = { clock: locked.clock, tick: this.port.world.tick };
+    // A pause or a beat's end: the hub's status hears the frames recorded up to it now, not up to a second later.
+    else if (!this.holding) this.sink.Progress(true);
+    this.holding = locked.kind === 'hold';
     return { clock: locked.clock };
   }
 

@@ -18,9 +18,9 @@ and `/movies`, the locks, and verify-page `export:` headless (E2); the real-GPU 
 animation clock (`sd-time`): the M6 movie, a 60 fps range, a slow 300-ship fight, HEVC 4K and cancel, two camera fixes
 (E3, Evidence below).
 
-**Live recording: R2 landed** (2026-10-24): `record_movie`, the record lock, the shared `MovieSink`, the quality preset
-and the HEVC High tier, the hub's sessions of either kind, verify-page `record:` headless (Live recording below). R3 (the
-real GPU) is open.
+**Live recording: R2 landed, R3 in part** (2026-10-24): `record_movie`, the record lock, the shared `MovieSink`, the quality preset
+and the HEVC High tier, the hub's sessions of either kind, verify-page `record:` headless (Live recording below). R3: the Mac Chrome cube run passed (Metal, VideoToolbox:
+1080p60 H.264, 4K HEVC `max` on the High tier, a pause, beats, Esc, playback); the dbxpc runs are open.
 
 **No-EVE-data mode** (`sd-dev-env`): exports work, holding the green screen and stand-in cubes (a 2 s 640×360 export on
 Mac Chrome, 2026-10-24).
@@ -377,7 +377,8 @@ an off-grid stop) are drawn and never encoded, so a pause leaves no gap and no f
 - **`Step(timestamp, drawAnyway)`**: null while the sink waits (hidden tab, encoder configuring or queue > 8, socket
   > 8 MiB: the clock does not move) or on a `wait` frame of `LockedFrame`; a `hold` frame draws at the clock; a `grid`
   frame is pending for `AfterFrame`. `drawAnyway` (main.ts passes `engine.capturePending`) draws a frame that would draw
-  nothing at the clock, never encoded. A progress message goes at most once a second while driving.
+  nothing at the clock, never encoded. A progress message goes at most once a second while driving, and at once on
+  the first hold after grid frames (a pause or a beat's end), so the hub's status is current between beats.
 - **`AfterFrame()`** captures the pending grid frame (`Director.ExportCapture`, shared with the export: the slate, the
   canvas or the compositor) and encodes it; a failed capture redraws the same grid frame (no clock step) and the third
   failure fails the recording; a lost device fails it at once. At `plan.maxFrames` (`duration` × F, else
@@ -437,9 +438,35 @@ Two fixes the run found: the hub's status read `preparing` for a recording pause
 so no progress message): the move to recording sends one, and `Step` sends one a second while driving; and (b) first
 read the hub's lagging status instead of the page's report.
 
-**R3 (open)**: the real-GPU runs in the plan (the 150 vs 150 fight at 4K HEVC in beats, a 10-ship 1080p60 recording, a
-10 s pause, Esc, `/movies` playback, `fps: 10` live on the big fight, `quality: max` 4K HEVC and the High tier) on
-dbxpc, and the cube run on this Mac's Chrome.
+**R3, this Mac** (2026-10-24, Chrome 146, `apple metal-3`, VideoToolbox; a private hub `--eve-data off --port 5531`
+with temp stores, `?audio=off`, 10 stand-in cubes, a rAF probe of the scene clock and wall ms):
+- **1080p60 H.264** (`avc1.64002A`, 24.9 Mbps standard): 4 s live at 60.07 fps, 1.001× real time (the cubes draw
+  faster than the grid); a 10 s pause encoded nothing; an order and a `time_control { play: 2 }` beat; Esc in the tab
+  stopped and saved (`note: stopped: Esc in the tab`). 2,011 frames = 33.517 s; `ReadMp4` samples = frames; the page's
+  log: every step 166,666 / 166,667 ticks, indices contiguous, no repeated clock (free-running before it: 146,000 to
+  187,000). `/movies` played it at 1920 × 1080, a Range seek to 20 s, 0 dropped frames, the HUD not in the picture.
+- **A hidden tab** (the Chrome window went to the background mid-run): no animation frame for 103 s, so no Step and
+  no clock movement; recording went on when it came back, with no gap (`frameMs.max` 103,134). Keep the tab visible:
+  a hidden tab stalls a recording but never damages it.
+- **4K HEVC `quality: max`**: the plan took `hvc1.1.6.H153.B0` (the High tier, level 5.1, 149.3 Mbps) and the encoder
+  configured it; two 2 s beats: 121 frames (4.033 s: both beats end on a grid frame), steps 333,333 / 333,334, 30.02 fps
+  live at 1.001×; `/movies` played it at 3840 × 2160 (`hvc1` entry, one `stts` entry, 0 dropped). `isConfigSupported`
+  says yes to `H150`, `L150` and `H153` at 49.8 / 99.5 / 160 Mbps with or without `prefer-hardware`, so only a real
+  `configure` (as above) proves a tier.
+- **Three 1.5 s beats at 720p30**: `record_movie {}` right after each read 46, 91, 136 frames, equal to get_state
+  `record` and the file (the fix below).
+
+The fix the run found: `record_movie` status (the hub's copy of the page's last progress message, sent at most once a
+second while driving) read up to a second behind right after a beat or a pause (106 frames for 121). The first hold
+frame after grid frames (`MovieRecording.Step`: paused, a beat's end, an off-grid stop) now forces a progress message,
+so the status settles within a frame. get_state `record` is the page's own report and is never behind.
+
+**R3 (open, dbxpc)**: the regression `verify-page --only 'record:|export:|time:'` against tools-core; Windows Chrome:
+the 150 vs 150 fight at 4K HEVC in beats (steps 333,333 / 333,334, live rate ≈ draw fps / 30, no undrawn frame, the
+camera's frame-to-frame speed change against a free-running window), a 10-ship 1080p60 recording, a 10 s pause, Esc,
+`/movies` playback, `fps: 10` live on the big fight, and whether the Windows GPU HEVC encoder takes the High-tier
+string the 2160p30 default now uses (`hvc1.1.6.H150.B0`; if not, fall back to the Main tier in
+`WebCodecsEncoder.Support` or keep `L150`).
 
 ## verify-page evidence (E2, 2026-10-24, dbxpc, tools-core SDE build 3646012, headless Chromium: `--only export:`)
 

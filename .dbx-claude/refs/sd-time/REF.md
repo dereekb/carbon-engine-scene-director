@@ -21,7 +21,8 @@ movie owns the camera (below, "Presentation across a jump"; `sd-cinema`). **Movi
 movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump` (`sd-timeline` doc `movie`).
 **Live recording R1** (plan `~/.claude/plans/i-want-to-think-expressive-volcano.md`, R1 the frame lock and beats → R2
 `record_movie` → R3 the real GPU): the frame lock (`time_control { fps }`), keyed stops and the beat lever
-(`time_control { play }`), below ("The frame lock" and "Beats"). R2 and R3 are not built yet (`sd-export`).
+(`time_control { play }`), below ("The frame lock" and "Beats"). R2 (`record_movie` and the record lock) landed;
+R3's Mac Chrome check passed and its dbxpc runs are open (`sd-export` → Live recording).
 
 ## Files
 
@@ -164,6 +165,10 @@ bounds the cost of a frame's ticks (the 40 ms budget), not the step a frame take
   runs, `Jump`, `Resimulate`, `Command` back / seek / fps and `SetFrameLock` throw `RECORD_LOCKED_TEXT` (a jump or a lock
   change would cut the video), and `BeginExport` refuses; `Pause`, `SetRate`, `StopAt` and `PlayFor` work, so beats
   direct a recording.
+  Real GPU (R3, Mac Chrome, 2026-10-24): every encoded step is 166,666 / 166,667 ticks at 60 fps and 333,333 / 333,334
+  at 30 (the free-running clock before the recording stepped 146,000 to 187,000 on the same display); a beat ends on its
+  grid frame. A hidden tab gets no animation frames, so the record lock's clock simply waits: a 103 s hidden spell left
+  no gap. `time_control { fps: 10 }` on 60 Hz: 20 steps of exactly 1,000,000 ticks in 2 s, no clock change between.
 - **main.ts**: when `frameLock` is set the loop calls `LockedFrame` instead of `Frame` (after `DriveTimeline`, as
   always). A wait frame does `requestAnimationFrame` and returns, except while a `screenshot` waits for a frame
   (`Engine.capturePending`): then it draws at the clock, so a slow-rate lock never keeps a screenshot waiting.
