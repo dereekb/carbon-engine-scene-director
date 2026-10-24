@@ -281,7 +281,9 @@ so the page stops such voices itself (`sd-ship-stats`). Which events play: `sd-s
   the TFIs fleet), and a burning hull's fires (7 per frigate, 10 per Ferox, surviving the kill and a load: below).
   **Three detached windows** keep the seams off for every build but the page's own emitters:
   1. every page hydration inside `PageAudio.Detached`: SOF (`Director.Build`; `BuildStaticObject`'s `detachAudio` for
-     the dressing's stations and gates and the scene's objects), turrets, module effects, warp flashes, explosions;
+     the dressing's stations and gates and the scene's objects), the dressing's sun, planets and moons (`LoadPlanet`:
+     the sun graphic carries a `sun_sfx_atmo` emitter, found at Jita 4-4 on 2026-10-23), turrets, module effects, warp
+     flashes, explosions;
   2. every runtime object build: `ConfigureResources` re-registers the `.black` / `.red` route's builders through
      `DetachObjectRoutes` (`audio-guard.ts`, over `GetObjectLoader` / `RegisterObjectBuilder`), so each file's
      `CreateObject` runs detached: controller child effects (`Tr2ActionChildEffect`), overlays (`Tr2ActionOverlay`),
@@ -303,22 +305,26 @@ so the page stops such voices itself (`sd-ship-stats`). Which events play: `sd-s
   sweep, which would hide the next leak).
 - **The backend is guarded (`audio-guard.ts`), because Chrome throws from the runtime's AudioParam scheduling.**
   Every per-voice scheduler (`ScheduleVoiceVolumeGain`, `ScheduleVoicePitchPlaybackRate`, `ApplyVoiceFilter`, the bus
-  gains) runs on each placement and RTPC refresh: `cancelAndHoldAtTime(now)`, `setValueAtTime(v, now)`,
-  `param.value = v`, then a `setValueCurveAtTime` per fade boundary. Chrome moves events scheduled after a quantum's
-  processing to the next quantum except value curves, so the setValues land inside the curve, `cancelAndHoldAtTime`
-  keeps it, and the next `setValueAtTime(now)` throws NotSupportedError ("overlaps setValueCurveAtTime"); a curve
-  scheduled from a stale `now` overlaps the next one too. Those throws came out of `EveSpaceScene.Update`
-  (`TriObserverLocal.Update` → emitter placement, `Tr2ActionBindRTPC.Update` → RTPC), so `engine.Frame` failed the
-  frame and rejected a pending screenshot (16 failed frames heard as a banging loop, 2026-10-22). The guard patches
-  the backend instance at enable: the six `_ApplyVoice*` appliers clear their own params
-  (`cancelScheduledValues(0)`, the runtime's own non-`cancelAndHold` branch) before scheduling, which removed every
-  `setValueAtTime` throw in a headless repro, and retry once on an overlap; the nine entry points emitters and the page
-  reach are try/caught (`PostEvent` returns 0). Curve-on-curve throws remain upstream's to fix: contained and counted.
-  **On a runtime pin bump, re-check `VOICE_APPLIER_PARAMS` and `CONTAINED_BACKEND_CALLS` against
-  `CjsWebAudioSoundEngine.js`** (the names are declared in the `.d.ts`, so a rename fails to compile); drop the
-  pre-clear once upstream schedules from a future boundary. Upstream draft: the `carbonenginejs-runtime` note.
-- `CjsAudioMan.Process` still schedules AudioParams the guard does not cover (`CjsWwiseSourceEffectRtpcLane.Apply`;
-  41 `_on` loops: ~10 throws a second for 35 s); the page counts those frames and goes on.
+  gains, the RTPC lane's `ScheduleBinding`) runs on each placement and RTPC refresh: `cancelAndHoldAtTime(now)`,
+  `setValueAtTime(v, now)`, `param.value = v`, then a `setValueCurveAtTime` per fade boundary. Chrome
+  (`audio_param_handler.cc`) moves events the main thread scheduled after the audio thread passed them to the next
+  quantum, **except value curves** (`ClampNewEventsToCurrentTime`), so the setValues land inside the curve;
+  `CancelAndHoldAtTime` truncates only the last event before the cancel time (that stray setValue), so the curve
+  survives and the next `setValueAtTime(now)` throws NotSupportedError ("overlaps setValueCurveAtTime"): the failing
+  time is exactly 128 frames (one quantum) after the curve's start. A curve scheduled from a stale `now` overlaps the
+  next one too. Those throws came out of `EveSpaceScene.Update` (`TriObserverLocal.Update` → emitter placement →
+  `_ApplyVoiceSourceEffects` for 45 of 52 logged stacks, `_ApplyVoiceGain` for 7), so `engine.Frame` failed the frame
+  and rejected a pending screenshot (2026-10-22). The guard patches the backend instance at enable: the seven
+  `_ApplyVoice*` appliers (`VOICE_APPLIER_PARAMS`, the RTPC lane's bound params included) run untouched, and **only on
+  an overlap** clear that voice's own params (`cancelScheduledValues(0)`, the runtime's own non-`cancelAndHold` branch,
+  which has no clamp problem) and retry once (`rescheduled`); a second failure or any other error is contained. The
+  nine entry points emitters and the page reach are try/caught (`PostEvent` returns 0). Since SOF audio is inert the
+  page's own stems hit none (0 rescheduled with 41 MWDs on, `sd-ship-stats`). **On a runtime pin bump, re-check
+  `VOICE_APPLIER_PARAMS` and `CONTAINED_BACKEND_CALLS` against `CjsWebAudioSoundEngine.js`**: the names are declared in
+  the `.d.ts`, and the page warns `audio guard: ... has no <names>` for any the instance lacks. Delete the recovery
+  once upstream schedules from a future render quantum. Upstream draft: the `carbonenginejs-runtime` note.
+- What still throws in `CjsAudioMan.Process` (its own update, culling or RTPC pass; the lane's scheduling now goes
+  through the guarded `_ApplyVoiceSourceEffects`) is counted as `frameErrors`, and the page goes on.
 - `get_state.audio`: `emitters` (the page's), `gameObjects` (registered with the runtime's manager: those plus the
   listener), `foreign` (every other registered game object, counted by name; omitted when none: what built with the
   seams attached), `frameErrors` / `lastFrameError` (`Process`), `rescheduled` (applier retries that went through),

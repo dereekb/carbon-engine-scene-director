@@ -114,7 +114,7 @@ plan `real-browser-look-and-listen-prop-mod-trails-and-engine-audio.md`; copies 
   Ctrl, Alt, Meta or Escape). This server's Chrome profile autoplays, even in an `isolatedContext`, and
   `evaluate_script` runs with a user gesture (sticky activation), so a gesture repro needs a browser that does not
   autoplay and must come before any `evaluate_script`.
-- SOF ships, stations and gates hydrate with the audio seams detached, and so do the runtime's object builds and the
+- SOF ships, stations, gates and the dressing's sun and planets hydrate with the audio seams detached, and so do the runtime's object builds and the
   scene update (`sd-runtime` → Audio), so `hull-off.js` is no longer needed: `get_state.audio.gameObjects` stays the
   page's emitters plus the listener, and `get_state.audio.foreign` names anything else registered.
 - Tap `director.audio.man.backend.masterGain` (before the runtime's -6 dBFS limiter) with analysers for level,

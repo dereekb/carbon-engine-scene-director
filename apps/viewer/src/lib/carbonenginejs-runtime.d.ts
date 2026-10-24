@@ -1313,6 +1313,15 @@ declare module '@carbonenginejs/runtime/audio' {
     readonly source: AudioBufferSourceNode | null;
     readonly lowPassFilter: BiquadFilterNode | null;
     readonly highPassFilter: BiquadFilterNode | null;
+    readonly sourceEffectRtpcLane: CjsWwiseSourceEffectRtpcLane | null;
+  }
+
+  /**
+   * A voice's RTPC automation of its source-effect parameters (internal/CjsWwiseSourceEffectRtpcLane.js): Apply
+   * reschedules each binding's param on every placement and RTPC refresh.
+   */
+  export interface CjsWwiseSourceEffectRtpcLane {
+    readonly _bindings: readonly { readonly param: AudioParam | null }[];
   }
 
   /**
@@ -1341,6 +1350,7 @@ declare module '@carbonenginejs/runtime/audio' {
     _ApplyVoiceBusGain(voice: CjsWebAudioVoice): void;
     _ApplyVoiceBusActionGain(voice: CjsWebAudioVoice): void;
     _ApplyVoiceBusRtpcGain(voice: CjsWebAudioVoice): void;
+    _ApplyVoiceSourceEffects(voice: CjsWebAudioVoice, smooth?: boolean): void;
   }
 
   /**

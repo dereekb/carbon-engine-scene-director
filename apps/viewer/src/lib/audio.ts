@@ -268,7 +268,11 @@ export class PageAudio {
       // Every bank, as the runtime's demo does: the engine gates PostEvent on bank status, and the catalog backend
       // reads nothing up front (media is read per event).
       if (!man.Enable(Object.keys(library.metadata.SoundBanks))) throw new Error('the audio manager could not create its AudioContext');
-      if (man.backend) GuardWebAudioBackend(man.backend, { onRescheduled: (error) => this.Rescheduled(error), onContained: (error, where) => this.BackendError(error, where) });
+      if (man.backend) {
+        const { missing } = GuardWebAudioBackend(man.backend, { onRescheduled: (error) => this.Rescheduled(error), onContained: (error, where) => this.BackendError(error, where) });
+        // The guard reaches private runtime names: a pin bump that renamed one leaves it unguarded.
+        if (missing.length) console.warn(`audio guard: the runtime's Web Audio backend has no ${missing.join(', ')} (runtime pin drift; re-check audio-guard.ts)`);
+      }
       void context.resume().catch(() => undefined);
       this.man = man;
       this.library = library;
@@ -374,9 +378,9 @@ export class PageAudio {
       man.Process({ time: input.now / TICKS_PER_SECOND, realTime, deltaTime: this.lastRealTime == null ? 0 : Math.max(0, realTime - this.lastRealTime), frame: ++this.frame });
       this.lastRealTime = realTime;
     } catch (error) {
-      // What the guard does not cover in the manager's own frame (its RTPC lanes and source effects schedule
-      // AudioParams too) can throw for a burst of frames while fades overlap, with a different message each frame:
-      // log a burst once.
+      // The guard recovers or contains the backend's AudioParam overlaps (its appliers and RTPC lanes), so what
+      // reaches here is the manager's own frame failing (its update, culling or RTPC pass): it can repeat for a burst
+      // of frames, with a different message each frame, so log a burst once.
       const message = ErrorText(error);
       this.frameErrors += 1;
       this.lastFrameError = message;

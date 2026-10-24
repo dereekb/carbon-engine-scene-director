@@ -7,34 +7,39 @@
  * setValueCurveAtTime(...)") from that pattern:
  *
  * - the audio thread moves events scheduled after a param was processed up to the next render quantum, except value
- *   curves, so the scheduler's own setValue events land inside its curve; `cancelAndHoldAtTime` then keeps the curve,
- *   and the next `setValueAtTime(now)` overlaps it;
+ *   curves (ClampNewEventsToCurrentTime in Chromium's audio_param_handler.cc), so the scheduler's own setValue events
+ *   land inside its curve; `cancelAndHoldAtTime` truncates only the last event before the cancel time (now that stray
+ *   setValue), so the curve survives and the next `setValueAtTime(now)` overlaps it, exactly one quantum (128 frames)
+ *   after the curve's start;
  * - a curve's start is clamped to the live clock, which moves within a task, while its duration is kept, so a segment
  *   computed from a stale `now` can overlap the next one (and a float seam does the same in a young context).
  *
- * The throws come from inside EveSpaceScene.Update (a SOF hull's emitter placement or RTPC binding) and from
+ * The throws came from inside EveSpaceScene.Update (a SOF hull's emitter placement or RTPC binding) and from
  * CjsAudioMan.Process, so one aborted the whole frame. GuardWebAudioBackend patches the backend instance:
  *
- * - each per-voice applier owns its params (VOICE_APPLIER_PARAMS), so it clears them (`cancelScheduledValues(0)`, the
- *   runtime's own branch for browsers without `cancelAndHoldAtTime`) before the runtime schedules, which ends the
- *   first kind; an overlap anyway is retried once after clearing again, and anything else is contained;
+ * - each per-voice applier owns its params (VOICE_APPLIER_PARAMS). On an overlap it clears them
+ *   (`cancelScheduledValues(0)`, the runtime's own branch for browsers without `cancelAndHoldAtTime`, which has no
+ *   first kind) and retries once; anything else is contained. The clear runs only on that error path, so the happy
+ *   path schedules exactly as the runtime does;
  * - every backend entry point an emitter, a controller or the page reaches (CONTAINED_BACKEND_CALLS) is contained:
  *   it reports the error and returns a neutral value.
  *
  * The guard reaches private runtime names (declared in carbonenginejs-runtime.d.ts): re-check both lists against
- * CjsWebAudioSoundEngine.js on a runtime pin bump, and drop the pre-clear once upstream schedules safely.
+ * CjsWebAudioSoundEngine.js on a runtime pin bump (the page warns on the names an instance lacks), and delete the
+ * recovery once upstream schedules from a future render quantum.
  */
 
 import type { Maybe } from '@dereekb/util';
 import type { CjsWebAudioSoundEngine, CjsWebAudioVoice } from './runtime';
 
 /**
- * The backend's per-voice schedulers the guard pre-clears.
+ * The backend's per-voice schedulers the guard recovers.
  */
-export type VoiceApplier = '_ApplyVoiceGain' | '_ApplyVoicePlaybackRate' | '_ApplyVoiceFilters' | '_ApplyVoiceBusGain' | '_ApplyVoiceBusActionGain' | '_ApplyVoiceBusRtpcGain';
+export type VoiceApplier = '_ApplyVoiceGain' | '_ApplyVoicePlaybackRate' | '_ApplyVoiceFilters' | '_ApplyVoiceBusGain' | '_ApplyVoiceBusActionGain' | '_ApplyVoiceBusRtpcGain' | '_ApplyVoiceSourceEffects';
 
 /**
- * The AudioParams each applier alone schedules (the stop, fade and transition gains are other nodes).
+ * The AudioParams each applier alone schedules (the stop, fade and transition gains are other nodes; the RTPC lane's
+ * bindings are the voice's source-effect params, which nothing else schedules).
  */
 export const VOICE_APPLIER_PARAMS: Readonly<Record<VoiceApplier, (voice: CjsWebAudioVoice) => readonly Maybe<AudioParam>[]>> = {
   _ApplyVoiceGain: (voice) => [voice.gain?.gain],
@@ -42,7 +47,8 @@ export const VOICE_APPLIER_PARAMS: Readonly<Record<VoiceApplier, (voice: CjsWebA
   _ApplyVoiceFilters: (voice) => [voice.lowPassFilter?.frequency, voice.highPassFilter?.frequency],
   _ApplyVoiceBusGain: (voice) => [voice.busGain?.gain],
   _ApplyVoiceBusActionGain: (voice) => [voice.busVoiceActionGain?.gain],
-  _ApplyVoiceBusRtpcGain: (voice) => [voice.busVoiceGain?.gain]
+  _ApplyVoiceBusRtpcGain: (voice) => [voice.busVoiceGain?.gain],
+  _ApplyVoiceSourceEffects: (voice) => voice.sourceEffectRtpcLane?._bindings.map((binding) => binding.param) ?? []
 };
 
 /**
@@ -60,7 +66,7 @@ const CONTAINED_RESULTS: Readonly<Partial<Record<ContainedBackendCall, unknown>>
 
 export interface WebAudioGuardOptions {
   /**
-   * An applier hit an automation overlap, and its retry after clearing again went through.
+   * An applier hit an automation overlap, and its retry after clearing its params went through.
    */
   readonly onRescheduled: (error: unknown, applier: VoiceApplier) => void;
   /**
@@ -74,6 +80,14 @@ export interface WebAudioGuardOptions {
  */
 type BackendMember = (this: unknown, ...args: never[]) => unknown;
 
+/**
+ * What GuardWebAudioBackend patched, and the names the instance lacks (runtime pin drift).
+ */
+export interface WebAudioGuardResult {
+  readonly guarded: readonly string[];
+  readonly missing: readonly string[];
+}
+
 const GUARDED = new WeakSet<object>();
 
 /**
@@ -81,21 +95,31 @@ const GUARDED = new WeakSet<object>();
  *
  * @param backend - CjsAudioMan.backend, the instance emitters reach as AudGameObjResource.backend.
  * @param options - Where rescheduled and contained errors are reported.
- * @returns False when the backend was already guarded.
+ * @returns The names patched and the names skipped; both empty when the backend was already guarded.
  */
-export function GuardWebAudioBackend(backend: CjsWebAudioSoundEngine, options: WebAudioGuardOptions): boolean {
-  if (GUARDED.has(backend)) return false;
+export function GuardWebAudioBackend(backend: CjsWebAudioSoundEngine, options: WebAudioGuardOptions): WebAudioGuardResult {
+  const guarded: string[] = [];
+  const missing: string[] = [];
+  if (GUARDED.has(backend)) return { guarded, missing };
   GUARDED.add(backend);
   for (const applier of Object.keys(VOICE_APPLIER_PARAMS) as VoiceApplier[]) {
     const original: BackendMember = backend[applier];
     // A pin bump may drop a member: the .d.ts still declares it until someone re-checks.
-    if (typeof original === 'function') Patch(backend, applier, GuardedApplier(original, applier, options));
+    if (typeof original !== 'function') missing.push(applier);
+    else {
+      Patch(backend, applier, GuardedApplier(original, applier, options));
+      guarded.push(applier);
+    }
   }
   for (const call of CONTAINED_BACKEND_CALLS) {
     const original: BackendMember = backend[call];
-    if (typeof original === 'function') Patch(backend, call, ContainedCall(original, call, options));
+    if (typeof original !== 'function') missing.push(call);
+    else {
+      Patch(backend, call, ContainedCall(original, call, options));
+      guarded.push(call);
+    }
   }
-  return true;
+  return { guarded, missing };
 }
 
 /**
@@ -236,23 +260,22 @@ export function DetachedBuilds<B extends ObjectBuilder>(builder: B, detach: Audi
 
 function GuardedApplier(original: BackendMember, applier: VoiceApplier, options: WebAudioGuardOptions) {
   const paramsOf = VOICE_APPLIER_PARAMS[applier];
-  return function (this: unknown, voice: CjsWebAudioVoice, ...rest: unknown[]): void {
-    const schedule = () => {
-      for (const param of paramsOf(voice)) param?.cancelScheduledValues(0);
-      Reflect.apply(original, this, [voice, ...rest]);
-    };
+  return function (this: unknown, voice: CjsWebAudioVoice, ...rest: unknown[]): unknown {
     try {
-      schedule();
+      return Reflect.apply(original, this, [voice, ...rest]);
     } catch (error) {
       if (!IsAutomationOverlap(error)) {
         options.onContained(error, applier);
-        return;
+        return undefined;
       }
       try {
-        schedule();
+        for (const param of paramsOf(voice)) param?.cancelScheduledValues(0);
+        const result = Reflect.apply(original, this, [voice, ...rest]);
         options.onRescheduled(error, applier);
+        return result;
       } catch (retryError) {
         options.onContained(retryError, applier);
+        return undefined;
       }
     }
   };

@@ -27,7 +27,7 @@ export interface LocationDressingOptions {
   readonly retained: () => object[];
   readonly onChange: () => void;
   /**
-   * Hydrates stations and gates with the audio seams detached (PageAudio.Detached).
+   * Hydrates the sun, planets, moons, stations and gates with the audio seams detached (PageAudio.Detached).
    */
   readonly detachAudio: DetachAudio;
 }
@@ -225,12 +225,16 @@ export class LocationDressing {
       if (heightMap) PatchHeightMap(values, heightMap);
       let state: DressedState = 'validated';
       if (this.engine) {
-        const planet = CjsSchema.from<EvePlanet>(values._type, values);
+        // The sun graphic carries its own ambience emitter (sun_sfx_atmo): it stays inert, as a ship's do.
+        const planet = this.detachAudio(() => {
+          const hydrated = CjsSchema.from<EvePlanet>(values._type, values);
+          hydrated.translationCurve = curve;
+          SetPlanetSize(hydrated, scale);
+          if (radius != null) hydrated.SetControllerVariable('radius', radius);
+          hydrated.StartControllers();
+          return hydrated;
+        });
         entry.planet = planet;
-        planet.translationCurve = curve;
-        SetPlanetSize(planet, scale);
-        if (radius != null) planet.SetControllerVariable('radius', radius);
-        planet.StartControllers();
         if (this.entries.get(entry.slot) === entry) this.engine.AddPlanet(planet);
         state = 'drawn';
       }

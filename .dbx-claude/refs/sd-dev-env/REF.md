@@ -117,5 +117,5 @@ provider). Do not sink time into headless GPU.
 
 The refs' "Real-GPU evidence" sections (Windows Chrome, NVIDIA, 2026-10-21/22) are measurements, not specs: turn
 smoothness and orbit/keep-at-range ranges (`sd-destiny`), booster looks (`boosters`), formation holding (`sd-fleets`),
-TFIs build time and fps (`compositions`). Re-measure before relying on one after a change in that area, and update the
+TFIs build time and fps (`compositions`), audio on/off fps (`sd-ship-stats`). Re-measure before relying on one after a change in that area, and update the
 section with the new date. New findings go in the area's ref, never the README.

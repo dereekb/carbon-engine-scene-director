@@ -11,11 +11,13 @@ function FakeParam() {
 }
 
 /**
- * A voice with a gain, both filters, and optionally a source and a bus gain.
+ * A voice with a gain, both filters, and optionally a source, a bus gain and an RTPC lane (two bound params and an
+ * unbound one).
  */
-function FakeVoice(input: { readonly source?: boolean; readonly bus?: boolean } = {}) {
-  const params = { gain: FakeParam(), rate: FakeParam(), lowPass: FakeParam(), highPass: FakeParam(), bus: FakeParam() };
+function FakeVoice(input: { readonly source?: boolean; readonly bus?: boolean; readonly lane?: boolean } = {}) {
+  const params = { gain: FakeParam(), rate: FakeParam(), lowPass: FakeParam(), highPass: FakeParam(), bus: FakeParam(), cutoff: FakeParam(), drive: FakeParam() };
   const nodes = {
+    sourceEffectRtpcLane: input.lane ? { _bindings: [{ param: params.cutoff }, { param: null }, { param: params.drive }] } : null,
     gain: { gain: params.gain },
     busGain: input.bus ? { gain: params.bus } : null,
     busVoiceActionGain: null,
@@ -46,7 +48,8 @@ function FakeBackend() {
     _ApplyVoiceFilters: vi.fn(),
     _ApplyVoiceBusGain: vi.fn(),
     _ApplyVoiceBusActionGain: vi.fn(),
-    _ApplyVoiceBusRtpcGain: vi.fn()
+    _ApplyVoiceBusRtpcGain: vi.fn(),
+    _ApplyVoiceSourceEffects: vi.fn()
   };
   const backend: CjsWebAudioSoundEngine = { ...originals };
   return { backend, originals };
@@ -60,46 +63,73 @@ function Guarded() {
 }
 
 describe('GuardWebAudioBackend', () => {
-  it('clears an applier’s own params before the runtime schedules them, and forwards this and the arguments', () => {
-    const { backend, originals } = Guarded();
-    const { voice, params } = FakeVoice({ source: true });
-    backend._ApplyVoiceGain(voice, true);
-    expect(params.gain.cancelScheduledValues).toHaveBeenCalledWith(0);
-    expect(params.gain.cancelScheduledValues.mock.invocationCallOrder[0]).toBeLessThan(originals._ApplyVoiceGain.mock.invocationCallOrder[0]);
+  it('passes an applier through untouched: this, the arguments and the result, with no clear', () => {
+    const { backend, originals, options } = Guarded();
+    const { voice, params } = FakeVoice({ source: true, lane: true });
+    originals._ApplyVoiceGain.mockReturnValueOnce('scheduled');
+    expect(backend._ApplyVoiceGain(voice, true)).toBe('scheduled');
     expect(originals._ApplyVoiceGain).toHaveBeenCalledWith(voice, true);
     expect(originals._ApplyVoiceGain.mock.contexts[0]).toBe(backend);
     backend._ApplyVoiceFilters(voice);
-    expect(params.lowPass.cancelScheduledValues).toHaveBeenCalledWith(0);
-    expect(params.highPass.cancelScheduledValues).toHaveBeenCalledWith(0);
     backend._ApplyVoicePlaybackRate(voice);
-    expect(params.rate.cancelScheduledValues).toHaveBeenCalledWith(0);
-    // Only the applier's own params.
-    expect(params.gain.cancelScheduledValues).toHaveBeenCalledTimes(1);
-  });
-
-  it('skips the params a voice does not have', () => {
-    const { backend, originals, options } = Guarded();
-    const { voice, params } = FakeVoice();
-    backend._ApplyVoiceBusGain(voice);
-    backend._ApplyVoicePlaybackRate(voice);
-    backend._ApplyVoiceBusRtpcGain(voice);
-    expect(params.bus.cancelScheduledValues).not.toHaveBeenCalled();
-    expect(originals._ApplyVoiceBusGain).toHaveBeenCalledOnce();
-    expect(originals._ApplyVoicePlaybackRate).toHaveBeenCalledOnce();
+    backend._ApplyVoiceSourceEffects(voice, true);
+    expect(originals._ApplyVoiceSourceEffects).toHaveBeenCalledWith(voice, true);
+    for (const param of Object.values(params)) expect(param.cancelScheduledValues).not.toHaveBeenCalled();
+    expect(options.onRescheduled).not.toHaveBeenCalled();
     expect(options.onContained).not.toHaveBeenCalled();
   });
 
-  it('clears again and retries once on an automation overlap, and reports the reschedule', () => {
+  it('clears the applier’s own params and retries once on an automation overlap, and reports the reschedule', () => {
     const { backend, originals, options } = Guarded();
-    const { voice, params } = FakeVoice();
+    const { voice, params } = FakeVoice({ source: true });
     const overlap = Overlap();
     originals._ApplyVoiceGain.mockImplementationOnce(() => {
       throw overlap;
     });
     expect(() => backend._ApplyVoiceGain(voice)).not.toThrow();
     expect(originals._ApplyVoiceGain).toHaveBeenCalledTimes(2);
-    expect(params.gain.cancelScheduledValues).toHaveBeenCalledTimes(2);
+    expect(params.gain.cancelScheduledValues).toHaveBeenCalledExactlyOnceWith(0);
+    expect(params.gain.cancelScheduledValues.mock.invocationCallOrder[0]).toBeLessThan(originals._ApplyVoiceGain.mock.invocationCallOrder[1]);
+    expect(originals._ApplyVoiceGain.mock.contexts[1]).toBe(backend);
+    // Only the applier's own params.
+    expect(params.rate.cancelScheduledValues).not.toHaveBeenCalled();
+    expect(params.lowPass.cancelScheduledValues).not.toHaveBeenCalled();
     expect(options.onRescheduled).toHaveBeenCalledExactlyOnceWith(overlap, '_ApplyVoiceGain');
+    expect(options.onContained).not.toHaveBeenCalled();
+    originals._ApplyVoiceFilters.mockImplementationOnce(() => {
+      throw Overlap();
+    });
+    backend._ApplyVoiceFilters(voice);
+    expect(params.lowPass.cancelScheduledValues).toHaveBeenCalledExactlyOnceWith(0);
+    expect(params.highPass.cancelScheduledValues).toHaveBeenCalledExactlyOnceWith(0);
+  });
+
+  it('clears the RTPC lane’s bound params on an overlap, skipping unbound ones', () => {
+    const { backend, originals, options } = Guarded();
+    const { voice, params } = FakeVoice({ lane: true });
+    originals._ApplyVoiceSourceEffects.mockImplementationOnce(() => {
+      throw Overlap();
+    });
+    expect(() => backend._ApplyVoiceSourceEffects(voice, false)).not.toThrow();
+    expect(params.cutoff.cancelScheduledValues).toHaveBeenCalledExactlyOnceWith(0);
+    expect(params.drive.cancelScheduledValues).toHaveBeenCalledExactlyOnceWith(0);
+    expect(params.gain.cancelScheduledValues).not.toHaveBeenCalled();
+    expect(originals._ApplyVoiceSourceEffects).toHaveBeenLastCalledWith(voice, false);
+    expect(options.onRescheduled).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: 'NotSupportedError' }), '_ApplyVoiceSourceEffects');
+  });
+
+  it('skips the params a voice does not have', () => {
+    const { backend, originals, options } = Guarded();
+    const { voice, params } = FakeVoice();
+    for (const applier of ['_ApplyVoiceBusGain', '_ApplyVoicePlaybackRate', '_ApplyVoiceBusRtpcGain', '_ApplyVoiceSourceEffects'] as const) {
+      originals[applier].mockImplementationOnce(() => {
+        throw Overlap();
+      });
+      backend[applier](voice);
+      expect(originals[applier]).toHaveBeenCalledTimes(2);
+    }
+    expect(params.bus.cancelScheduledValues).not.toHaveBeenCalled();
+    expect(options.onRescheduled).toHaveBeenCalledTimes(4);
     expect(options.onContained).not.toHaveBeenCalled();
   });
 
@@ -142,14 +172,26 @@ describe('GuardWebAudioBackend', () => {
   it('guards a backend once', () => {
     const { backend, originals } = FakeBackend();
     const options = { onRescheduled: vi.fn(), onContained: vi.fn() };
-    expect(GuardWebAudioBackend(backend, options)).toBe(true);
+    const first = GuardWebAudioBackend(backend, options);
+    expect(first.guarded).toHaveLength(16);
+    expect(first.missing).toEqual([]);
     const applier = backend._ApplyVoiceGain;
-    expect(GuardWebAudioBackend(backend, options)).toBe(false);
+    expect(GuardWebAudioBackend(backend, options)).toEqual({ guarded: [], missing: [] });
     expect(backend._ApplyVoiceGain).toBe(applier);
-    const { voice, params } = FakeVoice();
+    const { voice } = FakeVoice();
     backend._ApplyVoiceGain(voice);
     expect(originals._ApplyVoiceGain).toHaveBeenCalledOnce();
-    expect(params.gain.cancelScheduledValues).toHaveBeenCalledOnce();
+  });
+
+  it('reports and skips the names the instance lacks', () => {
+    const { originals } = FakeBackend();
+    const { _ApplyVoiceSourceEffects: _lane, SeekOnEventMs: _seek, ...rest } = originals;
+    const backend = rest as unknown as CjsWebAudioSoundEngine;
+    const result = GuardWebAudioBackend(backend, { onRescheduled: vi.fn(), onContained: vi.fn() });
+    expect(result.missing).toEqual(['_ApplyVoiceSourceEffects', 'SeekOnEventMs']);
+    expect(result.guarded).toHaveLength(14);
+    expect(result.guarded).toContain('_ApplyVoiceGain');
+    expect('_ApplyVoiceSourceEffects' in backend).toBe(false);
   });
 });
 
