@@ -289,7 +289,7 @@ import { TimelinePlayer, type CueFireResult, type TimelineSettled, type Timeline
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
 import type { CapturedSim, JumpLanding, TapeEntry, TimeControl } from './time-control';
-import { CloneState, EstimateBytes, FirstDifference, type CloneMemo } from './state-capture';
+import { CloneState, EstimateBytes, FirstDifference, type CapturedFields, type CloneMemo } from './state-capture';
 import { ParkSnapshotBytes } from './destiny-snapshot';
 import { ShipTurrets, type TurretsReport } from './turrets';
 import { WarpEffects, type WarpEffectsReport } from './warp-effects';
@@ -727,6 +727,11 @@ interface SimState {
    */
   readonly authored: Maybe<SceneDocument>;
   readonly liveEdits: readonly LiveEdit[];
+  /**
+   * The camera rig and the camera director (Movie mode M4): always captured, restored only while the movie owns the
+   * camera (Director.MovieOwnsCamera); SimDrift ignores them.
+   */
+  readonly camera: { readonly cinema: CapturedFields; readonly director: CapturedFields };
 }
 
 /**
@@ -1095,6 +1100,11 @@ export class Director {
    */
   private silent = false;
   /**
+   * The movie owned the camera when the jump began (Movie mode M4): the jump restores the rig and the camera director
+   * with the scene, the director steps through the re-simulation, and the landing does not rebase or clear them.
+   */
+  private movieCamera = false;
+  /**
    * Counts jump landings: a hull rebuild started by an earlier one is dropped.
    */
   private landings = 0;
@@ -1156,8 +1166,8 @@ export class Director {
       Release: (note) => this.ReleaseCinema({ adopt: true, note }),
       Standby: (on) => this.cinema.SetStandby(on),
       Seed: () => sceneCombatOf(this.scene ?? {}).seed,
-      Settled: () => this.SceneSettled().settled,
-      Silent: () => this.silent
+      Settled: () => this.SceneSettled({ simulation: true }).settled,
+      Silent: () => this.silent && !this.movieCamera
     });
     this.arrivals = new Arrivals({
       world,
@@ -2712,8 +2722,9 @@ export class Director {
     // Replaced, never mutated: one level is enough.
     const shared = { flights: new Map(this.flights), fittings: new Map(this.fittings), unaffectedFlights: new Map(this.unaffectedFlights), defaultWeapons: new Map(this.defaultWeapons) };
     const timeline = this.timeline.Snapshot();
-    const state: SimState = { world, owners, director, shared, timeline, scene: this.scene, authored: this.authored, liveEdits: [...this.liveEdits] };
-    const bytes = ParkSnapshotBytes(world.master) + ParkSnapshotBytes(world.replica) + EstimateBytes({ fields: world.fields, ships: world.ships, owners, director, timeline });
+    const camera = { cinema: this.cinema.Snapshot(), director: this.cameraDirector.Snapshot() };
+    const state: SimState = { world, owners, director, shared, timeline, scene: this.scene, authored: this.authored, liveEdits: [...this.liveEdits], camera };
+    const bytes = ParkSnapshotBytes(world.master) + ParkSnapshotBytes(world.replica) + EstimateBytes({ fields: world.fields, ships: world.ships, owners, director, timeline, camera });
     return { state, bytes };
   }
 
@@ -2744,6 +2755,10 @@ export class Director {
     RefillMap(this.unaffectedFlights, state.shared.unaffectedFlights);
     RefillMap(this.defaultWeapons, state.shared.defaultWeapons);
     this.timeline.Restore(state.timeline);
+    if (this.movieCamera) {
+      this.cinema.Restore(state.camera.cinema);
+      this.cameraDirector.Restore(state.camera.director);
+    }
     this.scene = state.scene;
     this.liveEdits = [...state.liveEdits];
     this.liveFleets = null;
@@ -2816,8 +2831,18 @@ export class Director {
   }
 
   /**
+   * Whether the timeline owns the camera (Movie mode M4, sd-cinema): its camera is on, it started, and its script has a
+   * camera cue or a movie block. A jump then returns the camera to the movie's at the landing (the rig and the camera
+   * director come back with the snapshot and play through the re-simulation) instead of rebasing the viewing camera.
+   */
+  MovieOwnsCamera(): boolean {
+    return this.timeline.camera && this.timeline.startTick != null && (this.timeline.cameraCues || this.authored?.timeline?.movie != null);
+  }
+
+  /**
    * Before a jump restores (sd-time): the transient effects come off (they belong to the time left behind), the turrets
-   * stop aiming, every voice is released, and silent mode starts.
+   * stop aiming, every voice is released, and silent mode starts. Whether the movie owns the camera is decided here,
+   * once for the whole jump.
    */
   private BeginJump(): void {
     this.moduleEffectsDrawn?.Clear();
@@ -2830,6 +2855,7 @@ export class Director {
     this.audio.Mute(true);
     this.swallowedFlashes = [];
     this.departedFractions = new Map(this.ImpactIds().map((id) => [id, this.damage.Fractions(id)]));
+    this.movieCamera = this.MovieOwnsCamera();
     this.silent = true;
   }
 
@@ -2850,7 +2876,8 @@ export class Director {
    * A jump landed (or a failed one put the scene back): silent mode ends; a ship hidden at the target loses its drawn
    * hull, every other drawn hull re-attaches to its new curves, and a ship that needs a hull and has none (destroyed
    * after the target, or hidden since the snapshot) gets a presentation-only rebuild; turrets re-aim, impacts sync,
-   * the renderer's update time and the camera shot are rebased, and the sounds unmute at the rate's setting.
+   * the renderer's update time is reset, the camera shot is rebased (unless the movie owns the camera), and the sounds
+   * unmute at the rate's setting.
    */
   private EndJump({ to, delta, failed }: JumpLanding): void {
     this.silent = false;
@@ -2874,9 +2901,13 @@ export class Director {
     this.departedFractions.clear();
     this.ReplayEffects(to);
     this.engine?.ResetSceneTime(to);
-    this.cinema.Rebase(delta);
-    // The director's memory holds the abandoned future: it picks fresh from the landing.
-    this.cameraDirector.Clear({ keep: 'settings', time: this.SceneSeconds(this.world.tick) });
+    // The movie's camera came back with the scene and stepped through the re-simulation: the next frame plays it on.
+    if (!this.movieCamera) {
+      this.cinema.Rebase(delta);
+      // The director's memory holds the abandoned future: it picks fresh from the landing.
+      this.cameraDirector.Clear({ keep: 'settings', time: this.SceneSeconds(this.world.tick) });
+    }
+    this.movieCamera = false;
     this.audio.Mute(this.time?.muted ?? false);
     this.onChange();
   }

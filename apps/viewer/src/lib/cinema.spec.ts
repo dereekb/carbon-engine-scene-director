@@ -3,6 +3,7 @@ import { catmullRom, distanceVec, poseRoll, quatFromAxisAngle, type CameraMove, 
 import { CINEMA_RELEASE_SECONDS, CinemaReleases, CinemaRig, LetterboxRect } from './cinema';
 import { Ease, EvaluateMoves, Noise, ShakeEnvelope, Smooth, type MoveContext } from './cinema-moves';
 import { TICKS_PER_SECOND } from './clock';
+import { RoundTrip } from './state-capture.spec-helper';
 
 const DEGREES = Math.PI / 180;
 const BASE: CameraPose = { eye: [0, 0, -100], look: [0, 0, 0], up: [0, 1, 0], fov: 40 };
@@ -197,11 +198,19 @@ describe('CinemaRig', () => {
     expect(rig.Report().state).toBe('idle');
   });
 
-  it('stands by for the director: holds a release-ending Claude shot, never the director\'s own, and tells when it releases', () => {
+  it("stands by for the director: holds a release-ending Claude shot, never the director's own, and tells when it releases", () => {
     const scene = Scene([Ship('a', [0, 0, 0])]);
     const rig = new CinemaRig();
     rig.SetStandby(true);
-    rig.Play({ shots: [{ hardpoint: { name: 'chase', ship: 'a' }, duration: 2 }, { hardpoint: { name: 'hero-port', ship: 'a' }, duration: 3 }] }, 0);
+    rig.Play(
+      {
+        shots: [
+          { hardpoint: { name: 'chase', ship: 'a' }, duration: 2 },
+          { hardpoint: { name: 'hero-port', ship: 'a' }, duration: 3 }
+        ]
+      },
+      0
+    );
     expect(rig.ReleasesAt()).toBe(5 * SECOND);
     rig.Frame(0, () => scene);
     expect(rig.HandingBack(4 * SECOND)).toBe(false);
@@ -413,6 +422,44 @@ describe('CinemaRig over MCP', () => {
     rig.Resume(-7 * SECOND);
     rig.Frame(-6 * SECOND, () => moving(100));
     expect(rig.Report().shot?.elapsed).toBeCloseTo(6);
+  });
+
+  it('snapshots (sd-time): a rig restored mid-sequence and framed later is on the shot and progress of an uninterrupted twin (Movie mode M4)', () => {
+    const sequence = {
+      shots: [
+        { hardpoint: { name: 'chase', ship: 'a' }, duration: 2 },
+        { hardpoint: { name: 'hero-port', ship: 'a' }, duration: 3, moves: [{ type: 'dolly', distance: 100 }] }
+      ]
+    };
+    const build = (): CinemaRig => {
+      const built = new CinemaRig();
+      built.Play(sequence, 0);
+      built.Frame(0, () => moving(0));
+      built.Frame(1 * SECOND, () => moving(100));
+      return built;
+    };
+    const rig = build();
+    const twin = build();
+    const trip = RoundTrip(
+      rig,
+      (r) => r.Report(),
+      (r) => {
+        r.Frame(3 * SECOND, () => moving(300));
+        r.Pause(3 * SECOND);
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    // A re-simulation draws no frames: the restored rig is framed next at 4 s, the twin at every second.
+    const restored = rig.Frame(4 * SECOND, () => moving(400));
+    twin.Frame(2 * SECOND, () => moving(200));
+    twin.Frame(3 * SECOND, () => moving(300));
+    const straight = twin.Frame(4 * SECOND, () => moving(400));
+    expect(rig.Report().sequence).toEqual(twin.Report().sequence);
+    expect(rig.Report().sequence).toMatchObject({ index: 1, count: 2 });
+    expect(rig.Report().shot?.progress).toBeCloseTo(twin.Report().shot?.progress ?? -1);
+    Close(restored?.pose.eye ?? [], straight?.pose.eye ?? [0, 0, 0], 3);
   });
 
   it('hands back on stop and replays from where it stopped, blending in from the drawn pose', () => {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { CameraDirectorPicture, CinemaDriver, DirectorShip, SceneFleet, SceneVector } from '@scene-director/scene';
 import { CameraDirector, CameraDirectorText, DIRECTOR_SETTLE_SECONDS, type CameraDirectorCinema, type CameraDirectorPort } from './camera-director';
+import { RoundTrip } from './state-capture.spec-helper';
 
 function Ship(id: string, team: string, position: SceneVector, forward: SceneVector): DirectorShip {
   return { id, team, position, velocity: [0, 0, 0], speed: 0, forward, radius: 50, maxVelocity: 400, health: 1, remaining: 5000, total: 5000 };
@@ -25,6 +26,7 @@ class FakeRig {
   releases: string[] = [];
   standby = false;
   settled = true;
+  silent = false;
 
   Port(): CameraDirectorPort {
     return {
@@ -43,7 +45,7 @@ class FakeRig {
       },
       Seed: () => 7,
       Settled: () => this.settled,
-      Silent: () => false
+      Silent: () => this.silent
     };
   }
 
@@ -152,5 +154,56 @@ describe('CameraDirector', () => {
     director.TakeBack(0, 0.5, 5e6);
     expect(rig.plays).toHaveLength(2);
     expect(director.Lost()).toBe(false);
+  });
+});
+
+describe('CameraDirector snapshots (sd-time)', () => {
+  const Boundaries = (director: CameraDirector, from: number, to: number): void => {
+    for (let tick = from; tick <= to; tick += 1) director.Boundary(tick, tick, tick * 1e7);
+  };
+
+  it('restores its memory, and cuts after the restore exactly as an uninterrupted twin (Movie mode M4)', () => {
+    const build = (): ReturnType<typeof Setup> => {
+      const setup = Setup();
+      setup.director.Command({ pace: 'fast' }, { source: 'claude', ...AT(0) });
+      Boundaries(setup.director, 1, 10);
+      return setup;
+    };
+    const { rig, director } = build();
+    const twin = build();
+    const cinema = { ...rig.cinema };
+    const played = rig.plays.length;
+    const trip = RoundTrip(
+      director,
+      (d) => {
+        // The step cost is a measurement, reset by a restore.
+        const { cost: _cost, ...report } = d.Report(10);
+        return [report, d.Log()];
+      },
+      (d) => Boundaries(d, 11, 20),
+      () => {
+        rig.cinema = cinema;
+        rig.plays.length = played;
+      }
+    );
+    expect(trip.mutated).not.toEqual(trip.before);
+    expect(trip.after).toEqual(trip.before);
+    expect(trip.again).toEqual(trip.snapshot);
+    Boundaries(director, 11, 40);
+    Boundaries(twin.director, 11, 40);
+    expect(rig.plays.length).toBeGreaterThan(played);
+    expect(rig.plays).toEqual(twin.rig.plays);
+    expect(director.Log()).toEqual(twin.director.Log());
+  });
+
+  it('steps nothing while its port is silent, and steps through the boundaries a movie camera re-simulates (Silent false)', () => {
+    const { rig, director } = Setup();
+    director.Command({ pace: 'fast' }, { source: 'claude', ...AT(0) });
+    rig.silent = true;
+    Boundaries(director, 1, 20);
+    expect(rig.plays).toHaveLength(1);
+    rig.silent = false;
+    Boundaries(director, 21, 40);
+    expect(rig.plays.length).toBeGreaterThan(1);
   });
 });

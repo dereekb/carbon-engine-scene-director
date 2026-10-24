@@ -33,6 +33,7 @@ import {
   type CinemaDriver,
   type DirectorCutLogEntry
 } from '@scene-director/scene';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 type JsonObject = Record<string, unknown>;
 
@@ -80,9 +81,14 @@ export interface CameraDirectorPort {
    * The document's combat seed.
    */
   Seed(): number;
+  /**
+   * The scene is settled for the simulation (the page's `SceneSettled({ simulation: true })`), so a re-simulation and a
+   * straight run gate the first pick the same.
+   */
   Settled(): boolean;
   /**
-   * A time-control jump re-simulates silently: the director does nothing.
+   * A time-control jump re-simulates silently: the director does nothing, unless the movie owns the camera (its state
+   * is restored and it steps through the re-simulation as the straight run did).
    */
   Silent(): boolean;
 }
@@ -107,6 +113,11 @@ export interface CameraDirectorCommandResult {
 }
 
 type Yielded = 'user' | 'claude' | 'timeline';
+
+/**
+ * The director's time-control capture (Movie mode M4, sd-time): the port is wiring, the step cost a measurement.
+ */
+const CAMERA_DIRECTOR_CAPTURE: CaptureOptions = { wiring: ['port'], reset: { cost: () => ({ lastMs: 0, maxMs: 0 }) } };
 
 export class CameraDirector {
   private on = false;
@@ -292,6 +303,27 @@ export class CameraDirector {
         this.yielded = null;
       }
     }
+  }
+
+  /**
+   * The director for a time-control snapshot (Movie mode M4, sd-time): on, source, settings, memory, events, yield and
+   * the last step. The page restores it only while the movie owns the camera.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, CAMERA_DIRECTOR_CAPTURE, memo);
+  }
+
+  /**
+   * Puts a Snapshot back; the step cost starts over.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, CAMERA_DIRECTOR_CAPTURE, memo);
   }
 
   /**

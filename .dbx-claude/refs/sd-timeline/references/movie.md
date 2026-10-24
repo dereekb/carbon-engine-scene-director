@@ -2,9 +2,10 @@
 
 > The page side of Movie mode (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`).
 > The document side (event cue syntax, `arms`, the check-second walk, chains, pruning, the `movie` block, `set_movie`)
-> is the main `sd-timeline` REF ("Event cues", "The movie block"). **M2 and M3 have landed** (the page plays event cues
-> on their events; script edits re-simulate, "Edit-resimulate" below); M4 the movie camera across jumps, M5 the `movie`
-> tool and the movie's look and end, M6 the real-GPU movie are next.
+> is the main `sd-timeline` REF ("Event cues", "The movie block"). **M2, M3 and M4 have landed** (the page plays event
+> cues on their events; script edits re-simulate, "Edit-resimulate" below; the movie camera comes back the same after a
+> jump, "The movie camera" below); M5 the `movie` tool and the movie's look and end, M6 the full verify-page and the
+> real-GPU movie are next.
 
 ## Files
 
@@ -22,6 +23,8 @@
 | `apps/viewer/src/lib/time-control.ts` | M3: `MarkOrigin`, `AbandonFuture`, `Resimulate` over `Run`, the port's `AfterRestore` (`time-control.spec.ts`; `sd-time`) |
 | `apps/viewer/src/lib/director.ts` | M3: `ScriptEdit` in `EditNow`, `PrefetchFor`, `MarkTimelineOrigin`, `ScriptAfterRestore`, `SimState.authored`, `AddCue`'s `resimulated` |
 | `apps/viewer/src/lib/movie.spec.ts` | M3: the determinism oracle (`TimelineRig`) |
+| `apps/viewer/src/lib/cinema.ts` / `camera-director.ts` | M4: `CinemaRig.Snapshot` / `Restore`, `CameraDirector.Snapshot` / `Restore` (`cinema.spec.ts`, `camera-director.spec.ts`) |
+| `apps/viewer/src/lib/director.ts` / `timeline.ts` | M4: `MovieOwnsCamera`, `movieCamera`, `SimState.camera`, the camera director port's `Silent()` / `Settled()`; `TimelinePlayer.cameraCues` |
 
 ## The record
 
@@ -155,12 +158,30 @@ instead of `missed`. This applies to every scripted timeline, not only movies.
   a future-only edit surviving `back: 12` (to tick 45).
 - **Cost**: one synchronous task, as a jump (`sd-time` "Script edits re-simulate").
 
+## The movie camera (M4)
+
+A jump or a re-simulation inside a movie lands on the movie's camera, the one the straight run had there, instead of
+rebasing the viewing camera. The rule, the capture and the limits are `sd-cinema` "Across a time-control jump"; in
+short: `Director.MovieOwnsCamera()` (the timeline's camera on, started, a camera cue or a `movie` block), decided at
+`BeginJump`; `SimState.camera` holds the rig and the camera director in every snapshot, restored only then; the
+director steps through the re-simulation; `EndJump` skips `Rebase` and `Clear`. The director's settle gate reads the
+simulation's check, so a re-simulation gates its first pick as the straight run did.
+
 ## Limits
 
 - An event's facts are the document membership at the time (a ship moved to another fleet by a live edit reports its
   new fleet).
 - Live input during play changes the run (as for timed cues); a waiting cue whose event never comes and has no
   `latest` waits for the rest of the run and keeps the timeline from `done`.
+
+## verify-page evidence (M4, 2026-10-24, dbxpc, headless)
+
+- **(f)** `movie: the camera after a seek is the movie camera …`: a library `hero` cue at 2 (6 s, release) and an
+  `auto_camera { pace: fast }` cue at 10, two flying Rifters, played to 25 s. `seek { timeline: 5 }` (paused): driver
+  `timeline`, the hero at 3.00 s, progress 0.50. `seek { timeline: 18 }`: the director driving, its cut log to 18 the
+  straight run's (overlook the engagement at 10, flyby b at 16). A scene with no camera cue: Claude's chase at 3.02 s
+  before and after `back: 4` (the rebase). In an `--only` batch with the warm-up and M3's (c) and (d), all ok.
+- The full headless verify-page (M3's and M4's) runs in M6.
 
 ## verify-page evidence (M3, 2026-10-24, dbxpc, headless)
 

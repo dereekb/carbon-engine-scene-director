@@ -110,7 +110,11 @@ events and plays the picks through the rig as driver `director`.
   frame and the director takes back at the first boundary at or past `ReleasesAt()`. `stop_shot` over them hands back
   at once; over the director's own shot, the pointer, a camera change and `frame_camera` yield to the user until
   `auto_camera` or D. `timeline { camera: false }` and a load turn a cue-sourced director off; a jump clears its memory
-  (`EndJump`). A shot lost between boundaries (`Lost()`) is re-picked in `TrackCamera`, the one frame-timed path.
+  (`EndJump`) unless the movie owns the camera ("Across a time-control jump"). A shot lost between boundaries (`Lost()`)
+  is re-picked in `TrackCamera`, the one frame-timed path. **The settle gate** (a `take` waits up to
+  `DIRECTOR_SETTLE_SECONDS` 10 for a settled scene) reads the simulation's check (`SceneSettled({ simulation: true })`,
+  `sd-time`), so a re-simulation and a straight run gate the same; it used to read the drawing-inclusive one, which
+  waits on cue-added ships' builds.
 - **Decisions** run at the end of the Director's `OnBoundary` listener, from `CameraFacts()` (master state, never drawn),
   stamped at `OnBeforeBoundary`'s exact grid time; warp and prop-mod events reach the next boundary.
 
@@ -154,8 +158,9 @@ events and plays the picks through the rig as driver `director`.
   document's combat seed. A scripted scene cuts the same after `timeline restart` (verify-page). A Claude-sourced
   director stays on across a load or restart and picks at t = 0, and keeps the settings a cue changed: start it from
   the cue (or turn it off first) for an exactly repeatable opening.
-- **Time control** (`sd-time`): it steps every boundary, fast-forward included (holds in scene time), is neither
-  journaled nor snapshotted, and `EndJump` clears its memory (settings kept).
+- **Time control** (`sd-time`): it steps every boundary, fast-forward included (holds in scene time), is not
+  journaled, and is snapshotted with the scene (`CameraDirector.Snapshot` / `Restore`: wiring `port`, `cost` reset) but
+  restored only while the movie owns the camera; otherwise `EndJump` clears its memory (settings kept).
 - **Cost**: `stepCameraDirector` on 500 ships ~4 ms in node (step.spec's 20 ms budget is the best of three); on the page
   ~2 ms per boundary (once a second) for 59 ships, including the picture.
 - **Limits**: a second kill inside a kill framing's hold is not cut to, and the next pick may skip its blast; wides of
@@ -176,9 +181,42 @@ movement-only: axis `motion`, three scales, one side; (h) camera off skips the c
 
 ## Across a time-control jump (`sd-time`)
 
-`CinemaRig.Rebase(delta)` shifts every scene-tick stamp (`run.start`, `resumeBlend.start`, `release.start`, `pausedAt`,
-`lastTick`, the report time) by the jump: a playing shot continues at its progress, a paused one stays paused, a release
-blend runs on. The camera is a viewing control, never rewound (spec'd in `cinema.spec.ts`).
+**The movie camera** (Movie mode M4, `sd-timeline` doc `movie`). The timeline **owns the camera**
+(`Director.MovieOwnsCamera()`) when its camera is on (`timeline.camera`), it has started (`startTick`), and its script
+has a camera cue (`TimelinePlayer.cameraCues`) or a `movie` block. Decided once per jump, at `BeginJump`
+(`Director.movieCamera`). While it does, a jump (or a script edit's re-simulation) returns the camera to the movie's
+at the landing:
+
+- **Captured always**: `CinemaRig.Snapshot()` / `Restore()` (`CINEMA_CAPTURE`, no wiring: shots, run, release, last
+  pose, smoothing, stopped record, standby) and `CameraDirector.Snapshot()` / `Restore()` (on, source, settings,
+  memory, events, yield, last step; wiring `port`, `cost` reset), in `SimState.camera` (not `SimOwners`: they restore
+  only conditionally). `SimDrift` ignores them.
+- **Restored** in `RestoreSim` only when the movie owns the camera.
+- **During the silent re-simulation** camera cues play on the rig as always (a logical update; `Frame` is not called),
+  and the director steps: its port's `Silent()` is `silent && !movieCamera`, its `Play` goes to the rig. So the rig's
+  and the director's state at the landing are the straight run's.
+- **At `EndJump`**: no `Rebase` and no `cameraDirector.Clear`. The first frame after the landing advances a sequence
+  through the durations that passed (`Frame`'s loop), releases a finished shot and resolves anchors.
+- **Claude's `play_shot`** while a movie owns the camera is a live preview: a jump or a re-simulation returns the
+  movie's camera.
+- **Limits**: an anchored hardpoint (flyby, warp-landing) whose shot started during the re-simulation anchors at the
+  landing's first frame, not at the shot's start (a follow-up); a shot whose subject vanished between boundaries is
+  re-picked at the next boundary in the re-simulation but at the next frame in straight play (`Lost` / `TakeBack` are
+  frame-timed); the lag smoothing snaps at the landing; the director stepping adds ~2 ms per re-simulated tick (59
+  ships). An edit that adds the script's first camera cue re-simulates without the restore (the jump began before it
+  owned the camera): its shot still plays from its cue time (a re-simulation lands with delta 0).
+- Spec'd in `cinema.spec.ts` (a rig restored mid-sequence and framed later is on an uninterrupted twin's shot,
+  progress and pose) and `camera-director.spec.ts` (a restored director cuts as its twin; `Silent()` gates the step).
+
+**Otherwise the camera is a viewing control**, never rewound: `CinemaRig.Rebase(delta)` shifts every scene-tick stamp
+(`run.start`, `resumeBlend.start`, `release.start`, `pausedAt`, `lastTick`, the report time) by the jump: a playing shot
+continues at its progress, a paused one stays paused, a release blend runs on (spec'd in `cinema.spec.ts`).
+
+verify-page `movie: the camera after a seek …` (headless, 2026-10-24, dbxpc): a library `hero` cue at 2 (6 s, release)
+and an `auto_camera { pace: fast }` cue at 10 on two flying Rifters, played to 25 s: `seek { timeline: 5 }` gave driver
+`timeline`, the hero at 3.00 s (progress 0.50); `seek { timeline: 18 }` gave the director driving with the straight
+run's cut log to 18 (overlook at 10, flyby at 16); a scene with no camera cue kept Claude's chase at 3.02 s across
+`back: 4` (the rebase).
 
 ## Hardpoints
 

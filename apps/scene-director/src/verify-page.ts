@@ -5381,6 +5381,45 @@ try {
     return `a cue at 40 s after back 5: pending, not re-simulated; latest ${time?.latest} = now ${time?.seconds}`;
   });
 
+  await Check('movie: the camera after a seek is the movie camera: the cue shot at its progress, the director on its straight-run cuts', async () => {
+    const MovieCamera = async (what: string, test: (cinema: CinemaStateReport) => boolean): Promise<CinemaStateReport> => cinemaOf(await WaitFor(what, 10, (polled) => (test(cinemaOf(polled)) ? null : Show({ driver: cinemaOf(polled).driver, shot: cinemaOf(polled).shot }))));
+    try {
+      await call('auto_camera', { on: false });
+      await LoadTimeline({
+        ships: [Scripted('a', [0, 0, 0], { orders: [{ type: 'direction', direction: [0, 0, 1] }] }), Scripted('b', [0, 0, 6000], { orders: [{ type: 'direction', direction: [1, 0, 0] }] })],
+        timeline: [
+          { id: 'hero', at: 2, play_shot: { shot: 'hero', ship: 'a', duration: 6, end: 'release' } },
+          { id: 'director', at: 10, auto_camera: { pace: 'fast' } }
+        ]
+      });
+      await Played('the timeline reaches 25 s', 60, 25);
+      const start = (await TimelineTool()).startedAt ?? 0;
+      const CutsTo = (log: readonly DirectorCutReport[], second: number): string[] => log.filter((cut) => cut.tick >= start && cut.tick <= start + second).map((cut) => `${cut.tick - start} ${cut.framing} ${cut.subject} ${cut.side}`);
+      const straight = CutsTo(await DirectorLog(), 18);
+      await TimeControl({ seek: { timeline: 5 }, pause: true });
+      const early = await MovieCamera('the hero cue shot at 5 s', (cinema) => cinema.driver === 'timeline' && cinema.shot != null);
+      Expect(Math.abs((early.shot?.elapsed ?? 0) - 3) < 0.25 && Math.abs((early.shot?.progress ?? 0) - 0.5) < 0.05, Show({ driver: early.driver, shot: early.shot }));
+      await TimeControl({ seek: { timeline: 18 }, pause: true });
+      const late = await MovieCamera('the director at 18 s', (cinema) => cinema.driver === 'director');
+      const seeked = CutsTo(await DirectorLog(), 18);
+      Expect(straight.length >= 2 && Show(seeked) === Show(straight) && DirectorOf(await call<ViewerState>('get_state'))?.state === 'driving', `straight: ${straight.join(', ')}\nafter the seek: ${seeked.join(', ')} (driver ${late.driver})`);
+      // No camera cue: the camera stays a viewing control, and a jump rebases Claude's shot. Pause survives a load.
+      await Playing();
+      await LoadTimeline({ ships: [Scripted('a', [0, 0, 0])], timeline: [{ id: 'go', at: 1, ...Direction('a', [0, 0, 1]) }] });
+      await Played('the timeline reaches 8 s', 40, 8);
+      await call('play_shot', { hardpoint: { name: 'chase', ship: 'a' }, duration: 30 });
+      await Played('the timeline reaches 11 s', 40, 11);
+      await TimeControl({ pause: true });
+      const before = await MovieCamera("Claude's shot", (cinema) => cinema.driver === 'claude' && cinema.shot != null);
+      await TimeControl({ back: 4, pause: true });
+      const after = await MovieCamera("Claude's shot after back 4", (cinema) => cinema.driver === 'claude' && cinema.shot != null);
+      Expect(Math.abs((after.shot?.elapsed ?? 0) - (before.shot?.elapsed ?? -1)) < 0.25, `before ${Show(before.shot)}, after ${Show(after.shot)}`);
+      return `seek 5: timeline hero at ${early.shot?.elapsed.toFixed(2)} s (${early.shot?.progress?.toFixed(2)}); seek 18: the straight run's ${straight.length} cuts (${straight.join(', ')}); no camera cue: Claude's shot rebased (${before.shot?.elapsed.toFixed(2)} s before and after back 4)`;
+    } finally {
+      await Playing();
+    }
+  });
+
   const errors = await call<LogEntry[]>('page_log', { level: 'error', limit: 20 });
   const unexpected = errors.filter((entry) => !/bogus|nosuchhull|renderer unavailable/u.test(entry.message));
   results.push(`info  page errors: ${errors.length} (${unexpected.length} unexpected)`);

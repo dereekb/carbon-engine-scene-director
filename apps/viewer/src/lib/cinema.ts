@@ -15,7 +15,7 @@
  *   the orbit is first set to the cinematic eye and look, so a drag continues from the image.
  * - A subject that left the scene ends the shot (released and forgotten, with a note).
  *
- * Node-tested: it imports only the scene package, the clock and cinema-moves.ts.
+ * Node-tested: it imports only the scene package, the clock, cinema-moves.ts and state-capture.ts.
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -48,6 +48,7 @@ import {
 } from '@scene-director/scene';
 import { Ease, EvaluateMoves, SeedOf, Smooth, TrackLag } from './cinema-moves';
 import { TICKS_PER_SECOND } from './clock';
+import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 
 /**
  * Seconds the release blend back to the orbit camera takes.
@@ -63,6 +64,11 @@ export const CINEMA_DEFAULT_ASPECT = 16 / 9;
  * A free pose's field of view when the shot gives none, degrees.
  */
 export const CINEMA_DEFAULT_FOV = 45;
+
+/**
+ * The rig's time-control capture (Movie mode M4, sd-time): every field is plain state, so it has no wiring.
+ */
+const CINEMA_CAPTURE: CaptureOptions = {};
 
 export type CinemaState = 'idle' | 'playing' | 'paused' | 'releasing';
 
@@ -445,6 +451,27 @@ export class CinemaRig {
     if (this.pausedAt != null) this.pausedAt += delta;
     if (this.lastTick != null) this.lastTick += delta;
     this.reportedAt += delta;
+  }
+
+  /**
+   * The rig for a time-control snapshot (Movie mode M4, sd-time): the shots, the run, the release, the last pose, the
+   * smoothing, the stopped record and the standby. The director restores it only while the movie owns the camera.
+   *
+   * @param memo - Shared with the other owners captured into the same snapshot.
+   * @returns Plain data.
+   */
+  Snapshot(memo?: CloneMemo): CapturedFields {
+    return CaptureFields(this, CINEMA_CAPTURE, memo);
+  }
+
+  /**
+   * Puts a Snapshot back: the stamps are the snapshot's scene ticks, so the next frame plays on from them.
+   *
+   * @param state - From Snapshot.
+   * @param memo - Shared with the other owners restored from the same snapshot.
+   */
+  Restore(state: unknown, memo?: CloneMemo): void {
+    RestoreFields(this, state, CINEMA_CAPTURE, memo);
   }
 
   /**

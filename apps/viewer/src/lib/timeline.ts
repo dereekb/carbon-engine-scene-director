@@ -215,6 +215,13 @@ export class TimelinePlayer {
   }
 
   /**
+   * Whether the loaded script has a camera cue (Movie mode M4: with one, the movie owns the camera across a jump).
+   */
+  get cameraCues(): boolean {
+    return this.data.records.some((record) => record.kind === 'camera');
+  }
+
+  /**
    * Whole seconds played (0 before t = 0).
    */
   get time(): number {

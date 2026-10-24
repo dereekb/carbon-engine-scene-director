@@ -16,7 +16,8 @@ again (explosions, missiles in flight, module beams and overlays, warp flashes),
 `seek { timeline }`), a jump across a timeline warp-in cue, and the real-GPU check. No smooth reverse playback (user,
 2026-10-22). **Movie mode M3** (`sd-timeline` doc `movie`): the timeline's pinned origin, `AbandonFuture`, script
 edits re-simulating through `Resimulate` (over `Run`, the jump's core) instead of cutting, and `AfterRestore` (below,
-"Script edits re-simulate").
+"Script edits re-simulate"). **Movie mode M4**: the snapshot holds the camera (`SimState.camera`), restored while the
+movie owns the camera (below, "Presentation across a jump"; `sd-cinema`).
 
 ## Files
 
@@ -31,7 +32,8 @@ edits re-simulating through `Resimulate` (over `Run`, the jump's core) instead o
 | `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
 | T3 planners (node-tested) | `damage.ts` `ImpactsHealed`; `explosion-plan.ts` `ExplosionReplays`; `module-fx.ts` `RunningModuleFxCommands` over `ShipModules.RunningEffects`; `warp-fx.ts` `WarpFlashReplays`, `WARP_IN_FLASH_SECONDS` / `WARP_OUT_FLASH_SECONDS`; `missile-flights.ts` `InFlightAt`; `missile-effects.ts` `Launch(…, { midFlight })`; `arrivals.ts` `AwaitsBuild` |
 | `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`) |
-| `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context, `sd-runtime`), `CinemaRig.Rebase(delta)` (`sd-cinema`), `PageAudio.ReleaseAll()` |
+| `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context, `sd-runtime`), `CinemaRig.Rebase(delta)` and (M4) `Snapshot()` / `Restore()` (`sd-cinema`), `PageAudio.ReleaseAll()` |
+| `camera-director.ts` | M4: `CameraDirector.Snapshot()` / `Restore()` (wiring `port`, `cost` reset) |
 | `apps/viewer/src/lib/state-capture.ts` | `CaptureFields` / `RestoreFields` / `CloneState` / `EstimateBytes`: the generic per-tick state capture every owner's `Snapshot()` / `Restore()` is a one-liner over. Node-tested |
 | `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark` (stream + scalar overlay), `CaptureScalars` / `OverlayScalars`, `STRUCTURAL_BALL_FIELDS` / `STRUCTURAL_PARK_FIELDS`, `ParkSnapshotBytes`, `WARMUP_TICKS` 3, `WARMUP_SAMPLES_PER_TICK` 30. `runtime-sim` only |
 | `apps/viewer/src/lib/destiny.ts` | `Snapshot()` / `Restore()` (`DestinySnapshot`), getter-backed `master` / `replica`, `SampleCurves(time)` |
@@ -101,7 +103,8 @@ edits re-simulating through `Resimulate` (over `Run`, the jump's core) instead o
 - **A snapshot** (`Director.CaptureSim`) is taken right after an evolved tick at that first boundary, then every `every`
   scene seconds on the grid from it (`(tick − start) % every == 0`), into a ring sorted by tick. Each holds the world
   (both parks + entries), every owner, the director's per-tick fields, the timeline player, the live scene and its live
-  edits, and its estimated bytes (`ParkSnapshotBytes` × 2 + `EstimateBytes` of the rest). A capture slower than
+  edits, the camera (the rig and the camera director, M4: restored only while the movie owns the camera), and its
+  estimated bytes (`ParkSnapshotBytes` × 2 + `EstimateBytes` of the rest). A capture slower than
   `CAPTURE_SLOW_MS` (15) doubles the spacing (reported in `window.every`).
 - **The ring trims** after each snapshot and on `Configure`: snapshots older than `window` seconds before the latest
   go, then the oldest past the byte budget (the latest always stays), then the tape before the earliest snapshot. The
@@ -194,11 +197,16 @@ restore runs again the tape entries from the snapshot's tick on (`ReplaysAfter`;
   retune, no re-plan, no cut; dropped if another jump lands first); every turret re-aims at `targets.Of`; impacts sync
   for every ship and object, cleared first on a hull whose armor or structure fraction rose across the jump
   (`ImpactsHealed`: the runtime's `SetImpactDamageState` only ever adds armor impacts, so a jump back to full HP kept
-  the dying hull's holes and fires, drawn as big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)`; `Mute(rate > 2)`; `onChange`.
+  the dying hull's holes and fires, drawn as big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)` and the camera director's `Clear`, unless the movie owns the camera (below); `Mute(rate > 2)`; `onChange`.
 - **The camera director** (`auto_camera`, `sd-cinema`) steps every boundary (fast-forward included, holds in scene
-  time), is neither journaled nor snapshotted (the camera is presentation), steps nothing during a jump's silent
-  re-simulation (`Silent()`), and `EndJump` clears its memory with
-  `Clear({ keep: 'settings' })` so its first picks after a jump never chase the abandoned future.
+  time) and is not journaled. A viewing camera (the movie does not own it): it steps nothing during a jump's silent
+  re-simulation (`Silent()`), and `EndJump` clears its memory with `Clear({ keep: 'settings' })` so its first picks
+  after a jump never chase the abandoned future.
+- **The movie camera** (M4, `sd-cinema` "Across a time-control jump"): when `Director.MovieOwnsCamera()` at
+  `BeginJump` (the timeline's camera on, started, a camera cue or a `movie` block), `RestoreSim` restores the rig and
+  the camera director from `SimState.camera`, the director steps through the re-simulation (`Silent()` false) and plays
+  its picks on the rig as camera cues do, and `EndJump` neither rebases nor clears: the landing shows the straight run's
+  camera. `SimDrift` ignores the camera.
 
 ## Effects across a jump (T3)
 
