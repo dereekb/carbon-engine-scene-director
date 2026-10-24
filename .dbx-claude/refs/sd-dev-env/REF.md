@@ -141,11 +141,49 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 
 ## verify-page (everything but drawing)
 
-`npx nx run scene-director:verify-page` (`apps/scene-director/src/verify-page.ts`) drives the real page in headless
-Chromium through the hub's tools, against a running tools-core: boot, the hub link, SOF builds from real EVE data,
-edits, storage and reload, prop mod audio events (launched with `--autoplay-policy=no-user-gesture-required`; it sees
-events posted, it cannot hear them). It uses temp file stores. `--only <text>` runs the checks whose label contains the
-text (any case; `a|b` for either) after the always-run connect check.
+verify-page (`apps/scene-director/src/verify-page.ts`, the `scene-director:verify-page` target) drives the real page in
+headless Chromium through the hub's tools, against a running tools-core: boot, the hub link, SOF builds from real EVE
+data, edits, storage and reload, prop mod audio events (launched with `--autoplay-policy=no-user-gesture-required`; it
+sees events posted, it cannot hear them). It uses temp file stores. `--only <text>` runs the checks whose label contains
+the text (any case; `a|b` for either) after the always-run connect check.
+
+**Run it through `dbx-claude-test`, not Bash.** The marker declares two suites (`tests.suites`):
+
+- `verify-page`: needs tools-core (`requires`), so only dbxpc runs it. Elsewhere the call is refused, naming dbxpc and
+  `dbx-claude-handoff`. It is `exclusive`: other lint / test / build / commit runs on the machine wait for it.
+- `verify-page-no-eve`: the `--eve-data off` run. It needs no tools-core, so it runs on any machine.
+
+`testName` is the `--only` filter: `dbx-claude-test { suite: "verify-page", testName: "combat:|logi:" }`. The run is a
+background job with a parsed per-check verdict and live progress. A long run in a loop pane parks the item at
+`awaiting-tests` and settles it back with a per-check note. Batch several filters into one wait with
+`suites: [{ suite: "verify-page", testName: "fleets:" }, { suite: "verify-page", testName: "time:" }]`. A raw Bash run
+of the target or the built script gets a one-time hint with the translated call. That hint (2026-10-24) translates a
+raw `--eve-data off` run to `verify-page` and drops the flag: use `verify-page-no-eve` instead.
+
+**Close-out checks** (`tests.closeOut`, dbx-claude's `dbxc-queue` ref):
+
+- **Default list**: an item whose changes touch `packages/viewer-engine/src/`, `apps/viewer/src/`,
+  `apps/scene-director/src/lib/hub/` or `packages/scene/src/` gets two entries before it closes:
+  - all of `verify-page-no-eve`: 26 checks in ~3 min on the Mac (2026-10-24). It runs on any machine.
+  - `verify-page` with the smoke filter
+    `load_scene builds|patch_scene moves|fleet membership|round-trip through|survives a reload`: the connect check, an
+    SOF build, a patch, the fleet tree, the IndexedDB and file saves, and a reload. That is the least of the
+    first-scene chain that runs, since each check builds on the one before.
+
+  A machine without tools-core runs the no-EVE entry, closes the item, and leaves the smoke entry on the standing
+  `owed-tests-dbxpc` item.
+- **Area map**: one `areas` entry per row of the table below, with the row's prefixes as its `testName`. Two rows
+  have no entry: `dev-env:` (the screenshot) and `no EVE data:`, which the default list already runs. An area's
+  `paths` are the ref's `pathContains` triggers plus a few page files those miss: `camera-director`, `movie.`,
+  `missile-`, `capacitor`, `pilot-facts`, `arrivals`, `fleet-view`. Writing a file in an area while holding a claimed
+  item fires the `test-area` hint once, with the exact `dbx-claude-queue-add { id, requiredTests }` call. Do not add
+  an area whose `add` is exactly `{ suite: "verify-page-no-eve" }`. The proof rule would take that area's paths as the
+  default entry's covered paths, and an old pass would then skip the default.
+- **Adding checks to an item**: put entries in `requiredTests`, e.g.
+  `{ suite: "verify-page", testName: "export:|record:" }`. Do this when enqueuing the item or later through
+  `dbx-claude-queue-add { id, requiredTests }`. Removing an entry, a default one included, takes
+  `waiveTests: [{ entry, reason }]`. A passing run keeps proving an entry until a file in its area (or the suite's
+  `paths`) changes.
 
 - **Output**: each result prints as its check ends (`ok    ` / `FAIL  ` / `skip  `, `info  ` notes, then a tally
   `N ok, M FAIL, K skip`), so a run that is killed keeps every result it reached.
@@ -188,9 +226,10 @@ text (any case; `a|b` for either) after the always-run connect check.
 | `dev-env:` | `sd-dev-env` | the screenshot (with a renderer) |
 | `no EVE data:` | `sd-dev-env` | the `--eve-data off` run (`record:` runs there too) |
 
-The full suite is ~210 checks and ~40 min (2026-10-24): run it as `--only` area batches, never alongside the test
-suites. The M6 runner and its label list are `.scratch/movie-gpu/batch.mjs` / `chain.sh` on dbxpc (`sd-timeline` doc
-`movie`, the M6 evidence; its labels predate the area prefixes, but a substring filter still matches).
+The full suite is ~210 checks and ~40 min (2026-10-24): run it as area batches (`testName` per area), never the whole
+suite for one item. `exclusive` keeps it from running alongside the other test suites. The M6 runner
+`.scratch/movie-gpu/batch.mjs` / `chain.sh` on dbxpc (`sd-timeline` doc `movie`) is superseded by the
+`verify-page` suite: its labels predate the area prefixes and it runs outside the job queue.
 
 **Headless Chromium in this WSL has no WebGPU adapter** (Dawn finds SwiftShader but cannot create its context
 provider). Do not sink time into headless GPU.

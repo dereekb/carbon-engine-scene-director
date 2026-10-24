@@ -25,6 +25,411 @@
       "fix"
     ]
   },
+  "tests": {
+    "suites": {
+      "verify-page": {
+        "project": "scene-director",
+        "target": "verify-page",
+        "format": "tap",
+        "nameFlag": "--only",
+        "extraArgs": [
+          "--tap"
+        ],
+        "requires": [
+          "tools-core"
+        ],
+        "exclusive": true,
+        "estimateMs": 2400000,
+        "timeoutMs": 3600000,
+        "description": "The real page in headless Chromium through the hub, against tools-core: everything but drawing (sd-dev-env). testName is the --only filter; area prefixes like \"combat:\" pick an area.",
+        "paths": [
+          "packages/viewer-engine/src/",
+          "apps/viewer/src/",
+          "apps/scene-director/src/",
+          "packages/scene/src/"
+        ],
+        "guard": {
+          "mode": "hint",
+          "commands": [
+            "dist/apps/scene-director/verify-page.js"
+          ]
+        }
+      },
+      "verify-page-no-eve": {
+        "project": "scene-director",
+        "target": "verify-page",
+        "format": "tap",
+        "nameFlag": "--only",
+        "extraArgs": [
+          "--tap",
+          "--eve-data",
+          "off"
+        ],
+        "exclusive": true,
+        "estimateMs": 200000,
+        "timeoutMs": 900000,
+        "description": "verify-page --eve-data off: its own no-EVE-data hub, no tools-core needed, runs the \"no EVE data:\" and \"record:\" checks on any machine (sd-dev-env).",
+        "paths": [
+          "packages/viewer-engine/src/",
+          "apps/viewer/src/",
+          "apps/scene-director/src/",
+          "packages/scene/src/"
+        ],
+        "guard": {
+          "mode": "hint",
+          "commands": [
+            "dist/apps/scene-director/verify-page.js"
+          ]
+        }
+      }
+    },
+    "closeOut": {
+      "default": [
+        {
+          "suite": "verify-page",
+          "testName": "load_scene builds|patch_scene moves|fleet membership|round-trip through|survives a reload",
+          "reason": "Page smoke: the tab connects, SOF builds from EVE data, a patch, the fleet tree, saves and a reload",
+          "when": {
+            "paths": [
+              "packages/viewer-engine/src/",
+              "apps/viewer/src/",
+              "apps/scene-director/src/lib/hub/",
+              "packages/scene/src/"
+            ]
+          }
+        },
+        {
+          "suite": "verify-page-no-eve",
+          "reason": "Runs on any machine (~3 min): the page, the hub link, stand-in staging, combat and the brain without EVE data, so a machine without tools-core proves what it can before the item closes",
+          "when": {
+            "paths": [
+              "packages/viewer-engine/src/",
+              "apps/viewer/src/",
+              "apps/scene-director/src/lib/hub/",
+              "packages/scene/src/"
+            ]
+          }
+        }
+      ],
+      "areas": [
+        {
+          "id": "scene-document",
+          "description": "the scene document, Destiny placement and flight, orders, warp, prop mods and their audio, the fleet tree, saves and reload (the first-scene chain)",
+          "paths": [
+            "packages/scene/src/lib/scene.ts",
+            "packages/scene/src/lib/json.ts",
+            "packages/scene/src/lib/orders",
+            "packages/scene/src/lib/prop-mods/",
+            "packages/viewer-engine/src/lib/director.ts",
+            "packages/viewer-engine/src/lib/camera.ts",
+            "packages/viewer-engine/src/lib/store.ts",
+            "packages/viewer-engine/src/lib/destiny.ts",
+            "packages/viewer-engine/src/lib/clock",
+            "packages/viewer-engine/src/lib/warp",
+            "packages/viewer-engine/src/lib/boosters",
+            "packages/viewer-engine/src/lib/flight",
+            "packages/viewer-engine/src/lib/start-viewer",
+            "packages/viewer-engine/src/lib/prop-mod",
+            "packages/viewer-engine/src/lib/audio",
+            "packages/viewer-engine/src/lib/fleet-view",
+            "carbonenginejs-server.d.ts",
+            "hub/saved-scenes",
+            "store/scene-files",
+            "store/document-files"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "scene-document:"
+            }
+          ]
+        },
+        {
+          "id": "ship-stats",
+          "description": "search_hulls, ship_stats and the skill table",
+          "paths": [
+            "packages/scene/src/lib/stats/",
+            "hub/ship-data",
+            "hub/ship-stats-tool"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "ship-stats:"
+            }
+          ]
+        },
+        {
+          "id": "fittings",
+          "description": "fits through the dogma path, module activation, tackle (webs, scrams, neuts)",
+          "paths": [
+            "packages/scene/src/lib/fitting/",
+            "packages/scene/src/lib/stats/ship-stats",
+            "hub/dogma-data",
+            "hub/sde-client",
+            "hub/ship-stats-tool",
+            "packages/viewer-engine/src/lib/fittings",
+            "packages/viewer-engine/src/lib/modules",
+            "packages/viewer-engine/src/lib/module-cycle",
+            "packages/viewer-engine/src/lib/damage",
+            "packages/viewer-engine/src/lib/module-fx",
+            "packages/viewer-engine/src/lib/module-audio",
+            "packages/viewer-engine/src/lib/module-effects",
+            "packages/viewer-engine/src/lib/capacitor"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "fittings:"
+            }
+          ]
+        },
+        {
+          "id": "weapons",
+          "description": "default guns, turrets on their weapon cycle, targets, turret sounds",
+          "paths": [
+            "packages/scene/src/lib/weapons/",
+            "hub/weapon-data",
+            "packages/viewer-engine/src/lib/weapon-lookup",
+            "packages/viewer-engine/src/lib/turret",
+            "packages/viewer-engine/src/lib/targets",
+            "packages/viewer-engine/src/lib/shots"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "weapons:"
+            }
+          ]
+        },
+        {
+          "id": "piloting",
+          "description": "get_overview and stances",
+          "paths": [
+            "packages/scene/src/lib/piloting/",
+            "packages/viewer-engine/src/lib/destiny-orbit-model",
+            "packages/viewer-engine/src/lib/pilots",
+            "packages/viewer-engine/src/lib/pilot-facts",
+            "apps/scene-director/src/pilot-loop"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "piloting:"
+            }
+          ]
+        },
+        {
+          "id": "combat",
+          "description": "locks, hits, engage / cease_fire, kills, set_hp, missiles, fleet deaths",
+          "paths": [
+            "packages/scene/src/lib/combat/",
+            "packages/scene/src/lib/fleets/live",
+            "packages/viewer-engine/src/lib/combat",
+            "packages/viewer-engine/src/lib/locks",
+            "packages/viewer-engine/src/lib/explosion",
+            "packages/viewer-engine/src/lib/missile-"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "combat:"
+            }
+          ]
+        },
+        {
+          "id": "fleets",
+          "description": "called targets, TFIs compositions, Follow the FC, order_fleet, fleet warp, the ship selector",
+          "paths": [
+            "packages/scene/src/lib/fleets/",
+            "packages/scene/src/lib/compositions/",
+            "packages/scene/src/lib/selectors/",
+            "packages/viewer-engine/src/lib/following",
+            "packages/viewer-engine/src/lib/steering",
+            "packages/viewer-engine/src/lib/fleet-orders",
+            "packages/viewer-engine/src/lib/fleet-targets",
+            "hub/fleet-compositions",
+            "store/composition-files"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "fleets:"
+            }
+          ]
+        },
+        {
+          "id": "personalities",
+          "description": "the FC brain and free fire",
+          "paths": [
+            "packages/scene/src/lib/personalities/",
+            "fleet-personalities",
+            "personality-files",
+            "fleet-commanders",
+            "packages/viewer-engine/src/lib/fleet-succession"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "personality:|free fire:"
+            }
+          ]
+        },
+        {
+          "id": "logi",
+          "description": "auto-repair",
+          "paths": [
+            "packages/scene/src/lib/logi/",
+            "packages/viewer-engine/src/lib/auto-repair"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "logi:"
+            }
+          ]
+        },
+        {
+          "id": "locations",
+          "description": "the environment report, search_map, get_system, set_location, dressing",
+          "paths": [
+            "packages/scene/src/lib/location/",
+            "hub/locations",
+            "hub/map-data",
+            "packages/viewer-engine/src/lib/location",
+            "packages/viewer-engine/src/lib/celestials"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "locations:"
+            }
+          ]
+        },
+        {
+          "id": "staging",
+          "description": "add_ships, stage_engagement and arriving fleets",
+          "paths": [
+            "packages/scene/src/lib/staging/",
+            "packages/scene/src/lib/arrivals/",
+            "hub/staging",
+            "packages/viewer-engine/src/lib/arrivals"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "staging:|warp-in:"
+            }
+          ]
+        },
+        {
+          "id": "objects",
+          "description": "search_objects, add_objects, orders on objects, the scene extent",
+          "paths": [
+            "packages/scene/src/lib/objects/",
+            "packages/scene/src/lib/extent",
+            "hub/object-data",
+            "hub/objects",
+            "packages/viewer-engine/src/lib/objects",
+            "packages/viewer-engine/src/lib/scene-objects"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "objects:"
+            }
+          ]
+        },
+        {
+          "id": "asteroid-fields",
+          "description": "asteroid fields: add, refuse, update, belts, round-trip, remove",
+          "paths": [
+            "packages/scene/src/lib/asteroids/",
+            "hub/asteroid-data",
+            "hub/asteroid-fields",
+            "packages/viewer-engine/src/lib/asteroid-fields",
+            "packages/viewer-engine/src/lib/scene-fields"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "asteroid-fields:"
+            }
+          ]
+        },
+        {
+          "id": "cinema",
+          "description": "shots, sequences, hardpoints, the warp-in shot and auto_camera",
+          "paths": [
+            "packages/scene/src/lib/cinema/",
+            "packages/scene/src/lib/waypoints/",
+            "packages/viewer-engine/src/lib/cinema",
+            "packages/viewer-engine/src/lib/camera-director"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "cinema:|director:"
+            }
+          ]
+        },
+        {
+          "id": "timeline",
+          "description": "timeline cues, ship orders, live edits, replay, event cues and the movie tool",
+          "paths": [
+            "packages/scene/src/lib/timeline/",
+            "packages/viewer-engine/src/lib/timeline",
+            "packages/viewer-engine/src/lib/ship-scripts",
+            "packages/viewer-engine/src/lib/movie."
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "timeline:|movie:"
+            }
+          ]
+        },
+        {
+          "id": "time",
+          "description": "time control: rate, pause, jumps, the tape, seek",
+          "paths": [
+            "packages/scene/src/lib/time/",
+            "packages/viewer-engine/src/lib/time-control",
+            "packages/viewer-engine/src/lib/frame-lock",
+            "packages/viewer-engine/src/lib/animation-clock",
+            "packages/viewer-engine/src/lib/state-capture",
+            "packages/viewer-engine/src/lib/destiny-snapshot"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "time:"
+            }
+          ]
+        },
+        {
+          "id": "export",
+          "description": "movie export and live recording",
+          "paths": [
+            "packages/scene/src/lib/export/",
+            "packages/viewer-engine/src/lib/export-",
+            "packages/viewer-engine/src/lib/movie-export",
+            "packages/viewer-engine/src/lib/movie-record",
+            "packages/viewer-engine/src/lib/movie-sink",
+            "apps/scene-director/src/lib/hub/movie-exports",
+            "apps/scene-director/src/lib/hub/mp4",
+            "apps/scene-director/src/lib/store/movie-files"
+          ],
+          "add": [
+            {
+              "suite": "verify-page",
+              "testName": "export:|record:"
+            }
+          ]
+        }
+      ]
+    }
+  },
   "queue": {
     "gitHandoff": {
       "machines": [
