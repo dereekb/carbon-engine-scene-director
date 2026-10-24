@@ -83,6 +83,12 @@ edits, storage and reload, prop mod audio events (launched with `--autoplay-poli
 events posted, it cannot hear them). It uses temp file stores. `--only <text>` runs the checks whose label contains the
 text (`a|b` for either), each loading its own scene.
 
+The full suite is ~180 checks and ~40 min (2026-10-24), and prints its results only at its end: run it as `--only`
+batches of contiguous labels, never alongside the test suites, with a runner limit generous enough that a slow batch
+(weapons and combat: ~400 s for a dozen) is not killed with its results. A few checks build on the one before (the
+compositions check expects the TFIs check's `tfis`), so cut batches at group starts. The M6 runner and its label list
+are `.scratch/movie-gpu/batch.mjs` / `chain.sh` on dbxpc (`sd-timeline` doc `movie`, the M6 evidence).
+
 **Headless Chromium in this WSL has no WebGPU adapter** (Dawn finds SwiftShader but cannot create its context
 provider). Do not sink time into headless GPU.
 

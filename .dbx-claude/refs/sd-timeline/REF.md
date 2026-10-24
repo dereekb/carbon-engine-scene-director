@@ -12,9 +12,10 @@ lever tool authors a cue with `at`.
 **Movie mode** (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`,
 slices M1 the document → M2 the page plays event cues → M3 edit-resimulate → M4 the movie camera across jumps → M5 the
 `movie` tool → M6 verify-page and the real-GPU movie): the movie *is* this timeline, plus event cues, a `movie` block
-and script edits that re-simulate. **M1 to M5 have landed**: event cues and the movie block in the document (below),
+and script edits that re-simulate. **M1 to M6 have landed**: event cues and the movie block in the document (below),
 the page playing event cues on their events, script edits re-simulating instead of `missed`, the movie camera coming
-back the same across a jump, and the `movie` tool with the movie's look and end. Sub-doc
+back the same across a jump, and the `movie` tool with the movie's look and end, checked by the full headless
+verify-page and a real-GPU movie (the sub-doc's evidence). Sub-doc
 (`{ ref: "sd-timeline", doc: "movie" }`): **`movie`** (the page's event cues: the record, the event second rule, the
 five sources, the event log and its cursor, `latest`, the reports, `when` on the tools; edit-resimulate: the divergence
 test, the edit path, the prefetch, the oracle; the movie camera pointer; the `movie` tool: beats, lanes, play, seek,

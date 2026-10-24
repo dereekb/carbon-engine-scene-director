@@ -4363,7 +4363,7 @@ try {
         { at: 1, order_fleet: { fleet: 'nofleet', order: { type: 'stop' } } }
       ]
     }).then(() => null, ErrorMessage);
-    const missing = ['at must be', 'when is reserved', 'exactly one action', 'set_environment', 'never ends'].filter((text) => !(error ?? '').includes(text));
+    const missing = ['at must be', 'when must be an object', 'exactly one action', 'set_environment', 'never ends'].filter((text) => !(error ?? '').includes(text));
     Expect(error != null && !missing.length, `missing ${missing.join(', ')} in: ${error}`);
     Expect(unknown != null && ['ghost', 'nofleet'].every((text) => unknown.includes(text)), `unknown ids: ${unknown}`);
     const named = await LoadTimeline({ ships: [Scripted('a', [0, 0, 0])], timeline: [{ at: 1, order_ship: { id: 'a', order: { type: 'approach', target: 'Some Station' } } }] });

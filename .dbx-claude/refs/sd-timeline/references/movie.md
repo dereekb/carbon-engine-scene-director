@@ -2,10 +2,10 @@
 
 > The page side of Movie mode (plan `~/.claude/plans/movie-mode-one-authored-movie-of-fleet-and-camera-beats-on-the-scene-timeline-cu.md`).
 > The document side (event cue syntax, `arms`, the check-second walk, chains, pruning, the `movie` block, `set_movie`)
-> is the main `sd-timeline` REF ("Event cues", "The movie block"). **M2 to M5 have landed** (the page plays event
+> is the main `sd-timeline` REF ("Event cues", "The movie block"). **M2 to M6 have landed** (the page plays event
 > cues on their events; script edits re-simulate, "Edit-resimulate" below; the movie camera comes back the same after a
-> jump, "The movie camera" below; the `movie` tool, the movie's look and its end, "The movie tool" below); M6 the full
-> verify-page and the real-GPU movie are next.
+> jump, "The movie camera" below; the `movie` tool, the movie's look and its end, "The movie tool" below; the full
+> headless verify-page and the real-GPU movie, the evidence sections at the end).
 
 ## Files
 
@@ -241,6 +241,68 @@ landing before the end stops there again. A `time_control` jump back before the 
   re-simulates the whole movie to now in one jump, so it costs what a seek from t = 0 costs.
 - The run override for L and H is per page (main.ts), not reported in get_state; `look.applied` says only that the
   movie's look is in force.
+- A beat's time comes from the player's records at the current time, not from the recorded future: after a seek back
+  before an event beat's event, that beat is `waiting` again, and `seek` / `play { from }` by its id throw `… has no
+  time yet: give timeline seconds instead`, though the window still holds the run that fired it. Seek by seconds (or
+  to a later beat first; a landing on a beat's second has fired every earlier beat).
+- The pinned origin holds no movie camera pose (the rig is idle before t = 0): a seek onto the first camera beat's
+  first second shows that shot's blend-in from the camera before the seek, not from the straight run's user camera. It
+  matches the straight run once the blend is over (the establishing shot at + 2 s on the GPU).
+
+## Real-GPU evidence (M6, 2026-10-24, dbxpc, Windows Chrome, NVIDIA)
+
+A private hub on 5526 with temp stores, Windows Chrome through `windows-chrome` (adapter `nvidia lovelace`, canvas
+1600×900). Scripts and artifacts in `.scratch/movie-gpu/` (`drive.mjs setup | run | scrub | edit | rates | reopen`),
+never committed.
+
+- **The movie**, authored through the tools: 30 km off Jita IV - Moon 4 - Caldari Navy Assembly Plant; blue 6
+  Punishers (fleet `blue`) + 2 Augorors (squad `logi`, role logi); red 6 Rifters (FC + 5) warping in 25 km ahead of
+  blue-fc; `{ letterbox: 2.39, hud: false, end: 95 }`. Beats: `establishing` 0 (6 s), `red-warp` + `warp-in-shot` 5,
+  `blue-mwd` / `blue-go` (red landed + 1), `overlook` (landed + 2), `blue-focus` / `red-engage` 25, `hero` (the 1st
+  kill + 1; 8 s, release), `blue-next` (the kill of blue's primary), `logi-off` (blue-fc's kill, latest 70),
+  `director` (`auto_camera { follow: { fleet: 'blue' } }`, cue hero + 8).
+- **1. Played at 1×**: fired 0, 5, 5, 19, 19, 20, 25, 25, 33, 33, 36, 41 (red landed at 18; the kills: blue-fc at 32,
+  red-fc at 35, red-dps-02 at 42; 45 events). The clock stopped at 95 exactly, `ended`. fps mean 42.8, min 8 (t = 10,
+  the six Rifters hydrating after their landing), p5 30; `gpuErrors` 0, `page_log` errors 0. Frames 2.39:1, HUD off.
+  The first kill was blue's FC (six Rifters engaged it at 25), so `hero` framed the dying FC and `logi-off` fired with
+  it: the authored fight, not a defect.
+- **2. `restart` and again**: the same fired seconds, the same kill ticks, the same 45 events, and the director's cut
+  log from the hand-off equal: 41 overlook-pull-out (the engagement), 43 kill (Rifter 2), 52 behind-fc (fleet blue), 64
+  hero (Augoror 2), 68 overlook, 73 rear-quarter (Augoror 2), 85 flank (fleet blue), 92 hero (Punisher 1). fps 39.8,
+  min 9.
+- **3. Scrub** (9 beats, latest first, `seek` paused): every landing on its beat's second with the straight run's
+  `camera.beat` (36 → hero, 25 → overlook, 19 → warp-in-shot). Jump ms: 12.6 (95 → 41, 7 ticks re-simulated), 10.8,
+  75.2, 0 (already there), 74.5, 6.8, 8.9, 447.5 (to 5: back across red's warp-in, the six Rifters off and on), 273.8
+  (to 0); 51 to 509 ms wall with the two frames. Each frame shows its shot at its start, blending in from the previous
+  beat as in the straight run, except t = 0 (Limits). Seeking by id earliest first failed at the first event beat
+  (Limits).
+- **4. A past edit** at 60 s (paused): `move overlook { when: landed + 4 }` re-simulated from 19 to 60 s, 41 ticks in
+  **47 ms** (194 ms wall with the two frames), no warnings; `overlook` fired at 22; the window not cut (earliest 0,
+  `origin`; latest 60, the recorded future abandoned). `play { from: 'overlook' }` landed at 20.07 and the overlook
+  drove at 23.
+- **5. Rates** from `blue-focus`: 1× 46.9 fps; pause 0 ticks in 4 s; 0.25× 2 ticks in 10 s (46.7, min 41); 4× 40 ticks
+  in 10 s (43.4, min 32); 1× again 49.4. `gpuErrors` 0, `page_log` errors 0.
+- **6. `save_scene` + `open_scene`**: the file holds the movie block and the 12 cues (`overlook`'s edited `when`);
+  played, the same beats (overlook 22), kill ticks, 45 events and 8 cuts. fps 36.8, min 23.
+- Framing seen, cinema's rather than movie mode's: the warp-in shot held one frame from 5 to 20 with the station's hull
+  filling it, and the overlook's first seconds showed mostly the station.
+
+## verify-page evidence (M6, 2026-10-24, dbxpc, tools-core SDE 3646012, headless: the full suite)
+
+- **180 checks: 178 ok, 1 skip, 1 FAIL**, run as `--only` batches of contiguous labels (file order), each batch from
+  `timeline:` on behind the warm-up; 15 batches, 12 s to 445 s each (~40 min in all). Per group: the ungrouped checks
+  119 ok + 1 skip (`SOF ships' own audio emitters stay inert`: no renderer); `logi:` 4, `personality:` 1, `timeline:`
+  14, `time:` 14, `director:` 8, `movie:` 10, all ok; `warp-in:` 7 ok + the known FAIL `the warp-in shot anchors at an
+  arriving fleet's landing …` (`flank-port`). The other known FAIL, `a moving FC dies …`, passed this time.
+- **One regression, fixed**: `timeline: bad timelines are refused …` still expected M1's predecessor text `when is
+  reserved`; M1 made `when` the event trigger (`timeline.cues[1].when must be an object …`), so the check now expects
+  that. Re-run: ok.
+- Batch artefact, not a regression: `compositions save, list, add by name with a unique id …` expects `tfis-2` because
+  the TFIs check before it loaded fleet `tfis`; a batch starting at it gets `tfis` (ok with that check in front).
+- The warm-up never failed its prepare this time. Page errors: 1 per batch, 0 unexpected (the M5 batch's 502 on
+  `black_gunmetal_brushed.black` did not recur).
+- verify-page prints only at its end: a batch killed for time loses every result, so give a batch runner a generous
+  limit (one 24-check batch with the weapons and combat checks outran 280 s).
 
 ## verify-page evidence (M5, 2026-10-24, dbxpc, headless)
 
@@ -264,7 +326,7 @@ landing before the end stops there again. A `time_control` jump back before the 
   `timeline`, the hero at 3.00 s, progress 0.50. `seek { timeline: 18 }`: the director driving, its cut log to 18 the
   straight run's (overlook the engagement at 10, flyby b at 16). A scene with no camera cue: Claude's chase at 3.02 s
   before and after `back: 4` (the rebase). In an `--only` batch with the warm-up and M3's (c) and (d), all ok.
-- The full headless verify-page (M3's, M4's and M5's) runs in M6.
+- The full headless verify-page (M3's, M4's and M5's) ran in M6 (below).
 
 ## verify-page evidence (M3, 2026-10-24, dbxpc, headless)
 
