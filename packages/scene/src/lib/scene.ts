@@ -40,6 +40,12 @@ export const SCENE_SCHEMA = 'cjs-scene/1';
 
 export const DEFAULT_UNIVERSE = 'res:/dx9/scene/universe/a01_cube.black';
 
+/**
+ * camera.fov's default, degrees: EveCamera's own, and what the page drew every scene at before it honoured camera.fov
+ * (its zoom curve pinned the view at 90 until 2026-10-23).
+ */
+export const DEFAULT_CAMERA_FOV = 90;
+
 export const DEFAULT_SCENE_NAME = 'untitled';
 
 /**
@@ -114,6 +120,10 @@ export interface SceneCamera {
   distance: Maybe<number>;
   yaw: number;
   pitch: number;
+  /**
+   * Vertical field of view in degrees, 5 to 120. Above an aspect of 1.6 the page narrows the view by aspect / 1.6, as
+   * Carbon does, so a wide window keeps the 16:10 width and loses height.
+   */
   fov: number;
   /**
    * How the camera follows its target; without a target it does nothing.
@@ -274,7 +284,7 @@ export function createEmptyScene(name: string = DEFAULT_SCENE_NAME): SceneDocume
     schema: SCENE_SCHEMA,
     name,
     environment: { universe: DEFAULT_UNIVERSE },
-    camera: { target: null, distance: null, yaw: 45, pitch: -15, fov: 45, mode: 'orbit' },
+    camera: { target: null, distance: null, yaw: 45, pitch: -15, fov: DEFAULT_CAMERA_FOV, mode: 'orbit' },
     ships: []
   };
 }

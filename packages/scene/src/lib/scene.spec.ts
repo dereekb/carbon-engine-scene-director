@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { applySceneOperations, DEFAULT_UNIVERSE, diffScenes, normalizeScene, SceneError } from './scene';
+import { applySceneOperations, DEFAULT_CAMERA_FOV, DEFAULT_UNIVERSE, diffScenes, normalizeScene, SceneError } from './scene';
 
 const duel = {
   name: 'duel',
@@ -97,6 +97,14 @@ describe('scene documents', () => {
     const next = applySceneOperations(scene, [{ op: 'set_camera', camera: { mode: 'chase' } }]).scene;
     expect(next.camera).toMatchObject({ target: 'b', mode: 'chase' });
     expect(catchSceneError(() => normalizeScene({ ...duel, camera: { mode: 'pov' } })).problems).toEqual(['camera.mode must be one of orbit, chase']);
+  });
+
+  it("the camera fov defaults to 90 (EveCamera's own), keeps a set one, and must be 5 to 120", () => {
+    expect(DEFAULT_CAMERA_FOV).toBe(90);
+    expect(normalizeScene(duel).scene.camera.fov).toBe(DEFAULT_CAMERA_FOV);
+    expect(normalizeScene({ ...duel, camera: { target: 'b' } }).scene.camera.fov).toBe(DEFAULT_CAMERA_FOV);
+    expect(normalizeScene({ ...duel, camera: { fov: 30 } }).scene.camera.fov).toBe(30);
+    expect(catchSceneError(() => normalizeScene({ ...duel, camera: { fov: 150 } })).problems.join('\n')).toMatch(/camera\.fov/);
   });
 
   it("removing the camera's target clears it; bad operations all report", () => {

@@ -82,7 +82,8 @@ Expected noise: a 404 for `/favicon.ico`, and the warning that `powerPreference`
   camera distance from the focus, R the booster sphere radius and H the canvas height in device pixels. Then flames
   and flares draw while D < ~0.04·R·H, the high-LOD flame while D < ~0.008·R·H, and trails while D < ~0.16·R·H. On a
   900 px canvas that is 600 m, 115 m and 2.3 km for a Slasher (R 15.9 m); a Tempest Fleet Issue (R 269 m) is
-  high-LOD at 1.5 km. The flags are not recomputed while a ship is culled, so trust them only on screen.
+  high-LOD at 1.5 km. Measured at the 90° the page draws by default; at another fov the distances scale by
+  tan 45° / tan(fov / 2). The flags are not recomputed while a ship is culled, so trust them only on screen.
 - The booster check's scripts (scene, probe, readout, driver) are in `.scratch/gpu-look/` on this machine and in the
   plan `real-gpu-look-at-the-speed-driven-boosters-and-the-warp.md`.
 - The movement and fleet check (`.scratch/gpu-check/`, plan

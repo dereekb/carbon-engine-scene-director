@@ -410,7 +410,8 @@ Notes `scene-director-cinema-gpu-check`; screens in `.scratch/cinema-check/` on 
   and the hull draws intact a few metres off the lens. With `look: 'path'` and the eye 0.3R over the centre the deck
   sits just below the frame mid-pass; look at a waypoint on the hull ahead to keep it in frame.
 - `overlook` / `into-sun` on a 100 km engagement draw hulls a few pixels wide: they fit every ship, logi included.
-- The orbit draws at 90° (the zoom curve overwrites the fov), so a release blends the fov from the shot's lens to 90°.
+- The orbit then drew at 90° whatever `camera.fov` said (the zoom curve, fixed 2026-10-23: `sd-runtime`), so a release
+  blended the fov from the shot's lens to 90°. It now blends to the document's fov (default 90).
 - `?letterbox=2.39`: the canvas and `screenshot` are 1600 × 669 (2.392:1); L and H toggle; a shot's `hud: false` and
   `letterbox: 2.39` apply while it plays and restore after. `frame_camera` mid-shot released it ("frame_camera took
   the camera"); a right-click mid-shot left it playing.

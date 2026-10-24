@@ -209,7 +209,7 @@ Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/t
   "schema": "cjs-scene/1",
   "name": "duel",
   "environment": { "universe": "res:/dx9/scene/universe/a01_cube.black" },
-  "camera": { "target": null, "distance": null, "yaw": 45, "pitch": -15, "fov": 45, "mode": "orbit" },
+  "camera": { "target": null, "distance": null, "yaw": 45, "pitch": -15, "fov": 90, "mode": "orbit" },
   "ships": [
     { "id": "punisher-1", "dna": "af1_t1:amarrbase:amarr", "team": "red", "position": [0, 0, 0] },
     { "id": "rifter-1", "dna": "mf1_t1:minmatarbase:minmatar", "team": "blue", "position": [3000, 0, 0], "rotation": [180, 0, 0] }

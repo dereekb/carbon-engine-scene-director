@@ -278,7 +278,7 @@ declare module '@carbonenginejs/runtime/trinity' {
   export interface EveProjectionMatrix {
     /**
      * Column-major 4x4, as EveCamera.Update last built it: indices 0 and 5 are the near plane's inverse half width and
-     * height, Carbon's aspect clamp and the zoom curve's field of view included.
+     * height, Carbon's aspect clamp included.
      */
     readonly transform: Float32Array;
     /**
@@ -292,9 +292,21 @@ declare module '@carbonenginejs/runtime/trinity' {
     readonly extraTranslation: Vec3;
     translationFromParent: number;
     fieldOfView: number;
+    /**
+     * A Tr2CurveScalar of field-of-view keys (radians at seconds) that Update plays from the current zoom key,
+     * overwriting fieldOfView while it plays. The default plays 90° → 46° → 6° → 90° and starts at 90°. Null leaves
+     * fieldOfView alone.
+     */
+    zoomCurve: object | null;
     frontClip: number;
     backClip: number;
     SetOrbit(yaw: number, pitch: number): void;
+    /**
+     * Builds the view and projection matrices.
+     *
+     * @param time - 100 ns ticks: samples `parent` and `interest`.
+     * @param realTime - 100 ns ticks: the frame delta (zoom curve, friction, idle sway, noise) is its change.
+     */
     Update(time: number, aspect: number, realTime: number): void;
     GetViewMatrix(): EveViewMatrix;
     GetProjection(): EveProjectionMatrix;

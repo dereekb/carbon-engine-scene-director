@@ -12,16 +12,19 @@
  *   change or removing that ship frames the document's camera again, and with no ship followed every edit re-fits.
  * - Picking casts the pointer's ray through the view and takes the nearest ship whose bounding sphere it passes
  *   through, with a few pixels of slack so a distant frigate can still be clicked. It reads the projection EveCamera
- *   draws with, not the document's fov: EveCamera's default zoom curve overrides the field of view every frame, and
- *   Carbon narrows the view above an aspect of 1.6.
+ *   draws with, Carbon's narrowing above an aspect of 1.6 included.
+ * - Drawing. DriveEveCamera points EveCamera at the orbit every frame, its zoom curve cleared so the document's fov is
+ *   what draws; OrbitFitDistance and PanMetresPerPixel use the same view extents (viewHalfExtents, Carbon's narrowing
+ *   included) for Fit and Pan.
  *
  * The angles are EveCamera's (degrees here): the eye sits at focus + distance × (sin yaw cos pitch, -sin pitch,
  * cos yaw cos pitch) and looks at the focus, so a negative pitch looks down from above.
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { SceneCameraMode } from '@scene-director/scene';
+import { fitDistance, viewHalfExtents, type SceneCameraMode } from '@scene-director/scene';
 import { TICKS_PER_SECOND } from './clock';
+import type { EveCamera } from './runtime';
 
 const DEGREES = Math.PI / 180;
 
@@ -49,6 +52,78 @@ export const CAMERA_GLIDE_SECONDS = 0.6;
  * Pixels of slack around a ship's bounding sphere when picking, so small or distant ships can be clicked.
  */
 export const PICK_SLACK_PIXELS = 10;
+
+/**
+ * A fitted bounding sphere spans 1 / FIT_MARGIN of the view's narrower extent.
+ */
+export const FIT_MARGIN = 1.15;
+
+/**
+ * The orbit camera's view (engine.ts's OrbitCamera), in degrees and metres.
+ */
+export interface DrivenOrbit {
+  readonly focus: ArrayLike<number>;
+  readonly distance: number;
+  readonly yaw: number;
+  readonly pitch: number;
+  /**
+   * The vertical field of view, before Carbon's narrowing above an aspect of 1.6.
+   */
+  readonly fov: number;
+  /**
+   * Metres from the origin to the farthest dressed object; the back clip covers it. 0 for none.
+   */
+  readonly reach: number;
+}
+
+/**
+ * Points EveCamera at the orbit for one frame. Its zoom curve is cleared every frame, as the runtime's
+ * TnyCameraControls does: while one plays it overwrites fieldOfView, and the default one starts at 90 degrees.
+ *
+ * @param eve - The camera the renderer draws with.
+ * @param orbit - Where it looks.
+ * @param ticks - A real-time clock in integer 100 ns ticks, EveCamera.Update's unit. It never runs backwards, so a
+ *   time-control jump hands EveCamera no negative frame delta (its friction divides by 1 + 7 × delta).
+ * @param aspect - The canvas's width over its height.
+ */
+export function DriveEveCamera(eve: EveCamera, orbit: DrivenOrbit, ticks: number, aspect: number): void {
+  const { focus, distance } = orbit;
+  eve.zoomCurve = null;
+  eve.useExtraTranslation = true;
+  for (let axis = 0; axis < 3; axis++) eve.extraTranslation[axis] = focus[axis];
+  eve.translationFromParent = distance;
+  eve.fieldOfView = orbit.fov * DEGREES;
+  // Reversed depth keeps precision with a far back plane.
+  eve.frontClip = Math.max(0.5, distance * 0.0005);
+  const reach = orbit.reach > 0 ? (orbit.reach + Math.hypot(focus[0], focus[1], focus[2]) + distance) * 1.1 : 0;
+  eve.backClip = Math.max(1e5, distance * 1000, reach);
+  eve.SetOrbit(orbit.yaw * DEGREES, orbit.pitch * DEGREES);
+  eve.Update(ticks, aspect, ticks);
+}
+
+/**
+ * How far from a bounding sphere's centre the orbit's eye sits for the sphere's silhouette to span 1 / FIT_MARGIN of
+ * the view's narrower extent.
+ *
+ * @param radius - The sphere's radius, metres (at least 1 is fitted).
+ * @param fov - The vertical field of view, degrees.
+ * @param aspect - The canvas's width over its height.
+ */
+export function OrbitFitDistance(radius: number, fov: number, aspect: number): number {
+  return fitDistance(radius, fov, aspect, 1 / FIT_MARGIN);
+}
+
+/**
+ * Metres on the focus plane per CSS pixel of view height, so a pan's grab point tracks the pointer.
+ *
+ * @param distance - The eye's distance from the focus, metres.
+ * @param fov - The vertical field of view, degrees.
+ * @param aspect - The canvas's width over its height.
+ * @param height - The view's height, CSS pixels.
+ */
+export function PanMetresPerPixel(distance: number, fov: number, aspect: number, height: number): number {
+  return (2 * distance * viewHalfExtents(fov, aspect).halfHeight) / Math.max(1, height);
+}
 
 /**
  * A vector following writes into (the orbit camera's focus).

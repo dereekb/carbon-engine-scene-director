@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CAMERA_GLIDE_SECONDS, CameraFollow, CHASE_PITCH, ChaseAngles, EaseAngle, PickShip, ReframesAfterEdit, type FollowedView, type PickSphere } from './camera';
+import { CAMERA_GLIDE_SECONDS, CameraFollow, CHASE_PITCH, ChaseAngles, EaseAngle, FIT_MARGIN, OrbitFitDistance, PanMetresPerPixel, PickShip, ReframesAfterEdit, type FollowedView, type PickSphere } from './camera';
 import { TICKS_PER_SECOND } from './clock';
 import { quat, vec3 } from './runtime-sim';
 
@@ -111,23 +111,28 @@ describe('PickShip', () => {
   const projection = Projection(45, width, height);
 
   it('picks the ship drawn under the pointer, off centre, from any angle and at the field of view drawn', () => {
-    // 90 degrees is what EveCamera's default zoom curve leaves the view at when the page passes it seconds.
-    for (const fov of [45, 90]) {
-      for (const [yaw, pitch] of [
-        [0, 0],
-        [200, -20],
-        [-75, 40]
-      ]) {
-        const view = ViewMatrix([100, 0, 0], 3000, yaw, pitch);
-        const drawn = Projection(fov, width, height);
-        const spheres: PickSphere[] = [
-          { id: 'a', centre: [100, 0, 0], radius: 60 },
-          { id: 'b', centre: [700, 200, -300], radius: 60 },
-          { id: 'c', centre: [-400, -250, 300], radius: 60 }
-        ];
-        for (const sphere of spheres) {
-          const [x, y] = Project(view, drawn, width, height, Array.from(sphere.centre));
-          expect(PickShip({ view, projection: drawn, width, height }, x, y, spheres)).toBe(sphere.id);
+    // A narrow and the default field of view, on a clamped wide canvas and a portrait one.
+    for (const [w, h] of [
+      [width, height],
+      [700, 1000]
+    ]) {
+      for (const fov of [45, 90]) {
+        for (const [yaw, pitch] of [
+          [0, 0],
+          [200, -20],
+          [-75, 40]
+        ]) {
+          const view = ViewMatrix([100, 0, 0], 3000, yaw, pitch);
+          const drawn = Projection(fov, w, h);
+          const spheres: PickSphere[] = [
+            { id: 'a', centre: [100, 0, 0], radius: 60 },
+            { id: 'b', centre: [700, 200, -300], radius: 60 },
+            { id: 'c', centre: [-400, -250, 300], radius: 60 }
+          ];
+          for (const sphere of spheres) {
+            const [x, y] = Project(view, drawn, w, h, Array.from(sphere.centre));
+            expect(PickShip({ view, projection: drawn, width: w, height: h }, x, y, spheres)).toBe(sphere.id);
+          }
         }
       }
     }
@@ -155,6 +160,70 @@ describe('PickShip', () => {
     const frigate = { id: 'frigate', centre: [0, 0, 0], radius: 40 };
     expect(PickShip({ view, projection, width, height }, width / 2 + 6, height / 2 - 5, [frigate])).toBe('frigate');
     expect(PickShip({ view, projection, width, height }, width / 2 + 30, height / 2, [frigate])).toBeNull();
+  });
+});
+
+describe('OrbitFitDistance', () => {
+  const ASPECTS = [0.7, 1, 1.6, 1960 / 1062, 2.4];
+
+  it("puts a sphere's silhouette across 1 / FIT_MARGIN of the view's narrower extent at any fov and aspect", () => {
+    const radius = 250;
+    for (const fov of [20, 45, 90, 120]) {
+      for (const aspect of ASPECTS) {
+        const distance = OrbitFitDistance(radius, fov, aspect);
+        const projection = Projection(fov, aspect * 1000, 1000);
+        const narrower = Math.min(1 / projection[0], 1 / projection[5]);
+        // The silhouette's half-angle a has sin a = radius / distance.
+        const silhouette = Math.tan(Math.asin(radius / distance));
+        expect(silhouette / narrower).toBeCloseTo(1 / FIT_MARGIN, 10);
+      }
+    }
+  });
+
+  it("fits the user's 1960 x 1062 canvas at 1.661 radii at 90 degrees and 3.355 at 45; a sphere under 1 m fits as 1 m", () => {
+    expect(OrbitFitDistance(100, 90, 1960 / 1062) / 100).toBeCloseTo(1.661, 3);
+    expect(OrbitFitDistance(100, 45, 1960 / 1062) / 100).toBeCloseTo(3.355, 3);
+    expect(OrbitFitDistance(0.2, 90, 1.6)).toBe(OrbitFitDistance(1, 90, 1.6));
+  });
+});
+
+describe('PanMetresPerPixel', () => {
+  it('moves a point on the focus plane as many pixels as the pointer, along the view axes', () => {
+    const focus = [400, -120, 900];
+    const distance = 3000;
+    for (const fov of [45, 90]) {
+      for (const [width, height] of [
+        [1600, 900],
+        [1000, 1000],
+        [2400, 1000],
+        [700, 1000]
+      ]) {
+        const view = ViewMatrix(focus, distance, 30, -20);
+        const projection = Projection(fov, width, height);
+        const metres = PanMetresPerPixel(distance, fov, width / height, height);
+        // The view matrix rows are the camera's right and up axes in world space.
+        const right = [view[0], view[4], view[8]];
+        const up = [view[1], view[5], view[9]];
+        const [x, y] = Project(
+          view,
+          projection,
+          width,
+          height,
+          [0, 1, 2].map((axis) => focus[axis] + right[axis] * 200 * metres)
+        );
+        expect(x).toBeCloseTo(width / 2 + 200, 3);
+        expect(y).toBeCloseTo(height / 2, 3);
+        const [upX, upY] = Project(
+          view,
+          projection,
+          width,
+          height,
+          [0, 1, 2].map((axis) => focus[axis] + up[axis] * 120 * metres)
+        );
+        expect(upX).toBeCloseTo(width / 2, 3);
+        expect(upY).toBeCloseTo(height / 2 - 120, 3);
+      }
+    }
   });
 });
 

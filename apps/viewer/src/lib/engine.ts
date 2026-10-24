@@ -8,7 +8,9 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { blendPoses, poseFromViewMatrix, poseViewMatrix, type CameraPose, type DressedSun } from '@scene-director/scene';
+import { blendPoses, DEFAULT_CAMERA_FOV, poseFromViewMatrix, poseViewMatrix, type CameraPose, type DressedSun } from '@scene-director/scene';
+import { DriveEveCamera, OrbitFitDistance, PanMetresPerPixel } from './camera';
+import { TICKS_PER_MS } from './clock';
 import type { CinemaFrame } from './cinema';
 import { CountBackgroundQuads, EnvironmentReport, ReadRenderOptions, SceneDresser, type SceneDressing, type SceneEnvironmentReport } from './environment';
 import { ErrorText, ResourceValues } from './resources';
@@ -579,7 +581,7 @@ export class Engine {
     const { camera, renderTarget, pump, al, format } = this.Parts();
     try {
       if (FitCanvasSize(this.canvas)) renderTarget.Configure({ width: this.canvas.width, height: this.canvas.height });
-      camera.Update(timestamp / 1000, this.Aspect());
+      camera.Update(Math.round(timestamp * TICKS_PER_MS));
       // The orbit camera updates underneath a cinematic shot, so its release blend has a live target.
       this.drawn = this.cinematic ? this.free.Apply(camera, this.cinematic, this.Aspect()) : camera.Drawn();
       pump.Render();
@@ -612,15 +614,23 @@ export class OrbitCamera {
   distance = 1000;
   yaw = 45;
   pitch = -15;
-  fov = 45;
+  fov = DEFAULT_CAMERA_FOV;
   /**
    * Metres from the origin to the farthest dressed object; the back clip covers it.
    */
   reach = 0;
+  private readonly canvas: HTMLCanvasElement;
 
   constructor(canvas: HTMLCanvasElement) {
-    this.eve.useExtraTranslation = true;
+    this.canvas = canvas;
     this.Attach(canvas);
+  }
+
+  /**
+   * The canvas's width / height: what the view draws at, so Fit and Pan agree with the drawing.
+   */
+  Aspect(): number {
+    return this.canvas.width / Math.max(1, this.canvas.height);
   }
 
   /**
@@ -635,11 +645,11 @@ export class OrbitCamera {
   }
 
   /**
-   * Fits a bounding sphere in view at the current angles.
+   * Fits a bounding sphere in view at the current angles: it spans 1 / FIT_MARGIN (87 %) of the view's narrower
+   * extent, at the fov just set (not the last frame's projection).
    */
   Fit(center: ArrayLike<number>, radius: number): void {
-    const half = (this.fov * DEGREES) / 2;
-    this.Set({ focus: center, distance: (Math.max(radius, 1) / Math.sin(half)) * 1.15 });
+    this.Set({ focus: center, distance: OrbitFitDistance(radius, this.fov, this.Aspect()) });
   }
 
   Get(): { focus: number[]; distance: number; yaw: number; pitch: number; fov: number } {
@@ -664,7 +674,7 @@ export class OrbitCamera {
 
   /**
    * The pose and clip planes EveCamera built last Update: the eye off its view matrix, the look at the focus, the field
-   * of view off its projection (the zoom curve's and the aspect clamp's, not `fov`).
+   * of view off its projection (the aspect clamp undone, so `fov`).
    */
   Drawn(): DrawnCamera {
     const fov = EveCamera.CalculateFovFromProjection(this.eve.GetProjection().transform) / DEGREES;
@@ -672,17 +682,13 @@ export class OrbitCamera {
     return { ...pose, look: [this.focus[0], this.focus[1], this.focus[2]], near: this.eve.frontClip, far: this.eve.backClip };
   }
 
-  Update(seconds: number, aspect: number): void {
-    const camera = this.eve;
-    vec3.copy(camera.extraTranslation, this.focus);
-    camera.translationFromParent = this.distance;
-    camera.fieldOfView = this.fov * DEGREES;
-    // Reversed depth keeps precision with a far back plane.
-    camera.frontClip = Math.max(0.5, this.distance * 0.0005);
-    const reach = this.reach > 0 ? (this.reach + vec3.length(this.focus) + this.distance) * 1.1 : 0;
-    camera.backClip = Math.max(1e5, this.distance * 1000, reach);
-    camera.SetOrbit(this.yaw * DEGREES, this.pitch * DEGREES);
-    camera.Update(seconds, aspect, seconds);
+  /**
+   * Points EveCamera at the orbit for this frame (DriveEveCamera), at the canvas's aspect.
+   *
+   * @param ticks - The animation frame's time, 100 ns ticks.
+   */
+  Update(ticks: number): void {
+    DriveEveCamera(this.eve, this, ticks, this.Aspect());
   }
 
   private Attach(canvas: HTMLCanvasElement): void {
@@ -721,7 +727,7 @@ export class OrbitCamera {
    */
   private Pan(dx: number, dy: number, height: number): void {
     const view = this.eve.GetViewMatrix().transform;
-    const metresPerPixel = (2 * this.distance * Math.tan((this.fov * DEGREES) / 2)) / Math.max(1, height);
+    const metresPerPixel = PanMetresPerPixel(this.distance, this.fov, this.Aspect(), height);
     // The view matrix rows are the camera's right and up axes in world space.
     const right = [view[0], view[4], view[8]];
     const up = [view[1], view[5], view[9]];

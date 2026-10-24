@@ -12,7 +12,7 @@ import { DEFAULT_WARP_IN_STAGGER, MAX_WARP_IN_STAGGER } from './arrivals/arrival
 import { COMPOSITION_ANCHOR_FC, COMPOSITION_ANCHOR_LEAD, FLEET_COMPOSITION_SCHEMA, MAX_FLEET_SHIPS } from './compositions/composition';
 import { CALLED_PRE_LOCKS, DEFAULT_ANCHOR_RANGES, DEFAULT_ANCHOR_UP_RANGE, DEFAULT_BREAK_OFF_RANGE, DEFAULT_FORMATION_RADIUS, FLEET_ORDER_TYPES, FORMATION_GAP, FORMATION_SPACING, MAX_FLEET_ORDER_DELAY, SQUAD_ROLES } from './fleets';
 import { APPROACH_RANGE, MAX_ORDER_RANGE, MIN_WARP_DISTANCE, SHIP_ORDER_REQUEST_TYPES } from './orders';
-import { DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
+import { DEFAULT_CAMERA_FOV, DEFAULT_UNIVERSE, SCENE_SCHEMA } from './scene';
 import { PROP_MOD_MODULE_AB, PROP_MOD_MODULE_MWD, PROP_MOD_MODULE_NONE } from './stats';
 import { CELESTIAL_KINDS, DEFAULT_STARGATE_LOCATION_RANGE, DEFAULT_STATION_LOCATION_RANGE, LOCATION_NEARBY_LIMIT, MAP_SEARCH_KINDS } from './location';
 import { DEFAULT_ENGAGEMENT_RANGE, DEFAULT_NEAR_SHIP_RANGE, ENGAGEMENT_TEAMS, NEAR_DIRECTIONS, SHIP_FORMATION_ALIASES, SHIP_FORMATIONS } from './staging';
@@ -76,13 +76,14 @@ const SCENE_FORMAT = `Scene document (${SCENE_SCHEMA}). Metres and degrees, Y up
   "schema": "${SCENE_SCHEMA}",
   "name": "duel",
   "environment": { "universe": "${DEFAULT_UNIVERSE}" },
-  "camera": { "target": "<ship or object id, or null to frame every ship>", "distance": <metres or null to fit>, "yaw": 45, "pitch": -15, "fov": 45 },
+  "camera": { "target": "<ship or object id, or null to frame every ship>", "distance": <metres or null to fit>, "yaw": 45, "pitch": -15, "fov": ${DEFAULT_CAMERA_FOV} },
   "ships": [
     { "id": "punisher-1", "dna": "af1_t1:amarrbase:amarr", "name": "Punisher", "team": "red", "position": [0, 0, 0], "rotation": [0, 0, 0] },
     { "id": "rifter-1", "dna": "mf1_t1:minmatarbase:minmatar", "team": "blue", "position": [3000, 0, 0], "rotation": [180, 0, 0] }
   ]
 }
 dna is a SOF DNA string, hull:faction:race[:commands]; use search_hulls to find hull names. rotation is [yaw, pitch, roll].
+camera.fov is the vertical field of view in degrees (5 to 120, default ${DEFAULT_CAMERA_FOV}); above an aspect of 1.6 the view keeps its 16:10 width and narrows in height, as Carbon does.
 "type" (EVE type id or name) and "stats" ({ "mass": kg, "maxVelocity": m/s, "agility", "signatureRadius": m }, each optional) set a ship's flight numbers; ship_stats shows them.
 "propMod" is the ship's propulsion module and its state at load: "<module>" or { "module"?: "<module>", "active"?: true }, where a module is an EVE type name ("50MN Microwarpdrive II"), a type id, "${PROP_MOD_MODULE_MWD}" / "${PROP_MOD_MODULE_AB}" (the Tech II module of that kind sized for the hull) or "${PROP_MOD_MODULE_NONE}". Omitted: the hull-sized Tech II microwarpdrive, off. "active": true runs it from the moment the scene loads; switch_prop_mods switches it live.
 "fit" is the ship's EVE fit: EFT text ("[Hull, Fit name]\nDamage Control II\n...", as the game or Pyfa copies it) or a key of the top-level "fits" ({ "<key>": "<EFT text>" }; keys are 1-64 letters, digits, "_", "-" or ".", optionally twice with one "/"). A fleet composition's ships carry "<composition id>/<fit key>" and the scene keeps each text once. With a fit and no propMod.module, the ship's prop mod is the fit's first microwarpdrive or afterburner ("${PROP_MOD_MODULE_NONE}" when it fits neither). A string type naming another hull than the fit's header warns.
@@ -927,7 +928,8 @@ Returns { fleet, wing?, squad?, autoRepair (the group's field after, or null), s
   {
     name: 'frame_camera',
     where: 'page',
-    description: 'Points the camera at one ship, object or asteroid field (its envelope), or fits every ship (every object when the scene has no ships, every field when it has neither) when target is omitted, without editing the saved camera settings unless persist is true.',
+    description:
+      "Points the camera at one ship, object or asteroid field (its envelope), or fits every ship (every object when the scene has no ships, every field when it has neither) when target is omitted, without editing the saved camera settings unless persist is true. Without a distance it fits: the target's bounding sphere spans 87 % of the view's height (its width in a portrait view).",
     inputSchema: {
       type: 'object',
       properties: {

@@ -73,6 +73,26 @@
   sun disc is the planet whose translation curve **is** `scene.sunBall` (Carbon picks the sun by identity). Details:
   `sd-locations`.
 
+### EveCamera: the zoom curve and ticks (`camera.ts` `DriveEveCamera`)
+
+- **`EveCamera.Update(time, aspect, realTime)` takes 100 ns ticks**, and **its default `zoomCurve` (90° → 46° → 6° →
+  90°, from zoom key 0) overwrites `fieldOfView` while it plays**. Until 2026-10-23 the page passed seconds, the curve
+  never advanced past its first key, and every scene drew at 90° whatever `camera.fov` said. Passing ticks alone still
+  plays 90° → 46° once.
+- `DriveEveCamera` clears the curve every frame (as the runtime's `TnyCameraControls` does) and passes the animation
+  frame's time in ticks (`Engine.Frame`: `timestamp × TICKS_PER_MS`), a clock that never runs backwards. Not the scene
+  clock: a time-control jump back would hand Update a negative delta, and its friction divides by 1 + 7 × delta.
+  Everything else time drives is inert here: `SetOrbit` sets yaw and pitch every frame (friction is then the
+  identity), `idleMove` is off, and the noise, `parent` and `interest` curves are null.
+- `CalculateProjectionMatrix` narrows the view by aspect / 1.6 above an aspect of 1.6. `viewHalfExtents`
+  (`packages/scene` cinema `framing.ts`) mirrors it for `OrbitCamera.Fit` / `Pan`; `PickShip` reads it off the
+  projection. `camera-eve.spec.ts` drives the real `EveCamera` and pins the drawn extents to the mirror: a runtime
+  re-pin that changes the projection, the clamp or the zoom handling fails it.
+- Still open: `_CapPitchAndYaw` clamps the orbit's pitch to ±1.4 rad (±80.2°) while the document allows ±89°.
+- Still open (2026-10-23, real GPU): **a view at exactly pitch 0 draws a flat grey frame** (mean RGB ~150–175, no
+  nebula, no hulls), at any yaw and fov, through the orbit and through `FreeCamera` alike; pitch −0.01 draws normally.
+  Not the zoom curve or the time unit (FreeCamera never calls Update); a degenerate pass for a perfectly level view.
+
 ### The update context across a time-control jump
 
 `EveSpaceScene.Update(realTime, simTime)` sets `updateContext.SetTime(simTime)`, and 42 runtime call sites read

@@ -12,7 +12,7 @@
   "schema": "cjs-scene/1",
   "name": "duel",
   "environment": { "universe": "res:/dx9/scene/universe/a01_cube.black" },
-  "camera": { "target": null, "distance": null, "yaw": 45, "pitch": -15, "fov": 45, "mode": "orbit" },
+  "camera": { "target": null, "distance": null, "yaw": 45, "pitch": -15, "fov": 90, "mode": "orbit" },
   "ships": [
     { "id": "punisher-1", "dna": "af1_t1:amarrbase:amarr", "team": "red", "position": [0, 0, 0] },
     { "id": "rifter-1", "dna": "mf1_t1:minmatarbase:minmatar", "team": "blue", "position": [3000, 0, 0], "rotation": [180, 0, 0] }
@@ -142,7 +142,18 @@ save or reload starts from the document's placements.
 
 ## Camera
 
-- `target: null` frames every ship (every object when the scene has no ships); `distance: null` fits the target.
+- `target: null` frames every ship (every object when the scene has no ships); `distance: null` fits the target:
+  `OrbitCamera.Fit` (`camera.ts` `OrbitFitDistance`) puts its bounding sphere across 1 / `FIT_MARGIN` (87 %) of the
+  view's narrower extent (the height, or the width in a portrait window), at the fov just set.
+- `fov` is the vertical field of view, 5–120°, default `DEFAULT_CAMERA_FOV` 90 (EveCamera's own). Above an aspect of
+  1.6 Carbon narrows the view by aspect / 1.6 (it keeps the 16:10 width); Fit, Pan and picking all include that. **Until
+  2026-10-23 every scene drew at 90° whatever `fov` said** (the zoom curve, `sd-runtime`), so fitted views filled only
+  35–41 % of the height; they now draw ~2.1x larger. Explicit distances look as before.
+- Real GPU (2026-10-23, Windows Chrome, NVIDIA, private hub, 1600 × 900): the projection drew 30 / 45 / 90 / 120° as
+  set; a fitted Tempest (R 536 m) sat inside a sphere spanning 0.8696 of the height at 45° (1.622 R at 90°, 3.242 R at
+  45°) and of the width at 700 × 1000; `Pan` moved a focus-plane point exactly 200 / 120 px at 45° and 90°; alt-click
+  took all five frigates, 38–60 px from the edges, at both; chase at 45° held the ship centred; a version-less record
+  at fov 45 opened at 90. 0 GPU errors.
   **A target may be an object id** (`frame_camera`, the document, alt-click, the overlay); celestial targets cannot. A ship target is followed every frame (focus
   shifts by the drawn ship's travel, keeping any orbit/pan/zoom). `mode`: `orbit` (keeps your angles) or `chase`
   (behind the ship, 12° above its heading, turns with it; a drag looks around and eases back).
@@ -151,8 +162,8 @@ save or reload starts from the document's placements.
   persisted) or gliding a persisted one across a teleport. `camera.ts` `ReframesAfterEdit` decides: re-frame only on a
   load, a camera change, removing the followed ship or object, or when nothing is followed. `Director.Apply` calls it before its
   `appliedCamera` check.
-- Picking reads EveCamera's actual projection, not the document's `fov` (its default zoom curve overrides fov every
-  frame, and Carbon narrows the view above aspect 1.6).
+- Picking reads EveCamera's drawn projection (`PickShip`), Carbon's narrowing above aspect 1.6 included; shift-drag
+  pan moves `PanMetresPerPixel` per pixel, so the grab point tracks the pointer.
 - A cinematic shot draws over the orbit camera, which keeps updating underneath (`sd-cinema`). `frame_camera`, a
   camera change and alt-click release the shot, a load cuts it, other edits leave it playing; get_state's
   `camera.view` says which camera draws and `camera.drawn` what it drew.
@@ -162,8 +173,13 @@ save or reload starts from the document's placements.
 | Store | Where | Notes |
 |---|---|---|
 | `disk` (default for saving) | `SceneFileStore` (`apps/scene-director/src/lib/store/scene-files.ts` over `document-files.ts`) in the hub's scenes dir: `--scenes <dir>` / `SCENE_DIRECTOR_SCENES`, default `scene-director/scenes` in the per-user data dir | validated on write and read; works with no tab |
-| `browser` | the tab's IndexedDB (`apps/viewer/src/lib/store.ts`); the working copy lives under a reserved key listings hide | needs a connected tab |
+| `browser` | the tab's IndexedDB (`apps/viewer/src/lib/store.ts`); the working copy lives under a reserved key listings hide | needs a connected tab; records carry `version` (`SCENE_RECORD_VERSION` 2) |
 
+- **Browser records from before the honoured fov** (no `version`) all carry the old default fov 45, which normalizing
+  wrote in: `store.ts` `FromSceneRecord` reads 45 as 90, the look they were drawn with, and keeps any other fov.
+  Nothing is rewritten in place; the next `Put` writes version 2. Disk scenes are not migrated (none existed on dbxpc).
+  A per-record version, not an IndexedDB version bump: a tab on the old bundle has no `onversionchange`, so the new
+  tab's `open(…, 2)` would block the page's start.
 - The tools are `where: 'hub'` (`hub/saved-scenes.ts`) and forward to the page's handlers for `store: "browser"`.
   Stores are independent (no write-through). With `store` omitted: `save_scene` → disk; `list_scenes` → both (each entry
   marked); `open_scene` → disk first, then browser (no tab: returns the disk scene with `loaded: false`);
