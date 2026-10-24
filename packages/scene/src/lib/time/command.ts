@@ -5,6 +5,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
+import { MAX_EXPORT_FPS, MIN_EXPORT_FPS } from '../export/command';
 import { isPlainObject } from '../json';
 import { SceneError } from '../scene';
 
@@ -42,10 +43,15 @@ export const DEFAULT_TIME_BUDGET_MB = 64;
  * The furthest a seek simulates past the recorded end, scene seconds.
  */
 export const MAX_SEEK_AHEAD_SECONDS = 300;
+/**
+ * The longest beat (`play`), scene seconds.
+ */
+export const MAX_PLAY_SECONDS = 3600;
 
 /**
- * time_control: pause or play, the scene clock's rate, a jump back or to a scene time, and the recording's spacing and
- * window. Applied in the order window settings, jump, rate, pause. `{}` reports.
+ * time_control: pause or play, the scene clock's rate, a jump back or to a scene time, the frame lock, a beat, and the
+ * recording's spacing and window. Applied in the order window settings, jump, rate, fps, then pause or play. `{}`
+ * reports.
  */
 export interface TimeControlCommand {
   readonly pause?: boolean;
@@ -67,6 +73,16 @@ export interface TimeControlCommand {
    * How far back the window reaches, scene seconds (MIN_TIME_WINDOW_SECONDS to MAX_TIME_WINDOW_SECONDS).
    */
   readonly window?: number;
+  /**
+   * The frame lock: the scene clock moves on a 1/fps grid, one grid frame a drawn frame at most (an integer from
+   * MIN_EXPORT_FPS to MAX_EXPORT_FPS), or false to unlock.
+   */
+  readonly fps?: number | false;
+  /**
+   * A beat: play this many scene seconds from now (above 0, at most MAX_PLAY_SECONDS), then pause; the call returns at
+   * the pause.
+   */
+  readonly play?: number;
 }
 
 /**
@@ -74,8 +90,8 @@ export interface TimeControlCommand {
  */
 export type TimeSeek = number | { readonly timeline: number };
 
-const COMMAND_KEYS = new Set<string>(['pause', 'rate', 'back', 'seek', 'every', 'window']);
-const COMMAND_KEYS_TEXT = 'pause, rate, back, seek, every, window';
+const COMMAND_KEYS = new Set<string>(['pause', 'rate', 'back', 'seek', 'every', 'window', 'fps', 'play']);
+const COMMAND_KEYS_TEXT = 'pause, rate, back, seek, every, window, fps, play';
 
 /**
  * Whether a value is a rate the scene clock takes.
@@ -99,13 +115,13 @@ export function normalizeTimeControlCommand(input: unknown, where = 'time_contro
   const problems: string[] = [];
   let command: Maybe<TimeControlCommand> = null;
   if (input != null && !isPlainObject(input)) {
-    problems.push(`${where} must be an object { pause?, rate?, back?, seek?, every?, window? }`);
+    problems.push(`${where} must be an object { pause?, rate?, back?, seek?, every?, window?, fps?, play? }`);
   } else {
     const object = input ?? {};
     for (const key of Object.keys(object)) {
       if (!COMMAND_KEYS.has(key)) problems.push(`${where}.${key} is not a time_control field (${COMMAND_KEYS_TEXT})`);
     }
-    const { pause, rate, back, seek, every, window } = object as Record<string, unknown>;
+    const { pause, rate, back, seek, every, window, fps, play } = object as Record<string, unknown>;
     if (pause !== undefined && typeof pause !== 'boolean') problems.push(`${where}.pause must be true (pause) or false (play)`);
     if (rate !== undefined && !isTimeRate(rate)) problems.push(`${where}.rate must be a number from ${MIN_TIME_RATE} (1/16, slow motion) to ${MAX_TIME_RATE} (fast-forward); 1 is real time`);
     const backOk = back === undefined || (isFiniteNumber(back) && back > 0);
@@ -117,13 +133,20 @@ export function normalizeTimeControlCommand(input: unknown, where = 'time_contro
     if (!everyOk) problems.push(`${where}.every must be the snapshot spacing in scene seconds, from ${MIN_SNAPSHOT_EVERY_SECONDS} to ${MAX_SNAPSHOT_EVERY_SECONDS}`);
     const windowOk = window === undefined || isInRange(window, MIN_TIME_WINDOW_SECONDS, MAX_TIME_WINDOW_SECONDS);
     if (!windowOk) problems.push(`${where}.window must be the scene seconds kept, from ${MIN_TIME_WINDOW_SECONDS} to ${MAX_TIME_WINDOW_SECONDS}`);
+    const fpsOk = fps === undefined || fps === false || (Number.isInteger(fps) && (fps as number) >= MIN_EXPORT_FPS && (fps as number) <= MAX_EXPORT_FPS);
+    if (!fpsOk) problems.push(`${where}.fps must be the frame lock's frames a second, an integer from ${MIN_EXPORT_FPS} to ${MAX_EXPORT_FPS}, or false to unlock`);
+    const playOk = play === undefined || (isFiniteNumber(play) && play > 0 && play <= MAX_PLAY_SECONDS);
+    if (!playOk) problems.push(`${where}.play must be the scene seconds to play before pausing, above 0 and at most ${MAX_PLAY_SECONDS}`);
+    if (play !== undefined && pause !== undefined) problems.push(`${where}: give pause or play, not both (play plays, then pauses)`);
     command = {
       ...(typeof pause === 'boolean' ? { pause } : {}),
       ...(isTimeRate(rate) ? { rate } : {}),
       ...(back !== undefined && backOk ? { back: back as number } : {}),
       ...(seek !== undefined && seekOk ? { seek: typeof seek === 'number' ? seek : { timeline: (seek as { readonly timeline: number }).timeline } } : {}),
       ...(every !== undefined && everyOk ? { every: every as number } : {}),
-      ...(window !== undefined && windowOk ? { window: window as number } : {})
+      ...(window !== undefined && windowOk ? { window: window as number } : {}),
+      ...(fps !== undefined && fpsOk ? { fps: fps as number | false } : {}),
+      ...(play !== undefined && playOk ? { play: play as number } : {})
     };
   }
   if (problems.length || !command) throw new SceneError(problems);

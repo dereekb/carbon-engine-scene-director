@@ -6,7 +6,7 @@ import { ResolveFlight, type PublishedHull } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
 import { ExportFrameTicks } from './export-frames';
 import { EstimateBytes } from './state-capture';
-import { EXPORT_LOCKED_TEXT, RateText, SceneSeconds, SceneTicks, TimeControl, TimeText, type TapeEntry, type TimePresentation, type TimeSimPort } from './time-control';
+import { EXPORT_LOCKED_TEXT, RateText, SceneSeconds, SceneTicks, TimeControl, TimeText, type LockedFrameResult, type TapeEntry, type TimeBeatEnd, type TimePresentation, type TimeSimPort } from './time-control';
 import type { ShipOrder } from '@scene-director/scene';
 import type { DestinySnapshot } from './destiny';
 
@@ -726,5 +726,208 @@ describe('TimeControl export mode (sd-export)', () => {
     control.EndExport();
     control.Command({ back: 6 });
     expect(world.tick).toBeLessThan(16);
+  });
+});
+
+/**
+ * A Rig at tick 4 under a frame lock at `fps`, with its own frame timestamps (the first locked frame counts no real time).
+ */
+function LockRig(fps: number, options: Parameters<typeof Rig>[0] = {}) {
+  const rig = Rig(options);
+  rig.RunTo(4);
+  rig.clock.Resync();
+  rig.control.SetFrameLock(fps);
+  let ms = 1_000_000;
+  const Locked = (frameMs = 1000 / 60): LockedFrameResult => {
+    ms += frameMs;
+    return rig.control.LockedFrame(ms);
+  };
+  return { ...rig, Locked };
+}
+
+describe('TimeControl frame lock (sd-time)', () => {
+  it('steps a grid frame every other 60 Hz frame at 30 fps, wall time equal to scene time', () => {
+    const { clock, control, Locked } = LockRig(30);
+    const start = clock.now;
+    expect(Locked()).toEqual({ kind: 'grid', clock: start, index: 0 });
+    const kinds: string[] = [];
+    let previous = start;
+    for (let frame = 0; frame < 600; frame++) {
+      const result = Locked();
+      kinds.push(result.kind);
+      if (result.kind === 'grid') {
+        expect([333_333, 333_334]).toContain(result.clock - previous);
+        previous = result.clock;
+      } else expect(result).toEqual({ kind: 'wait', clock: previous });
+    }
+    expect(kinds.filter((kind) => kind === 'grid')).toHaveLength(300);
+    expect(clock.now - start).toBe(10 * TICKS_PER_SECOND);
+    expect(control.Report()).toMatchObject({ lock: { fps: 30, by: 'time_control' } });
+    expect(control.Report().effectiveRate).toBeUndefined();
+    expect(TimeText(control.Report())).toMatch(/^1× · 30 fps lock( · back \d+ s)?$/u);
+  });
+
+  it('steps one grid frame a 300 ms frame, and reports the slowdown', () => {
+    const { clock, control, Locked } = LockRig(30);
+    const start = clock.now;
+    for (let frame = 0; frame <= 40; frame++) expect(Locked(300)).toEqual({ kind: 'grid', clock: start + ExportFrameTicks(frame, 30), index: frame });
+    expect(control.effectiveRate).toBeCloseTo(1 / 9, 2);
+    expect(TimeText(control.Report())).toMatch(/^1× · 30 fps lock \(0\.11× actual\)( · back \d+ s)?$/u);
+  });
+
+  it('never steps two grid frames in one call, and never pays back a slow spell', () => {
+    const { clock, Locked } = LockRig(10);
+    const start = clock.now;
+    Locked();
+    // A 5 s stall counts 1 s (MAX_FRAME_STEP_MS): one grid frame, then the one frame owed, then the pacing goes on.
+    expect(Locked(5000)).toEqual({ kind: 'grid', clock: start + TICKS_PER_SECOND / 10, index: 1 });
+    expect(Locked()).toMatchObject({ kind: 'grid', index: 2 });
+    const kinds = Array.from({ length: 11 }, () => Locked().kind);
+    expect(kinds).toEqual(['wait', 'wait', 'wait', 'wait', 'grid', 'wait', 'wait', 'wait', 'wait', 'wait', 'grid']);
+  });
+
+  it('holds while paused or held, and owes nothing for those frames', () => {
+    const { clock, control, Locked } = LockRig(30);
+    Locked();
+    Locked();
+    Locked();
+    const at = clock.now;
+    control.Pause(true);
+    for (let i = 0; i < 30; i++) expect(Locked()).toEqual({ kind: 'hold', clock: at });
+    control.Pause(false);
+    clock.Hold();
+    for (let i = 0; i < 30; i++) expect(Locked()).toEqual({ kind: 'hold', clock: at });
+    clock.Release();
+    expect(Locked()).toEqual({ kind: 'wait', clock: at });
+    expect(Locked()).toMatchObject({ kind: 'grid', clock: at + 333_334 });
+  });
+
+  it('stops at an off-grid StopAt, then resumes onto the same grid', () => {
+    const { clock, control, Locked } = LockRig(10);
+    const start = clock.now;
+    Locked();
+    const stop = start + 5_500_000;
+    let stopped = 0;
+    control.StopAt(stop, () => (stopped += 1));
+    const results: LockedFrameResult[] = [];
+    for (let i = 0; i < 100 && !control.paused; i++) results.push(Locked());
+    expect(results.at(-1)).toEqual({ kind: 'hold', clock: stop });
+    expect(results.filter((result) => result.kind === 'grid').map((result) => result.clock)).toEqual([1, 2, 3, 4, 5].map((k) => start + k * 1_000_000));
+    expect([clock.now, control.paused, stopped, control.stopsAt]).toEqual([stop, true, 1, null]);
+    control.Pause(false);
+    expect(Locked()).toEqual({ kind: 'grid', clock: start + 6_000_000, index: 6 });
+  });
+
+  it('re-anchors at a jump landing: its grid frame 0 draws at once', () => {
+    const { clock, control, Locked } = LockRig(30);
+    for (let i = 0; i < 600; i++) Locked();
+    control.Command({ back: 4 });
+    const landing = clock.now;
+    expect(Locked()).toEqual({ kind: 'grid', clock: landing, index: 0 });
+    expect(Locked()).toEqual({ kind: 'grid', clock: landing + 333_333, index: 1 });
+    expect(Locked()).toEqual({ kind: 'wait', clock: landing + 333_333 });
+  });
+
+  it('unlocks, refuses an fps out of bounds, and is refused during an export', () => {
+    const { control } = LockRig(30);
+    expect(control.frameLock).toBe(30);
+    control.Command({ fps: false });
+    expect(control.frameLock).toBeNull();
+    expect(control.Report()).not.toHaveProperty('lock');
+    for (const fps of [0, 121, 2.5]) expect(() => control.SetFrameLock(fps)).toThrow(RangeError);
+    control.BeginExport({ fps: 30 });
+    expect(() => control.Command({ fps: 10 })).toThrow(EXPORT_LOCKED_TEXT);
+  });
+});
+
+describe('TimeControl beats (sd-time)', () => {
+  it('plays N scene seconds, pauses exactly there, and reports the beat until then', () => {
+    const { clock, control, RunTo, Frames } = Rig();
+    RunTo(3);
+    control.Pause(true);
+    const from = clock.now;
+    const ends: TimeBeatEnd[] = [];
+    control.PlayFor(2.5, (end) => ends.push(end));
+    expect(control.paused).toBe(false);
+    expect(control.Report().play).toEqual({ stopsAt: SceneSeconds(from + 25_000_000), stopsIn: 2.5 });
+    expect(TimeText(control.Report())).toMatch(/^1× · beat ends in 2\.5 s( · back \d+ s)?$/u);
+    Frames(600);
+    expect([clock.now, control.paused]).toEqual([from + 25_000_000, true]);
+    expect(ends).toEqual([{ endedBy: 'played', played: 2.5, wallSeconds: 0 }]);
+    expect(control.Report()).not.toHaveProperty('play');
+  });
+
+  it('with the movie end armed too: the earlier stop wins, and each fires its own callback', () => {
+    const { clock, control, RunTo, Frames } = Rig();
+    RunTo(3);
+    let movie = 0;
+    const ends: TimeBeatEnd[] = [];
+    let from = clock.now;
+    control.StopAt(from + TICKS_PER_SECOND, () => (movie += 1));
+    control.PlayFor(3, (end) => ends.push(end));
+    Frames(600);
+    expect([clock.now, movie]).toEqual([from + TICKS_PER_SECOND, 1]);
+    expect(ends).toEqual([{ endedBy: 'paused', played: 1, wallSeconds: 0 }]);
+    from = clock.now;
+    control.StopAt(from + 3 * TICKS_PER_SECOND, () => (movie += 1));
+    control.PlayFor(1, (end) => ends.push(end));
+    Frames(600);
+    expect([clock.now, movie, ends.at(-1)?.endedBy]).toEqual([from + TICKS_PER_SECOND, 1, 'played']);
+    expect(control.stopsAt).toBe(from + 3 * TICKS_PER_SECOND);
+    control.Pause(false);
+    Frames(600);
+    expect([clock.now, movie, control.paused]).toEqual([from + 3 * TICKS_PER_SECOND, 2, true]);
+  });
+
+  it('keeps a beat when the movie stop is re-armed or cleared', () => {
+    const { clock, control, RunTo, Frames } = Rig();
+    RunTo(3);
+    const from = clock.now;
+    const ends: TimeBeatEnd[] = [];
+    control.PlayFor(2, (end) => ends.push(end));
+    control.StopAt(from + 9 * TICKS_PER_SECOND);
+    control.StopAt(null);
+    expect(control.stopsAt).toBe(from + 2 * TICKS_PER_SECOND);
+    Frames(600);
+    expect([clock.now, ends.at(-1)?.endedBy]).toEqual([from + 2 * TICKS_PER_SECOND, 'played']);
+  });
+
+  it('lands exactly on its clock under the frame lock, on the grid or off it', () => {
+    const { clock, control, Locked } = LockRig(30);
+    Locked();
+    const ends: TimeBeatEnd[] = [];
+    for (const seconds of [2, 0.55]) {
+      const from = clock.now;
+      control.PlayFor(seconds, (end) => ends.push(end));
+      for (let i = 0; i < 1000 && !control.paused; i++) Locked();
+      expect(clock.now).toBe(from + Math.round(seconds * TICKS_PER_SECOND));
+    }
+    expect(ends.map(({ endedBy, played }) => [endedBy, played])).toEqual([
+      ['played', 2],
+      ['played', 0.55]
+    ]);
+  });
+
+  it('ends at a pause, a jump, a new beat and an export, each with its why, and clears its stop', () => {
+    const { clock, control, RunTo, Frames } = Rig();
+    RunTo(10);
+    const ends: TimeBeatEnd[] = [];
+    control.PlayFor(5, (end) => ends.push(end));
+    control.Command({ pause: true });
+    expect(ends.at(-1)?.endedBy).toBe('paused');
+    control.PlayFor(5, (end) => ends.push(end));
+    Frames(60);
+    control.Command({ back: 2 });
+    expect(ends.at(-1)).toEqual({ endedBy: 'jump', played: 1, wallSeconds: 0 });
+    expect([control.stopsAt, control.paused]).toEqual([null, false]);
+    control.PlayFor(5, (end) => ends.push(end));
+    control.PlayFor(1, (end) => ends.push(end));
+    expect(ends.at(-1)?.endedBy).toBe('replaced');
+    expect(control.stopsAt).toBe(clock.now + TICKS_PER_SECOND);
+    control.BeginExport({ fps: 30 });
+    expect(ends.at(-1)?.endedBy).toBe('export');
+    expect(control.stopsAt).toBeNull();
+    expect(() => control.PlayFor(1, () => undefined)).toThrow(EXPORT_LOCKED_TEXT);
+    expect(ends).toHaveLength(4);
   });
 });

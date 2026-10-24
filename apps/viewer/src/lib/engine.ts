@@ -518,6 +518,14 @@ export class Engine {
     return this.capture.Request();
   }
 
+  /**
+   * Whether a Capture waits for its frame: the frame lock's wait frames draw then (main.ts), so a screenshot never waits
+   * on a slow grid.
+   */
+  get capturePending(): boolean {
+    return this.capture.waiting;
+  }
+
   Stats(): EngineStats {
     return {
       adapter: this.adapterInfo,
@@ -956,6 +964,13 @@ class FrameCapture {
 
   constructor(device: GPUDevice) {
     this.device = device;
+  }
+
+  /**
+   * Whether a capture waits for the next frame.
+   */
+  get waiting(): boolean {
+    return this.pending != null && !this.pending.copied;
   }
 
   Request(): Promise<CapturedFrame> {

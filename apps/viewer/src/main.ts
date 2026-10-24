@@ -390,6 +390,15 @@ async function Start(): Promise<void> {
         return;
       }
       now = step.clock;
+    } else if (timeControl.frameLock != null) {
+      // The frame lock steps the clock one 1/fps grid frame once it is due (sd-time); a wait frame draws nothing, unless
+      // a screenshot waits for a frame.
+      const locked = timeControl.LockedFrame(timestamp);
+      if (locked.kind === 'wait' && !engine?.capturePending) {
+        requestAnimationFrame(frame);
+        return;
+      }
+      now = locked.clock;
     } else {
       // Every tick boundary up to the frame's time, at the clock's rate; a failing tick is logged once and the loop goes on.
       now = timeControl.Frame(timestamp);

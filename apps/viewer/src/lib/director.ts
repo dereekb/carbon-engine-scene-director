@@ -313,7 +313,7 @@ import { TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, typ
 import { BeatReportOf, BeatTime, MovieLookApplies, MoviePresentation, MovieReportOf, SeekChunks, type FramePresentation } from './movie';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
-import type { CapturedSim, JumpLanding, TapeEntry, TimeControl } from './time-control';
+import { PLAY_WAIT_LIMIT_MS, type CapturedSim, type JumpLanding, type TapeEntry, type TimeControl } from './time-control';
 import { CloneState, EstimateBytes, FirstDifference, type CapturedFields, type CloneMemo } from './state-capture';
 import { ParkSnapshotBytes } from './destiny-snapshot';
 import { ShipTurrets, type TurretsReport } from './turrets';
@@ -3101,20 +3101,41 @@ export class Director {
   }
 
   /**
-   * time_control: the window settings, a jump back or to a scene time, the rate, then pause or play (so
-   * { back: 10, rate: 0.25 } re-watches a moment in slow motion). `{}` reports.
+   * time_control: the window settings, a jump back or to a scene time, the rate, the frame lock, then pause or play (so
+   * { back: 10, rate: 0.25 } re-watches a moment in slow motion), or a beat: { play: N } plays N scene seconds and
+   * answers at the pause. `{}` reports.
    *
-   * @returns get_state's time, plus warnings.
+   * @returns get_state's time, plus warnings; a beat's also { played, wallSeconds, endedBy }, or { playing, stopsIn, note }
+   *   when it outlasts PLAY_WAIT_LIMIT_MS.
    * @throws {SceneError} When the command is invalid.
    * @throws {Error} Before main.ts attached the time control, or when a jump is refused or failed.
    */
-  TimeControl(input: Record<string, unknown> = {}): object {
-    const command = normalizeTimeControlCommand(input);
+  TimeControl(input: Record<string, unknown> = {}): object | Promise<object> {
+    const { play, ...command } = normalizeTimeControlCommand(input);
     const time = this.time;
     if (!time) throw new Error('time control is not attached yet: the page is still starting');
     // time_control {} only reads, so it answers while a movie export locks the clock.
     const warnings = Object.keys(command).length ? time.Command(command) : [];
-    return { ...time.Report(), warnings };
+    if (play === undefined) return { ...time.Report(), warnings };
+    return new Promise((resolve) => {
+      let answered = false;
+      let timer: Maybe<ReturnType<typeof setTimeout>> = null;
+      // A refused beat (an export runs) throws here, before the timer: the call fails.
+      time.PlayFor(play, (end) => {
+        if (answered) return;
+        answered = true;
+        if (timer != null) clearTimeout(timer);
+        this.onChange();
+        resolve({ ...time.Report(), warnings, ...end });
+      });
+      timer = setTimeout(() => {
+        if (answered) return;
+        answered = true;
+        const report = time.Report();
+        const stopsIn = report.play?.stopsIn ?? 0;
+        resolve({ ...report, warnings, playing: true, stopsIn, note: `the beat still plays (${stopsIn} scene seconds to go): call time_control { play: ${stopsIn} } to wait it out` });
+      }, PLAY_WAIT_LIMIT_MS);
+    });
   }
 
   /**

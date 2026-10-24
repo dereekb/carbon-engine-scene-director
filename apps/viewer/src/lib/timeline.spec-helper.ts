@@ -145,6 +145,21 @@ export function TimelineRig(cues: readonly SceneCue[], ships: readonly ScriptedS
     return stepper;
   };
   /**
+   * Live play under the frame lock at `fps` (sd-time), frames `frameMs` apart, until the world reaches a tick, calling
+   * back at every new tick and every grid frame.
+   */
+  const LockTo = (tick: number, fps: number, frameMs: number, { onTick, onGrid }: { readonly onTick?: (tick: number) => void; readonly onGrid?: (clock: number, index: number) => void } = {}) => {
+    control.SetFrameLock(fps);
+    for (let guard = 0; world.tick < tick && guard < 1_000_000; guard++) {
+      ms += frameMs;
+      const before = world.tick;
+      PlayerFrame();
+      const result = control.LockedFrame(ms);
+      if (result.kind === 'grid') onGrid?.(result.clock, result.index);
+      if (world.tick !== before) onTick?.(world.tick);
+    }
+  };
+  /**
    * The director's script-edit path: abandon the recorded future, then take the edit at once when it changes only the
    * future, else re-simulate from the latest snapshot it does not affect.
    *
@@ -179,7 +194,7 @@ export function TimelineRig(cues: readonly SceneCue[], ships: readonly ScriptedS
     cues: (player.Report()?.list ?? []).map(({ id, state, tick }) => ({ id, state, tick })),
     scripts: (player.Report()?.ships ?? []).map(({ ship, state, step }) => ({ ship, state, step }))
   });
-  return { world, clock, control, player, RunTo, ExportTo, Edit, Facts };
+  return { world, clock, control, player, RunTo, ExportTo, LockTo, Edit, Facts };
 }
 
 export type TimelineRigFacts = ReturnType<ReturnType<typeof TimelineRig>['Facts']>;

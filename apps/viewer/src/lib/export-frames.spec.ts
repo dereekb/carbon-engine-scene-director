@@ -249,6 +249,39 @@ describe('an export is the 1× run, tick for tick (sd-export)', () => {
   });
 });
 
+describe('a frame-locked run is the 1× run, tick for tick (sd-time)', () => {
+  it('at 30 fps on 60 Hz frames, at 30 fps on 300 ms frames and at 24 fps: the balls, the boundaries and every cue', () => {
+    const live = TimelineRig(ORACLE_CUES, SHIPS_A);
+    const liveLog = Watch(live.world);
+    live.RunTo(ORACLE_END, liveLog.onTick);
+    const facts = live.Facts();
+    for (const { fps, frameMs } of [
+      { fps: 30, frameMs: 1000 / 60 },
+      { fps: 30, frameMs: 300 },
+      { fps: 24, frameMs: 1000 / 60 }
+    ]) {
+      const rig = TimelineRig(ORACLE_CUES, SHIPS_A);
+      const log = Watch(rig.world);
+      let previous: number | null = null;
+      const steps = new Set<number>();
+      rig.LockTo(ORACLE_END, fps, frameMs, {
+        onTick: log.onTick,
+        onGrid: (clock) => {
+          if (previous != null) steps.add(clock - previous);
+          previous = clock;
+        }
+      });
+      const where = `${fps} fps on ${frameMs.toFixed(1)} ms frames`;
+      expect(rig.Facts(), where).toEqual(facts);
+      expect(log.boundaries, where).toEqual(liveLog.boundaries);
+      for (const [tick, states] of liveLog.states) expect(log.states.get(tick), `${where}, tick ${tick}`).toEqual(states);
+      // Every grid step is 1/fps (a timeline prepare holds the clock: no grid frame then).
+      expect([...steps].sort(), where).toEqual([Math.floor(TICKS_PER_SECOND / fps), Math.ceil(TICKS_PER_SECOND / fps)].filter((step, index, all) => all.indexOf(step) === index));
+      expect(rig.control.Report(), where).toMatchObject({ lock: { fps }, state: 'playing' });
+    }
+  });
+});
+
 describe('drawn attitudes sampled at 30 vs 60 Hz (sd-export)', () => {
   /**
    * The angle between two rotations, in degrees.

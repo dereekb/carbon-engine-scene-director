@@ -209,7 +209,7 @@ connected tab.
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 | `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |
 | `auto_camera` | page | the director camera on or off, and its bias |
-| `time_control` | page | pause or play, slow motion or fast-forward the scene, and jump back or seek within the recorded window |
+| `time_control` | page | pause or play, slow motion or fast-forward the scene, jump back or seek within the recorded window, lock the clock to a frame grid (`fps`) and play beats (`play`) |
 | `timeline` | page | the scene's script: status (every cue and ship script), play, pause, restart; the lever tools and `add_ships`, `add_fleet_composition`, `stage_engagement`, `add_objects` take `at` to add a cue instead of acting now |
 | `movie` | page | the timeline as a movie: beats in a fleet and a camera lane, add / move / edit / remove them, seek to a beat (paused, for a screenshot), play from one, retake after a cut, and the movie's look and end |
 | `export_movie` | hub | render the movie or a time range offline to an MP4 on a fixed 1/fps clock: start, status (progress, the file), cancel |

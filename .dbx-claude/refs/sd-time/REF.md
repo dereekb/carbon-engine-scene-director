@@ -19,21 +19,26 @@ edits re-simulating through `Resimulate` (over `Run`, the jump's core) instead o
 "Script edits re-simulate"). **Movie mode M4**: the snapshot holds the camera (`SimState.camera`), restored while the
 movie owns the camera (below, "Presentation across a jump"; `sd-cinema`). **Movie mode M5**: `StopAt`, the stop at a
 movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump` (`sd-timeline` doc `movie`).
+**Live recording R1** (plan `~/.claude/plans/i-want-to-think-expressive-volcano.md`, R1 the frame lock and beats → R2
+`record_movie` → R3 the real GPU): the frame lock (`time_control { fps }`), keyed stops and the beat lever
+(`time_control { play }`), below ("The frame lock" and "Beats"). R2 and R3 are not built yet (`sd-export`).
 
 ## Files
 
 | File | Holds |
 |---|---|
-| `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek` (scene seconds, or `TimeSeek` `{ timeline }`), `every`, `window`), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
-| `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`, `timeline` included) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
+| `packages/scene/src/lib/time/command.ts` | `TimeControlCommand` (`pause`, `rate`, `back`, `seek` (scene seconds, or `TimeSeek` `{ timeline }`), `every`, `window`, `fps` (an integer `MIN_EXPORT_FPS`–`MAX_EXPORT_FPS`, or false), `play` (above 0 to `MAX_PLAY_SECONDS` 3600; refused with `pause`)), `normalizeTimeControlCommand` (every problem at once; `back` with `seek` refused), `MIN_TIME_RATE` 1/16, `MAX_TIME_RATE` 32, `DEFAULT_TIME_RATE`, `AUDIBLE_MAX_RATE` 2, `isTimeRate`, the window bounds (`every` 1–60 s, default 5; `window` 10–3600 s, default 120; `DEFAULT_TIME_BUDGET_MB` 64; `MAX_SEEK_AHEAD_SECONDS` 300) |
+| `packages/scene/src/lib/time/report.ts` | `TimeReport` (get_state `time`, `timeline` included; `lock` `TimeLockReport` `{ fps, by }`, `play` `TimePlayReport` `{ stopsAt, stopsIn }`, `TIME_LOCK_SOURCES`, `TIME_PLAY_ENDS`) with `TimeWindowReport`, `TimeRecordingReport`, `TimeReplayReport`, `TimeDriftReport`, `TimeJumpReport`; `TIME_STATES`, `TimeAudioState` |
 | `apps/viewer/src/lib/clock.ts` | `SceneClock.rate` / `paused`, `Next(frameMs)` (the frame's target, records the frame), `Set(ticks)`, `Resync()` (forget the last frame time: after an export); `Advance` = `Set(Next())` for the specs |
+| `apps/viewer/src/lib/frame-lock.ts` | `FrameLock`, the frame lock's grid pacer (`Anchor`, `NextClock`, `Advance`, `IsDue`, `Reached`, `frame`). Node-tested |
+| `time-control.ts` frame lock and beats | `SetFrameLock` / `frameLock`, `LockedFrame` (`LockedFrameResult`: wait, hold, grid), the private `StepTo` (shared with `FrameTo`), keyed `StopAt(clock, onStop?, slot)` (`MOVIE_STOP_SLOT`, `PLAY_STOP_SLOT`), `PlayFor` (`TimeBeatEnd`), `PLAY_WAIT_LIMIT_MS` |
 | `time-control.ts` export mode | `BeginExport` / `FrameTo` / `EndExport`, `exporting`, `EXPORT_LOCKED_TEXT`: a movie export moves the clock 1/fps a frame (`sd-export`) |
 | `apps/viewer/src/lib/time-control.ts` | `TimeControl` (`Frame`, `Pause`, `SetRate`, `Report`, `AttachPort`, `effectiveRate`; T2b: `AttachSim`, `Command`, `Configure`, `Cut`, `Mark` / `Record`, `Jump`, the ring, the tape and its replay hook, drift; M3: `MarkOrigin`, `AbandonFuture`, `Resimulate`, the private `Run`; M5: `StopAt`, `stopsAt`, `recordedEnd`), `TimeSimPort` (M3: `AfterRestore`) / `TapeEntry` / `JumpLanding` / `TimeResimulateOptions` / `TimeResimulation`, `SceneSeconds` / `SceneTicks`, `TimeText` / `RateText` for the HUD. Node-tested, no runtime |
 | `apps/viewer/src/lib/destiny.ts` | `NextBoundaryTime()` (shares its formula with `DeliverBeforeBoundary`), `BoundaryTime(boundary)` (any boundary on the grid: the timeline's t = 0) |
 | `apps/viewer/src/lib/audio.ts` | `PageAudio.Suspend(on)` and `Mute(on)` |
 | `apps/viewer/src/lib/director.ts` | `AttachTime` (the presentation port and the sim port), the `time_control` handler, get_state `time`; T2b: `CaptureSim` / `RestoreSim` (`SimState`), `SimDrift`, `Replay`, `Journaled` + `JOURNALED_TOOLS`, `BeginJump` / `SilentFrame` / `EndJump`, `RebuildHull`, silent mode (the drawn-owner getters over `*Drawn` fields), `SimInput`, `BuildIsSimInput`, `SimulationChange` (the cut rule in `Apply`); T3: `TimelineOrigin` on the sim port, `ReplayExplosions`, `ReplayEffects`, `swallowedFlashes` |
 | T3 planners (node-tested) | `damage.ts` `ImpactsHealed`; `explosion-plan.ts` `ExplosionReplays`; `module-fx.ts` `RunningModuleFxCommands` over `ShipModules.RunningEffects`; `warp-fx.ts` `WarpFlashReplays`, `WARP_IN_FLASH_SECONDS` / `WARP_OUT_FLASH_SECONDS`; `missile-flights.ts` `InFlightAt`; `missile-effects.ts` `Launch(…, { midFlight })`; `arrivals.ts` `AwaitsBuild` |
-| `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`) |
+| `apps/viewer/src/main.ts` | builds `TimeControl` with the clock and world before the engine; the HUD `time` row; the keys (Space, `[` `]`, `←`); the loop's frame-lock branch (`LockedFrame`; a wait frame draws nothing unless `Engine.capturePending`) |
 | `apps/viewer/src/lib/animation-clock.ts` | `AnimationClock` (`Frame(now)`, `Rebase(now)`, `Sample()`, `Report()`, `ticks`), `MAX_ANIMATION_STEP_TICKS` (1 s): Blue's frame clock on the scene clock. Node-tested, no runtime |
 | `engine.ts` / `cinema.ts` / `audio.ts` | `Engine.ResetSceneTime(now)` (the update context and the animation clock's rebase, `sd-runtime`), the animation clock's install (`ANIMATION_ON_SCENE_CLOCK`, `?anim=real`), `CinemaRig.Rebase(delta)` and (M4) `Snapshot()` / `Restore()` (`sd-cinema`), `PageAudio.ReleaseAll()` |
 | `camera-director.ts` | M4: `CameraDirector.Snapshot()` / `Restore()` (wiring `port`, `cost` reset) |
@@ -41,7 +46,7 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 | `apps/viewer/src/lib/destiny-snapshot.ts` | `CapturePark` / `RestorePark` (stream + scalar overlay), `CaptureScalars` / `OverlayScalars`, `STRUCTURAL_BALL_FIELDS` / `STRUCTURAL_PARK_FIELDS`, `ParkSnapshotBytes`, `WARMUP_TICKS` 3, `WARMUP_SAMPLES_PER_TICK` 30. `runtime-sim` only |
 | `apps/viewer/src/lib/destiny.ts` | `Snapshot()` / `Restore()` (`DestinySnapshot`), getter-backed `master` / `replica`, `SampleCurves(time)` |
 | owners | `Snapshot(memo?)` / `Restore(state, memo?)` on `ShipModules`, `DamageModel`, `CapacitorModel`, `ShipLocks`, `CombatRules`, `ShipTargets`, `FleetTargets`, `FleetCommanders`, `AutoRepair`, `MissileFlights`, `ShotQueue`, `TurretSoundQueue`, `WarpFx`, `FleetFollowing`, `FleetOrders`, `Arrivals` (each with a `*_CAPTURE` options constant naming its wiring) |
-| specs | `time/command.spec.ts`, `clock.spec.ts`, `time-control.spec.ts` (T2b: `Rig`, a fake sim port over a real world; M3: `Resimulate`, the origin, `AbandonFuture`), `movie.spec.ts` (M3: the edit-resimulate determinism oracle, `sd-timeline` doc `movie`), `state-capture.spec.ts` (also `FirstDifference`), `cinema.spec.ts` (`Rebase`), `destiny-snapshot.spec.ts` (the audit, determinism, warm-up, the `SD_BENCH` bench), a `<Owner> snapshots (sd-time)` round trip in each owner's spec over `state-capture.spec-helper.ts` `RoundTrip`; verify-page `time:` |
+| specs | `frame-lock.spec.ts`; `export-frames.spec.ts` "a frame-locked run is the 1× run" (the lock's determinism oracle); `time/command.spec.ts`, `clock.spec.ts`, `time-control.spec.ts` ("frame lock", "beats"; T2b: `Rig`, a fake sim port over a real world; M3: `Resimulate`, the origin, `AbandonFuture`), `movie.spec.ts` (M3: the edit-resimulate determinism oracle, `sd-timeline` doc `movie`), `state-capture.spec.ts` (also `FirstDifference`), `cinema.spec.ts` (`Rebase`), `destiny-snapshot.spec.ts` (the audit, determinism, warm-up, the `SD_BENCH` bench), a `<Owner> snapshots (sd-time)` round trip in each owner's spec over `state-capture.spec-helper.ts` `RoundTrip`; verify-page `time:` |
 
 ## The stepping loop
 
@@ -98,7 +103,8 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 
 ## The movie's end (Movie mode M5)
 
-- `StopAt(clock, onStop?)` stops the frame loop exactly at a clock: the frame whose target reaches it clamps the target
+- `StopAt(clock, onStop?, slot = 'movie')` stops the frame loop exactly at a clock (each slot holds one stop: the movie's
+  end, a beat's; the loop stops at the earliest, `stopsAt`, and setting or clearing one slot never touches another): the frame whose target reaches it clamps the target
   there, steps the boundaries up to it (its own boundary included, so the cues due then fire) and, once the clock is
   there, pauses (`Pause(true)`), clears the stop and calls `onStop`. At 32× the same (spec'd at 1× and 32×); a frame
   over its step budget waits at an earlier boundary and the next frame finishes it.
@@ -110,20 +116,70 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 
 ## The tool and get_state
 
-- `time_control { pause?, rate?, back?, seek?, every?, window? }` (page tool; hub `SLOW_TOOLS`, a long jump can take a
-  while): applied in the order `every` / `window` (trimming the ring), the jump (`back` seconds from now, or `seek` to a
-  scene time), `rate`, `pause`, so `{ back: 10, rate: 0.25 }` re-watches in slow motion and `{ seek: 42, pause: true }`
+- `time_control { pause?, rate?, back?, seek?, every?, window?, fps?, play? }` (page tool; hub `SLOW_TOOLS`, a long jump
+  or a beat can take a while): applied in the order `every` / `window` (trimming the ring), the jump (`back` seconds from
+  now, or `seek` to a scene time), `rate`, `fps` (the frame lock), then `pause` or `play` (a beat), so `{ back: 10, rate: 0.25 }` re-watches in slow motion and `{ seek: 42, pause: true }`
   lands paused. `{}` reports. Returns the `time` report plus `warnings` (a clamped jump, "already there").
 - **Timeline time** (T3): `time.timeline` is `seconds` less the scene time of the timeline's t = 0
   (`TimeSimPort.TimelineOrigin` = `world.BoundaryTime(timeline.startTick)`), once a scripted timeline started;
   `seek: { timeline: s }` jumps to that origin + s (refused without a started timeline). A landing on t = s exactly has
   fired the cues due at s.
-- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping | exporting, exportFps?, timeline?, effectiveRate?, held?, audio?:
+- get_state `time`: `{ seconds, tick, rate, paused, state: playing | paused | jumping | exporting, exportFps?, lock?: { fps,
+  by: time_control | record_movie }, play?: { stopsAt, stopsIn }, timeline?, effectiveRate?, held?, audio?:
   muted | suspended, back, earliest?, latest?, window: { seconds, every, window, snapshots, bytes, budget, capture? },
   recording: { on, since?, why?, cutAt?, waiting? }, replay?: { pending, next?: { tool, seconds } }, drift?: { count,
   tick?, summary? }, jump?: { from, to, snapshot, resimulated, ms, cause: jump | edit, edit?: { cues, ships }, warnings? } }` (`seconds` and `tick` equal
   `simulation`'s; scene seconds throughout). The HUD row adds `back 63 s`, `N s recorded ahead` or `recording waits: 3
   builds`.
+
+## The frame lock (live recording R1)
+
+`time_control { fps: F }` (`SetFrameLock`): the scene clock moves on a 1/F grid instead of on wall time. The free clock
+bounds the cost of a frame's ticks (the 40 ms budget), not the step a frame takes, so at 2 fps each drawn frame jumped
+0.5 s of scene; the lock makes a heavy scene slow down smoothly instead.
+
+- **`FrameLock`** (`frame-lock.ts`): `Anchor(now)` sets the origin to now, index −1 and `due` to now (frame 0 is due at
+  the anchor itself); `NextClock()` = origin + `ExportFrameTicks(index + 1, F)` (the export's grid: no accumulation, no
+  drift); `Advance(ticks)` adds the frame's real delta × rate (from `clock.Next`, so capped at 1 s and 0 while paused or
+  held); `IsDue()` = `due ≥ NextClock()`; `Reached()` moves the index on, then `due = min(due, NextClock())`: **at most
+  one frame is ever owed**, so a slow spell is never paid back.
+- **`LockedFrame(frameMs)`** returns `wait` (nothing due: main.ts draws nothing, as the export's waiting frames), `hold`
+  (paused, held by a timeline prepare, a tick threw (logged once, as `Frame`), or an off-grid stop: draw at the clock)
+  or `grid` `{ clock, index }`: every boundary stepped to `NextClock()` through `StepTo` (no step budget, as `FrameTo`).
+  - GPU faster than F: the scene runs at the rate, F grid frames a scene second, and the rAFs between draw nothing
+    (60 Hz at 30 fps: every other frame).
+  - GPU slower than F: one grid frame a drawn frame; the scene slows to (draw fps / F) × rate, frames still exactly
+    1/F apart (300 ms frames at 30 fps: 0.11× actual).
+- **A stop inside the step** (`StopAt`, a beat) stops there: pause, `onStop`, an off-grid hold. On resume the next frame
+  steps on from it to the grid clock, so a stop never shifts the grid.
+- **Re-anchored** on a lock change, after a `Jump` / `Resimulate` landing (its grid frame 0 draws at once) and after
+  `EndExport`. A load does not move the clock, so the grid goes on (its prepare holds: no grid frame meanwhile).
+- **`Measure` runs on locked frames** (wait frames count real time, no scene), and a window closes only on a grid frame,
+  so it spans whole grid steps and `effectiveRate` shows the slowdown without the ±1 frame noise of a 1 s window.
+- The lock is a viewing preference like the rate: it lasts across loads and resets on a tab reload; refused during an
+  export (`EXPORT_LOCKED_TEXT`). `time.lock { fps, by: time_control }`; the HUD reads `1× · 30 fps lock (0.12× actual)`.
+- **main.ts**: when `frameLock` is set the loop calls `LockedFrame` instead of `Frame` (after `DriveTimeline`, as
+  always). A wait frame does `requestAnimationFrame` and returns, except while a `screenshot` waits for a frame
+  (`Engine.capturePending`): then it draws at the clock, so a slow-rate lock never keeps a screenshot waiting.
+- **The oracle** (`export-frames.spec.ts`): a locked run at 30 fps on 60 Hz frames, at 30 fps on 300 ms frames and at
+  24 fps equals the free 1× run tick for tick (the master `BallStates`, the boundary sequence and every cue), each grid
+  step ⌊1/F⌋ or ⌈1/F⌉.
+
+## Beats (live recording R1)
+
+`time_control { play: N }` (`PlayFor(seconds, onEnd)`): arms the `play` stop slot at now + N scene seconds and unpauses;
+the director's handler returns a promise that resolves at `onEnd` with the time report plus `{ endedBy, played (scene
+s), wallSeconds }`. It works with or without a lock (under one it lands exactly on its clock, on the grid or off it).
+
+- `onEnd` runs once: at its own stop (`played`), at any pause before it (`paused`: the movie's end, Space, a
+  `time_control pause`), at a jump or re-simulation landing (`jump`, `played` counted to the clock before the jump), at
+  `BeginExport` (`export`) or when a new beat replaces it (`replaced`). Every way out but its own stop clears that stop.
+- With the movie's end armed too, the earlier stop wins and each fires its own callback; `ArmMovieEnd` re-arming or
+  clearing the movie slot never clears a beat.
+- The page stops waiting at `PLAY_WAIT_LIMIT_MS` (240 s, under the hub's 600 s): it answers `{ playing: true, stopsIn,
+  note }` with the stop still armed; calling `play` again with `stopsIn` replaces the beat with one ending at the same
+  clock.
+- `time.play { stopsAt, stopsIn }` while armed; the HUD adds `· beat ends in 3.2 s`.
 
 ## The window: recording, snapshots and cuts (T2b)
 

@@ -16,6 +16,37 @@ export type TimeState = (typeof TIME_STATES)[number];
  */
 export type TimeAudioState = 'muted' | 'suspended';
 
+/**
+ * Who set the frame lock: time_control { fps }, or a live recording (record_movie) for its length.
+ */
+export const TIME_LOCK_SOURCES = ['time_control', 'record_movie'] as const;
+export type TimeLockSource = (typeof TIME_LOCK_SOURCES)[number];
+
+/**
+ * How a beat (time_control { play }) ended: played (it reached its stop), paused (a pause before it: the movie's end,
+ * Space, time_control pause), jump (a jump or a script edit's re-simulation landed), export (a movie export began) or
+ * replaced (a new beat).
+ */
+export const TIME_PLAY_ENDS = ['played', 'paused', 'jump', 'export', 'replaced'] as const;
+export type TimePlayEnd = (typeof TIME_PLAY_ENDS)[number];
+
+/**
+ * The frame lock (time_control { fps }): the scene clock moves on a 1/fps grid, one grid frame a drawn frame at most,
+ * so a page that cannot draw fps frames a second slows the scene instead of skipping it ahead.
+ */
+export interface TimeLockReport {
+  readonly fps: number;
+  readonly by: TimeLockSource;
+}
+
+/**
+ * A beat armed (time_control { play }): where it pauses, scene seconds, and how far that is.
+ */
+export interface TimePlayReport {
+  readonly stopsAt: number;
+  readonly stopsIn: number;
+}
+
 export interface TimeReport {
   /**
    * Scene seconds since the page booted (get_state.simulation.seconds).
@@ -33,13 +64,22 @@ export interface TimeReport {
    */
   readonly exportFps?: number;
   /**
+   * The frame lock, while one is set (time_control { fps }).
+   */
+  readonly lock?: TimeLockReport;
+  /**
+   * The beat playing (time_control { play }), until it pauses.
+   */
+  readonly play?: TimePlayReport;
+  /**
    * Seconds of timeline time at now (`seconds` less the scene time of the timeline's t = 0), once a scripted timeline
    * started: what `seek { timeline }` takes.
    */
   readonly timeline?: number;
   /**
    * The rate the page actually kept over the last second, when it fell behind the asked rate (below 95 %): a frame
-   * steps ticks for at most its step budget, and the clock waits at the last tick it stepped.
+   * steps ticks for at most its step budget, and the clock waits at the last tick it stepped; under a frame lock, the
+   * page draws fewer grid frames a second than the lock's fps.
    */
   readonly effectiveRate?: number;
   /**

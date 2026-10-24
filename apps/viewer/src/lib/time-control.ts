@@ -27,6 +27,11 @@
  * Resimulate, Pause, SetRate) are refused and Frame steps nothing; recording goes on, so the exported run stays
  * scrubbable.
  *
+ * The frame lock (time_control { fps }): the clock moves on a 1/fps grid instead (LockedFrame over a FrameLock): a drawn
+ * frame steps exactly one grid frame once real time × rate has reached it, never two, and a slow spell is never paid
+ * back, so a heavy scene slows down smoothly instead of skipping ahead. Stops are keyed (StopAt's slot: the movie's end,
+ * a beat), and a beat (PlayFor, time_control { play }) plays N scene seconds then pauses, telling its caller how it ended.
+ *
  * Node-tested (time-control.spec.ts): it imports no runtime.
  */
 
@@ -40,11 +45,15 @@ import {
   MAX_SNAPSHOT_EVERY_SECONDS,
   MAX_TIME_RATE,
   MIN_TIME_RATE,
+  MAX_EXPORT_FPS,
+  MIN_EXPORT_FPS,
   isTimeRate,
   type TimeAudioState,
   type TimeControlCommand,
   type TimeDriftReport,
   type TimeJumpReport,
+  type TimeLockSource,
+  type TimePlayEnd,
   type TimeRecordingReport,
   type TimeReplayReport,
   type TimeReport,
@@ -55,6 +64,7 @@ import {
 import { CLOCK_EPOCH_TICKS, MAX_FRAME_STEP_MS, TICKS_PER_MS, TICKS_PER_SECOND, type SceneClock } from './clock';
 import type { DestinyWorld } from './destiny';
 import { WARMUP_SAMPLES_PER_TICK, WARMUP_TICKS } from './destiny-snapshot';
+import { FrameLock } from './frame-lock';
 import { CloneState } from './state-capture';
 
 /**
@@ -77,6 +87,31 @@ export const CAPTURE_SLOW_MS = 15;
  * The refusal of the user's time controls while a movie export drives the clock (sd-export).
  */
 export const EXPORT_LOCKED_TEXT = 'a movie export is running: export_movie { action: "cancel" } stops it';
+/**
+ * How long the page's time_control { play } waits for its beat to end before it answers with the beat still armed:
+ * well under the hub's 600 s timeout for slow tools.
+ */
+export const PLAY_WAIT_LIMIT_MS = 240_000;
+/**
+ * StopAt's slots: the movie's end (the default), and a beat's (PlayFor).
+ */
+export const MOVIE_STOP_SLOT = 'movie';
+export const PLAY_STOP_SLOT = 'play';
+
+/**
+ * A frame under the frame lock (LockedFrame): wait (no grid frame is due: draw nothing), hold (paused, held, a tick
+ * failed or an off-grid stop: draw at the clock) or grid (the next grid frame, `index` from the lock's anchor).
+ */
+export type LockedFrameResult = { readonly kind: 'wait' | 'hold'; readonly clock: number } | { readonly kind: 'grid'; readonly clock: number; readonly index: number };
+
+/**
+ * How a beat (PlayFor) ended: why, the scene seconds it played, and the real seconds it took.
+ */
+export interface TimeBeatEnd {
+  readonly endedBy: TimePlayEnd;
+  readonly played: number;
+  readonly wallSeconds: number;
+}
 
 /**
  * What the page's presentation does with the clock's state: the AudioContext suspends while paused, and the sounds
@@ -351,9 +386,17 @@ export class TimeControl {
   private lastJump: Maybe<TimeJumpReport> = null;
   private jumping = false;
   /**
-   * Where the frame loop stops (Movie mode M5: a movie's end), and who to tell.
+   * Where the frame loop stops, by slot (Movie mode M5: a movie's end; a beat), and who to tell.
    */
-  private stopAt: Maybe<{ readonly clock: number; readonly onStop?: () => void }> = null;
+  private readonly stops = new Map<string, { readonly clock: number; readonly onStop?: () => void }>();
+  /**
+   * The frame lock (time_control { fps }) and who set it.
+   */
+  private lock: Maybe<{ readonly pacer: FrameLock; readonly by: TimeLockSource }> = null;
+  /**
+   * The beat playing (PlayFor): its start clock, its stop, its caller and its real start.
+   */
+  private beat: Maybe<{ readonly from: number; readonly stop: number; readonly onEnd: (end: TimeBeatEnd) => void; readonly startMs: number }> = null;
   /**
    * Whether a movie export drives the clock (BeginExport to EndExport), and at how many frames a second.
    */
@@ -436,7 +479,8 @@ export class TimeControl {
   }
 
   /**
-   * Runs a time_control command in its order: the window settings, the jump, the rate, the pause.
+   * Runs a time_control command in its order: the window settings, the jump, the rate, the frame lock, the pause. A beat
+   * (`play`) needs its caller's callback: the director runs it after (PlayFor).
    *
    * @param command - Validated (normalizeTimeControlCommand).
    * @returns Warnings (a clamped jump, a jump to now).
@@ -449,6 +493,7 @@ export class TimeControl {
     if (command.back !== undefined) warnings.push(...(this.Jump(this.clock.now - Math.round(command.back * TICKS_PER_SECOND)).warnings ?? []));
     else if (command.seek !== undefined) warnings.push(...(this.Jump(this.SeekTicks(command.seek)).warnings ?? []));
     if (command.rate !== undefined) this.SetRate(command.rate);
+    if (command.fps !== undefined) this.SetFrameLock(command.fps === false ? null : command.fps);
     if (command.pause !== undefined) this.Pause(command.pause);
     return warnings;
   }
@@ -708,6 +753,9 @@ export class TimeControl {
     }
     this.jumping = false;
     if (this.recording.on) this.end = Math.max(this.end ?? goal, goal);
+    // The landing is the frame lock's new frame 0, drawn at once; a beat ends here.
+    this.lock?.pacer.Anchor(goal);
+    this.EndBeat('jump', before);
     sim.EndJump({ from: before, to: goal, delta: goal - before });
     return { startTick, ms: Math.round((this.realNow() - start) * 10) / 10 };
   }
@@ -722,12 +770,10 @@ export class TimeControl {
   Frame(frameMs: number): number {
     if (this.jumping || this.exportMode) return this.clock.now;
     const before = this.clock.now;
-    const stop = this.stopAt;
-    // A stop the clock already reached or passed (a jump past it, say) is dropped.
-    if (stop && stop.clock <= before) this.stopAt = null;
+    const stop = this.NextStop(before);
     let target = this.clock.Next(frameMs);
-    const stopping = stop != null && stop.clock > before && target >= stop.clock;
-    if (stopping) target = stop.clock;
+    const stopping = stop != null && target >= stop;
+    if (stopping) target = stop;
     const start = this.realNow();
     try {
       for (;;) {
@@ -746,20 +792,155 @@ export class TimeControl {
       }
       this.tickError = null;
     } catch (error) {
-      // A failed tick must not end the loop; log each distinct failure once.
-      const message = error instanceof Error ? error.message : String(error);
-      if (this.tickError !== message) console.error(`destiny tick failed: ${message}\n${(error as Maybe<Error>)?.stack ?? ''}`);
-      this.tickError = message;
+      this.TickFailed(error);
     }
     if (this.recording.on) this.end = Math.max(this.end ?? this.clock.now, this.clock.now);
     this.Measure(frameMs, this.clock.now - before);
     // The stop's boundaries all ran (a frame behind its budget waits at an earlier one and goes on next frame).
-    if (stopping && stop && this.clock.now === stop.clock) {
-      this.stopAt = null;
-      this.Pause(true);
-      stop.onStop?.();
-    }
+    if (stopping && this.clock.now === stop) this.ReachStops();
     return this.clock.now;
+  }
+
+  /**
+   * One animation frame under the frame lock (SetFrameLock): the frame's real time at the rate is added to what is due,
+   * and once the next grid frame is due the clock steps every boundary to it (no step budget, as FrameTo). Never two
+   * grid frames in one call, and a slow spell is never paid back. A stop inside the step stops there (an off-grid hold);
+   * the next frame goes on from it to the grid clock, so a stop never shifts the grid. A failed tick is logged once (as
+   * Frame does) and the clock waits at its boundary.
+   *
+   * @param frameMs - The animation frame's timestamp, in milliseconds.
+   * @returns wait (nothing due: draw nothing), hold (paused, held, a failed tick or a stop: draw at the clock) or grid.
+   */
+  LockedFrame(frameMs: number): LockedFrameResult {
+    const before = this.clock.now;
+    const lock = this.lock?.pacer;
+    if (!lock || this.jumping || this.exportMode) return { kind: 'hold', clock: before };
+    const stop = this.NextStop(before);
+    const advance = this.clock.Next(frameMs) - before;
+    if (this.clock.paused || this.clock.held) {
+      this.Measure(frameMs, 0);
+      return { kind: 'hold', clock: before };
+    }
+    // The grid never sits behind the clock (the anchor follows every jump); should it, it starts again from now.
+    if (lock.NextClock() < before) lock.Anchor(before);
+    lock.Advance(advance);
+    if (!lock.IsDue()) {
+      this.Measure(frameMs, 0, false);
+      return { kind: 'wait', clock: before };
+    }
+    const goal = lock.NextClock();
+    const target = stop != null && stop < goal ? stop : goal;
+    try {
+      this.StepTo(target);
+      this.tickError = null;
+    } catch (error) {
+      this.TickFailed(error);
+      this.Measure(frameMs, this.clock.now - before, false);
+      return { kind: 'hold', clock: this.clock.now };
+    }
+    const reached = target === goal;
+    if (reached) lock.Reached();
+    // A window closes on a grid frame only, so it spans whole grid steps.
+    this.Measure(frameMs, target - before, reached);
+    if (stop != null && target >= stop) this.ReachStops();
+    return reached ? { kind: 'grid', clock: goal, index: lock.frame } : { kind: 'hold', clock: target };
+  }
+
+  /**
+   * Sets the frame lock (time_control { fps }), anchored at now, or takes it off. A viewing preference like the rate: it
+   * lasts across loads.
+   *
+   * @param fps - Grid frames a scene second, an integer from MIN_EXPORT_FPS to MAX_EXPORT_FPS, or null to unlock.
+   * @throws {RangeError} For an fps out of bounds.
+   */
+  SetFrameLock(fps: Maybe<number>): void {
+    this.Unlocked();
+    if (fps != null && !(Number.isInteger(fps) && fps >= MIN_EXPORT_FPS && fps <= MAX_EXPORT_FPS)) throw new RangeError(`the frame lock must be an integer from ${MIN_EXPORT_FPS} to ${MAX_EXPORT_FPS} frames a second, not ${fps}`);
+    this.lock = fps == null ? null : { pacer: new FrameLock(fps, this.clock.now), by: 'time_control' };
+    this.ResetMeasure();
+  }
+
+  /**
+   * The frame lock's frames a second, or null while the clock runs free (main.ts calls LockedFrame while it is set).
+   */
+  get frameLock(): Maybe<number> {
+    return this.lock?.pacer.fps ?? null;
+  }
+
+  /**
+   * Plays a beat (time_control { play }): unpauses, and pauses again exactly `seconds` of scene time from now (the play
+   * stop slot). `onEnd` is called once, when the beat ends: at its stop (played), at any pause before it (the movie's
+   * end, Space, time_control pause), at a jump or re-simulation landing, when a movie export begins, or when a new beat
+   * replaces it. Every way out but its own stop clears that stop.
+   *
+   * @param seconds - Scene seconds, above 0.
+   * @param onEnd - Told how the beat ended.
+   * @throws {Error} During a jump or an export.
+   */
+  PlayFor(seconds: number, onEnd: (end: TimeBeatEnd) => void): void {
+    this.Unlocked();
+    if (this.jumping) throw new Error('a jump is running: play once it lands');
+    if (!(seconds > 0)) throw new RangeError(`a beat plays above 0 scene seconds, not ${seconds}`);
+    this.EndBeat('replaced');
+    const from = this.clock.now;
+    const stop = from + Math.round(seconds * TICKS_PER_SECOND);
+    this.beat = { from, stop, onEnd, startMs: this.realNow() };
+    this.StopAt(stop, undefined, PLAY_STOP_SLOT);
+    this.Pause(false);
+  }
+
+  /**
+   * Ends the beat, if one plays: its stop goes and its caller is told.
+   *
+   * @param why - How it ended.
+   * @param at - The clock it ended at (a jump's: before it).
+   */
+  private EndBeat(why: TimePlayEnd, at = this.clock.now): void {
+    const beat = this.beat;
+    if (!beat) return;
+    this.beat = null;
+    this.stops.delete(PLAY_STOP_SLOT);
+    beat.onEnd({ endedBy: why, played: Round2(Math.max(0, at - beat.from) / TICKS_PER_SECOND), wallSeconds: Round2((this.realNow() - beat.startMs) / 1000) });
+  }
+
+  /**
+   * The earliest armed stop after now. A stop the clock already reached or passed (a jump past it, say) is dropped.
+   *
+   * @param now - The clock as the frame starts.
+   */
+  private NextStop(now: number): Maybe<number> {
+    let next: Maybe<number> = null;
+    for (const [slot, stop] of this.stops) {
+      if (stop.clock <= now) {
+        this.stops.delete(slot);
+        if (slot === PLAY_STOP_SLOT) this.EndBeat('jump', now);
+      } else if (next == null || stop.clock < next) next = stop.clock;
+    }
+    return next;
+  }
+
+  /**
+   * The loop reached its earliest stop: every stop due now clears, the clock pauses (a beat whose stop it was ends
+   * played, any other beat paused), then each stop's onStop runs.
+   */
+  private ReachStops(): void {
+    const now = this.clock.now;
+    const reached = [...this.stops].filter(([, stop]) => stop.clock <= now);
+    for (const [slot] of reached) this.stops.delete(slot);
+    this.clock.paused = true;
+    this.ResetMeasure();
+    this.Present();
+    this.EndBeat(reached.some(([slot]) => slot === PLAY_STOP_SLOT) ? 'played' : 'paused');
+    for (const [, stop] of reached) stop.onStop?.();
+  }
+
+  /**
+   * Logs a failed tick once per distinct message: a failed tick must not end the loop.
+   */
+  private TickFailed(error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    if (this.tickError !== message) console.error(`destiny tick failed: ${message}\n${(error as Maybe<Error>)?.stack ?? ''}`);
+    this.tickError = message;
   }
 
   /**
@@ -774,6 +955,7 @@ export class TimeControl {
     if (this.jumping) throw new Error('a jump is running: export once it lands');
     if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: export once it plays');
     if (this.exportMode) throw new Error('a movie export is already running');
+    this.EndBeat('export');
     this.exportMode = true;
     this.exportFps = fps ?? null;
     this.clock.paused = false;
@@ -795,6 +977,18 @@ export class TimeControl {
     if (!this.exportMode) throw new Error('FrameTo steps a movie export: BeginExport first');
     const goal = Math.round(target);
     if (goal < this.clock.now) throw new Error(`an export frame never goes back (to ${SecondsText(goal - CLOCK_EPOCH_TICKS)} s from ${SecondsText(this.clock.now - CLOCK_EPOCH_TICKS)} s)`);
+    this.StepTo(goal);
+    return this.clock.now;
+  }
+
+  /**
+   * Steps every tick boundary up to a goal, one evolve per world.Tick, setting the clock at each, then sets the clock to
+   * the goal: no step budget and no StopAt (FrameTo, LockedFrame). A throwing tick propagates, the clock waiting at its
+   * boundary.
+   *
+   * @param goal - 100 ns ticks, at or after now.
+   */
+  private StepTo(goal: number): void {
     for (;;) {
       const boundary = this.world.NextBoundaryTime();
       if (boundary == null || boundary > goal) break;
@@ -805,7 +999,6 @@ export class TimeControl {
     this.clock.Set(goal);
     this.world.Tick(goal);
     if (this.recording.on) this.end = Math.max(this.end ?? goal, goal);
-    return this.clock.now;
   }
 
   /**
@@ -821,6 +1014,7 @@ export class TimeControl {
     this.exportFps = null;
     this.clock.Resync();
     this.lastFrameMs = null;
+    this.lock?.pacer.Anchor(this.clock.now);
     this.Pause(pause);
   }
 
@@ -832,22 +1026,27 @@ export class TimeControl {
   }
 
   /**
-   * Stops the frame loop exactly at a clock (Movie mode M5: a movie's end): the frame that reaches it steps the
-   * boundaries up to it, sets the clock there and pauses, at any rate; then the stop clears itself. Jumps and
-   * re-simulations ignore it (they have their own target), and a clock the loop is already at or past drops it.
+   * Stops the frame loop exactly at a clock (Movie mode M5: a movie's end; a beat): the frame that reaches it steps the
+   * boundaries up to it, sets the clock there and pauses, at any rate or under the frame lock; then the stop clears
+   * itself. Each slot holds one stop, and the loop stops at the earliest. Jumps and re-simulations ignore it (they have
+   * their own target), and a clock the loop is already at or past drops it.
    *
-   * @param clock - 100 ns ticks, or null to clear the stop.
+   * @param clock - 100 ns ticks, or null to clear the slot's stop.
    * @param onStop - Called once the loop stopped there.
+   * @param slot - Whose stop (MOVIE_STOP_SLOT by default): setting one slot never clears another's.
    */
-  StopAt(clock: Maybe<number>, onStop?: () => void): void {
-    this.stopAt = clock == null ? null : { clock, ...(onStop ? { onStop } : {}) };
+  StopAt(clock: Maybe<number>, onStop?: () => void, slot: string = MOVIE_STOP_SLOT): void {
+    if (clock == null) this.stops.delete(slot);
+    else this.stops.set(slot, { clock, ...(onStop ? { onStop } : {}) });
   }
 
   /**
-   * The clock the frame loop stops at (StopAt), or null.
+   * The earliest clock the frame loop stops at (StopAt), or null.
    */
   get stopsAt(): Maybe<number> {
-    return this.stopAt?.clock ?? null;
+    let next: Maybe<number> = null;
+    for (const stop of this.stops.values()) if (next == null || stop.clock < next) next = stop.clock;
+    return next;
   }
 
   /**
@@ -868,6 +1067,7 @@ export class TimeControl {
     this.clock.paused = paused;
     this.ResetMeasure();
     this.Present();
+    if (paused) this.EndBeat('paused');
   }
 
   /**
@@ -906,6 +1106,8 @@ export class TimeControl {
       paused,
       state: this.State(),
       ...(this.exportMode && this.exportFps != null ? { exportFps: this.exportFps } : {}),
+      ...(this.lock ? { lock: { fps: this.lock.pacer.fps, by: this.lock.by } } : {}),
+      ...(this.beat ? { play: { stopsAt: SceneSeconds(this.beat.stop), stopsIn: Round2(Math.max(0, this.beat.stop - now) / TICKS_PER_SECOND) } } : {}),
       ...(origin == null ? {} : { timeline: Round2((now - origin) / TICKS_PER_SECOND) }),
       ...(behind ? { effectiveRate: Math.round(effective * 100) / 100 } : {}),
       ...(this.clock.held ? { held: true as const } : {}),
@@ -1134,7 +1336,10 @@ export class TimeControl {
     this.port.Presentation(presentation);
   }
 
-  private Measure(frameMs: number, sceneTicks: number): void {
+  /**
+   * @param closable - Whether the window may close on this frame (under the frame lock, only on a grid frame).
+   */
+  private Measure(frameMs: number, sceneTicks: number, closable = true): void {
     const last = this.lastFrameMs;
     if (Number.isFinite(frameMs)) this.lastFrameMs = frameMs;
     if (typeof last !== 'number' || !Number.isFinite(frameMs) || this.clock.paused || this.clock.held) {
@@ -1143,7 +1348,7 @@ export class TimeControl {
     }
     this.windowReal += Math.min(Math.max(frameMs - last, 0), MAX_FRAME_STEP_MS);
     this.windowScene += sceneTicks;
-    if (this.windowReal >= EFFECTIVE_RATE_WINDOW_MS) {
+    if (closable && this.windowReal >= EFFECTIVE_RATE_WINDOW_MS) {
       this.measured = this.windowScene / (this.windowReal * TICKS_PER_MS);
       this.windowReal = 0;
       this.windowScene = 0;
@@ -1171,12 +1376,14 @@ export function RateText(rate: number): string {
  * The overlay's time row.
  *
  * @param report - TimeControl.Report.
- * @returns Such as "1×", "paused at 0.25×" or "4× (2.7× actual) · muted".
+ * @returns Such as "1×", "paused at 0.25×", "4× (2.7× actual) · muted" or "1× · 30 fps lock (0.12× actual)".
  */
 export function TimeText(report: TimeReport): string {
   if (report.state === 'exporting') return report.exportFps ? `exporting · 1/${report.exportFps} s a frame` : 'exporting';
   let text = report.paused ? `paused at ${RateText(report.rate)}` : RateText(report.rate);
+  if (report.lock) text += ` · ${report.lock.fps} fps lock`;
   if (report.effectiveRate != null) text += ` (${RateText(report.effectiveRate)} actual)`;
+  if (report.play) text += ` · beat ends in ${report.play.stopsIn.toFixed(1)} s`;
   if (report.held) text += ' · held for the timeline';
   if (report.audio === 'muted') text += ' · muted';
   if (report.back > 0) text += ` · back ${Math.floor(report.back)} s`;
