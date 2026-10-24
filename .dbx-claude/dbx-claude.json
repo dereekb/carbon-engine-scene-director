@@ -826,10 +826,10 @@
         "tone": "hint",
         "triggers": [
           {
-            "words": ["stance", "stances", "ideal range", "piloting", "pilot brain", "kite", "kiting", "spiral", "burn out", "disengage", "legacyOrbitOf", "orbitOrderFor", "idealRangeOf", "stepShipPilot", "get_overview", "overview", "transversal", "angular velocity", "range dictation"]
+            "words": ["stance", "stances", "ideal range", "piloting", "pilot brain", "kite", "kiting", "spiral", "burn out", "disengage", "legacyOrbitOf", "orbitOrderFor", "idealRangeOf", "stepShipPilot", "get_overview", "overview", "transversal", "angular velocity", "range dictation", "pilot-loop", "controller protocol"]
           },
           {
-            "pathContains": ["packages/scene/src/lib/piloting/", "apps/viewer/src/lib/destiny-orbit-model", "apps/viewer/src/lib/pilots"],
+            "pathContains": ["packages/scene/src/lib/piloting/", "apps/viewer/src/lib/destiny-orbit-model", "apps/viewer/src/lib/pilots", "apps/scene-director/src/pilot-loop"],
             "every": 12
           }
         ]

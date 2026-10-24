@@ -12,7 +12,7 @@
       "options": {
         "outputPath": "dist/apps/scene-director",
         "main": "apps/scene-director/src/main.ts",
-        "additionalEntryPoints": ["apps/scene-director/src/verify-page.ts"],
+        "additionalEntryPoints": ["apps/scene-director/src/verify-page.ts", "apps/scene-director/src/pilot-loop.ts"],
         "tsConfig": "apps/scene-director/tsconfig.app.json",
         "bundle": true,
         "thirdParty": false,

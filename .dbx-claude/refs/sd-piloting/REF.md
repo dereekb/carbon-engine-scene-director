@@ -3,8 +3,12 @@
 > How a ship decides its own range and maneuvering from both sides' numbers, and the stances that tell it to. The
 > plan is `~/.claude/plans/i-want-to-work-woolly-flame.md` (slices P1-P6). **Status: P1 (the pure math in
 > `packages/scene/src/lib/piloting/`), P2 (stances in the document and as live orders), P3 (`get_overview`, the
-> ship-relative overview) and P4 (the page's pilots fly their stances, `apps/viewer/src/lib/pilots.ts`) have landed.**
-> The outside-program driver (P5) and the dbxpc evidence (P6) are still to come. Related refs: `sd-destiny` (the
+> ship-relative overview), P4 (the page's pilots fly their stances, `apps/viewer/src/lib/pilots.ts`) and P5 (the
+> outside program: the controller sub-doc and the `pilot-loop` example driver) have landed.** The dbxpc evidence (P6:
+> verify-page, the real-GPU look, fps with 50 loose pilots, `BrainFacts`' cost) is still to come. Sub-doc
+> (`{ ref: "sd-piloting", doc: "<key>" }`): **`controller`** (the hub's WebSocket protocol for a program outside the
+> page, one `get_overview` per piloted ship per tick, intent levers vs raw orders, errors and timeouts, the MCP route,
+> and `apps/scene-director/src/pilot-loop.ts`). Related refs: `sd-destiny` (the
 > parks, orders, the legacy orbit), `sd-combat` (hit chance, missile application), `sd-fleets` (Follow the FC, the
 > `piloting` state), `sd-personalities` (the FC brain's `toFleetMove`; a stance on the acting FC takes its `move` and
 > `prop-mods` levers).

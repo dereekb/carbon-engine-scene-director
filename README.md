@@ -47,6 +47,10 @@ What works today:
   its FC brain runs the fight: target calls, free fire, the FC's moves and prop mods,
   as the same tool calls a model makes, with FC ability, pilot reactions and a
   succession with a handover when the FC dies; pulling a lever yourself takes it manual.
+- **Pilots and stances**: a ship, squad, wing or fleet gets a stance (kite, brawl,
+  snipe, tackle, support, orbit, ...) and its pilots fly it every tick from both sides'
+  numbers (the ideal range, kiting, spiralling in, burning out); a program outside the
+  page picks stances from `get_overview` (`pilot-loop.js --ship <id>` is the example).
 - **Locations**: a scene can sit at a real EVE place, dressed with its region's
   nebula, its star, and the planets, moons, stations and stargates near it.
 - **Scene building**: `add_ships` and `stage_engagement` add N ships, or two
@@ -115,7 +119,7 @@ An nx workspace:
 | Project | Path | Builds | Holds |
 |---|---|---|---|
 | `scene` | `packages/scene` | `@nx/js:tsc` | the scene document and its patch ops, the tool list, ship stats, prop mods, fleets, fleet compositions, locations and scene building, shared by the hub and the page (no runtime imports) |
-| `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI and `verify-page` |
+| `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | the hub, the MCP server, the CLI, `verify-page` and `pilot-loop` |
 | `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the page: renderer, director, ships, the Destiny world and its clock, camera, fleet following, location dressing, audio |
 
 `bin/scene-director.js` launches the built CLI (`dist/apps/scene-director/main.js`).
