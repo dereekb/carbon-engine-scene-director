@@ -1,0 +1,29 @@
+{
+  "name": "battle",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "sourceRoot": "packages/battle/src",
+  "projectType": "library",
+  "tags": [],
+  "targets": {
+    "build": {
+      "executor": "@nx/js:tsc",
+      "outputs": ["{options.outputPath}"],
+      "options": {
+        "outputPath": "dist/packages/battle",
+        "main": "packages/battle/src/index.ts",
+        "tsConfig": "packages/battle/tsconfig.lib.json",
+        "assets": []
+      }
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "outputs": [],
+      "options": {
+        "command": "tsc --noEmit -p packages/battle/tsconfig.spec.json"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint"
+    }
+  }
+}

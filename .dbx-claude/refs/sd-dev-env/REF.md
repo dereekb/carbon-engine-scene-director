@@ -110,6 +110,13 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 - **A hub code change needs the owning session to reconnect its MCP server** (`/mcp`).
 - Page tools go to the newest tab connected to that hub. verify-page starts its own hub on a free port
   (`new Hub({ port: 0 })`), so running it never takes page tools from a tab on 5520.
+- **The battle console** (`sd-console`) is served at `/console/` from `--console <dir>` / `SCENE_DIRECTOR_CONSOLE`, by
+  default `dist/apps/battle-console/browser` beside the CLI bundle when it exists. Build it with `dbx-claude-build`
+  `project: battle-console` (it builds the engine bundle first; building `scene-director` does not build the console),
+  then reload `http://127.0.0.1:5520/console/`. A console tab is a page like the viewer: page tools go to the newest
+  tab of either. To try it without disturbing a session's hub, serve one on a spare port with temp stores:
+  `node dist/apps/scene-director/main.js serve --port 5531 --eve-data off --console dist/apps/battle-console/browser
+  --scenes <tmp> --fleets <tmp> --personalities <tmp> --movies <tmp>`.
 - **Audio cache**: ranged `/audio/path` reads come from local copies of tools-core's banks, downloaded whole on first
   use (`--audio-cache <dir>` / `SCENE_DIRECTOR_AUDIO_CACHE`, default `scene-director-audio-cache` in the OS temp dir,
   ~372 MB for `turrets.bnk`; shared by every hub, verify-page included; build-keyed, safe to delete). Without it each

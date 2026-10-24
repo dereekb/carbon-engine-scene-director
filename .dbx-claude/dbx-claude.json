@@ -913,6 +913,19 @@
             "toolNames": ["mcp__scene-director__export_movie", "mcp__scene-director__record_movie"]
           }
         ]
+      },
+      {
+        "name": "sd-console",
+        "delivery": "read",
+        "tone": "hint",
+        "triggers": [
+          {
+            "words": ["battle console", "battle-console", "cjs-scenario", "scenario file", "scenario bundle", "settings drop", "fleet panel", "fleet card", "command bar", "run bar", "Warp out", "Pull range", "Call primary", "readScenarioBundle", "planScenarioStaging", "toFleetCommandCall", "import map"]
+          },
+          {
+            "pathContains": ["apps/battle-console/", "packages/battle/"]
+          }
+        ]
       }
     ]
   }

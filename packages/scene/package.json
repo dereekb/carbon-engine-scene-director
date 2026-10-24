@@ -13,6 +13,6 @@
   "types": "./src/index.d.ts",
   "dependencies": {
     "tslib": "^2.8.1",
-    "@dereekb/util": "14.9.0"
+    "@dereekb/util": "14.23.0"
   }
 }

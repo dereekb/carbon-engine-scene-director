@@ -1,0 +1,40 @@
+@use 'sass:map';
+@use '@angular/material' as mat;
+@use '@dereekb/dbx-web' as dbx;
+@use '@dereekb/dbx-form' as dbx-form;
+
+// The console's theme, modeled on dbx-components apps/demo/src/style/_doc.scss: one dark M3 theme (the scene is space),
+// applied to the class on <body> so the CDK overlay container (dialogs, selects) is themed too.
+$_console-mat-theme: mat.define-theme(
+  (
+    color: (
+      theme-type: dark,
+      primary: mat.$azure-palette,
+      tertiary: mat.$orange-palette
+    ),
+    typography: (
+      plain-family: system-ui,
+      brand-family: system-ui
+    ),
+    density: (
+      scale: -1
+    )
+  )
+);
+
+$_console-dbx-config: dbx.quick-define-dbx-config-via-banners(0px);
+$console-theme: dbx.define-dbx-theme-config($_console-mat-theme, $_console-dbx-config);
+$console-form-theme: dbx-form.define-dbx-form-theme-config($console-theme);
+
+/**
+Applies the console theme (Material + dbx-web + dbx-form) and the dbx component shapes to a css selector (the body's
+".console-app").
+*/
+@mixin console-theme($root-selector) {
+  @include dbx.theme($root-selector, $console-theme);
+  @include dbx-form.theme($root-selector, $console-form-theme);
+
+  #{$root-selector} {
+    @include dbx.dbx-components-shapes();
+  }
+}

@@ -62,6 +62,8 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 | `scene-director` | `apps/scene-director` | `@nx/esbuild` (node) | hub, MCP server, CLI (`serve`, `mcp`, `call`), `verify-page.ts`. Building it builds the viewer (implicit dependency) |
 | `viewer-engine` (`@scene-director/viewer-engine`) | `packages/viewer-engine` | node `test` and `typecheck`; an `engine` target (`@nx/esbuild`, browser) | the engine every page runs: director, ships, Destiny world, clock, camera, following, location dressing, audio, time control, the hub link, the stores; `StartViewer` (the boot and the loop, `start-viewer.ts`), the runtime-free `ViewerApi` / `FleetView` facade (`api.ts`, `fleet-view.ts`), the shared `esbuild.config.mjs`. The `engine` target bundles it once into `dist/packages/viewer-engine/engine.js` (ESM exporting `StartViewer`) for a host that cannot apply the runtime's esbuild rules (the battle console) |
 | `viewer` | `apps/viewer` | `@nx/esbuild` (browser) | the read-only page: the canvas, the status overlay, `StartViewer` from the engine library (bundled from source with the library's esbuild config) |
+| `battle` (`@scene-director/battle`) | `packages/battle` | `@nx/js:tsc`, node tests | the battle console's pure logic: the `cjs-scenario/1` format, bundle reader, staging plan, settings to ops, commands to tool calls, panel view models. camelCase; imports `@scene-director/scene`, never the engine library (`sd-console`) |
+| `battle-console` | `apps/battle-console` | `@angular/build:application` (vitest Angular tests, angular-eslint) | the battle console: an Angular + dbx-components page that loads `engine.js` through an import map and reaches the scene only through `ViewerApi` (`sd-console`) |
 
 `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
@@ -74,7 +76,9 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 - **Apps** (`apps/scene-director`, `apps/viewer`) and the engine library (`packages/viewer-engine`) follow the CarbonEngineJS runtime's style: PascalCase functions and
   methods (`Hub.Start`, `DestinyWorld.Order`, `ReadNumber`, `MakeFakeShipData`), dbx verb prefixes in that case
   (`IsShipResource`); camelCase properties, parameters, locals; PascalCase types; UPPER_SNAKE exported constants.
-- **`packages/scene`** is camelCase (`toFleetMemberships`, `computeShipStats`).
+- **`packages/scene`** and **`packages/battle`** are camelCase (`toFleetMemberships`, `computeShipStats`,
+  `planScenarioStaging`). **`apps/battle-console`** follows Angular and dbx-components (camelCase members, the `console-`
+  selector prefix); it calls `ViewerApi`'s PascalCase methods as they are.
 - **Match the file you are in.** Ignore dbx tooling that asks for camelCase app functions: the sweep was stowed on
   2026-10-21 (queue note `naming-camelcase-for-our-code-carbon-names-only-where-the-runtime-calls-them`).
 - **Never rename a name the runtime calls**: `override`s of runtime members (`BallRotation.Update__Ticks`) and members
@@ -86,7 +90,8 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 | Do | With |
 |---|---|
 | build (scene + viewer + CLI) | `dbx-claude-build` `project: scene-director` (or `npx nx build scene-director`) |
-| tests | `dbx-claude-test` `project: scene` / `viewer-engine` / `scene-director`. The MCP spec spawns the built CLI, so `test` depends on `build` |
+| build the console | `dbx-claude-build` `project: battle-console` (builds the engine bundle first; the hub serves it at `/console/`) |
+| tests | `dbx-claude-test` `project: scene` / `viewer-engine` / `scene-director` / `battle` / `battle-console`. The MCP spec spawns the built CLI, so `test` depends on `build` |
 | lint | `dbx-claude-lint-run`. Config is the dbx library config (`eslint.config.library.mjs`); warnings allowed, errors block |
 | format | `npx oxfmt --write .` |
 | commit | `dbx-claude-commit` (gates lint, build, typecheck, affected tests) |
@@ -101,7 +106,8 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
   (shapes captured live against SDE build 3632936); tests run offline.
 - **Node-tested viewer modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine). See
   `sd-runtime`.
-- **The viewer UI is a plain DOM overlay.** dbx-web / Angular only when a feature genuinely needs them.
+- **The read-only viewer stays plain DOM; the battle console is the Angular app** (`apps/battle-console`, dbx-web and
+  dbx-form at the dbx-components versions; `sd-console`).
 - **EVE content is CCP's** (README, "EVE content"); the code is MIT.
 
 ## Where docs go
@@ -131,5 +137,9 @@ declares which refs it made stale (`dbx-claude-log` `refImpact`, `[]` when none)
   on its `scene-director` branch, pass its `npm test`, and push to `origin`, never `upstream`. `dist/` is gitignored:
   `npm run build` there after a checkout, then `npm install` here. `npm ls @carbonenginejs/runtime` must show
   `deduped` under the server.
+- **`@dereekb/*` move together**, at dbx-components' release (14.23.0 since 2026-10-24: util, dbx-cli, vitest, rxjs,
+  date, browser, model, dbx-core, dbx-web, dbx-form). Their Angular / ngrx / uirouter / ng-forge / zip.js peers sit at
+  dbx-components' root versions (Angular 22.1.4); mapbox-gl and ngx-mapbox-gl are installed only as dbx-web peers,
+  the console never imports them. npm only; after any install check the runtime's lock entry and md5 (above).
 - **The other upstream clones** (`runtime`, `tools-core`, `tools-blender`, `format-gr2`) are read-only references.
   Do not edit them.

@@ -1,0 +1,38 @@
+@use '@angular/material' as mat;
+@use '@dereekb/dbx-web' as dbx;
+@use '@dereekb/dbx-form' as dbx-form;
+@use './style/console';
+
+@include mat.core();
+@include dbx.core();
+@include dbx-form.core();
+
+@include console.console-theme('.console-app');
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #05070c;
+  color: #cfd8e6;
+  font:
+    13px/1.4 system-ui,
+    sans-serif;
+}
+
+// The engine's canvas fills the page under the UI; touch-action none so drags orbit the camera, not the page.
+#view {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  touch-action: none;
+}
+
+// H (or a movie's or a shot's look) hides the whole console UI, the CDK overlay container included.
+body.console-ui-hidden console-root,
+body.console-ui-hidden .cdk-overlay-container {
+  display: none !important;
+}

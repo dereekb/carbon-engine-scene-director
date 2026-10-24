@@ -35,6 +35,14 @@ config: the viewer page (`apps/viewer` `build`, which bundles the library from s
 Angular builder takes no esbuild plugins and cannot apply these rules, so it loads that module through an import map
 instead of re-bundling the runtime; its types are `src/lib/api.ts`'s, which name no runtime type.
 
+- **The console's route (verified 2026-10-24, A1 spike).** `apps/battle-console` lists `@scene-director/viewer-engine`
+  in `externalDependencies` (Angular leaves `import('@scene-director/viewer-engine')` alone in `main.js`), its build
+  `dependsOn` `viewer-engine:engine` and copies `engine.js(.map)` to its output root, and `src/index.html`'s import map
+  resolves the name to `/console/engine.js`. The console boots through the hub headless and draws in real Chrome, so
+  the runtime's class registrations are exactly the viewer's (the bundle comes from this config unchanged). The
+  fallback, never needed: import the pre-built `engine.js` by path, so Angular bundles it as one opaque module (that
+  route would need a tools-core machine to prove Black reading). Details: `sd-console`.
+
 - **`ignoreAnnotations: true` is mandatory.** The bundle must ignore the runtime package.json's `sideEffects` list:
   many listed files register classes on import, and without them Black reading fails with
   "No source shape registered for Black type ...".

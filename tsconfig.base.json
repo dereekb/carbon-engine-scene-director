@@ -18,6 +18,7 @@
     "noImplicitOverride": true,
     "strict": true,
     "paths": {
+      "@scene-director/battle": ["./packages/battle/src/index.ts"],
       "@scene-director/scene": ["./packages/scene/src/index.ts"],
       "@scene-director/viewer-engine": ["./packages/viewer-engine/src/index.ts"]
     }

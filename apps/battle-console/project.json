@@ -1,0 +1,65 @@
+{
+  "name": "battle-console",
+  "$schema": "../../node_modules/nx/schemas/project-schema.json",
+  "projectType": "application",
+  "prefix": "console",
+  "sourceRoot": "apps/battle-console/src",
+  "tags": [],
+  "implicitDependencies": ["viewer-engine"],
+  "targets": {
+    "build": {
+      "executor": "@angular/build:application",
+      "outputs": ["{options.outputPath}"],
+      "dependsOn": ["^build", { "projects": ["viewer-engine"], "target": "engine" }],
+      "options": {
+        "outputPath": "dist/apps/battle-console",
+        "browser": "apps/battle-console/src/main.ts",
+        "index": "apps/battle-console/src/index.html",
+        "baseHref": "/console/",
+        "polyfills": [],
+        "tsConfig": "apps/battle-console/tsconfig.app.json",
+        "inlineStyleLanguage": "scss",
+        "externalDependencies": ["@scene-director/viewer-engine"],
+        "outputHashing": "none",
+        "assets": [
+          {
+            "input": "dist/packages/viewer-engine",
+            "glob": "engine.js?(.map)",
+            "output": "."
+          }
+        ],
+        "allowedCommonJsDependencies": ["make-error", "date-fns", "date-fns-tz", "bowser"],
+        "styles": ["apps/battle-console/src/styles.scss"],
+        "scripts": []
+      },
+      "configurations": {
+        "production": {
+          "budgets": [
+            {
+              "type": "initial",
+              "maximumWarning": "4mb",
+              "maximumError": "8mb"
+            }
+          ]
+        },
+        "development": {
+          "optimization": false,
+          "extractLicenses": false,
+          "sourceMap": true,
+          "namedChunks": true
+        }
+      },
+      "defaultConfiguration": "production"
+    },
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "outputs": [],
+      "options": {
+        "command": "tsc --noEmit -p apps/battle-console/tsconfig.spec.json"
+      }
+    },
+    "lint": {
+      "executor": "@nx/eslint:lint"
+    }
+  }
+}

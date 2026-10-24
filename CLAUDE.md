@@ -18,6 +18,8 @@ tools table, and nothing more. Behavior, rules, gotchas, measurements and real-G
   CLI (`serve`, `mcp`, `call`) and `verify-page.ts`. Building it builds the viewer too.
 - `packages/viewer-engine`: the engine every page runs (`StartViewer`, `ViewerApi`); `src/lib/runtime.ts` is the single
   runtime import point. `apps/viewer` (`@nx/esbuild`, browser): the read-only page over it.
+- `packages/battle` (pure, camelCase) and `apps/battle-console` (`@angular/build`, served by the hub at `/console/`):
+  the battle console (`sd-console`).
 - `bin/scene-director.js` launches `dist/apps/scene-director/main.js`; `.mcp.json` points at it.
 
 ## Project references
@@ -57,6 +59,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
 - `sd-time`: time control: rate, pause and fast-forward stepping; snapshots of the parks and per-tick state, the
   tape, jumps and what cuts the window
 - `sd-piloting`: stances, the ideal range from both sides' numbers, the orbit model, maneuvers and the pilot step
+- `sd-console`: the battle console (Angular app on the engine bundle through an import map) and `packages/battle`:
+  scenario files and bundles, the staging pipeline over page→hub calls, FC settings to ops, buttons to tool calls
 - `sd-export`: movie export: the fixed-step export clock, what samples scene time, the picture and WebCodecs encoding,
   the hub's MP4 writer and `/movies`, `export_movie`; live recording (`record_movie`)
 
@@ -100,5 +104,5 @@ Never rename a name the runtime calls (overrides of runtime members, members of 
 - `server` is the exception: the user's fork (`origin` = github.com/dereekb/carbon-engine-server; `upstream` =
   carbonenginejs/server). Changes go on its `scene-director` branch, pass its `npm test`, and are pushed to `origin`,
   never `upstream`. Pins and reinstall steps: `sd-workspace`, `sd-dev-env`.
-- The viewer UI is a plain DOM overlay; dbx-web / Angular only when a feature genuinely needs them.
+- The read-only viewer stays plain DOM; the battle console (`apps/battle-console`) is the Angular + dbx-components app.
 - EVE content is CCP's (see README); the code is MIT.

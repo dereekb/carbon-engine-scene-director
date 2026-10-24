@@ -1,0 +1,19 @@
+{
+  "name": "@scene-director/battle",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "dependencies": {
+    "tslib": "^2.8.1",
+    "@dereekb/util": "14.23.0",
+    "@scene-director/scene": "0.1.0"
+  }
+}

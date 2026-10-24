@@ -272,6 +272,7 @@ behavior, the rules, the files and the gotchas of one area:
 | Movie export and live recording: the fixed-step export clock, the record lock, what samples scene time, the picture, encoding, the hub's MP4 writer | [`sd-export`](.dbx-claude/refs/sd-export/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
+| The battle console: the Angular app, scenario files, staging, FC settings and fleet commands (`packages/battle`) | [`sd-console`](.dbx-claude/refs/sd-console/REF.md) |
 
 **This README stays an overview.** A new feature gets a line in "What works today"
 and the tools table here; its behavior, rules and measurements go in the area's
