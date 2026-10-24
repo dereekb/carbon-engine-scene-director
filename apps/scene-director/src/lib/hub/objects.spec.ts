@@ -44,7 +44,7 @@ class FakePage implements SavedScenesPage {
     this.calls.push({ name, args });
     let result: unknown = null;
     if (name === 'get_scene') result = FakeGetScene(this.scene, args);
-    else if (name === 'patch_scene' && args['at'] != null) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
+    else if (name === 'patch_scene' && (args['at'] != null || args['when'] != null)) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
     else if (name === 'patch_scene') {
       const { scene, warnings } = applySceneOperations(this.scene, args['operations']);
       this.scene = scene;

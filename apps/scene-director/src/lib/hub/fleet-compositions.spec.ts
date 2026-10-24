@@ -49,7 +49,7 @@ class FakePage implements SavedScenesPage {
   async Call(name: string, args: ToolArgs = {}): Promise<unknown> {
     let result: unknown = null;
     if (name === 'get_scene') result = FakeGetScene(this.scene, args);
-    else if (name === 'patch_scene' && args['at'] != null) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
+    else if (name === 'patch_scene' && (args['at'] != null || args['when'] != null)) ({ scene: this.scene, result } = FakeAddCue(this.scene, args));
     else if (name === 'patch_scene') {
       this.patches.push(args['operations'] as Record<string, unknown>[]);
       const { scene, warnings, arrivals } = applySceneOperations(this.scene, args['operations']);

@@ -279,4 +279,35 @@ describe('Arrivals snapshots (sd-time)', () => {
     expect([...exits]).toEqual([...twin.exits]);
     expect(arrivals.Report()).toEqual(twin.arrivals.Report());
   });
+
+  it('reports each arrival phase once, in boundary order, and a restored snapshot re-reports the same (timeline events)', () => {
+    const { harness, arrivals } = MakeWorld([
+      ['a', rifter, [0, 0, 0]],
+      ['b', rifter, [500, 0, 0]],
+      ['c', guardian, [-500, 0, 0]]
+    ]);
+    const seen: string[] = [];
+    harness.world.OnBoundary((boundary) => {
+      for (const event of arrivals.Transitions(boundary)) seen.push(`${event.phase}@${boundary} ${event.group} ${event.ships.join(',')}`);
+    });
+    harness.Ticks(6);
+    arrivals.Add(Group(['a', 'b', 'c']));
+    harness.Ticks(2);
+    const world = harness.world.Snapshot();
+    const state = arrivals.Snapshot();
+    const now = harness.now;
+    harness.Ticks(150);
+    const first = [...seen];
+    expect(first.map((line) => line.split('@')[0])).toEqual(['first', 'landed', 'formed']);
+    const ticks = first.map((line) => Number(line.split('@')[1].split(' ')[0]));
+    expect(ticks[0]).toBeLessThan(ticks[1]);
+    expect(ticks[1]).toBeLessThanOrEqual(ticks[2]);
+    expect(first[0]).toMatch(/ g a,b,c$/);
+    seen.length = 0;
+    harness.world.Restore(world);
+    arrivals.Restore(state);
+    harness.now = now;
+    harness.Ticks(150);
+    expect(seen).toEqual(first);
+  });
 });

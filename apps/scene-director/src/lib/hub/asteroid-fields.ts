@@ -53,7 +53,7 @@ type OreEntry = { readonly kind: 'name'; readonly name: string; readonly weight:
 /**
  * The tool's keys that are not the op's.
  */
-const TOOL_ONLY_KEYS = ['scene', 'replace', 'ores', 'at', 'cue'];
+const TOOL_ONLY_KEYS = ['scene', 'replace', 'ores', 'at', 'when', 'cue'];
 
 export class AsteroidFieldTools {
   private readonly asteroidData: AsteroidDataApi;
@@ -77,7 +77,7 @@ export class AsteroidFieldTools {
 
   async AddAsteroidField(args: ToolArgs): Promise<object> {
     const entries = ReadOreEntries(args['ores']);
-    const before = await this.places.Before(Without(args, ['at', 'cue']));
+    const before = await this.places.Before(Without(args, ['at', 'when', 'cue']));
     const resolved = await Promise.all(
       entries.map((entry, index) =>
         this.ResolveOre(entry).then(

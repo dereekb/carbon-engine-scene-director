@@ -5183,6 +5183,149 @@ try {
     return `cue ${cue?.state} (${cue?.note}); on: false -> driver ${cinemaOf(state).driver}`;
   });
 
+  // Movie mode (M2): the page plays event cues on their events. Each check loads its own scene; --only movie: runs them
+  // alone. (a) and (b) need the SDE (combat and the warp-ins' flight numbers).
+  const EventCue = (id: string, when: object, action: object, extra: object = {}) => ({ id, when, ...extra, ...action });
+  const EventSeconds = (report: TimelineToolReport, ids: readonly string[]) => Object.fromEntries(ids.map((id) => [id, report.list.find((cue) => cue.id === id)?.event?.second ?? null]));
+  const MOVIE_RIFTER = { hull: 'Rifter', dna: 'mf4_t1:minmatarbase:minmatar', radius: 31 };
+  const WarpInCue = (id: string, at: number, fleet: string, count: number, position: SceneVector) => ({
+    id,
+    at,
+    patch_scene: { operations: [{ op: 'add_fleet_composition', composition: { id: fleet, commander: MOVIE_RIFTER, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ ...MOVIE_RIFTER, count }] }] }] }, position, heading: 180, team: 'red', warpIn: true }] }
+  });
+  const MOVIE_SECONDS = 45;
+  const MOVIE_EVENT_CUES = ['first-blood', 'primary-dies', 'landed', 'chain', 'fallback'];
+  interface MovieRun {
+    readonly startedAt: number;
+    readonly fired: Record<string, number>;
+    readonly events: Record<string, Maybe<number>>;
+    readonly waiting: Maybe<TimelineSummary>;
+    readonly end: Maybe<TimelineSummary>;
+  }
+  const movieRuns: MovieRun[] = [];
+  const MovieRunOf = async (): Promise<MovieRun> => {
+    let waiting: Maybe<TimelineSummary> = null;
+    const end = await WaitFor(`timeline time ${MOVIE_SECONDS}`, MOVIE_SECONDS + 90, (polled) => {
+      const timeline = TimelineOf(polled);
+      if (!waiting && timeline?.state === 'playing' && timeline.cues.waiting === MOVIE_EVENT_CUES.length) waiting = timeline;
+      return (timeline?.time ?? -1) >= MOVIE_SECONDS ? null : Show(timeline);
+    });
+    const report = await TimelineTool();
+    const fired = Object.fromEntries(Object.entries(FiredAt(report)).filter(([id]) => MOVIE_EVENT_CUES.includes(id)));
+    return { startedAt: report.startedAt ?? 0, fired, events: EventSeconds(report, MOVIE_EVENT_CUES), waiting, end: TimelineOf(end) };
+  };
+
+  await Check('movie: (SDE) event cues fire on their events, the same across a restart and a jump back', async () => {
+    const red = (id: string, position: SceneVector) => ({ ...Rifter(id, position), team: 'red' });
+    const blue = (id: string, position: SceneVector) => ({ ...Punisher(id, position), team: 'blue' });
+    try {
+      await LoadCombatScene(
+        [blue('b1', [0, 0, 0]), blue('b2', [800, 0, 0]), blue('b3', [-800, 0, 0]), blue('b9', [0, 0, -60000]), red('r1', [0, 0, 2500]), red('r2', [900, 0, 3000]), red('r3', [-900, 0, 3000])],
+        { seed: 7, death: 'explode' },
+        {
+          fleets: [{ id: 'b', commander: 'b1', wings: [{ id: 'b-w', squads: [{ id: 'b-s', role: 'dps', members: ['b2', 'b3'] }] }] }],
+          timeline: [
+            { id: 'engage', at: 1, engage: { ships: ['r1', 'r2', 'r3'], target: 'b1' } },
+            { id: 'call', at: 1, order_fleet: { fleet: 'b', order: { type: 'targets', set: ['r1', 'r2', 'r3'] } } },
+            WarpInCue('reinforce', 3, 'wr', 1, [0, 0, 9000]),
+            EventCue('first-blood', { kill: {}, after: 2 }, { switch_prop_mods: { fleet: 'b', active: true } }),
+            EventCue('primary-dies', { kill: { primary: 'b' } }, { order_fleet: { fleet: 'b', order: { type: 'targets', next: true } } }),
+            EventCue('landed', { arrival: { fleet: 'wr' } }, { order_fleet: { fleet: 'wr', order: { type: 'approach', target: 'b2' } } }),
+            EventCue('chain', { cue: 'landed', after: 3 }, { order_fleet: { fleet: 'wr', order: { type: 'stop' } } }),
+            EventCue('fallback', { kill: { ship: 'b9' }, latest: 30 }, { order_ship: { id: 'b9', order: { type: 'stop' } } })
+          ]
+        }
+      );
+      movieRuns.length = 0;
+      movieRuns.push(await MovieRunOf());
+      await TimelineTool({ action: 'restart' });
+      movieRuns.push(await MovieRunOf());
+      await Recorded();
+      const jump = await TimeControl({ seek: { timeline: 10 } });
+      await Playing();
+      movieRuns.push(await MovieRunOf());
+      const [first, second, third] = movieRuns;
+      Expect(Object.keys(first.fired).length === MOVIE_EVENT_CUES.length && first.fired['fallback'] === 30, `fired ${Show(first.fired)}`);
+      for (const id of MOVIE_EVENT_CUES.filter((cue) => cue !== 'fallback')) Expect(first.events[id] != null && first.fired[id] > (first.events[id] ?? Infinity), `${id}: event ${first.events[id]}, fired ${first.fired[id]}`);
+      Expect(Show(first.fired) === Show(second.fired) && Show(first.events) === Show(second.events), `restart: ${Show(first)} then ${Show(second)}`);
+      Expect(Show(second.fired) === Show(third.fired) && Show(second.events) === Show(third.events), `jump back: ${Show(second)} then ${Show(third)}`);
+      return `fired at ${Show(first.fired)} on events at ${Show(first.events)}; equal after a restart and after seek { timeline: 10 } (${jump.jump?.ms} ms)`;
+    } finally {
+      await Playing();
+    }
+  });
+
+  await Check('movie: get_state shows the waiting event cues with their texts, then the beats and the event log', async () => {
+    Expect(movieRuns.length > 0, 'the event-cue check did not record a run');
+    const { waiting, end } = movieRuns[0];
+    const texts = Object.fromEntries((waiting?.waiting ?? []).map((cue) => [cue.id, cue.when]));
+    Expect(texts['first-blood'] === 'the 1st kill + 2 s' && texts['fallback']?.endsWith('at 30 s at the latest') === true && texts['chain'] === 'cue landed fired + 3 s', Show(waiting?.waiting));
+    Expect(end?.beat?.fleet != null && (end.events?.count ?? 0) > 0 && (end.events?.last.length ?? 0) > 0, Show({ beat: end?.beat, events: end?.events }));
+    return `waiting ${Show(texts)}; then beat ${Show(end?.beat)}, ${end?.events?.count} events, the last ${Show(end?.events?.last[0])}`;
+  });
+
+  await Check('movie: (SDE) a warp-in fires its first, landed and formed cues in order, each the tick after its phase, the same after a restart', async () => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter' }).catch(SkipWithoutSde);
+    const phases = ['ph-first', 'ph-landed', 'ph-formed'];
+    await LoadTimeline({
+      ships: [Scripted('a', [0, 0, 0])],
+      timeline: [WarpInCue('reinforce', 2, 'wr', 2, [0, 0, 9000]), ...(['first', 'landed', 'formed'] as const).map((phase) => EventCue(`ph-${phase}`, { arrival: { fleet: 'wr', phase } }, { order_ship: { id: 'a', order: { type: 'stop' } } }))]
+    });
+    const Run = async () => {
+      await Done(120);
+      const report = await TimelineTool();
+      return { fired: FiredAt(report), events: EventSeconds(report, phases) };
+    };
+    const first = await Run();
+    await TimelineTool({ action: 'restart' });
+    const second = await Run();
+    const [at1, at2, at3] = phases.map((id) => first.fired[id]);
+    Expect(at1 < at2 && at2 <= at3, `fired ${Show(first.fired)}`);
+    for (const id of phases) Expect(first.fired[id] === (first.events[id] ?? -9) + 1, `${id}: event ${first.events[id]}, fired ${first.fired[id]}`);
+    Expect(Show(first) === Show(second), `${Show(first)} then ${Show(second)}`);
+    return `first +${at1}, landed +${at2}, formed +${at3} (events ${Show(first.events)}); equal after a restart`;
+  });
+
+  await Check('movie: bad event cues are refused with every problem', async () => {
+    const ships = [Scripted('a', [0, 0, 0])];
+    const stop = { order_ship: { id: 'a', order: { type: 'stop' } } };
+    const read = await LoadTimeline({ ships, timeline: [EventCue('odd', { explode: {} }, stop), EventCue('both', { kill: {}, warp: {} }, stop)] }).then(() => null, ErrorMessage);
+    Expect(read != null && /"odd".*exactly one event kind/su.test(read) && /exactly one event kind[^;]*got kill, warp/su.test(read), `read: ${read}`);
+    const cycle = await LoadTimeline({ ships, timeline: [EventCue('c1', { cue: 'c2' }, stop), EventCue('c2', { cue: 'c1' }, stop)] }).then(() => null, ErrorMessage);
+    Expect(cycle?.includes('wait for each other') === true, `cycle: ${cycle}`);
+    const rw = { id: 'adds', at: 5, patch_scene: { operations: [{ op: 'add_fleet_composition', composition: { id: 'rw', commander: MOVIE_RIFTER, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ ...MOVIE_RIFTER, count: 1 }] }] }] }, position: [0, 0, 9000], heading: 180, team: 'red' }] } };
+    const walk = await LoadTimeline({ ships, timeline: [rw, EventCue('early', { kill: {} }, { order_fleet: { fleet: 'rw', order: { type: 'stop' } } }, { at: 0 }), EventCue('ghost', { kill: { ship: 'ghost' } }, stop), EventCue('late', { kill: {}, latest: 5 }, stop, { at: 10 })] }).then(() => null, ErrorMessage);
+    Expect(walk?.includes('give at 5 or later (cue "adds" adds it)') === true && walk.includes('no ship "ghost"') && walk.includes('is before the cue arms'), `walk: ${walk}`);
+    await LoadTimeline({ ships, timeline: [{ id: 'first', at: 1, ...stop }, EventCue('then', { cue: 'first' }, stop)] }, { timeline: 'pause' });
+    const removed = await call('patch_scene', { operations: [{ op: 'remove_cue', id: 'first' }] }).then(() => null, ErrorMessage);
+    Expect(removed?.includes('waits for cue "first"') === true, `remove_cue: ${removed}`);
+    return 'unknown and two kinds, a cycle, at too early (with its hint), a ghost filter, latest before arms and remove_cue of a waited-for cue: each refused';
+  });
+
+  await Check('movie: (SDE) when on engage and add_ships makes event cues with arms that fire on their events', async () => {
+    await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter' }).catch(SkipWithoutSde);
+    const blue = (id: string, position: SceneVector) => ({ ...Punisher(id, position), team: 'blue' });
+    await LoadTimeline(
+      {
+        combat: { seed: 7, death: 'explode' },
+        ships: [blue('b1', [0, 0, 0]), blue('b2', [800, 0, 0]), blue('b3', [-800, 0, 0]), { ...Rifter('r1', [0, 0, 2500]), team: 'red' }],
+        timeline: [{ id: 'kill-r1', at: 1, engage: { ships: ['b1', 'b2', 'b3'], target: 'r1' } }, WarpInCue('reinforce', 2, 'wr', 1, [0, 0, 12000])]
+      },
+      { timeline: 'pause' }
+    );
+    await WaitTimeline('the timeline is ready', 90, (timeline) => (timeline?.state === 'ready' ? null : Show(timeline)));
+    const engage = await call<CueResult>('engage', { ships: ['wr-fc'], target: 'b1', when: { arrival: { fleet: 'wr' } }, cue: 'wr-engage' });
+    const avenge = await call<CueResult>('add_ships', { dna: MOVIE_RIFTER.dna, radius: MOVIE_RIFTER.radius, stats: TIMELINE_STATS, count: 1, team: 'red', position: [0, 0, 6000], when: { kill: { ship: 'r1' } }, cue: 'avenge' });
+    Expect(engage.state === 'waiting' && engage.cue.arms === 2 && avenge.state === 'waiting' && avenge.cue.arms === 0, Show({ engage: [engage.state, engage.cue], avenge: [avenge.state, avenge.cue] }));
+    await TimelineTool({ action: 'play' });
+    await WaitTimeline('both event cues fire', 120, (timeline) => (timeline?.cues.waiting === 0 && timeline.cues.pending === 0 ? null : Show(timeline?.waiting ?? timeline)));
+    const report = await TimelineTool();
+    const fired = FiredAt(report);
+    const events = EventSeconds(report, ['wr-engage', 'avenge']);
+    Expect(fired['wr-engage'] === (events['wr-engage'] ?? -9) + 1 && fired['avenge'] === (events['avenge'] ?? -9) + 1, Show({ fired, events }));
+    return `engage arms ${engage.cue.arms} and add_ships arms ${avenge.cue.arms}, both waiting; fired at +${fired['wr-engage']} (landed at ${events['wr-engage']}) and +${fired['avenge']} (r1 killed at ${events['avenge']})`;
+  });
+
   const errors = await call<LogEntry[]>('page_log', { level: 'error', limit: 20 });
   const unexpected = errors.filter((entry) => !/bogus|nosuchhull|renderer unavailable/u.test(entry.message));
   results.push(`info  page errors: ${errors.length} (${unexpected.length} unexpected)`);

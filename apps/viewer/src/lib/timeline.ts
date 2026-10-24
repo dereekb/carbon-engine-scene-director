@@ -3,7 +3,10 @@
  * ticks, and steps the ships' scripts (ship-scripts.ts). The director calls Boundary from DestinyWorld.OnBeforeBoundary,
  * so a cue is exactly the MCP call made just before that tick: within one tick the scripts step first (in `ships[]`
  * order), then the due cues fire in the stored order (by check second). An event cue (`when`) is `waiting` with no due
- * second until its event resolves it (Movie mode; the page's event sources land next).
+ * second until its event resolves it: the director hands every kill, arrival phase, warp, called primary and shot to
+ * Event, and each fired cue is an event too. An event belongs to timeline second `played` inside Boundary and to
+ * `played − 1` anywhere else (the boundary that last ran), so a live call and its tape replay land on the same second;
+ * the cue is then due at that second + max(1, ceil(after)), or at its `latest` when the event never came.
  *
  * A scripted load prepares with the scene clock held (HoldClock) until the port says the scene settled (every hull's
  * numbers, fit and build), capped at TIMELINE_PREPARE_LIMIT_SECONDS of wall time; t = 0 is the next boundary. Timeline
@@ -14,7 +17,30 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { cueActionOf, cueDueSecond, describeCueTrigger, TIMELINE_ACTIONS, type CueReport, type CueState, type SceneCue, type ShipScriptReport, type TimelineActionKind, type TimelineActionName, type TimelineState, type TimelineSummary } from '@scene-director/scene';
+import {
+  cueActionOf,
+  cueDueSecond,
+  cueEventDueSecond,
+  cueTriggerMatches,
+  describeCueTrigger,
+  describeTimelineEvent,
+  FIRE_QUIET_SECONDS,
+  MAX_TIMELINE_EVENTS,
+  resolveCueTrigger,
+  TIMELINE_ACTIONS,
+  type CueReport,
+  type CueState,
+  type CueTrigger,
+  type SceneCue,
+  type ShipScriptReport,
+  type TimelineActionKind,
+  type TimelineActionName,
+  type TimelineBeatReport,
+  type TimelineEvent,
+  type TimelineEventEntry,
+  type TimelineState,
+  type TimelineSummary
+} from '@scene-director/scene';
 import type { ScriptedShip, ShipScriptRecord, ShipScripts } from './ship-scripts';
 
 /**
@@ -64,14 +90,24 @@ export interface CueRecord {
   readonly id: string;
   readonly at?: number;
   /**
-   * An event cue's trigger text and arm time.
+   * An event cue's trigger (normalized), its text, arm time and latest.
    */
-  readonly when?: string;
+  readonly when?: CueTrigger;
+  readonly whenText?: string;
   readonly arms?: number;
+  readonly latest?: number;
+  /**
+   * The matching events an event cue counted so far.
+   */
+  matched?: number;
   /**
    * The timeline second it fires at; null while an event cue waits for its event.
    */
   due: Maybe<number>;
+  /**
+   * The event that resolved an event cue.
+   */
+  event?: { readonly second: number; readonly text: string };
   readonly name?: string;
   readonly action: TimelineActionName;
   readonly kind: TimelineActionKind;
@@ -82,9 +118,10 @@ export interface CueRecord {
   key: string;
   tick?: number;
   /**
-   * The order cues were processed in.
+   * The order cues were processed in, and the timeline second.
    */
   seq?: number;
+  second?: number;
   note?: string;
   error?: string;
   result?: unknown;
@@ -115,6 +152,14 @@ export interface TimelineSnapshot {
   seq: number;
   preparing: Maybe<{ readonly since: number; resume: 'play' | 'pause'; waiting: Readonly<Record<string, number>> }>;
   note: Maybe<string>;
+  /**
+   * How much of the event log belongs to this state's history (the log itself lives outside the snapshot).
+   */
+  logCursor: number;
+  /**
+   * Each ship's last shot (timeline second): a shot after FIRE_QUIET_SECONDS of quiet is a `fire` event.
+   */
+  lastShot: Record<string, number>;
   scripts: Record<string, ShipScriptRecord>;
 }
 
@@ -138,7 +183,16 @@ const PROCESSED: ReadonlySet<CueState> = new Set(['fired', 'failed', 'skipped'])
 export class TimelinePlayer {
   private readonly port: TimelinePort;
   readonly scripts: ShipScripts;
-  private data: Omit<TimelineSnapshot, 'scripts'> = { state: 'idle', startTick: null, played: 0, camera: true, cues: [], records: [], seq: 0, preparing: null, note: null };
+  private data: Omit<TimelineSnapshot, 'scripts'> = { state: 'idle', startTick: null, played: 0, camera: true, cues: [], records: [], seq: 0, preparing: null, note: null, logCursor: 0, lastShot: {} };
+  /**
+   * The run's event log, outside the snapshotted data: a replay that writes the entry already at the cursor moves on,
+   * a different one truncates the recorded rest first. A Restore moves only the cursor.
+   */
+  private log: TimelineEventEntry[] = [];
+  /**
+   * Inside Boundary: an event then belongs to timeline second `played`, else to `played − 1`.
+   */
+  private inBoundary = false;
 
   constructor({ port, scripts }: TimelinePlayerOptions) {
     this.port = port;
@@ -183,7 +237,20 @@ export class TimelinePlayer {
    */
   Load(cues: readonly SceneCue[], scripted: boolean, { paused = false }: { readonly paused?: boolean } = {}): void {
     this.scripts.Clear();
-    this.data = { state: scripted ? 'preparing' : 'idle', startTick: null, played: 0, camera: this.data.camera, cues: [...cues], records: cues.map((cue) => NewRecord(cue)), seq: 0, preparing: scripted ? { since: this.port.Now(), resume: paused ? 'pause' : 'play', waiting: {} } : null, note: null };
+    this.log = [];
+    this.data = {
+      state: scripted ? 'preparing' : 'idle',
+      startTick: null,
+      played: 0,
+      camera: this.data.camera,
+      cues: [...cues],
+      records: cues.map((cue) => NewRecord(cue)),
+      seq: 0,
+      preparing: scripted ? { since: this.port.Now(), resume: paused ? 'pause' : 'play', waiting: {} } : null,
+      note: null,
+      logCursor: 0,
+      lastShot: {}
+    };
     this.port.HoldClock(scripted);
   }
 
@@ -208,7 +275,8 @@ export class TimelinePlayer {
   }
 
   /**
-   * The pre-boundary hook: while playing, steps the scripts, then fires the due cues.
+   * The pre-boundary hook: while playing, makes the waiting event cues whose latest came due, steps the scripts, then
+   * fires the due cues (each fired cue is a `cue` event).
    *
    * @param boundary - The boundary's world tick.
    * @param time - Its scene-clock time (100 ns ticks).
@@ -221,14 +289,63 @@ export class TimelinePlayer {
       this.data.played = 0;
     }
     const played = this.data.played;
-    this.scripts.Step(played, ships);
-    const cues = new Map(this.data.cues.map((cue) => [cue.id, cue]));
-    for (const record of this.data.records) {
-      if (record.state !== 'pending' || record.due == null || record.due > played) continue;
-      const cue = cues.get(record.id);
-      if (cue) this.FireOne(record, cue, boundary, time);
+    this.inBoundary = true;
+    try {
+      for (const record of this.data.records) {
+        if (record.state !== 'waiting' || !record.when || record.latest == null || cueDueSecond(record.latest) > played) continue;
+        record.state = 'pending';
+        record.due = played;
+        record.note = LateNote(record.when, record.latest);
+      }
+      this.scripts.Step(played, ships);
+      const cues = new Map(this.data.cues.map((cue) => [cue.id, cue]));
+      for (const record of this.data.records) {
+        if (record.state !== 'pending' || record.due == null || record.due > played) continue;
+        const cue = cues.get(record.id);
+        if (!cue) continue;
+        this.FireOne(record, cue, boundary, time);
+        this.Event({ kind: 'cue', cue: record.id, state: record.state });
+      }
+    } finally {
+      this.inBoundary = false;
     }
     this.data.played = played + 1;
+  }
+
+  /**
+   * Takes an event while playing (ignored otherwise): logs it at its timeline second and counts it for every waiting
+   * event cue armed by then whose trigger matches; the nth match makes the cue due at second + max(1, ceil(after)). A
+   * shot (`fire`) counts only when its ship had not shot for FIRE_QUIET_SECONDS.
+   *
+   * @param event - The event's facts.
+   */
+  Event(event: TimelineEvent): void {
+    if (this.data.state !== 'playing' || this.data.startTick == null) return;
+    const second = this.inBoundary ? this.data.played : this.data.played - 1;
+    if (second < 0) return;
+    if (event.kind === 'fire') {
+      const last = this.data.lastShot[event.shooter.ship];
+      this.data.lastShot[event.shooter.ship] = second;
+      if (last != null && second - last < FIRE_QUIET_SECONDS) return;
+    }
+    const text = describeTimelineEvent(event);
+    this.Log({ second, event, text });
+    for (const record of this.data.records) {
+      const when = record.when;
+      if (record.state !== 'waiting' || !when || (record.arms ?? 0) > second || (record.latest != null && second >= cueDueSecond(record.latest)) || !cueTriggerMatches(when, event)) continue;
+      record.matched = (record.matched ?? 0) + 1;
+      if (record.matched < (when.count ?? 1)) continue;
+      record.state = 'pending';
+      record.due = cueEventDueSecond(second, when.after);
+      record.event = { second, text };
+    }
+  }
+
+  /**
+   * The event log of this history (up to the cursor).
+   */
+  Events(): readonly TimelineEventEntry[] {
+    return this.log.slice(0, this.data.logCursor);
   }
 
   /**
@@ -243,7 +360,8 @@ export class TimelinePlayer {
     if (!scripted) {
       if (this.data.state === 'preparing' || this.data.state === 'ready') this.port.HoldClock(false);
       this.scripts.Clear();
-      this.data = { ...this.data, state: 'idle', startTick: null, played: 0, cues: [], records: [], preparing: null, note: null };
+      this.log = [];
+      this.data = { ...this.data, state: 'idle', startTick: null, played: 0, cues: [], records: [], preparing: null, note: null, logCursor: 0, lastShot: {} };
       return;
     }
     const started = this.data.startTick != null;
@@ -264,9 +382,11 @@ export class TimelinePlayer {
         continue;
       }
       const record = NewRecord(cue);
+      if (started && record.when) this.Resolve(record);
       if (started && record.due != null && record.due < this.data.played) {
         record.state = 'missed';
-        record.note = old ? 'retimed into the past while playing: it plays from the next restart' : 'added after its time: it plays from the next restart';
+        if (record.when) record.note = old ? 'edited after its event: it plays from the next restart' : 'its event came before it was added: it plays from the next restart';
+        else record.note = old ? 'retimed into the past while playing: it plays from the next restart' : 'added after its time: it plays from the next restart';
       }
       records.push(record);
     }
@@ -296,6 +416,9 @@ export class TimelinePlayer {
         this.data.state = 'playing';
         this.data.startTick = null;
         this.data.played = 0;
+        this.data.logCursor = 0;
+        this.data.lastShot = {};
+        this.log = [];
         break;
       case 'ready':
         this.data.state = 'playing';
@@ -344,6 +467,12 @@ export class TimelinePlayer {
     const counts = this.scripts.Counts();
     const done = this.data.state === 'playing' && !pending.length && this.scripts.Settled();
     const preparing = this.data.preparing;
+    const beat: { fleet?: TimelineBeatReport; camera?: TimelineBeatReport } = {};
+    for (const record of processed) {
+      const lane = record.kind === 'camera' ? 'camera' : 'fleet';
+      if (record.state === 'fired' && !beat[lane]) beat[lane] = { id: record.id, ...(record.name ? { name: record.name } : {}), at: record.second ?? 0 };
+    }
+    const cursor = this.data.logCursor;
     return {
       state: done ? 'done' : this.data.state,
       time,
@@ -351,7 +480,29 @@ export class TimelinePlayer {
       camera: this.data.camera,
       cues: CountCues(records),
       ...(due.length ? { next: due.slice(0, 5).map((record) => ({ id: record.id, ...(record.at != null ? { at: record.at } : {}), action: record.action, in: Math.max(0, (record.due ?? time) - time) })) } : {}),
-      ...(waiting.length ? { waiting: waiting.slice(0, 5).map((record) => ({ id: record.id, when: record.when ?? 'its event', ...(record.arms != null && record.arms > time ? { armsIn: record.arms - time } : {}) })) } : {}),
+      ...(waiting.length
+        ? {
+            waiting: waiting.slice(0, 5).map((record) => ({
+              id: record.id,
+              when: record.whenText ?? 'its event',
+              ...(record.arms != null && record.arms > time ? { armsIn: record.arms - time } : {}),
+              ...(record.latest != null ? { latestIn: Math.max(0, cueDueSecond(record.latest) - time) } : {})
+            }))
+          }
+        : {}),
+      ...(beat.fleet || beat.camera ? { beat } : {}),
+      ...(cursor
+        ? {
+            events: {
+              count: cursor,
+              last: this.log
+                .slice(Math.max(0, cursor - 5), cursor)
+                .reverse()
+                .map(({ second, text }) => ({ second, text })),
+              ...(cursor >= MAX_TIMELINE_EVENTS ? { full: true as const } : {})
+            }
+          }
+        : {}),
       ...(processed.length ? { last: processed.slice(0, 5).map((record) => ({ id: record.id, at: record.at, action: record.action, ...(record.tick != null ? { tick: record.tick } : {}), state: record.state, ...(record.note ? { note: record.note } : {}) })) } : {}),
       ...(failed.length ? { failed: failed.slice(0, 10).map((record) => ({ id: record.id, at: record.at, action: record.action, ...(record.tick != null ? { tick: record.tick } : {}), error: record.error ?? 'failed' })) } : {}),
       ...(counts.ships ? { scripts: counts } : {}),
@@ -372,8 +523,9 @@ export class TimelinePlayer {
       list: this.data.records.map((record) => ({
         id: record.id,
         ...(record.at != null ? { at: record.at } : {}),
-        ...(record.when ? { whenText: record.when, ...(record.arms != null ? { arms: record.arms } : {}) } : {}),
+        ...(record.when ? { when: record.when, whenText: record.whenText, ...(record.arms != null ? { arms: record.arms } : {}), ...(record.latest != null ? { latest: record.latest } : {}) } : {}),
         ...(record.due != null ? { due: record.due } : {}),
+        ...(record.event ? { event: record.event } : {}),
         ...(record.name ? { name: record.name } : {}),
         action: record.action,
         kind: record.kind,
@@ -407,11 +559,42 @@ export class TimelinePlayer {
     this.scripts.Restore(scripts);
   }
 
+  /**
+   * Resolves an event cue added or edited while playing against the log so far: its nth event already logged makes it
+   * due (Edit then marks it missed when that is past); a latest already passed makes it due then.
+   */
+  private Resolve(record: CueRecord): void {
+    if (!record.when) return;
+    const resolved = resolveCueTrigger({ trigger: record.when, arms: record.arms ?? 0 }, this.log, this.data.logCursor);
+    record.matched = resolved.matched;
+    if (resolved.due == null || (resolved.late && resolved.due >= this.data.played)) return;
+    record.state = 'pending';
+    record.due = resolved.due;
+    if (resolved.event) record.event = resolved.event;
+    if (resolved.late && record.latest != null) record.note = LateNote(record.when, record.latest);
+  }
+
+  /**
+   * Writes an entry at the cursor: an equal one already there (a replay) is kept, a different one (the run diverged)
+   * truncates the recorded rest first. Past MAX_TIMELINE_EVENTS nothing more is logged.
+   */
+  private Log(entry: TimelineEventEntry): void {
+    const cursor = Math.min(this.data.logCursor, this.log.length);
+    if (cursor >= MAX_TIMELINE_EVENTS) return;
+    const existing = this.log[cursor];
+    if (!existing || JSON.stringify(existing) !== JSON.stringify(entry)) {
+      this.log.length = cursor;
+      this.log.push(entry);
+    }
+    this.data.logCursor = cursor + 1;
+  }
+
   private FireOne(record: CueRecord, cue: SceneCue, boundary: number, time: number): void {
     // Processed before it runs: a lever that throws is recorded once and never fired again.
     record.state = 'failed';
     record.tick = boundary;
     record.seq = ++this.data.seq;
+    record.second = this.data.played;
     record.error = 'it did not finish';
     if (record.kind === 'camera' && !this.data.camera) {
       record.state = 'skipped';
@@ -434,9 +617,16 @@ export class TimelinePlayer {
 function NewRecord(cue: SceneCue): CueRecord {
   const { name, args } = cueActionOf(cue);
   const base = { id: cue.id, ...(cue.at != null ? { at: cue.at } : {}), ...(cue.name ? { name: cue.name } : {}), action: name, kind: TIMELINE_ACTIONS[name].kind(args as never), key: JSON.stringify(cue) };
-  // An event cue waits with no due second; nothing resolves it until the page's event sources land.
-  if (cue.when) return { ...base, when: describeCueTrigger(cue.when), arms: cue.arms ?? cue.at ?? 0, due: null, state: 'waiting' };
+  // An event cue waits with no due second until its event (or its latest) resolves it.
+  if (cue.when) return { ...base, when: cue.when, whenText: describeCueTrigger(cue.when), arms: cue.arms ?? cue.at ?? 0, ...(cue.when.latest != null ? { latest: cue.when.latest } : {}), matched: 0, due: null, state: 'waiting' };
   return { ...base, due: cueDueSecond(cue.at ?? 0), state: 'pending' };
+}
+
+/**
+ * A waiting event cue's note when its latest makes it due: `its event (the kill of blue-fc) had not happened by 70 s`.
+ */
+function LateNote(when: CueTrigger, latest: number): string {
+  return `its event (${describeCueTrigger({ ...when, after: 0, latest: undefined })}) had not happened by ${latest} s`;
 }
 
 function CountCues(records: readonly CueRecord[]): Record<'total' | CueState, number> {

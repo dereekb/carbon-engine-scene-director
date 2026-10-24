@@ -233,6 +233,16 @@ describe('FleetTargets', () => {
     expect(sync(twoWings({ fleet: ['r1'] }), 7).primaries).toHaveLength(1);
   });
 
+  it("names the groups whose last synced primary a ship is (a kill's primaryOf)", () => {
+    const { targets, sync } = lever();
+    sync(twoWings({ fleet: ['r1', 'r2'], w1: ['r1'], dps: ['r3'] }));
+    expect(targets.PrimaryGroupsOf('r1').map(({ kind, id }) => `${kind} ${id}`)).toEqual(['fleet f', 'wing w1']);
+    expect(targets.PrimaryGroupsOf('r3').map(({ kind, id }) => `${kind} ${id}`)).toEqual(['squad dps']);
+    expect(targets.PrimaryGroupsOf('r2')).toEqual([]);
+    sync(twoWings({ fleet: ['r2'] }), 1);
+    expect(targets.PrimaryGroupsOf('r1')).toEqual([]);
+  });
+
   it('gives the same changes for the same inputs', () => {
     const run = () => {
       const { sync } = lever();

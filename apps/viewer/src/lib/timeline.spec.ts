@@ -1,4 +1,4 @@
-import type { SceneCue, SceneShipStep, ShipOrderRequest } from '@scene-director/scene';
+import { MAX_TIMELINE_EVENTS, type SceneCue, type SceneShipStep, type ShipOrderRequest, type TimelineEvent } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { ShipScripts, type ShipScriptsPort } from './ship-scripts';
 import { DescribeWaiting, TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, TimelineText, type CueFireResult, type TimelinePort, type TimelineSettled } from './timeline';
@@ -11,11 +11,24 @@ function ShotCue(id: string, at: number): SceneCue {
   return { id, at, play_shot: { shot: 'hero', ship: 'a' } } as SceneCue;
 }
 
+function EventCue(id: string, when: object, extra: object = {}): SceneCue {
+  return { id, when, arms: 0, order_ship: { id: 'a', order: { type: 'stop' } }, ...extra } as SceneCue;
+}
+
+function Kill(ship: string, by = 'b1'): TimelineEvent {
+  return { kind: 'kill', victim: { ship, team: 'red' }, killer: { ship: by, team: 'blue', fleet: 'b' } };
+}
+
+function Shot(ship: string): TimelineEvent {
+  return { kind: 'fire', shooter: { ship, team: 'red' }, target: { ship: 'b1', team: 'blue' } };
+}
+
 class FakePort implements TimelinePort {
   readonly fired: string[] = [];
   readonly log: string[] = [];
   readonly failing = new Set<string>();
   skip: Maybe<string> = null;
+  onFire: Maybe<(cue: SceneCue) => void> = null;
   settled: TimelineSettled = { settled: false, waiting: { builds: 2, lookups: 1 } };
   held = false;
   now = 0;
@@ -24,6 +37,7 @@ class FakePort implements TimelinePort {
     this.log.push(`cue ${cue.id}`);
     if (this.failing.has(cue.id)) throw new Error(`${cue.id} refused`);
     this.fired.push(`${cue.id}@${boundary}`);
+    this.onFire?.(cue);
     return this.skip ? { state: 'skipped', note: this.skip } : { state: 'fired', result: { ok: cue.id } };
   }
 
@@ -118,7 +132,7 @@ describe('TimelinePlayer', () => {
     expect(paused.port.fired).toEqual([`go@${start}`]);
   });
 
-  it('keeps an event cue waiting with no due second: it never fires until the event sources land', () => {
+  it('keeps an event cue waiting with no due second until its event, and reports it', () => {
     const event = { id: 'first-blood', when: { kill: {}, after: 1 }, arms: 0, order_ship: { id: 'a', order: { type: 'stop' } } } as SceneCue;
     const { port, player, Run } = Setup([OrderCue('go', 0), event]);
     port.settled = { settled: true, waiting: {} };
@@ -128,7 +142,125 @@ describe('TimelinePlayer', () => {
     expect(summary).toMatchObject({ state: 'playing', cues: { total: 2, fired: 1, waiting: 1, pending: 0 }, waiting: [{ id: 'first-blood', when: 'the 1st kill + 1 s' }] });
     expect(summary?.next).toBeUndefined();
     expect(TimelineText(summary)).toBe('playing · 5 s · 1/2 cues · 1 waiting');
-    expect(player.Report()?.list.find((cue) => cue.id === 'first-blood')).toMatchObject({ state: 'waiting', whenText: 'the 1st kill + 1 s', arms: 0 });
+    expect(player.Report()?.list.find((cue) => cue.id === 'first-blood')).toMatchObject({ state: 'waiting', whenText: 'the 1st kill + 1 s', arms: 0, when: { kill: {}, after: 1 } });
+  });
+
+  it('resolves a kill, a landing, a warp, a primary, an opened fire and a cue chain to the event second + max(1, ceil(after))', () => {
+    const cues = [EventCue('k', { kill: { ship: 'r1' }, after: 2 }), EventCue('l', { arrival: { fleet: 'wr' } }), EventCue('w', { warp: { ship: 'r2' } }), EventCue('p', { primary: { fleet: 'b' } }), EventCue('f', { fire: { team: 'red' } }), EventCue('c', { cue: 'k', after: 0.5 })];
+    const { port, player, Run, tick } = Setup(cues);
+    port.settled = { settled: true, waiting: {} };
+    const start = tick();
+    Run(3);
+    // Between boundaries: the events belong to second 2, the boundary that last ran.
+    player.Event(Kill('r1'));
+    player.Event({ kind: 'arrival', group: 'wr', fleet: 'wr', phase: 'landed', ships: ['wr-1'] });
+    player.Event({ kind: 'warp', ship: { ship: 'r2', team: 'red' }, phase: 'exit', arrival: false });
+    player.Event({ kind: 'primary', fleet: 'b', primary: 'r1', previous: null });
+    player.Event(Shot('r3'));
+    expect(player.Report()?.list.find((cue) => cue.id === 'k')).toMatchObject({ state: 'pending', due: 4, event: { second: 2, text: 'r1 destroyed by b1' } });
+    Run(4);
+    expect(port.fired).toEqual([`l@${start + 3}`, `w@${start + 3}`, `p@${start + 3}`, `f@${start + 3}`, `k@${start + 4}`, `c@${start + 5}`]);
+    expect(player.Events().map(({ second, text }) => `${second} ${text}`)).toContain('4 cue k fired');
+    const summary = player.Summary();
+    expect(summary).toMatchObject({ state: 'done', beat: { fleet: { id: 'c', at: 5 } }, events: { count: 11 } });
+    expect(summary?.events?.last[0]).toEqual({ second: 5, text: 'cue c fired' });
+  });
+
+  it('counts to the nth match, ignores events before arms and while paused, applies the fire quiet rule, and fires latest with its note', () => {
+    const cues = [EventCue('two', { kill: {}, count: 2 }), EventCue('armed', { kill: {} }, { arms: 3 }), EventCue('late', { kill: { ship: 'ghost' }, latest: 4.5 }), EventCue('volley', { fire: { ship: 's1' }, count: 2 })];
+    const { port, player, Run, tick } = Setup(cues);
+    port.settled = { settled: true, waiting: {} };
+    const start = tick();
+    Run(3);
+    player.Event(Kill('x'));
+    player.Event(Shot('s1'));
+    player.Pause();
+    player.Event(Kill('y'));
+    player.Play();
+    expect(player.Report()?.list.map(({ id, state }) => `${id} ${state}`)).toEqual(['two waiting', 'armed waiting', 'late waiting', 'volley waiting']);
+    expect(player.Summary()?.waiting?.find((cue) => cue.id === 'late')).toMatchObject({ latestIn: 3 });
+    Run(1);
+    player.Event(Kill('z'));
+    // A shot one second after the last is no opened fire; ten seconds of quiet later it is.
+    player.Event(Shot('s1'));
+    Run(3);
+    expect(port.fired).toEqual([`two@${start + 4}`, `armed@${start + 4}`, `late@${start + 5}`]);
+    expect(player.Report()?.list.find((cue) => cue.id === 'late')).toMatchObject({ state: 'fired', note: 'its event (the kill of ghost) had not happened by 4.5 s' });
+    Run(9);
+    player.Event(Shot('s1'));
+    Run(2);
+    expect(port.fired.at(-1)).toBe(`volley@${start + 16}`);
+    expect(player.Events().filter(({ event }) => event.kind === 'fire')).toHaveLength(2);
+  });
+
+  it('gives an event in Boundary second played, and one between boundaries (a live call, or its tape replay before the next boundary) played − 1', () => {
+    const cues = [OrderCue('call', 2), EventCue('in', { primary: { fleet: 'b', ship: 'r1' } }), EventCue('out', { primary: { fleet: 'b', ship: 'r2' } })];
+    const { port, player, Run, tick } = Setup(cues);
+    port.settled = { settled: true, waiting: {} };
+    port.onFire = (cue) => {
+      if (cue.id === 'call') player.Event({ kind: 'primary', fleet: 'b', primary: 'r1', previous: null });
+    };
+    const start = tick();
+    Run(2);
+    player.Event({ kind: 'primary', fleet: 'b', primary: 'r2', previous: null });
+    Run(3);
+    expect(player.Events().map(({ second, event }) => `${second} ${event.kind}`)).toEqual(['1 primary', '2 primary', '2 cue', '2 cue', '3 cue']);
+    expect(port.fired).toEqual([`call@${start + 2}`, `out@${start + 2}`, `in@${start + 3}`]);
+  });
+
+  it('keeps the log across Snapshot → Restore when the same events are re-written, and truncates at a different one', () => {
+    const { port, player, Run } = Setup([EventCue('third', { kill: {}, count: 3 })]);
+    port.settled = { settled: true, waiting: {} };
+    Run(2);
+    player.Event(Kill('a'));
+    const early = player.Snapshot();
+    Run(1);
+    player.Event(Kill('b'));
+    Run(1);
+    player.Event(Kill('c'));
+    const late = player.Snapshot();
+    const texts = (): string[] => player.Events().map(({ second, text }) => `${second} ${text}`);
+    const recorded = texts();
+    expect(recorded).toEqual(['1 a destroyed by b1', '2 b destroyed by b1', '3 c destroyed by b1']);
+    player.Restore(early);
+    expect(texts()).toEqual(['1 a destroyed by b1']);
+    Run(1);
+    player.Event(Kill('b'));
+    // The recorded future is still there: a jump forward reads it.
+    player.Restore(late);
+    expect(texts()).toEqual(recorded);
+    expect(player.Report()?.list[0]).toMatchObject({ state: 'pending', due: 4 });
+    player.Restore(early);
+    Run(1);
+    player.Event(Kill('d'));
+    expect(texts()).toEqual(['1 a destroyed by b1', '2 d destroyed by b1']);
+    player.Restore(late);
+    expect(texts()).toHaveLength(2);
+  });
+
+  it('stops logging at MAX_TIMELINE_EVENTS but still resolves event cues', () => {
+    const { port, player, Run } = Setup([EventCue('end', { kill: { ship: 'last' } })]);
+    port.settled = { settled: true, waiting: {} };
+    Run(1);
+    for (let index = 0; index < MAX_TIMELINE_EVENTS + 5; index++) player.Event(Kill(`r${index}`));
+    player.Event(Kill('last'));
+    expect(player.Summary()).toMatchObject({ events: { count: MAX_TIMELINE_EVENTS, full: true }, cues: { pending: 1 } });
+  });
+
+  it('resolves an event cue added while playing against the log: its past event makes it missed, a recent one pending', () => {
+    const { port, player, Run } = Setup([OrderCue('go', 0)]);
+    port.settled = { settled: true, waiting: {} };
+    Run(3);
+    player.Event(Kill('r1'));
+    Run(3);
+    player.Event(Kill('r2'));
+    player.Edit([OrderCue('go', 0), EventCue('old', { kill: { ship: 'r1' } }), EventCue('recent', { kill: { ship: 'r2' }, after: 3 }), EventCue('later', { kill: { ship: 'r3' } })], true);
+    expect(player.Report()?.list.map(({ id, state, due, note }) => ({ id, state, due, note }))).toEqual([
+      { id: 'go', state: 'fired', due: 0, note: undefined },
+      { id: 'old', state: 'missed', due: 3, note: 'its event came before it was added: it plays from the next restart' },
+      { id: 'recent', state: 'pending', due: 8, note: undefined },
+      { id: 'later', state: 'waiting', due: undefined, note: undefined }
+    ]);
   });
 
   it('steps the scripts first, then fires due cues in document order, each on the first tick at or after its time', () => {

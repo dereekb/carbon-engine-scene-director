@@ -236,7 +236,9 @@ freeFire?)` takes the group keys with free fire on (`FleetCommanders.FreeFireKey
   `stand-down` with `unlock`; row `held`); unlock clears the target as before, then `SyncFleetTargets()`.
   `switch_modules { modules: ["turret"], state: "online" }` on an armed member is undone at the next boundary, as on an
   engaged ship: cease_fire is the hold.
-- **`OnPrimary(listener)`** returns its unsubscribe: the automatic camera's "a called primary switching".
+- **`OnPrimary(listener)`** returns its unsubscribe: the automatic camera's "a called primary switching", and the
+  timeline's `primary` events. **`FleetTargets.PrimaryGroupsOf(ship)`** names the groups whose last synced primary a
+  ship is: a kill's `primaryOf` (event cues `when: { kill: { primary } }`, `sd-timeline` doc `movie`).
 - **No auto-approach**: a member out of lock range keeps following its anchor while its lock waits; the FC brings the
   fleet in (`order_fleet` approach / keep-at-range on the primary).
 

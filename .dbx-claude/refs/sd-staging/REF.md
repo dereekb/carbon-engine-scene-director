@@ -182,6 +182,9 @@ off-grid and land from warp at their placements (Destiny's EntityWarpIn: `sd-des
   landing, notes? }`; ship states `waiting | scheduled | warping | landed | forming-up | formed | dropped` (formed = in
   formation / leading, or a landed free ship under 1 m/s; dropped = placed, removed or refused). A group is kept
   `ARRIVAL_FORMED_KEEP` (30 ticks) after it formed. A load or open clears them; a removed ship leaves its group.
+- **Timeline arrival events**: `Arrivals.Transitions(boundary)`, called only from the director's `OnBoundary` listener
+  right after `Boundary` (never after an Apply's builds), gives each group's first `first` / `landed` / `formed` once
+  (`firstAt`, `landedAt`, `formedSeenAt` ride the snapshot), feeding event cues (`sd-timeline` doc `movie`).
 - **While arriving**: orders, prop mods, modules (the modules port's `InWarp` is `InWarp || Arriving`) and
   `frame_camera` on it are refused; framing (`ApplyCamera`'s `WorldSphere(doc, { landing: true })`) puts it at its
   landing; Follow the FC reports `following.state` `arriving` and `formation.arriving` counts it.

@@ -512,6 +512,18 @@ export class FleetTargets {
   }
 
   /**
+   * The groups whose last synced primary is a ship (a kill's `primaryOf`, read before RemoveDead forgets it).
+   *
+   * @param ship - The ship.
+   * @returns Each fleet, wing or squad calling it, in sync order.
+   */
+  PrimaryGroupsOf(ship: string): FleetGroup[] {
+    const groups: FleetGroup[] = [];
+    for (const { group, primary } of this.primaries.values()) if (primary === ship) groups.push(group);
+    return groups;
+  }
+
+  /**
    * A ship left the scene or died: its marks, call, hold and response go.
    *
    * @param ship - The ship.

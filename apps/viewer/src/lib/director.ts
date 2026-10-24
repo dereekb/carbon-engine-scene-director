@@ -210,7 +210,10 @@ import {
   sceneAtTimelineTime,
   timelinePatchScenes,
   type SceneCue,
-  type SceneCueAdds
+  type SceneCueAdds,
+  type KillTimelineEvent,
+  type TimelineEvent,
+  type TimelineEventParty
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -983,6 +986,11 @@ export class Director {
   private readonly killListeners = new Set<KillListener>();
   private readonly primaryListeners = new Set<PrimaryListener>();
   /**
+   * The timeline events' parties (team, fleet, wing, squad), memoized per scene object: the document membership, where
+   * a ship just killed is still in its fleet.
+   */
+  private eventParties: Maybe<{ readonly scene: SceneDocument; readonly memberships: Map<string, ShipFleetMembership>; readonly teams: Map<string, string> }> = null;
+  /**
    * Ships destroyed with death "explode", until a load revives them or remove_ship removes them.
    */
   private readonly deaths = new Map<string, ShipDeath>();
@@ -1393,6 +1401,9 @@ export class Director {
       if (this.missileHits.length) this.Shots([]);
       // Arriving groups plan once ready; their warp-ins start at this boundary at the earliest.
       this.arrivals.Boundary(boundary);
+      // The timeline's arrival events: only here, never after an Apply's builds, so they fall on the same boundaries.
+      const transitions = this.timeline.state === 'playing' ? this.arrivals.Transitions(boundary) : [];
+      for (const event of transitions) this.timeline.Event(event);
       // Last: the camera director sees this boundary's kills, calls, removals and arrivals.
       this.cameraDirector.Boundary(this.SeedTick(boundary), this.SceneSeconds(boundary), this.boundaryTime);
     });
@@ -1433,6 +1444,15 @@ export class Director {
     world.OnWarp((event) => this.cameraDirector.Event({ kind: 'warp', tick: this.SeedTick(event.tick), ship: event.id, phase: event.kind === 'enter' ? 'enter' : 'exit', ...(event.arrival ? { arrival: true } : {}) }));
     world.OnPropMod((event) => {
       if (event.kind === 'on') this.cameraDirector.Event({ kind: 'prop-mod', tick: this.SeedTick(event.tick), ship: event.id });
+    });
+    // The timeline's events (event cues, sd-timeline movie): kills and called primaries at their boundary, warps after
+    // the evolve, turret shots as they resolve and missile launches (Launches); the player gives each its second.
+    this.OnKill((kill) => this.TimelineEvent(() => this.KillEvent(kill)));
+    this.OnPrimary(({ group, primary, previous }) => this.TimelineEvent(() => ({ kind: 'primary', fleet: group.fleet, ...(group.kind === 'wing' ? { wing: group.id } : group.kind === 'squad' ? { squad: group.id } : {}), primary, previous })));
+    world.OnWarp((event) => this.TimelineEvent(() => ({ kind: 'warp', ship: this.EventParty(event.id), phase: event.kind, arrival: Boolean(event.arrival) })));
+    // A shot with `missile` is a missile's hit: its launch was the opened fire.
+    this.OnShot((shot) => {
+      if (!shot.missile) this.TimelineEvent(() => ({ kind: 'fire', shooter: this.EventParty(shot.ship), target: this.EventParty(shot.target) }));
     });
     if (engine) this.AttachCameraControls(engine.canvas);
   }
@@ -1478,7 +1498,7 @@ export class Director {
     // A lever given at becomes a timeline cue instead of running now (and is not journaled: the timeline replays it).
     for (const action of TIMELINE_ACTION_NAMES) {
       const run = handlers[action];
-      handlers[action] = (args) => (args['at'] != null || args['cue'] != null ? this.AddCue(action, args) : run(args));
+      handlers[action] = (args) => (args['at'] != null || args['when'] != null || args['cue'] != null ? this.AddCue(action, args) : run(args));
     }
     return handlers;
   }
@@ -2982,21 +3002,22 @@ export class Director {
   }
 
   /**
-   * A lever tool given `at` (and `cue`, its id): instead of running now, the call becomes the timeline cue `{ id?, at,
-   * [action]: its arguments }`, added to the authored timeline through the edit queue (patch_scene's `name` names the
-   * cue). The player takes it as any timeline edit: behind a playing timeline it is `missed` until a restart.
+   * A lever tool given `at` or `when` (and `cue`, its id): instead of running now, the call becomes the timeline cue
+   * `{ id?, at?, when?, [action]: its arguments }`, added to the authored timeline through the edit queue (patch_scene's
+   * `name` names the cue; an event cue's `arms` is derived there). The player takes it as any timeline edit: behind a
+   * playing timeline it is `missed` until a restart.
    *
    * @returns The cue as stored, its state, get_state's timeline report, and the warnings naming the cue (plus a missed
    *   cue's and a stopped timeline's).
    * @throws {SceneError} When the cue does not check out against the scene as it will be at its time.
    */
   private AddCue(action: TimelineActionName, args: Record<string, unknown>): Promise<object> {
-    const { at, cue: id, ...rest } = args;
-    if (at == null) throw new Error('cue (the cue id) goes with at (seconds of timeline time)');
-    if (typeof at !== 'number' || !Number.isFinite(at) || at < 0) throw new Error('at must be seconds of timeline time, at least 0');
+    const { at, when, cue: id, ...rest } = args;
+    if (at == null && when == null) throw new Error('cue (the cue id) goes with at (seconds of timeline time) or when (an event)');
+    if (at != null && (typeof at !== 'number' || !Number.isFinite(at) || at < 0)) throw new Error('at must be seconds of timeline time, at least 0');
     if (id != null && typeof id !== 'string') throw new Error('cue must be a cue id');
     const name = action === 'patch_scene' && typeof rest['name'] === 'string' ? rest['name'] : null;
-    const cue = { ...(id != null ? { id } : {}), at, ...(name ? { name } : {}), [action]: action === 'patch_scene' ? { operations: rest['operations'] } : rest };
+    const cue = { ...(id != null ? { id } : {}), ...(at != null ? { at } : {}), ...(when != null ? { when } : {}), ...(name ? { name } : {}), [action]: action === 'patch_scene' ? { operations: rest['operations'] } : rest };
     return this.Serialize(async () => {
       const known = new Set((this.authored?.timeline?.cues ?? []).map((candidate) => candidate.id));
       const patch = (await this.EditNow([{ op: 'add_cue', cue }])) as { readonly warnings?: string[] };
@@ -3004,10 +3025,45 @@ export class Director {
       const record = added ? [...(this.timeline.Report()?.list ?? [])].reverse().find((entry) => entry.id === added.id) : null;
       const summary = this.timeline.Summary();
       const warnings = added ? (patch.warnings ?? []).filter((warning) => warning.includes(`"${added.id}"`)) : (patch.warnings ?? []);
-      if (added && record?.state === 'missed') warnings.push(`cue "${added.id}" at ${added.at} s is behind the timeline (${summary?.time ?? 0} s played): it is missed, and plays from the next restart (timeline restart)`);
+      if (added && record?.state === 'missed')
+        warnings.push(
+          added.when
+            ? `cue "${added.id}" (when ${record.whenText}) is behind the timeline (${summary?.time ?? 0} s played): its event came at ${record.event?.second ?? record.due} s, so it is missed, and plays from the next restart (timeline restart)`
+            : `cue "${added.id}" at ${added.at} s is behind the timeline (${summary?.time ?? 0} s played): it is missed, and plays from the next restart (timeline restart)`
+        );
       if (summary?.state === 'stopped') warnings.push('the timeline is stopped: timeline play starts it (t = 0 at the next tick, from the scene as it is now); timeline restart replays it from the placements');
       return { cue: added, state: record?.state ?? null, timeline: this.TimelineSummary(), warnings };
     });
+  }
+
+  /**
+   * Hands the timeline player an event while it plays (the facts are built only then).
+   *
+   * @param event - Builds the event's facts.
+   */
+  private TimelineEvent(event: () => TimelineEvent): void {
+    if (this.timeline.state === 'playing') this.timeline.Event(event());
+  }
+
+  /**
+   * A kill's timeline facts: the victim's and the killer's parties, and the fleets whose last synced called primary
+   * (any level) the victim was (this boundary's SyncFleetTargets ran before the shots resolved).
+   */
+  private KillEvent(kill: ShipKill): KillTimelineEvent {
+    const primaryOf = [...new Set(this.fleetTargets.PrimaryGroupsOf(kill.ship).map((group) => group.fleet))];
+    return { kind: 'kill', victim: this.EventParty(kill.ship), ...(kill.by ? { killer: this.EventParty(kill.by) } : {}), ...(primaryOf.length ? { primaryOf } : {}) };
+  }
+
+  /**
+   * A ship's party for a timeline event: its team and its document fleet, wing and squad (an object: its id only).
+   */
+  private EventParty(ship: string): TimelineEventParty {
+    const scene = this.scene;
+    if (!scene) return { ship };
+    if (this.eventParties?.scene !== scene) this.eventParties = { scene, memberships: toFleetMemberships(scene), teams: new Map(scene.ships.flatMap((each) => (each.team ? [[each.id, each.team] as const] : []))) };
+    const membership = this.eventParties.memberships.get(ship);
+    const team = this.eventParties.teams.get(ship);
+    return { ship, ...(team ? { team } : {}), ...(membership ? { fleet: membership.fleet, ...(membership.wing ? { wing: membership.wing } : {}), ...(membership.squad ? { squad: membership.squad } : {}) } : {}) };
   }
 
   /**
@@ -3901,6 +3957,8 @@ export class Director {
         continue;
       }
       const { charge } = numbers;
+      const { ship, target } = event;
+      this.TimelineEvent(() => ({ kind: 'fire', shooter: this.EventParty(ship), target: this.EventParty(target) }));
       this.missiles.Add({ id, ship: event.ship, module: event.module, typeID: spec.typeID, name: spec.name, ...(charge ? { charge } : {}), target: event.target, targetKind, cycle: event.cycle, activation: event.activation, tick: event.tick, at, numbers }, this.clock.now);
     }
   }

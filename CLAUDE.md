@@ -49,7 +49,8 @@ files you touch and the scene-director tools you call. Fetch before designing or
 - `sd-personalities`: fleet personalities: the `cjs-fleet-personality/1` templates, the hub library and embedding,
   pilot traits, and the FC brain (succession, handover, calls, stances, free fire)
 - `sd-timeline`: the scene's script: `timeline` cues and ship `orders`, validation against the projected scene, `adds`,
-  the timeline ops and pruning; later the page player, live vs authored, determinism
+  the timeline ops and pruning; later the page player, live vs authored, determinism (doc: `movie`: event cues,
+  edit-resimulate, the movie tool)
 - `sd-time`: time control: rate, pause and fast-forward stepping; snapshots of the parks and per-tick state, the
   tape, jumps and what cuts the window
 - `sd-piloting`: stances, the ideal range from both sides' numbers, the orbit model, maneuvers and the pilot step

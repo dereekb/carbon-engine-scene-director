@@ -15,7 +15,7 @@
  * Node-tested: no runtime import (the world and the director are ports).
  */
 import type { Maybe } from '@dereekb/util';
-import { type SceneArrival, type SceneShip, type SceneVector, toArrivalLane, toArrivalOffsets } from '@scene-director/scene';
+import { type ArrivalTimelineEvent, type SceneArrival, type SceneShip, type SceneVector, toArrivalLane, toArrivalOffsets } from '@scene-director/scene';
 import type { ShipArrival, ShipArrivalReport, ShipMotion } from './destiny';
 import { CaptureFields, RestoreFields, type CaptureOptions, type CapturedFields, type CloneMemo } from './state-capture';
 import { FleetFrame, FramePoint, WarpFrame } from './steering';
@@ -315,6 +315,13 @@ interface ArrivalGroup {
   readonly ships: ArrivalShip[];
   planned: Maybe<{ readonly tick: number; readonly exits: ReadonlyMap<string, number> }>;
   formedAt: Maybe<number>;
+  /**
+   * The boundaries Transitions first saw the group's first landing, every ship landed and every ship formed (the
+   * timeline's arrival events).
+   */
+  firstAt: Maybe<number>;
+  landedAt: Maybe<number>;
+  formedSeenAt: Maybe<number>;
   readonly notes: string[];
 }
 
@@ -364,7 +371,7 @@ export class Arrivals {
     const { world } = this.config;
     let key = arrival.group;
     for (let suffix = 2; this.groups.has(key); suffix++) key = `${arrival.group}#${suffix}`;
-    const group: ArrivalGroup = { arrival: { ...arrival, group: key }, added: world.tick, waitForBuild, ships: [], planned: null, formedAt: null, notes: [] };
+    const group: ArrivalGroup = { arrival: { ...arrival, group: key }, added: world.tick, waitForBuild, ships: [], planned: null, formedAt: null, firstAt: null, landedAt: null, formedSeenAt: null, notes: [] };
     for (const id of arrival.ships) this.Remove(id);
     const lane = this.Lane(group);
     for (const id of arrival.ships) {
@@ -394,6 +401,41 @@ export class Arrivals {
       if (group.planned && (state === 'formed' || state === 'dropped')) group.formedAt ??= boundary;
       if (group.formedAt != null && boundary - group.formedAt >= ARRIVAL_FORMED_KEEP) this.groups.delete(key);
     }
+  }
+
+  /**
+   * The arrival phases groups reached since the last call: a group's first ship out of warp (`first`), every ship landed
+   * (`landed`), every ship formed up (`formed`), each once per group, in that order. Call it only from the director's
+   * OnBoundary listener right after Boundary, never after an Apply's builds, so the timeline's arrival events fall on
+   * the same boundaries in every run.
+   *
+   * @param boundary - The master tick.
+   * @returns The timeline events.
+   */
+  Transitions(boundary: number): ArrivalTimelineEvent[] {
+    const events: ArrivalTimelineEvent[] = [];
+    for (const group of this.groups.values()) {
+      if (!group.planned || group.formedSeenAt != null) continue;
+      const ships = group.ships.filter((ship) => !ship.dropped);
+      const order = ships.map((ship) => STATE_ORDER.indexOf(this.ShipState(group, ship).state));
+      if (!order.length) continue;
+      const landed = STATE_ORDER.indexOf('landed');
+      const reached = { first: Math.max(...order) >= landed, landed: Math.min(...order) >= landed, formed: Math.min(...order) === STATE_ORDER.indexOf('formed') };
+      const event = (phase: ArrivalTimelineEvent['phase']): ArrivalTimelineEvent => ({ kind: 'arrival', group: group.arrival.group, ...(group.arrival.fleet ? { fleet: group.arrival.fleet } : {}), phase, ships: ships.map((ship) => ship.id) });
+      if (reached.first && group.firstAt == null) {
+        group.firstAt = boundary;
+        events.push(event('first'));
+      }
+      if (reached.landed && group.landedAt == null) {
+        group.landedAt = boundary;
+        events.push(event('landed'));
+      }
+      if (reached.formed) {
+        group.formedSeenAt = boundary;
+        events.push(event('formed'));
+      }
+    }
+    return events;
   }
 
   /**

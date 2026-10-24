@@ -19,7 +19,7 @@ export function FakeGetScene(scene: SceneDocument, args: ToolArgs): SceneDocumen
 }
 
 /**
- * patch_scene with `at`: the operations become one patch_scene cue in the document's timeline.
+ * patch_scene with `at` or `when`: the operations become one patch_scene cue in the document's timeline.
  *
  * @param scene - The tab's authored document.
  * @param args - patch_scene's arguments.
@@ -28,7 +28,7 @@ export function FakeGetScene(scene: SceneDocument, args: ToolArgs): SceneDocumen
 export function FakeAddCue(scene: SceneDocument, args: ToolArgs): { readonly scene: SceneDocument; readonly result: object } {
   const id = typeof args['cue'] === 'string' ? args['cue'] : null;
   const known = new Set((scene.timeline?.cues ?? []).map((cue) => cue.id));
-  const cue = { ...(id ? { id } : {}), at: args['at'], ...(typeof args['name'] === 'string' ? { name: args['name'] } : {}), patch_scene: { operations: args['operations'] } };
+  const cue = { ...(id ? { id } : {}), ...(args['at'] != null ? { at: args['at'] } : {}), ...(args['when'] != null ? { when: args['when'] } : {}), ...(typeof args['name'] === 'string' ? { name: args['name'] } : {}), patch_scene: { operations: args['operations'] } };
   const applied = applySceneOperations(scene, [{ op: 'add_cue', cue }]);
   const stored = applied.scene.timeline?.cues.find((candidate) => (id ? candidate.id === id : !known.has(candidate.id))) ?? null;
   return { scene: applied.scene, result: { cue: stored, state: 'pending', timeline: null, warnings: [] } };

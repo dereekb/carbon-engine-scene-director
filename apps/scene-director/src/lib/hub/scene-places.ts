@@ -52,16 +52,23 @@ export interface SceneBefore {
   readonly scene: SceneDocument;
   readonly live: boolean;
   /**
-   * With `at`: the call becomes this timeline cue.
+   * With `at` or `when`: the call becomes this timeline cue.
    */
   readonly cue?: SceneCueTarget;
 }
 
 /**
- * The timeline cue a tool given `at` becomes.
+ * The timeline cue a tool given `at` or `when` becomes.
  */
 export interface SceneCueTarget {
-  readonly at: number;
+  /**
+   * A timed cue's time; an event cue's arm time.
+   */
+  readonly at?: number;
+  /**
+   * An event cue's event (normalized and checked where the cue is added).
+   */
+  readonly when?: Record<string, unknown>;
   /**
    * The cue id asked for (`cue`); default the lowest free `cue-<n>`.
    */
@@ -123,7 +130,9 @@ export class ScenePlaces {
 
   /**
    * The document to build on: the passed `scene`, else the tab's live scene (empty before any load). With `at`, the
-   * document as it will be at that timeline time (the patch cues due by its tick applied: get_scene { at }).
+   * document as it will be at that timeline time (the patch cues due by its tick applied: get_scene { at }); with
+   * `when`, at its arm time, or with no `at` at the end of the timeline (every patch cue applied: the event may come
+   * at any time).
    *
    * @param args - The tool's arguments.
    * @param options - Whether the tab's document is read.
@@ -136,10 +145,10 @@ export class ScenePlaces {
     let before: SceneBefore;
     if (args['scene'] != null) {
       const authored = normalizeScene(args['scene']).scene;
-      before = cue ? { scene: sceneAtTimelineTime(authored, cueDueSecond(cue.at), applySceneOperations), live: false, cue: { ...cue, authored } } : { scene: authored, live: false };
+      before = cue ? { scene: sceneAtTimelineTime(authored, CueTargetSecond(cue), applySceneOperations), live: false, cue: { ...cue, authored } } : { scene: authored, live: false };
     } else if (this.page.Connected()) {
       const read = options.read !== false || cue != null;
-      const scene = read ? normalizeScene((await this.page.Call('get_scene', cue ? { at: cueDueSecond(cue.at) } : { live: true })) ?? createEmptyScene()).scene : createEmptyScene();
+      const scene = read ? normalizeScene((await this.page.Call('get_scene', cue ? { at: CueTargetSecond(cue) } : { live: true })) ?? createEmptyScene()).scene : createEmptyScene();
       before = { scene, live: true, ...(cue ? { cue } : {}) };
     } else throw new ToolError(`${this.page.NotConnected().message} Or pass "scene" to build a document without a tab.`);
     return before;
@@ -171,9 +180,9 @@ export class ScenePlaces {
   }
 
   /**
-   * The operations as one patch_scene timeline cue `{ id?, at, name, patch_scene: { operations } }`: first applied to the
-   * document as it will be then (its problems throw, its warnings are kept), then added to the tab's timeline
-   * (patch_scene with at, which the page takes as any lever's cue) or to the passed document's.
+   * The operations as one patch_scene timeline cue `{ id?, at?, when?, name, patch_scene: { operations } }`: first
+   * applied to the document as it will be then (its problems throw, its warnings are kept), then added to the tab's
+   * timeline (patch_scene with at or when, which the page takes as any lever's cue) or to the passed document's.
    *
    * @param cue - The cue the call becomes.
    * @param input - The document at the cue's time, the operations and the cue's name.
@@ -185,12 +194,12 @@ export class ScenePlaces {
     let applied: SceneApplied;
     if (cue.authored) {
       const known = new Set((cue.authored.timeline?.cues ?? []).map((candidate) => candidate.id));
-      const added = applySceneOperations(cue.authored, [{ op: 'add_cue', cue: { ...(cue.id ? { id: cue.id } : {}), at: cue.at, ...(name ? { name } : {}), patch_scene: { operations } } }]);
+      const added = applySceneOperations(cue.authored, [{ op: 'add_cue', cue: { ...(cue.id ? { id: cue.id } : {}), ...CueTiming(cue), ...(name ? { name } : {}), patch_scene: { operations } } }]);
       const stored = added.scene.timeline?.cues.find((candidate) => (cue.id ? candidate.id === cue.id : !known.has(candidate.id))) ?? null;
       const named = stored ? added.warnings.filter((warning) => warning.includes(`"${stored.id}"`)) : added.warnings;
       applied = { scene: added.scene, warnings: [...new Set([...dry.warnings, ...named])], rest: { cue: stored, scene: added.scene, loaded: false } };
     } else {
-      const patched = (await this.page.Call('patch_scene', { operations, at: cue.at, ...(cue.id ? { cue: cue.id } : {}), ...(name ? { name } : {}) })) as Record<string, unknown> & { readonly warnings?: string[] };
+      const patched = (await this.page.Call('patch_scene', { operations, ...CueTiming(cue), ...(cue.id ? { cue: cue.id } : {}), ...(name ? { name } : {}) })) as Record<string, unknown> & { readonly warnings?: string[] };
       applied = { scene: null, warnings: [...new Set([...dry.warnings, ...(patched.warnings ?? [])])], rest: Without(patched, ['warnings']) };
     }
     return applied;
@@ -361,18 +370,40 @@ export class ScenePlaces {
 }
 
 /**
- * A tool's `at` (seconds of timeline time) and `cue` (the cue id): the cue the call becomes, or null without `at`.
+ * A tool's `at` (seconds of timeline time), `when` (an event) and `cue` (the cue id): the cue the call becomes, or null
+ * with neither `at` nor `when`.
  *
  * @param args - The tool's arguments.
- * @returns The cue's time and id.
- * @throws {ToolError} When at is not seconds in range, or cue comes without at or is not a string.
+ * @returns The cue's time, event and id.
+ * @throws {ToolError} When at is not seconds in range, when is not an object, or cue comes without at or when or is
+ *   not a string.
  */
 export function ReadCueTarget(args: ToolArgs): Maybe<SceneCueTarget> {
-  const { at, cue: id } = args;
-  if (at == null && id != null) throw new ToolError('cue (the cue id) goes with at (seconds of timeline time)');
+  const { at, when, cue: id } = args;
+  if (at == null && when == null && id != null) throw new ToolError('cue (the cue id) goes with at (seconds of timeline time) or when (an event)');
   if (at != null && (typeof at !== 'number' || !Number.isFinite(at) || at < 0 || at > MAX_TIMELINE_SECONDS)) throw new ToolError(`at must be seconds of timeline time, 0 to ${MAX_TIMELINE_SECONDS}`);
+  if (when != null && !IsRecord(when)) throw new ToolError('when must be an event: { kill | arrival | warp | cue | primary | fire: <filter>, count?, after?, latest? }');
   if (id != null && typeof id !== 'string') throw new ToolError('cue must be a cue id');
-  return typeof at === 'number' ? { at, ...(typeof id === 'string' ? { id } : {}) } : null;
+  const timing = { ...(typeof at === 'number' ? { at } : {}), ...(IsRecord(when) ? { when } : {}) };
+  return timing.at != null || timing.when ? { ...timing, ...(typeof id === 'string' ? { id } : {}) } : null;
+}
+
+/**
+ * The timeline time a cue target's names resolve at: a timed cue's due second; an event cue's arm time, or with no
+ * `at` the end of the timeline (every patch cue applied).
+ *
+ * @param cue - The cue target.
+ * @returns Timeline seconds.
+ */
+export function CueTargetSecond(cue: SceneCueTarget): number {
+  let second = MAX_TIMELINE_SECONDS;
+  if (cue.when) second = cue.at ?? MAX_TIMELINE_SECONDS;
+  else if (cue.at != null) second = cueDueSecond(cue.at);
+  return second;
+}
+
+function CueTiming(cue: SceneCueTarget): { readonly at?: number; readonly when?: Record<string, unknown> } {
+  return { ...(cue.at != null ? { at: cue.at } : {}), ...(cue.when ? { when: cue.when } : {}) };
 }
 
 /**
