@@ -86,7 +86,11 @@
               "cjs-sde-prepare",
               "SDE",
               "map index",
-              "gpuErrors"
+              "gpuErrors",
+              "no EVE data",
+              "eve-data",
+              "stand-in",
+              "green screen"
             ]
           },
           {
@@ -95,7 +99,10 @@
               "map-data.testing",
               "ship-data.testing",
               "hub/tools-core",
-              ".claude/skills/windows-chrome"
+              ".claude/skills/windows-chrome",
+              "apps/viewer/src/lib/eve-data",
+              "hub/eve-data",
+              "packages/scene/src/lib/eve-data"
             ],
             "every": 12
           },
@@ -133,7 +140,8 @@
               "uncapturederror",
               "frameClock",
               "GetCurrentFrameTime",
-              "animationTime"
+              "animationTime",
+              "stand-in"
             ]
           },
           {

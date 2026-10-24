@@ -10,6 +10,9 @@
 Asteroid fields (seeded ore rocks, draw-only, no balls) are their own area: `sd-asteroid-fields`. Ids are unique across
 ships, objects and fields.
 
+**No-EVE-data mode** (`sd-dev-env`): objects settle as `stand-in` (a cube at their placement and radius), `add_objects`
+takes them by `dna` only, and `search_objects` refuses.
+
 ## Files
 
 | File | Role |

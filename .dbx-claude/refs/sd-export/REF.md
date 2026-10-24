@@ -15,6 +15,9 @@ and `/movies`, the locks, and verify-page `export:` headless (E2); the real-GPU 
 animation clock (`sd-time`): the M6 movie, a 60 fps range, a slow 300-ship fight, HEVC 4K and cancel, two camera fixes
 (E3, Evidence below).
 
+**No-EVE-data mode** (`sd-dev-env`): exports work, holding the green screen and stand-in cubes (a 2 s 640×360 export on
+Mac Chrome, 2026-10-24).
+
 ## Files
 
 | File | Holds |

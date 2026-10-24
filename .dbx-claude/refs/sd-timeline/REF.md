@@ -354,7 +354,8 @@ One script on one tools-core replays the same: cue and step ticks relative to t 
 
 **Limits.** A cue-added hull is drawn once built: on a slow machine a big fleet's hulls may appear after they land (the
 SOF build is not prefetched). Ships without the SDE take their class values' radius from the build, so a cue-added
-fleet's formation waits on builds and is not tick-exact. Live input during play (a user's command) changes the run, as it
+fleet's formation waits on builds and is not tick-exact; in no-EVE-data mode (`sd-dev-env`) a prepare settles at once,
+since `BuildSettled` counts `stand-in` and `FormationRadius` takes the class radius. Live input during play (a user's command) changes the run, as it
 should. A prepare that hits the 60 s cap says the run may differ.
 
 ## Seams for Time control and Movie mode
@@ -367,7 +368,8 @@ director's). Lever cues need no journal and patch cues do not cut the window (th
 `RestoreSim` retires the live entries of ships absent from the restored live scene and the re-fired cue re-adds them.
 A cue's warp-in plans on flight numbers (`waitForBuild: false`), so its builds landing do not cut and a jump crosses it:
 the group lands again on the same ticks (T3, verify-page `time:`). Limit: a cue-added ship's build landing still cuts the
-window when the hub has no SDE radius for it (the build gives its formation radius). `SceneClock.Hold` and Time
+window when the hub has no SDE radius for it (the build gives its formation radius), except in no-EVE-data mode, where
+the ship settles as `stand-in` at once. `SceneClock.Hold` and Time
 control's pause (`clock.paused`, `sd-time`) both stop the clock; they are independent. An event cue's record resolves on the page's events (doc `movie`): its
 `matched`, `due` and `event` and the player's `logCursor` and `lastShot` are in the snapshot, the event log is not.
 Since M3 a timeline starting pins the window's origin (t = 0 stays recorded), script edits re-simulate through

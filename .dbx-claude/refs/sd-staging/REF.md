@@ -7,6 +7,9 @@
 Generated ship, object and composition ids skip every ship, object and **asteroid field** id (`stagingTakenIds`,
 `toExpandExisting`; `StagingDraft.fields`, `sd-asteroid-fields`).
 
+**No-EVE-data mode** (`sd-dev-env`): `add_ships` by hull name refuses naming the mode; `dna` lines work (and fly class
+numbers).
+
 ## Split: hub resolves, op is pure
 
 - `hub/staging.ts` resolves every name first: hull names → SOF DNA + EVE radius (tools-core SDE, as

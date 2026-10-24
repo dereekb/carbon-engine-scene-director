@@ -16,6 +16,10 @@ points and scrams (with the scram's MWD block), neuts, nos and cap transmitters 
 `~/.claude/plans/targeted-module-effects-on-their-targets.md`). Research behind the design: the dbx-claude note
 `fitted-modules-dogma-and-module-effects-research`.
 
+**No-EVE-data mode** (`sd-dev-env`): the page's `FitLookup` answers every name unavailable and fails every type and the
+skills at once with the mode's note (no request), so a fitted ship flies its hull's class numbers; the fit routes
+(`/fit/type`, `/dogma/types`, `/dogma/skills`) answer 503.
+
 ## Files
 
 | File | Role |

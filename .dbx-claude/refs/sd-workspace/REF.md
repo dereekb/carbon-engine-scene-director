@@ -25,13 +25,20 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
   (no tab; result returned with `loaded: false`). They read the tab's document as `get_scene { live: true }` (the live
   scene, a timeline's adds included); given `at`, as `get_scene { at }` (the authored document projected to that
   timeline time), and their op becomes a `patch_scene` cue instead (`sd-staging`, `sd-timeline` "Authoring").
+- **The hub's data sources are tools-core's or none** (`hub/eve-data.ts`: `HubEveDataSources` / `NoEveDataSources`),
+  chosen once at construction from `HubOptions.eveData`. With `'off'` (no-EVE-data mode, `sd-dev-env`) every lookup
+  rejects at once with a `NoEveDataError` (a `ShipDataError` `unavailable`, so existing fallbacks keep working and the
+  HTTP proxies answer 503), and the hub ignores `toolsCore` and the data-source options, so it never touches tools-core.
+  The CLI takes it as `--eve-data tools-core|off` / `SCENE_DIRECTOR_EVE_DATA`, read only where a hub is made
+  (`main.ts` `HubOptionsFromCommandLine`, so `call` ignores it); an invalid value exits 2 on stderr.
 - **One hub per port.** `scene-director mcp` starts the hub or, when 5520 is taken, joins it through `RemoteHub`
   (`hub/remote-hub.ts`, same `Call` surface as `Hub`; `hub/tool-call.ts`). A joined hub keeps the owner's scenes and
   fleets directories.
-- **WebSocket messages** are JSON (`hello`, `call`, `result`, `log`), plus a movie export's (`sd-export`): page → hub
+- **WebSocket messages** are JSON (`hello`, `call`, `result`, `log`; the hub's hello reply is
+  `{ type, role, hub: { url, eveData } }`, and a hub-sourced tab reloads when its mode differs), plus a movie export's (`sd-export`): page → hub
   `{ type: "export", id, kind: config | progress | end | failed | cancelled }` and binary chunk packets (`SDX1` + u32
   header length + JSON header + bytes, `packages/scene/src/lib/export/wire.ts`), hub → page `saved` / `failed`.
-- **HTTP routes** (`hub.ts`): `/build`, `/resfileindex.txt`, `/resource/<path>`, `/ship-stats`, `/prop-mod`,
+- **HTTP routes** (`hub.ts`): `/config` (`{ eveData }`, read by the page before it boots: `sd-dev-env`), `/build`, `/resfileindex.txt`, `/resource/<path>`, `/ship-stats`, `/prop-mod`,
   `/fit/type`, `/dogma/types`, `/dogma/skills` (`sd-fittings`), `/weapon` (`sd-weapons`), `/audio/library`,
   `/audio/path/<encoded res:/ path>` (streams, forwards `Range`), `/map/system`, `/movies/<file>` (an exported movie
   from the movies directory, GET / HEAD with `Range`: `sd-export`), `/ws`. The hub's HTTP layer is GET-only (and HEAD

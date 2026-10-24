@@ -24,12 +24,45 @@ Set up and verified on a Mac on 2026-10-22: install, `nx build scene-director` a
 - Then `npm install` here, and check `npm ls @carbonenginejs/runtime` (deduped under the server) and the `CjsSchema.js`
   md5 (`sd-workspace`).
 - Node 24 works for install, build and tests (only tools-core needs Node 22).
-- **Without tools-core the page still runs** (checked on the Mac, 2026-10-24): the hub, the HUD, the Destiny simulation
-  (class flight numbers), orders, the camera, cinema shots, screenshots and the tools all work, on a chroma-green
-  backdrop with a cube per ship and object (team colours, the nose face pale; `sd-runtime` → Stand-ins). Enough for UI
-  and camera work. Missing: hull models, real stats and fits (so no default guns and no combat), locations, audio.
-  Mac Chrome has WebGPU, so tools-core on the Mac would draw everything; it downloads EVE's files itself and never
-  reads an installed client (not tried here yet).
+- Without tools-core, run in **no-EVE-data mode** (below). Mac Chrome has WebGPU, so tools-core on the Mac would draw
+  everything; it downloads EVE's files itself and never reads an installed client (not tried here yet).
+
+## No-EVE-data mode
+
+For a machine without tools-core (UI, camera and cinema work): the hub and the page ask for no EVE file or lookup, and
+the simulation, orders, the camera, cinema, screenshots and exports run on a green screen with a cube per ship and
+object (team colours, the nose face pale; `sd-runtime` → Stand-ins). Missing: hull models, real stats and fits (so no
+default guns and no combat), locations, audio.
+
+- **Turning it on**: `--eve-data off` or `SCENE_DIRECTOR_EVE_DATA=off` (default `tools-core`; another value exits 2 on
+  stderr). The stdio MCP server inherits Claude Code's environment, so on a no-EVE machine **export the variable in the
+  shell profile Claude Code starts from** instead of editing `.mcp.json`, and check once with `viewer_status`
+  (`eveData.mode`). By hand: `npx nx run scene-director:serve --eve-data off` (`serve` forwards its args; `Option` also
+  takes `--eve-data=off`). The hub then never touches tools-core and ignores `--tools-core` (`sd-workspace` → Who
+  answers what).
+- **What the page learns, and when**: it reads `GET /config` (`{ eveData }`) before it configures resources or creates
+  the engine (a failure or timeout means EVE data on, with one warning). `?eve=off` turns the mode on for one tab; it is
+  one way (`from: url`) and never turns EVE data on against an `off` hub. The hello reply carries the hub's mode too: a
+  tab whose mode came from the hub reloads once when it reconnects to a hub in the other mode.
+- **Statuses**: ships and objects `stand-in` (cubes, class flight numbers); asteroid fields, the location, the dressing,
+  the nebula and audio `off`, each with the mode's note.
+- **Reports**: `viewer_status.eveData { mode, note? }` (`toolsCore` null), a HUD "EVE data" row, and
+  `get_state.eveData { mode, from, note, refused, expected }`. `refused` counts EVE files `ResourceBytes` turned away
+  for a page path (**0 expected**; more means a path still asks); `expected` counts the runtime's own construction cost
+  (9: a new `EveSpaceScene` asks for its volumetric fog effects, refused as expected through `ExpectRefusals`).
+- **Refuses, naming the mode**: `search_hulls`, `search_map`, `get_system`, `set_location`, `search_objects`,
+  `ship_stats` without all four stats, and `add_ships` / `add_objects` / `add_asteroid_field` by EVE name. The hub's
+  `/resource`, `/audio`, `/build`, `/ship-stats`, `/prop-mod` and fit routes answer 503.
+- **Still works**: `dna` lines, the built-in `tfis`, objects by `dna`, `ship_stats` with all four stats, orders, the
+  timeline, cinema, screenshots and `export_movie`.
+- **verify-page `--eve-data off`** starts its own hub in the mode, needs no tools-core and runs only the "no EVE data:"
+  checks (statuses, refusals, zero EVE requests in Playwright's request log, a quiet `page_log`). On this Mac the
+  Playwright headless shell is `chromium_headless_shell-1234`: it has a WebGPU adapter but loses its device on the first
+  stand-in pass, so the run reports those errors as info and skips the screenshot. Check drawing in a real Chrome tab.
+- **Mac Chrome findings (2026-10-24, Apple Metal)**: 60 fps; a green screen with team cubes; an orbit drag and the hero
+  shot track without the runtime frame; a 2 s 640×360 `export_movie` holds the cubes; the tab requests only `/`,
+  `/app/main.js` and `/config`; `refused` 0. Exactly one reload per hub mode change, once `Hub.Stop` closed keep-alive
+  connections: before that a restarted hub's old connection kept answering `/config` and the reload looped.
 
 ## What needs what
 
@@ -38,6 +71,7 @@ Set up and verified on a Mac on 2026-10-22: install, `nx build scene-director` a
 | offline tests (`dbx-claude-test`) | `node_modules` (runtime + server install-links copies built at their pins, see `sd-workspace` and "A second machine") |
 | build | the same |
 | page draws ships | tools-core on `127.0.0.1:5510` (every resource goes through the hub's `/resource` proxy to it); without it, a green screen and a stand-in cube per ship and object (below) |
+| UI, camera and cinema work with no tools-core | no-EVE-data mode: `--eve-data off` / `SCENE_DIRECTOR_EVE_DATA=off` ("No-EVE-data mode" above) |
 | `ship_stats`, `/ship-stats`, SDE radii, hull names, `add_fleet_composition` without inline dna | a **prepared** SDE in tools-core |
 | locations (`search_map`, `get_system`, `set_location`, dressing) | tools-core's map routes over the SDE (a healthy map index) |
 | sounds (prop mods, modules, turrets) | tools-core's audio library, a user gesture in the tab (or autoplay allowed) |
@@ -69,6 +103,8 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 
 - Often owned by **a Claude Code session's MCP server** (`bin/scene-director.js mcp`); another `mcp` joins it
   (`RemoteHub`). Hand-run: `npx nx run scene-director:serve`, then open http://127.0.0.1:5520/.
+- **`--eve-data tools-core|off`** (`SCENE_DIRECTOR_EVE_DATA`): `off` is no-EVE-data mode (above); the page reads it from
+  `/config`.
 - It streams the built viewer from disk on every request: **a page-only change needs a rebuild plus a tab reload**
   (changing `environment.universe` makes a connected tab reload itself).
 - **A hub code change needs the owning session to reconnect its MCP server** (`/mcp`).
@@ -130,6 +166,7 @@ provider). Do not sink time into headless GPU.
 | `?tier=lo\|hi` | shader tier (default `depth`) |
 | `?audio=off` | no audio |
 | `?turretlod=on` | the runtime's own turret LOD (default: every turret set frozen at high detail, `sd-weapons`) |
+| `?eve=off` | no-EVE-data mode for this tab only (`get_state.eveData.from: url`); one way: never turns EVE data on against an `off` hub |
 | `?fields=off\|shadow` | asteroid fields: `off` draws none (status `off`), `shadow` lets rocks cast shadows (default off, `sd-asteroid-fields`) |
 
 ## Real-GPU findings are dated evidence

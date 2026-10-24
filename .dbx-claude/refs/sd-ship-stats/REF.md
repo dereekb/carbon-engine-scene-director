@@ -6,6 +6,9 @@
 > `prop-mod-audio.ts` / `audio.ts`, `DestinyWorld`'s prop mod methods, or the hub's `ship-data.ts` /
 > `ship-stats-tool.ts`. How the numbers move a ball: `sd-destiny`.
 
+**No-EVE-data mode** (`sd-dev-env`): the page's hull and prop mod lookups answer at once with the mode's note (the ship
+flies class numbers), `ship_stats` needs all four `stats`, and `/ship-stats` and `/prop-mod` answer 503.
+
 ## Files
 
 | File | Role |

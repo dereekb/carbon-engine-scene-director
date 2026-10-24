@@ -5,6 +5,9 @@
 > `location.ts`. Sub-doc **`dressing`** (`{ ref: "sd-locations", doc: "dressing" }`): how the page draws a location
 > (nebula, sun, flare, planets, stations, gates, the planet pass).
 
+**No-EVE-data mode** (`sd-dev-env`): `get_state.location` and the dressing read `off` with the mode's note, and
+`search_map`, `get_system` and `set_location` refuse.
+
 ## Files
 
 | File | Role |

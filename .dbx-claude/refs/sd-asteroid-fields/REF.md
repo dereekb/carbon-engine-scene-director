@@ -13,6 +13,9 @@ instanced SOF root per field, listed in `get_state.asteroidFields`, framed by `f
 verify-page `--only field`. Measured and tuned on the real GPU: rocks cast no shadows and each model draws its LOD
 mesh for its nearest rock (Real-GPU evidence below).
 
+**No-EVE-data mode** (`sd-dev-env`): fields read `off` with the mode's note (the rocks are placed, no model is built)
+and draw nothing; `add_asteroid_field` takes only `{ rocks: [dna, …] }` ores, never ore names.
+
 ## Files
 
 | File | Role |
