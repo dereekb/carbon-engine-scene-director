@@ -214,6 +214,11 @@ export interface ExplosionScheduleInput {
   readonly deathTick: number;
   readonly lingerSeconds: number;
   readonly tickSeconds: number;
+  /**
+   * Seconds after the start the hull hides when there are no facts: a stand-in's pop without EVE data, which loads no
+   * explosion file (stand-ins.ts STAND_IN_DEATH_SECONDS).
+   */
+  readonly hideAfter?: number;
 }
 
 export interface ExplosionSoundPost {
@@ -249,7 +254,7 @@ export interface ExplosionTimes {
  */
 export function ExplosionSchedule(input: ExplosionScheduleInput): ExplosionTimes {
   const { start, facts, deathTick, lingerSeconds, tickSeconds } = input;
-  const global = facts ? start + facts.timing.localExplosionDelay + facts.timing.globalExplosionDelay : start;
+  const global = facts ? start + facts.timing.localExplosionDelay + facts.timing.globalExplosionDelay : start + (input.hideAfter ?? 0);
   const sounds: ExplosionSoundPost[] = [];
   if (facts?.localEvents.length) sounds.push({ at: start, part: 'local', event: facts.localEvents[0] });
   if (facts?.globalEvents.length) sounds.push({ at: global, part: 'global', event: facts.globalEvents[0] });

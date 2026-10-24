@@ -1,5 +1,5 @@
 import type { Maybe } from '@dereekb/util';
-import { combatRoll, type ShipDefense, type ShotTargetKind, type TurretCombatNumbers, type WeaponShot } from '@scene-director/scene';
+import { combatRoll, type ShipDefense, type ShotTargetKind, standInCombatOf, standInTurretNumbersOf, type TurretCombatNumbers, type WeaponShot } from '@scene-director/scene';
 import { describe, expect, it } from 'vitest';
 import { type AccuracyNumbers, type CombatPort, CombatRules, DPS_WINDOW_SECONDS, MISSILE_EXPIRED_NOTE, MISSILE_TARGET_DESTROYED } from './combat';
 import { DamageModel } from './damage';
@@ -102,6 +102,38 @@ describe('CombatRules', () => {
     expect(run(1)).toEqual(run(1));
     expect(run(2)).not.toEqual(run(1));
     expect(run(1).some((quality) => quality === 0)).toBe(true);
+  });
+
+  it('kills a stand-in frigate with stand-in cruiser guns on the same tick, by the same gun, for a seed; another seed differs', () => {
+    const run = (seed: number) => {
+      const port = new FakePort();
+      const cruiser = standInCombatOf('cruiser');
+      port.weapons.clear();
+      for (let index = 0; index < cruiser.guns; index++) port.weapons.set(`high-${index}`, standInTurretNumbersOf(cruiser, index));
+      const { rules, damage, kills } = Rules(1, port);
+      damage.SetDefense('prey', standInCombatOf('frigate').defense);
+      rules.SetCombat({ seed, death: 'explode' });
+      const qualities: number[] = [];
+      let killTick: Maybe<number> = null;
+      for (let cycle = 1; cycle <= 40 && killTick == null; cycle++) {
+        const tick = cycle * cruiser.gun.cycleTime;
+        const shots = ['h1', 'h2'].flatMap((ship) => Array.from({ length: cruiser.guns }, (_, index) => Shot({ ship, module: `high-${index}`, typeID: -1, name: cruiser.gun.name, target: 'prey', cycle, tick, at: tick - 0.5 })));
+        rules.Resolve(shots, tick);
+        qualities.push(...shots.map((shot) => shot.outcome?.quality ?? -1));
+        if (kills.length) killTick = tick;
+      }
+      // Overkill after the kill: the next boundary's shots land on a dead ship and kill nothing more.
+      const after = Shot({ ship: 'h1', module: 'high-0', target: 'prey', cycle: 99, tick: 999, at: 998 });
+      rules.Resolve([after], 999);
+      return { killTick, kills: [...kills], qualities, overkill: after.outcome?.result };
+    };
+    const first = run(1);
+    expect(first.killTick).not.toBeNull();
+    expect(first.kills).toHaveLength(1);
+    expect(first.kills[0]).toMatch(/^prey by h[12]:high-\d$/u);
+    expect(run(1)).toEqual(first);
+    expect(run(2).qualities).not.toEqual(first.qualities);
+    expect(first.overkill).toBe('overkill');
   });
 
   it('marks misses, and does EVE damage on hits: quality × base, wrecking at 3 ×', () => {

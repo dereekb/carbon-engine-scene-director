@@ -13,7 +13,7 @@
 | A2: `packages/battle` (pure, node-tested) | done: scenario, bundle, staging, settings, commands, views (32 specs) |
 | A3: loading (drop, zip.js, staging over `CallHub`, dialogs, scenario card, Reset, IndexedDB) | done (specs + `verify-console`) |
 | A4: fleet panel (cards, command bar, target list, settings dialog, doctrine picker) | done (specs + `verify-console`) |
-| A5: console end-to-end Playwright script, offline verify gaps | done: `verify-console` passes load, engage, Pull range / Hold, the settings drop, two equal Resets and Retreat then Warp out (fixed: a fleet warp now holds the align stance's pilot, `sd-piloting` Manual); verify-page's offline brain checks cover a fleet warp after align, a lent call ended by a warp-off, `calls: false` with free fire and a `freeFire: false` doctrine; the real-Chrome pass is done (below). Kill checks wait on offline damage |
+| A5: console end-to-end Playwright script, offline verify gaps | done: `verify-console` passes load, engage, Pull range / Hold, the settings drop, two equal Resets and Retreat then Warp out (fixed: a fleet warp now holds the align stance's pilot, `sd-piloting` Manual); verify-page's offline brain checks cover a fleet warp after align, a lent call ended by a warp-off, `calls: false` with free fire and a `freeFire: false` doctrine; the real-Chrome pass is done (below). Offline damage landed (stand-in combat, `sd-combat`): verify-console's brawl fights to a winner with equal kills across two Resets, and verify-page covers the lent call after a kill and equal kill ticks |
 
 ## Projects
 
@@ -195,8 +195,11 @@ doctrine instead) or has no ship left (`fleetCommandsBlocked`). `views.ts`: `toF
   through get_state: both fleets land and both brains engage; Pull range and Hold change the FC's stance while the
   calls go on; a settings drop changes `red-fc` without the clock going back; two Resets give equal landing ticks and
   decision logs; Retreat reports aligned and Warp out lands over 1,000 km off.
-- Its gotchas: the doctrines engage `in-range` (the stand-ins land outside lock range, so `on-sight` never fires
-  offline); a stance shows in `fc.piloted` (move, prop-mods), not `fc.manual`; Destiny's tick runs on across loads,
+- A second zip, `verify-console-brawl` (blue 4 v red 2 stand-in cruisers 8 km apart, warp-in, `explode`, `on-sight`
+  with a `falloff` reach, hold), replaces the duel through the "Replace the running battle?" dialog and runs at rate 4:
+  blue wins, red's command bar is blocked, and two Resets give equal kills relative to the first landing.
+- Its gotchas: the duel runs `death: "flag"` (the stand-in guns deal damage; flagged ships stay fleet members, so the
+  levers stay live); its doctrines still engage `in-range`, though `on-sight` and named reaches work offline now; a stance shows in `fc.piloted` (move, prop-mods), not `fc.manual`; Destiny's tick runs on across loads,
   so a Reset is detected by a new warp-in and runs compare ticks from their first landing (to 20 after the last);
   `landedAt` shows only until a ship starts to follow, so it is recorded while polling. Page errors
   other than headless WebGPU's are reported as an `info` line.

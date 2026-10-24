@@ -337,7 +337,7 @@ interface ShipFitState {
   readonly typeID?: number;
   readonly unknown: string[];
   readonly modules: ShipModuleRowState[];
-  readonly math: 'dogma' | 'table';
+  readonly math: 'dogma' | 'stand-in' | 'table';
   readonly note?: string;
 }
 
@@ -6009,14 +6009,14 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
  */
 interface NoEveState {
   readonly eveData?: { readonly mode: string; readonly from?: string; readonly note?: string; readonly refused: number };
-  readonly renderer: { readonly available: boolean; readonly standIns?: { readonly greenScreen: boolean; readonly cubes: number } };
+  readonly renderer: { readonly available: boolean; readonly standIns?: { readonly greenScreen: boolean; readonly cubes: number; readonly tracers?: number } };
   readonly ships: readonly {
     readonly id: string;
     readonly status: string;
     readonly speed?: number;
     readonly physics?: { readonly source?: string; readonly note?: string };
     readonly propMod?: Maybe<{ readonly source?: string }>;
-    readonly fit?: Maybe<{ readonly note?: Maybe<string> }>;
+    readonly fit?: Maybe<{ readonly key?: string; readonly math?: string; readonly note?: Maybe<string> }>;
   }[];
   readonly fleets?: readonly { readonly id: string; readonly formation?: { readonly ready: boolean } }[];
   readonly objects?: readonly { readonly id: string; readonly status: string }[];
@@ -6099,7 +6099,9 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     const named = state.ships.find((ship) => ship.id === 'named');
     Expect(['baked', 'default'].includes(named?.propMod?.source ?? ''), `named prop mod ${Show(named?.propMod)}`);
     const fitted = state.ships.find((ship) => ship.id === 'fitted');
-    Expect(MODE.test(fitted?.fit?.note ?? ''), `fit ${Show(fitted?.fit?.note)}`);
+    Expect(MODE.test(fitted?.fit?.note ?? '') && /its fit "inline" needs the EVE data/u.test(fitted?.fit?.note ?? ''), `fit ${Show(fitted?.fit?.note)}`);
+    const unarmed = state.ships.find((ship) => ship.fit?.key !== 'stand-in' || ship.fit.math !== 'stand-in');
+    Expect(!unarmed, `not a stand-in fit: ${Show(unarmed?.fit)}`);
     Expect(state.objects?.[0]?.status === 'stand-in', `object ${Show(state.objects?.[0])}`);
     Expect(state.asteroidFields?.[0]?.status === 'off' && MODE.test(state.asteroidFields[0].note ?? ''), `field ${Show(state.asteroidFields?.[0])}`);
     Expect(state.location?.status === 'off' && state.audio?.state === 'off', `location ${Show(state.location)}, audio ${Show(state.audio)}`);
@@ -6207,7 +6209,8 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
 
   await Check('no EVE data: the FC brain takes engage back from a hold, lends its call until the target is gone, and aligns', async () => {
     const quick = { schema: 'cjs-fleet-personality/1', extends: 'line', command: { ability: 1 }, engage: 'on-sight', targeting: { reach: 30_000 }, movement: { stance: 'hold' } };
-    const ships = (team: string, z: number) => [1, 2, 3].map((n) => ({ id: `${team}-${n}`, dna: DNA, team, position: [n * 300, 0, z] }));
+    // The stand-in guns fire now: every ship is immune, as this check is about the levers, not kills.
+    const ships = (team: string, z: number) => [1, 2, 3].map((n) => ({ id: `${team}-${n}`, dna: DNA, team, position: [n * 300, 0, z], immune: true }));
     const fleet = (team: string) => ({ id: team, commander: `${team}-1`, personality: 'quick', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: [`${team}-2`, `${team}-3`] }] }] });
     await call('load_scene', { scene: { name: 'verify-no-eve-data-brain', personalities: { quick }, ships: [...ships('blue', 0), ...ships('red', 15_000)], fleets: [fleet('blue'), fleet('red')] } });
     await WaitNoEve('the builds settle', 10, Settled);
@@ -6271,7 +6274,8 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
 
   await Check('no EVE data: free fire with calls off, then a freeFire: false doctrine turns it off', async () => {
     const doctrine = (freeFire: boolean) => ({ schema: 'cjs-fleet-personality/1', extends: 'line', command: { ability: 1 }, engage: 'in-range', targeting: { reach: 30_000, calls: false, freeFire }, movement: { stance: 'hold' } });
-    const ships = (team: string, z: number) => [1, 2, 3].map((n) => ({ id: `${team}-${n}`, dna: DNA, team, position: [n * 300, 0, z] }));
+    // The stand-in guns fire now: every ship is immune, as this check is about the levers, not kills.
+    const ships = (team: string, z: number) => [1, 2, 3].map((n) => ({ id: `${team}-${n}`, dna: DNA, team, position: [n * 300, 0, z], immune: true }));
     const fleet = (team: string, personality?: string) => ({ id: team, commander: `${team}-1`, ...(personality ? { personality } : {}), wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: [`${team}-2`, `${team}-3`] }] }] });
     await call('load_scene', { scene: { name: 'verify-no-eve-data-free-fire', personalities: { free: doctrine(true) }, ships: [...ships('blue', 0), ...ships('red', 15_000)], fleets: [fleet('blue', 'free'), fleet('red')] } });
     await WaitNoEve('the builds settle', 10, Settled);
@@ -6302,6 +6306,176 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     const turnedOff = (off.fc?.decisions ?? []).find((decision) => decision.lever === 'free-fire' && decision.args?.order?.on === false);
     Expect(turnedOff != null, `no free-fire off decision: ${Show(off.fc?.decisions)}`);
     return `free fire on with no call (${(on.fc?.decisions ?? []).map((decision) => decision.lever).join(', ')}), then off: ${turnedOff?.why ?? '?'}`;
+  });
+
+  // Stand-in combat (sd-combat → Stand-in combat): the class guns, HP and targeting every stand-in carries offline.
+  const Guns = (state: ViewerState, id: string) => state.ships.find((ship) => ship.id === id)?.fit?.modules.filter((module) => module.module.startsWith('high-')) ?? [];
+  const Firing = (state: ViewerState, ids: readonly string[]) => ids.flatMap((id) => Guns(state, id).filter((gun) => gun.state === 'active' || gun.state === 'stopping'));
+  const Dead = (state: ViewerState, id: string) => state.ships.find((ship) => ship.id === id)?.destroyed;
+  type Brain = FleetBrainState & { readonly lent?: { readonly targets: readonly string[] }; readonly reach?: { readonly lock: number; readonly optimal: number; readonly falloff: number } };
+  const CalledOf = (state: ViewerState, fleet: string): Maybe<string> => (state.fleets.find((each) => each.id === fleet) as Maybe<{ readonly called?: { readonly primary?: string } }>)?.called?.primary;
+  const BrainOf = (state: ViewerState, fleet: string): Maybe<Brain> => (state.fleets.find((each) => each.id === fleet) as Maybe<{ readonly fc?: Brain }>)?.fc ?? null;
+  const LoadDuel = async (seed: number): Promise<ViewerState> => {
+    await call('load_scene', {
+      scene: {
+        name: 'verify-no-eve-data-kill',
+        combat: { seed, death: 'explode' },
+        ships: [
+          { id: 'h1', dna: DNA, team: 'blue', position: [0, 0, 0] },
+          { id: 'h2', dna: DNA, team: 'blue', position: [300, 0, 0] },
+          { id: 'prey', dna: DNA, team: 'red', position: [0, 0, 3000], standIn: { class: 'frigate' } }
+        ]
+      }
+    });
+    return WaitFor('the stand-in fits', 10, (polled) => (polled.ships.every((ship) => ship.fit?.key === 'stand-in') ? null : Show(polled.ships.map((ship) => ship.fit?.key))));
+  };
+  const Brawl = (blueDoctrine: object, redDoctrine: Maybe<object>, seed: number) => ({
+    name: 'verify-no-eve-data-brawl',
+    combat: { seed, death: 'explode' },
+    personalities: { bluedoc: blueDoctrine, ...(redDoctrine ? { reddoc: redDoctrine } : {}) },
+    ships: [...[1, 2, 3].map((n) => ({ id: `blue-${n}`, dna: DNA, team: 'blue', position: [n * 300, 0, 0] })), ...[1, 2, 3].map((n) => ({ id: `red-${n}`, dna: DNA, team: 'red', position: [n * 300, 0, 8000], standIn: { class: 'frigate' } }))],
+    fleets: [
+      { id: 'blue', commander: 'blue-1', personality: 'bluedoc', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['blue-2', 'blue-3'] }] }] },
+      ...(redDoctrine ? [{ id: 'red', commander: 'red-1', personality: 'reddoc', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['red-2', 'red-3'] }] }] }] : [])
+    ]
+  });
+  const QUICK = { schema: 'cjs-fleet-personality/1', extends: 'line', command: { ability: 1 }, engage: 'on-sight', movement: { stance: 'hold' } };
+
+  await Check('no EVE data: stand-ins carry stand-in guns, lock and kill', async () => {
+    const ready = await LoadDuel(1);
+    Expect(
+      ready.ships.every((ship) => ship.fit?.math === 'stand-in'),
+      Show(ready.ships.map((ship) => ship.fit?.math))
+    );
+    Expect(Guns(ready, 'h1').length === 4 && Guns(ready, 'h1').every((gun) => gun.name === 'Stand-in cruiser gun'), Show(Guns(ready, 'h1')));
+    const targeting = ShipIn(ready, 'h1').targeting;
+    Expect(targeting?.maxTargetRange === 60_000 && targeting.scanResolution === 350 && targeting.maxLocks === 6, Show(targeting));
+    const maxes = (id: string) => Show((['shield', 'armor', 'structure'] as const).map((layer) => ShipIn(ready, id).defense?.[layer].max));
+    Expect(maxes('h1') === '[2000,2000,2000]' && maxes('prey') === '[500,500,450]', `${maxes('h1')} / ${maxes('prey')}`);
+    const hp = await call<SetHpResult>('set_hp', { ships: ['h1'], shield: '50%' });
+    Expect(!hp.skipped.length && hp.ships[0]?.shield.hp === 1000, Show(hp));
+    const engaged = await call<EngageResult>('engage', { ships: ['h1', 'h2'], target: 'prey' });
+    Expect(engaged.ships.length === 2, Show(engaged));
+    const LockOn = (state: ViewerState) => ShipIn(state, 'h1').locks?.find((lock) => lock.target === 'prey');
+    const locking = await WaitFor('the lock starts', 5, (polled) => (LockOn(polled) && LockOn(polled)?.state !== 'waiting' ? null : Show(ShipIn(polled, 'h1').locks)));
+    const lockTime = LockOn(locking)?.lockTime ?? 0;
+    Expect(Math.abs(lockTime - 6.33) < 0.05, `lockTime ${lockTime}`);
+    const dead = await WaitFor('prey is destroyed', 40, (polled) => (Dead(polled, 'prey') ? null : Show(ShipIn(polled, 'prey').defense)));
+    const kill = Dead(dead, 'prey');
+    Expect(['h1', 'h2'].includes(kill?.by ?? '') && /^high-\d$/u.test(kill?.module ?? '') && kill?.weapon === 'Stand-in cruiser gun' && kill.mode === 'explode', Show(kill));
+    Expect(dead.combat?.kills.some((row) => row.ship === 'prey') === true, Show(dead.combat?.kills));
+    await WaitFor('the hunters stop firing', 10, (polled) => (Firing(polled, ['h1', 'h2']).length ? Show(Firing(polled, ['h1', 'h2'])) : null));
+    const hidden = await WaitFor('prey hides after its pop', 10, (polled) => (ShipIn(polled, 'prey').status === 'destroyed' ? null : ShipIn(polled, 'prey').status));
+    const removesAt = kill?.explosion?.removesAt ?? 0;
+    const gone = await WaitFor('prey leaves at removesAt', 40, (polled) => (Dead(polled, 'prey')?.explosion?.gone ? null : `tick ${polled.simulation.tick} of ${removesAt}`));
+    Expect(gone.simulation.tick >= removesAt, `gone at ${gone.simulation.tick}, removesAt ${removesAt}`);
+    const refused = (await NoEve()).eveData?.refused;
+    Expect(refused === 0, `refused ${refused}`);
+    return `lock ${lockTime} s; prey killed at tick ${kill?.tick} by ${kill?.by}:${kill?.module}; hidden at ${hidden.simulation.tick}, gone at ${gone.simulation.tick} (removesAt ${removesAt}); refused 0`;
+  });
+
+  await Check('no EVE data: the same seed replays the same kill; another seed differs', async () => {
+    const Fight = async (seed: number): Promise<string> => {
+      await LoadDuel(seed);
+      const engaged = await call<EngageResult>('engage', { ships: ['h1', 'h2'], target: 'prey' });
+      const dead = await WaitFor('the kill', 40, (polled) => (Dead(polled, 'prey') ? null : Show(ShipIn(polled, 'prey').defense)));
+      const settled = await WaitFor('the guns settle', 10, (polled) => (Firing(polled, ['h1', 'h2']).length ? 'firing' : null));
+      const kill = Dead(dead, 'prey');
+      return Show({ shots: settled.combat?.shots, after: (kill?.tick ?? 0) - engaged.tick, by: kill?.by, module: kill?.module, dealt: ['h1', 'h2'].map((id) => Math.round((ShipIn(settled, id).combat?.dealt ?? 0) * 10) / 10) });
+    };
+    const first = await Fight(1);
+    const again = await Fight(1);
+    Expect(first === again, `seed 1 twice: ${first} vs ${again}`);
+    const other = await Fight(2);
+    Expect(other !== first, `seed 2 replayed seed 1: ${other}`);
+    return `seed 1: ${first} (twice); seed 2: ${other}`;
+  });
+
+  await Check('no EVE data: a lent call comes back after a kill', async () => {
+    await call('load_scene', { scene: Brawl(QUICK, null, 3) });
+    const ready = await WaitFor('blue engages on sight', 30, (polled) => (BrainOf(polled, 'blue')?.engaged ? null : Show(BrainOf(polled, 'blue'))));
+    const reach = BrainOf(ready, 'blue')?.reach;
+    Expect(reach?.lock === 60_000 && reach.optimal === 4000 && reach.falloff > reach.optimal, `reach ${Show(reach)}`);
+    await call('order_fleet', { fleet: 'blue', order: { type: 'targets', primary: 'red-3', until: 'gone' } });
+    await WaitFor('the call lent on red-3', 5, (polled) => (BrainOf(polled, 'blue')?.lent?.targets.includes('red-3') ? null : Show(BrainOf(polled, 'blue'))));
+    const killed = await WaitFor('red-3 is killed by blue', 60, (polled) => (Dead(polled, 'red-3') ? null : Show(ShipIn(polled, 'red-3').defense)));
+    const kill = Dead(killed, 'red-3');
+    Expect(/^blue-\d$/u.test(kill?.by ?? ''), Show(kill));
+    const back = await WaitFor('the lent call back', 10, (polled) => {
+      const fc = BrainOf(polled, 'blue');
+      return fc && !fc.lent && !fc.manual.includes('call') ? null : Show(fc);
+    });
+    const killTick = kill?.tick ?? 0;
+    // The brain's call takes over again: its queue (or a new call) puts a live red ship first.
+    const moved = await WaitFor('the call moves on', 10, (polled) => {
+      const primary = CalledOf(polled, 'blue');
+      return primary && primary !== 'red-3' && !Dead(polled, primary) ? null : `primary ${primary}`;
+    });
+    return `red-3 killed at tick ${killTick} by ${kill?.by}:${kill?.module}; the call came back at ${back.simulation.tick}, on ${CalledOf(moved, 'blue')} by ${moved.simulation.tick}`;
+  });
+
+  await Check('no EVE data: two loads give the same kills, the call moves on and a dead FC hands over', async () => {
+    const blueDoc = { ...QUICK, targeting: { priority: ['fc'], reach: 'falloff' } };
+    const Run = async () => {
+      await call('load_scene', { scene: Brawl(blueDoc, QUICK, 5) });
+      let anchor: Maybe<number> = null;
+      const calls: string[] = [];
+      const redStates: string[] = [];
+      const done = await WaitFor('red is gone', 90, (polled) => {
+        const blue = BrainOf(polled, 'blue');
+        if (anchor == null && blue?.decisions.length) anchor = Math.min(...blue.decisions.map((decision) => decision.tick));
+        const primary = CalledOf(polled, 'blue');
+        if (primary && calls.at(-1) !== primary) calls.push(primary);
+        const red = BrainOf(polled, 'red')?.state ?? 'none';
+        if (redStates.at(-1) !== red) redStates.push(red);
+        const dead = ['red-1', 'red-2', 'red-3'].filter((id) => Dead(polled, id));
+        return dead.length === 3 ? null : `${dead.length} red dead, red ${red}`;
+      });
+      const kills = (done.combat?.kills ?? []).filter((row) => row.ship.startsWith('red-')).map((row) => `${row.ship} by ${row.by}:${row.module} @${row.tick - (anchor ?? 0)}`);
+      return { kills, calls, redStates };
+    };
+    try {
+      await call('time_control', { rate: 4 });
+      const first = await Run();
+      const second = await Run();
+      Expect(Show(first.kills) === Show(second.kills), `${Show(first.kills)} vs ${Show(second.kills)}`);
+      Expect(first.calls.length >= 2, `the call never moved on: ${Show(first.calls)}`);
+      Expect(first.redStates.includes('handover'), `red never handed over: ${Show(first.redStates)}`);
+      return `kills ${first.kills.join(', ')} (twice); calls ${first.calls.join(' → ')}; red ${first.redStates.join(' → ')}`;
+    } finally {
+      await call('time_control', { rate: 1, pause: false });
+    }
+  });
+
+  await Check('no EVE data: a jump back replays the same kill', async () => {
+    try {
+      await call('load_scene', { scene: Brawl(QUICK, null, 7) });
+      await WaitFor('time control records', 60, (polled) => ((polled as unknown as { readonly time?: TimeReport }).time?.recording.on ? null : 'not recording'));
+      const killed = await WaitFor('the first kill', 60, (polled) => (polled.combat?.kills.length ? null : `shots ${polled.combat?.shots ?? 0}`));
+      const kill = killed.combat?.kills[0];
+      if (!kill) throw new Error('no kill');
+      const past = await WaitFor('3 s past the kill', 15, (polled) => (polled.simulation.tick >= kill.tick + 3 ? null : `tick ${polled.simulation.tick}`));
+      const jump = await call<TimeReport>('time_control', { back: past.simulation.tick - kill.tick + 3 });
+      Expect(jump.tick < kill.tick, Show({ tick: jump.tick, kill: kill.tick }));
+      await call('time_control', { pause: false });
+      const again = await WaitFor('the kill replays', 30, (polled) => (polled.simulation.tick > kill.tick + 1 && polled.combat?.kills.some((row) => row.ship === kill.ship) ? null : `tick ${polled.simulation.tick}`));
+      const replayed = again.combat?.kills.find((row) => row.ship === kill.ship);
+      Expect(replayed?.tick === kill.tick && replayed.by === kill.by && replayed.module === kill.module, `${Show(kill)} vs ${Show(replayed)}`);
+      const drift = (again as unknown as { readonly time?: TimeReport }).time?.drift;
+      Expect(!drift, Show(drift));
+      return `${kill.ship} by ${kill.by}:${kill.module} at tick ${kill.tick}, again after a jump back to ${jump.tick}; no drift`;
+    } finally {
+      await call('time_control', { rate: 1, pause: false });
+    }
+  });
+
+  await Check('no EVE data: stand-in shots draw tracers', async () => {
+    const state = await NoEve();
+    if (!state.renderer.available || HEADLESS) return 'skipped: drawing is checked in a real Chrome tab (sd-dev-env)';
+    await LoadDuel(1);
+    await call('engage', { ships: ['h1', 'h2'], target: 'prey' });
+    const drawn = await WaitNoEve('a tracer draws', 20, (polled) => ((polled.renderer.standIns?.tracers ?? 0) > 0 ? null : Show(polled.renderer.standIns)));
+    return `${drawn.renderer.standIns?.tracers} tracers in a frame`;
   });
 
   await Check('no EVE data: the tab asked for no EVE data', async () => {
@@ -6336,7 +6510,8 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     const lost = (await call<{ readonly message: string }[]>('page_log', { level: 'error', limit: 50 })).some((entry) => HeadlessGpu(entry.message));
     if (lost) throw new Skipped('headless WebGPU failed; check drawing in a real Chrome tab');
     const shot = await call<{ readonly width?: number; readonly height?: number }>('screenshot');
-    const cubes = state.ships.length + (state.objects?.length ?? 0);
+    // A dead stand-in hides: only live stand-ins draw a cube.
+    const cubes = state.ships.filter((ship) => ship.status === 'stand-in').length + (state.objects?.length ?? 0);
     Expect(state.renderer.standIns?.cubes === cubes, `cubes ${state.renderer.standIns?.cubes}, ships and objects ${cubes}`);
     return `${shot.width ?? '?'}x${shot.height ?? '?'}, ${cubes} cubes`;
   });

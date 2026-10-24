@@ -31,8 +31,9 @@ Set up and verified on a Mac on 2026-10-22: install, `nx build scene-director` a
 
 For a machine without tools-core (UI, camera and cinema work): the hub and the page ask for no EVE file or lookup, and
 the simulation, orders, the camera, cinema, screenshots and exports run on a green screen with a cube per ship and
-object (team colours, the nose face pale; `sd-runtime` → Stand-ins). Missing: hull models, real stats and fits (so no
-default guns and no combat), locations, audio.
+object (team colours, the nose face pale; `sd-runtime` → Stand-ins). Missing: hull models, real stats and fits,
+locations, audio. Every ship carries stand-in guns, HP and targeting by class instead, so fights lock, shoot and kill
+(`sd-combat` → Stand-in combat; `ships[].standIn.class`, a cruiser otherwise).
 
 - **Turning it on**: `--eve-data off` or `SCENE_DIRECTOR_EVE_DATA=off` (default `tools-core`; another value exits 2 on
   stderr). The stdio MCP server inherits Claude Code's environment, so on a no-EVE machine **export the variable in the
@@ -56,13 +57,21 @@ default guns and no combat), locations, audio.
 - **Still works**: `dna` lines, the built-in `tfis`, objects by `dna`, `ship_stats` with all four stats, orders, the
   timeline, cinema, screenshots and `export_movie`.
 - **verify-page `--eve-data off`** starts its own hub in the mode, needs no tools-core and runs only the "no EVE data:"
-  checks (statuses, refusals, zero EVE requests in Playwright's request log, a quiet `page_log`). On this Mac the
+  checks (statuses, refusals, zero EVE requests in Playwright's request log, a quiet `page_log`; stand-in combat: guns,
+  lock and kill, the same kill for a seed and another for another seed, a lent call that comes back after a kill, two
+  loads with equal kills at rate 4 with the call moving on and a red FC handover, a jump back that replays the kill,
+  tracers headed only). The brain checks run every ship `immune`: the guns fire now. On this Mac the
   Playwright headless shell is `chromium_headless_shell-1234`: it has a WebGPU adapter but loses its device on the first
   stand-in pass, so the run reports those errors as info and skips the screenshot. Check drawing in a real Chrome tab.
 - **Mac Chrome findings (2026-10-24, Apple Metal)**: 60 fps; a green screen with team cubes; an orbit drag and the hero
   shot track without the runtime frame; a 2 s 640×360 `export_movie` holds the cubes; the tab requests only `/`,
   `/app/main.js` and `/config`; `refused` 0. Exactly one reload per hub mode change, once `Hub.Stop` closed keep-alive
   connections: before that a restarted hub's old connection kept answering `/config` and the reload looped.
+- **Mac Chrome stand-in combat (2026-10-24, Apple Metal-3, a spare `--eve-data off` hub on 5531 with temp stores)**: a
+  3v3 frigate fight at 60 fps with `gpuErrors` 0; `renderer.standIns.tracers` 18 then 6 in sampled frames (each
+  volley's guns cycle together, so tracers come in 0.25 s bursts); dead cubes pop and leave `cubes`; `refused` 0. A
+  background or unfocused Chrome window throttles the tab to 0 fps, so the scene clock (and tracers) stall until it is
+  in front; drive it with the window visible.
 
 ## What needs what
 

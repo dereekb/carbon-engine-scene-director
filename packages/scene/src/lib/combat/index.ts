@@ -11,3 +11,4 @@ export * from './kill';
 export * from './distributions';
 export * from './hp-set';
 export * from './immunity';
+export * from './stand-ins';

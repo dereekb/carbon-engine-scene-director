@@ -60,6 +60,7 @@ import {
   type ShipFitting,
   type ShipStats,
   type ShipStatsInput,
+  type StandInCombat,
   type HullStatOverrides,
   toDogmaModules,
   turretCombatNumbersOf,
@@ -90,7 +91,7 @@ const RETRIED_STATUSES: ReadonlySet<number> = new Set([0, 502, 503, 504]);
 /**
  * The prop mod group (MWDs and ABs).
  */
-const PROP_MOD_GROUP = 46;
+export const PROP_MOD_GROUP = 46;
 
 /**
  * What a `/fit/type` lookup found: the type, or why there is none.
@@ -574,6 +575,20 @@ export interface ResolvedShipFitting {
    * missiles of launchers with none.
    */
   readonly typeIDs: number[];
+  /**
+   * A stand-in fitting's numbers (no EVE data, stand-in-combat.ts): its guns, defense and targeting stand in for dogma.
+   */
+  readonly standIn?: StandInCombat;
+}
+
+/**
+ * Whether a ship's fit gives its modules numbers: its dogma resolved, or it is a stand-in fitting.
+ *
+ * @param resolved - The ship's resolved fit.
+ * @returns True when its modules can run.
+ */
+export function IsFitResolved(resolved: Maybe<ResolvedShipFitting>): boolean {
+  return resolved?.dogma != null || resolved?.standIn != null;
 }
 
 /**
@@ -792,9 +807,10 @@ export interface ShipFitReport {
   readonly modules: ShipModuleRow[];
   readonly drones: { readonly name: string; readonly quantity: number }[];
   /**
-   * `dogma` when the fit sets the ship's numbers, else `table` (note says why).
+   * `dogma` when the fit sets the ship's numbers, `stand-in` for a stand-in's class numbers (no EVE data), else
+   * `table` (note says why).
    */
-  readonly math: 'dogma' | 'table';
+  readonly math: 'dogma' | 'stand-in' | 'table';
   readonly note?: string;
 }
 
@@ -820,9 +836,16 @@ export function ShipFitReportOf(resolved: ResolvedShipFitting, stateOf: (module:
       return { module: module.key, name: module.name, ...live, ...(module.charge ? { charge: module.charge.name } : {}), ...(module.prop ? { prop: true as const } : {}), ...(notes ? { note: notes } : {}) };
     }),
     drones: fitting.drones.map((drone) => ({ name: drone.name, quantity: drone.quantity })),
-    math: dogma ? 'dogma' : 'table',
+    math: ShipFitMathOf(resolved),
     ...(note ? { note } : {})
   };
+}
+
+function ShipFitMathOf(resolved: ResolvedShipFitting): ShipFitReport['math'] {
+  let math: ShipFitReport['math'] = 'table';
+  if (resolved.dogma) math = 'dogma';
+  else if (resolved.standIn) math = 'stand-in';
+  return math;
 }
 
 /**

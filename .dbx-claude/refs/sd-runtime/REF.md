@@ -20,7 +20,7 @@
 - **Node-tested modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine): `clock.ts`, `time-control.ts`,
   `destiny.ts`, `flight.ts`, `warp.ts`, `boosters.ts`, `steering.ts`, `camera.ts`, `following.ts`, `location.ts`,
   `celestials.ts`, `prop-mods.ts`, `prop-mod-audio.ts`, `objects.ts`, `audio-guard.ts`, `fittings.ts`, `module-cycle.ts`, `modules.ts`, `damage.ts`, `module-fx.ts`, `module-audio.ts`,
-  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `stand-ins.ts` (only its `StandInPass` touches WebGPU), `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `animation-clock.ts`, `eve-data.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
+  `weapon-lookup.ts`, `turret-plan.ts`, `targets.ts`, `shots.ts`, `stand-ins.ts` (only its `StandInPass` touches WebGPU), `stand-in-combat.ts`, `turret-audio.ts`, `capacitor.ts`, `locks.ts`, `combat.ts`, `explosion-plan.ts`, `arrivals.ts`, `warp-fx.ts`, `fleet-targets.ts`, `auto-repair.ts`, `missile-flights.ts`, `state-capture.ts`, `destiny-snapshot.ts`, `asteroid-fields.ts`, `animation-clock.ts`, `eve-data.ts`, `state-capture.spec-helper.ts`, `asteroid-fields.spec-helper.ts`, `destiny.spec-helper.ts` (the shared
   DestinyWorld spec harness; no vitest import, so the app tsconfig may include it) (`destiny-tackle.spec.ts`,
   `destiny-accuracy.spec.ts`, `destiny-warp-in.spec.ts` and `destiny-missile.spec.ts` cover `destiny.ts`' tackle, accuracy, arrivals and missiles on
   `runtime-sim` too). The full facade drags in the renderer and the `runtime-dist/`
@@ -98,7 +98,14 @@ instead of re-bundling the runtime; its types are `src/lib/api.ts`'s, which name
   before the capture, so `screenshot` and movie exports include them. It clears the image to `GREEN_SCREEN` (sRGB 0,
   177, 64) first only when `greenScreen` is on and the runtime drew no batch that frame (`GetDrawnBatchCount()` is
   cumulative: the frame's count is the difference), so it never wipes real drawing. A hull that fails with EVE data
-  present also draws as a cube, over the nebula. `get_state.renderer.standIns` reports `{ greenScreen, cubes }`; the HUD's
+  present also draws as a cube, over the nebula. `get_state.renderer.standIns` reports `{ greenScreen, cubes, tracers }`
+  (`cubes` counts ship and object cubes only). Stand-in combat draws in the same pass and the same instanced draw
+  (`StandInCube.halfExtents` makes a long thin box; the WGSL is unchanged), on the scene clock, only without EVE data and
+  with an engine: a shot (`DrawShot`, outside silent frames) is a 0.25 s tracer from the shooter's drawn ball to the
+  target's in its team colour mixed halfway to white, its pale +Z face at the target, about 2 px wide at any zoom; a miss
+  ends 1.5 target radii past and aside (the side by cycle parity); a hit flashes the target white for 0.2 s; a death
+  pops the cube orange to white, swelling to 1.6× over 1 s from the explosion start, then `Hide`. The shot list
+  (`StandInShots`) is presentation only: cleared at `BeginJump` and on a load, never captured. The HUD's
   renderer line says "no EVE data: green screen and cubes". In the mode a ship or object settles as `stand-in` without
   building a model (`ApplyNow` retries only `failed`, so it is never retried), and the EVE-effect subsystems (module effects, explosions,
   warp effects, turrets, missiles) are not built, as without a renderer.

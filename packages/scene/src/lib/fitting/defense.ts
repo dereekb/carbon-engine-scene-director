@@ -171,14 +171,32 @@ export function shipDefenseOf(ship: DogmaShip): ShipDefense {
   const layer = (name: DefenseLayerName): DefenseLayer => {
     const ids = DEFENSE_ATTRIBUTES[name];
     const resonances = Object.fromEntries(DAMAGE_TYPES.map((type) => [type, ship.attribute(ids.resonances[type])])) as Record<DamageType, number>;
-    const hp = ship.attribute(ids.hp);
-    const mean = DAMAGE_TYPES.reduce((total, type) => total + resonances[type], 0) / DAMAGE_TYPES.length;
-    return { hp, resonances, resists: Object.fromEntries(DAMAGE_TYPES.map((type) => [type, Math.round((1 - resonances[type]) * 10000) / 100])) as Record<DamageType, number>, ehp: mean > 0 ? hp / mean : hp };
+    return defenseLayerOf(ship.attribute(ids.hp), resonances);
   };
-  const shield = layer('shield');
-  const armor = layer('armor');
-  const structure = layer('structure');
-  return { shield, armor, structure, ehp: shield.ehp + armor.ehp + structure.ehp, shieldRecharge: ship.attribute(SHIELD_RECHARGE_RATE) / 1000 };
+  return shipDefenseFrom({ shield: layer('shield'), armor: layer('armor'), structure: layer('structure'), shieldRecharge: ship.attribute(SHIELD_RECHARGE_RATE) / 1000 });
+}
+
+/**
+ * One defense layer from its HP and resonances: the resists in percent and its omni EHP.
+ *
+ * @param hp - The layer's HP.
+ * @param resonances - The fraction of damage taken, by type.
+ * @returns The layer.
+ */
+export function defenseLayerOf(hp: number, resonances: Readonly<Record<DamageType, number>>): DefenseLayer {
+  const mean = DAMAGE_TYPES.reduce((total, type) => total + resonances[type], 0) / DAMAGE_TYPES.length;
+  return { hp, resonances: { ...resonances }, resists: Object.fromEntries(DAMAGE_TYPES.map((type) => [type, Math.round((1 - resonances[type]) * 10000) / 100])) as Record<DamageType, number>, ehp: mean > 0 ? hp / mean : hp };
+}
+
+/**
+ * A ship's defense from its layers: their omni EHP summed.
+ *
+ * @param input - The three layers and the shield recharge time (s).
+ * @returns The defense.
+ */
+export function shipDefenseFrom(input: Pick<ShipDefense, 'shield' | 'armor' | 'structure' | 'shieldRecharge'>): ShipDefense {
+  const { shield, armor, structure, shieldRecharge } = input;
+  return { shield, armor, structure, ehp: shield.ehp + armor.ehp + structure.ehp, shieldRecharge };
 }
 
 /**

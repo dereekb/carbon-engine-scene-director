@@ -18,7 +18,10 @@ below); **M3 is in** (2026-10-23: missiles draw, fly and detonate with the clien
 Launchers fire, drawn, below); the plan is delivered. Research: the dbx-claude notes `turrets-runtime-pipeline-research` and
 `scene-director-locations-objects-turrets-research`.
 
-**No-EVE-data mode** (`sd-dev-env`): no turrets or missiles are built, so nothing mounts or fires.
+**No-EVE-data mode** (`sd-dev-env`): no turrets or missiles are built, so nothing mounts or draws an EVE effect. Every
+ship carries stand-in guns instead (`sd-combat` → Stand-in combat): turret-style specs with no graphic, `typeID`
+`STAND_IN_GUN_TYPE_ID` (−1, never looked up: `WeaponLookup` answers its off note), fired through the same cycles, shots
+and hits, and drawn as stand-in tracers (`sd-runtime` → Stand-ins).
 
 ## Files
 

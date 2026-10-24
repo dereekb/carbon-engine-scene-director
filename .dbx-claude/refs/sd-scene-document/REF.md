@@ -28,7 +28,9 @@
   it answers fleet orders, `personalities/pilots.ts`; a pilot name and other keys are reserved, stored with a warning;
   stored for fleet personalities, not acted on yet), `orders?` (the ship's own script: order_ship steps with `after` /
   `duration`, `timeline/steps.ts`, `sd-timeline`), `immune?` (`true` or a list of `shield` / `armor` / `structure`: the
-  ship ignores incoming damage there; `sd-combat` → Damage immunity).
+  ship ignores incoming damage there; `sd-combat` → Damage immunity), `standIn?` (`{ class? }`, used only without EVE
+  data: the class a stand-in flies and fights as; stored and ignored with EVE data; a change retunes; `sd-combat` →
+  Stand-in combat).
 - Top level: `schema`, `name`, `environment`, `camera`, `ships`, `fleets?` (`fleets[].personality?` names a built-in
   or a `personalities` key), `objects?`, `fits?` (EFT text by key; omitted when empty), `personalities?` (custom
   `cjs-fleet-personality/1` templates by key, never a built-in name; each resolves through `extends` to `line`;
@@ -62,7 +64,7 @@ malformed values and never throws; `normalizeScene` reports what is wrong with t
 
 | Op family | Ops | Where |
 |---|---|---|
-| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`, `orders`, `immune`; `stats` and `orders` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list and from the timeline's cues and ship steps, with a warning; `remove_object`, `remove_fleet`, `remove_wing` and `remove_squad` prune the same) | `scene.ts` |
+| ships | `add_ship` / `update_ship { id, set }` (id can't change; `null` clears `type`, `stats`, `propMod`, `fit`, `pilot`, `orders`, `immune`, `standIn`; `stats` and `orders` replaced whole) / `remove_ship` (clears `camera.target`, leaves fleets with fallback, prunes it from every called `targets` list and from the timeline's cues and ship steps, with a warning; `remove_object`, `remove_fleet`, `remove_wing` and `remove_squad` prune the same) | `scene.ts` |
 | scene | `set_camera`, `set_environment` (merged), `rename`, `set_location` (whole), `clear_location` | `scene.ts` |
 | fleets | `add_/update_/remove_fleet`, `..._wing`, `..._squad`, `move_to_squad`, `remove_from_fleet`, `set_anchor`; `update_fleet` / `_wing` / `_squad` `set { targets }` edits a group's called targets and `set { autoRepair }` its logi auto-repair (`null` clears) | `fleets/operations.ts`, `fleets/targets.ts` (`sd-fleets`, doc `targets`), `logi/auto-repair.ts` (`sd-logi`) |
 | compositions | `add_fleet_composition` | `compositions/operation.ts` (`sd-fleets` → `compositions`) |

@@ -36,12 +36,14 @@ import {
   type RigSize,
   type SceneShip,
   type ShipCapacitor,
+  type ShipClass,
   type ShipDefense,
   type ShipDogmaInput,
   type ShipStats,
   type ShipStatsInput,
   type ShipStatsMath,
-  type ShipTargeting
+  type ShipTargeting,
+  type StandInCombat
 } from '@scene-director/scene';
 import type { ShipHull, ShipPhysics, ShipPropMod } from './destiny';
 import { EVE_DATA_ON, type PageEveData } from './eve-data';
@@ -176,9 +178,14 @@ export interface ResolveFlightInput {
    * computeShipStats, or a memoized one (FitLookup.ShipStats).
    */
   readonly compute?: (input: ShipStatsInput) => ShipStats;
+  /**
+   * A stand-in's combat numbers (no EVE data, combat/stand-ins.ts): its defense and targeting go on the flight when
+   * there is no dogma; the math stays table.
+   */
+  readonly standIn?: Maybe<Pick<StandInCombat, 'defense' | 'targeting'>>;
 }
 
-export type ShipClass = 'frigate' | 'destroyer' | 'cruiser' | 'battlecruiser' | 'battleship' | 'capital' | 'titan';
+export type { ShipClass } from '@scene-director/scene';
 
 /**
  * Class values, not dogma: published-like numbers for a class, used only when the EVE data cannot name the hull. With
@@ -240,12 +247,14 @@ export const DEFAULT_FLIGHT_RADIUS = 100;
 export const HULL_STATS_TIMEOUT_MS = 90_000;
 
 /**
- * A hull's class, by its SOF category, else its bounding radius; the cruiser class when nothing is known.
+ * A hull's class: its stand-in class (no EVE data), else by its SOF category, else its bounding radius; the cruiser
+ * class when nothing is known.
  *
- * @param hull - The SOF hull's category and bounding radius.
+ * @param hull - The SOF hull's category and bounding radius, or a stand-in's class.
  * @returns The class.
  */
 export function ShipClassOf(hull: Maybe<ShipHull>): ShipClass {
+  if (hull?.shipClass) return hull.shipClass;
   const category = hull?.category?.toLowerCase().replaceAll(/[^a-z]/gu, '');
   let shipClass: Maybe<ShipClass> = category ? CATEGORY_CLASSES[category] : null;
   if (!shipClass && IsPositive(hull?.radius)) {
@@ -274,6 +283,7 @@ export function ClassHull(hull: Maybe<ShipHull>): HullStats {
  */
 export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
   const { published, note, hull, overrides, propMod, dogma } = input;
+  const standIn = dogma ? null : input.standIn;
   const incoming = input.incoming?.length ? input.incoming : null;
   const compute = (stats: ShipStatsInput): ShipStats => (input.compute ?? computeShipStats)(incoming ? { ...stats, incoming } : stats);
   const pinned = HULL_STAT_OVERRIDE_KEYS.every((key) => overrides?.[key] != null);
@@ -331,6 +341,7 @@ export function ResolveFlight(input: ResolveFlightInput): ShipFlight {
     ...(stats.defense ? { defense: stats.defense } : {}),
     ...(stats.capacitor ? { capacitor: stats.capacitor } : {}),
     ...(stats.targeting ? { targeting: stats.targeting } : {}),
+    ...(standIn ? { defense: standIn.defense, targeting: standIn.targeting } : {}),
     warpScrambleStatus: stats.warpScrambleStatus,
     ...(warpScrambleSteps.length ? { warpScrambleSteps } : {})
   };

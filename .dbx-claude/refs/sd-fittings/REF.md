@@ -18,7 +18,9 @@ points and scrams (with the scram's MWD block), neuts, nos and cap transmitters 
 
 **No-EVE-data mode** (`sd-dev-env`): the page's `FitLookup` answers every name unavailable and fails every type and the
 skills at once with the mode's note (no request), so a fitted ship flies its hull's class numbers; the fit routes
-(`/fit/type`, `/dogma/types`, `/dogma/skills`) answer 503.
+(`/fit/type`, `/dogma/types`, `/dogma/skills`) answer 503. Every ship offline carries the stand-in fitting instead
+(`stand-in-combat.ts` `StandInFittingOf`: key `stand-in`, `math: stand-in`, its class guns as `high-*` and the prop mod as
+`mid-0`; `sd-combat` → Stand-in combat); a ship's own `fit` stays in the document and the note names it.
 
 ## Files
 

@@ -117,7 +117,7 @@ export interface EngineStats {
    * What the page draws without EVE data (stand-ins.ts): whether the backdrop is the green screen (the universe file
    * did not load), and the cubes drawn last frame for ships and objects with no model.
    */
-  readonly standIns: { readonly greenScreen: boolean; readonly cubes: number };
+  readonly standIns: { readonly greenScreen: boolean; readonly cubes: number; readonly tracers: number };
 }
 
 export interface EngineEnvironment extends SceneEnvironmentReport {
@@ -278,6 +278,10 @@ export class Engine {
    * The cubes to draw for ships and objects with no model (stand-ins.ts), set by the director every frame.
    */
   private standIns: readonly StandInCube[] = [];
+  /**
+   * The stand-in shots' tracers to draw with them (no EVE data).
+   */
+  private standInTracers: readonly StandInCube[] = [];
   private standInPass: Maybe<StandInPass> = null;
 
   /**
@@ -369,8 +373,9 @@ export class Engine {
    *
    * @param cubes - The cubes, placed for the frame about to draw.
    */
-  SetStandIns(cubes: readonly StandInCube[]): void {
+  SetStandIns(cubes: readonly StandInCube[], tracers: readonly StandInCube[] = []): void {
     this.standIns = cubes;
+    this.standInTracers = tracers;
   }
 
   /**
@@ -537,7 +542,7 @@ export class Engine {
       deviceLost: this.deviceLost,
       gpuErrors: { count: this.gpuErrors.count, messages: [...this.gpuErrors.messages] },
       animation: { clock: this.animation ? 'scene' : 'real', ...this.animation?.Report(), shaderTime: Math.round(Tr2Renderer.GetAnimationTime() * 100) / 100 },
-      standIns: { greenScreen: this.greenScreen, cubes: this.standIns.length }
+      standIns: { greenScreen: this.greenScreen, cubes: this.standIns.length, tracers: this.standInTracers.length }
     };
   }
 
@@ -765,7 +770,8 @@ export class Engine {
    * the pass clears the image to the green first, cubes or none.
    */
   private DrawStandIns(camera: OrbitCamera, context: GPUCanvasContext, format: GPUTextureFormat, batches: number): void {
-    const cubes = this.standIns;
+    // Tracers are boxes like the cubes: one instanced draw takes both.
+    const cubes = this.standInTracers.length ? [...this.standIns, ...this.standInTracers] : this.standIns;
     const backdrop = this.greenScreen && batches === 0 ? GREEN_SCREEN : null;
     if (cubes.length === 0 && !backdrop) return;
     // The wrapped getCurrentTexture records the image as presented, so the capture and an export read it.

@@ -72,7 +72,226 @@ export interface StandInCube {
    * The ball's radius, metres: the cube's corners touch it, so cubes overlap on screen only when the balls do.
    */
   readonly radius: number;
+  /**
+   * Per-axis half extents (metres, local x, y, z), in place of the radius's cube: a tracer's long thin box.
+   */
+  readonly halfExtents?: readonly [number, number, number];
   readonly color: StandInColor;
+}
+
+/**
+ * Seconds a stand-in shot's tracer shows, from the shot's draw.
+ */
+export const STAND_IN_TRACER_SECONDS = 0.25;
+
+/**
+ * Seconds a hit flashes its target toward white.
+ */
+export const STAND_IN_HIT_FLASH_SECONDS = 0.2;
+
+/**
+ * Seconds a destroyed stand-in pops (orange, swelling) before it hides: its explosion's hide without EVE data.
+ */
+export const STAND_IN_DEATH_SECONDS = 1;
+
+/**
+ * How large a popping stand-in swells by the end of its pop.
+ */
+export const STAND_IN_DEATH_SCALE = 1.6;
+
+/**
+ * A popping stand-in's colour at the pop's start: explosion orange, fading to white.
+ */
+export const STAND_IN_DEATH_COLOR: StandInColor = [1, 0.55, 0.1];
+
+/**
+ * A tracer's width as a fraction of its distance from the eye: about 2 px at any zoom.
+ */
+export const STAND_IN_TRACER_WIDTH = 0.002;
+
+/**
+ * How far past its target a miss's tracer ends, and how far aside, in target radii.
+ */
+export const STAND_IN_MISS_OFFSET = 1.5;
+
+const WHITE: StandInColor = [1, 1, 1];
+
+/**
+ * A colour mixed toward another.
+ *
+ * @param from - The colour at 0.
+ * @param to - The colour at 1.
+ * @param amount - 0-1.
+ * @returns The mix.
+ */
+export function MixStandInColor(from: StandInColor, to: StandInColor, amount: number): StandInColor {
+  const t = Math.min(1, Math.max(0, amount));
+  return [from[0] + (to[0] - from[0]) * t, from[1] + (to[1] - from[1]) * t, from[2] + (to[2] - from[2]) * t];
+}
+
+/**
+ * A stand-in shot to draw: a tracer from its shooter to its target for STAND_IN_TRACER_SECONDS, and on a hit a flash on
+ * its target.
+ */
+export interface StandInShot {
+  readonly ship: string;
+  readonly target: string;
+  /**
+   * When it drew, scene seconds.
+   */
+  readonly at: number;
+  readonly hit: boolean;
+  /**
+   * Which side of its target a miss passes: from the shot's cycle parity, no RNG.
+   */
+  readonly side: 1 | -1;
+  readonly color: StandInColor;
+}
+
+/**
+ * The stand-in shots still drawing. Presentation only: never captured, cleared on a load and a time jump.
+ */
+export class StandInShots {
+  private shots: StandInShot[] = [];
+
+  /**
+   * Adds a drawn shot.
+   *
+   * @param shot - The shot.
+   */
+  Add(shot: StandInShot): void {
+    this.shots.push(shot);
+  }
+
+  /**
+   * The shots whose tracers draw at `now`, after dropping those past every window.
+   *
+   * @param now - Scene seconds.
+   * @returns The live shots.
+   */
+  Live(now: number): readonly StandInShot[] {
+    const keep = Math.max(STAND_IN_TRACER_SECONDS, STAND_IN_HIT_FLASH_SECONDS);
+    this.shots = this.shots.filter((shot) => now - shot.at < keep);
+    return this.shots.filter((shot) => shot.at <= now && now - shot.at < STAND_IN_TRACER_SECONDS);
+  }
+
+  /**
+   * How far through its latest hit flash a ship is.
+   *
+   * @param id - The ship.
+   * @param now - Scene seconds.
+   * @returns 0-1 through the flash; null when none shows.
+   */
+  FlashOf(id: string, now: number): Maybe<number> {
+    let latest: Maybe<number> = null;
+    for (const shot of this.shots) if (shot.hit && shot.target === id && shot.at <= now && now - shot.at < STAND_IN_HIT_FLASH_SECONDS && (latest == null || shot.at > latest)) latest = shot.at;
+    return latest == null ? null : (now - latest) / STAND_IN_HIT_FLASH_SECONDS;
+  }
+
+  /**
+   * How many shots it holds.
+   */
+  get size(): number {
+    return this.shots.length;
+  }
+
+  Clear(): void {
+    this.shots = [];
+  }
+}
+
+export interface StandInTracerInput {
+  /**
+   * The shooter's drawn ball centre, world metres.
+   */
+  readonly from: ArrayLike<number>;
+  /**
+   * The target's drawn ball centre, world metres.
+   */
+  readonly to: ArrayLike<number>;
+  /**
+   * The target's ball radius, metres (a miss ends off it).
+   */
+  readonly targetRadius: number;
+  readonly hit: boolean;
+  readonly side: 1 | -1;
+  /**
+   * The camera's eye, world metres (the width scales with its distance).
+   */
+  readonly eye: ArrayLike<number>;
+  /**
+   * The shooter's team colour.
+   */
+  readonly color: StandInColor;
+}
+
+/**
+ * A shot's tracer as a long thin box: from the shooter to the target (a miss past it, aside by STAND_IN_MISS_OFFSET
+ * target radii), its +Z face (the pale nose) at the far end, in the shooter's colour mixed halfway to white.
+ *
+ * @param input - The ends, the eye and the colour.
+ * @returns The box; null when the ends meet.
+ */
+export function StandInTracerOf(input: StandInTracerInput): Maybe<StandInCube> {
+  const { from, to, targetRadius, hit, side, eye } = input;
+  let end = [to[0], to[1], to[2]];
+  let direction = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+  let length = Math.hypot(direction[0], direction[1], direction[2]);
+  if (!(length > 0)) return null;
+  direction = direction.map((value) => value / length);
+  if (!hit) {
+    const up = Math.abs(direction[1]) > 0.99 ? [1, 0, 0] : [0, 1, 0];
+    const aside = Normalize([direction[1] * up[2] - direction[2] * up[1], direction[2] * up[0] - direction[0] * up[2], direction[0] * up[1] - direction[1] * up[0]]);
+    const offset = STAND_IN_MISS_OFFSET * targetRadius;
+    end = end.map((value, axis) => value + direction[axis] * offset + aside[axis] * offset * side);
+    direction = [end[0] - from[0], end[1] - from[1], end[2] - from[2]];
+    length = Math.hypot(direction[0], direction[1], direction[2]);
+    direction = direction.map((value) => value / length);
+  }
+  const position = [(from[0] + end[0]) / 2, (from[1] + end[1]) / 2, (from[2] + end[2]) / 2];
+  const half = (STAND_IN_TRACER_WIDTH * Math.hypot(position[0] - eye[0], position[1] - eye[1], position[2] - eye[2])) / 2;
+  return { position, rotation: RotationToward(direction), radius: length / 2, halfExtents: [half, half, length / 2], color: MixStandInColor(input.color, WHITE, 0.5) };
+}
+
+/**
+ * A popping stand-in's scale and colour.
+ *
+ * @param progress - 0-1 through the pop.
+ * @returns Its scale (1 to STAND_IN_DEATH_SCALE) and colour (orange to white).
+ */
+export function StandInDeathPop(progress: number): { readonly scale: number; readonly color: StandInColor } {
+  const t = Math.min(1, Math.max(0, progress));
+  return { scale: 1 + (STAND_IN_DEATH_SCALE - 1) * t, color: MixStandInColor(STAND_IN_DEATH_COLOR, WHITE, t) };
+}
+
+/**
+ * A hit stand-in's colour: white at the flash's start, back to its own by its end.
+ *
+ * @param color - Its own colour.
+ * @param progress - 0-1 through the flash.
+ * @returns The colour.
+ */
+export function StandInHitColor(color: StandInColor, progress: number): StandInColor {
+  return MixStandInColor(WHITE, color, progress);
+}
+
+function Normalize(vector: readonly number[]): number[] {
+  const length = Math.hypot(vector[0], vector[1], vector[2]);
+  return length > 0 ? vector.map((value) => value / length) : [0, 0, 1];
+}
+
+/**
+ * The unit quaternion turning local +Z onto a unit direction.
+ */
+function RotationToward(direction: readonly number[]): [number, number, number, number] {
+  const [x, y, z] = direction;
+  let rotation: [number, number, number, number] = [0, 1, 0, 0];
+  if (z > -0.999999) {
+    const w = 1 + z;
+    const length = Math.hypot(-y, x, w);
+    rotation = [-y / length, x / length, 0, w / length];
+  }
+  return rotation;
 }
 
 /**
@@ -116,21 +335,22 @@ export function PackStandInCubes(cubes: readonly StandInCube[], eye: ArrayLike<n
   cubes.forEach((cube, index) => {
     const [x, y, z, w] = [cube.rotation[0], cube.rotation[1], cube.rotation[2], cube.rotation[3]];
     const half = cube.radius / Math.sqrt(3);
+    const [hx, hy, hz] = cube.halfExtents ?? [half, half, half];
     const base = index * STAND_IN_FLOATS;
-    // gl-matrix fromQuat, each column scaled to the half-extent.
+    // gl-matrix fromQuat, each column scaled to its axis's half-extent.
     out.set(
       [
-        (1 - 2 * (y * y + z * z)) * half,
-        2 * (x * y + z * w) * half,
-        2 * (x * z - y * w) * half,
+        (1 - 2 * (y * y + z * z)) * hx,
+        2 * (x * y + z * w) * hx,
+        2 * (x * z - y * w) * hx,
         0,
-        2 * (x * y - z * w) * half,
-        (1 - 2 * (x * x + z * z)) * half,
-        2 * (y * z + x * w) * half,
+        2 * (x * y - z * w) * hy,
+        (1 - 2 * (x * x + z * z)) * hy,
+        2 * (y * z + x * w) * hy,
         0,
-        2 * (x * z + y * w) * half,
-        2 * (y * z - x * w) * half,
-        (1 - 2 * (x * x + y * y)) * half,
+        2 * (x * z + y * w) * hz,
+        2 * (y * z - x * w) * hz,
+        (1 - 2 * (x * x + y * y)) * hz,
         0,
         cube.position[0] - eye[0],
         cube.position[1] - eye[1],

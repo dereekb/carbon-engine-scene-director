@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { localRepairRates, moduleNumbersOf, shipCapacitorOf, shipDefenseOf, shipTargetingOf } from './defense';
+import { defenseLayerOf, localRepairRates, moduleNumbersOf, shipCapacitorOf, shipDefenseFrom, shipDefenseOf, shipTargetingOf } from './defense';
 import { type DogmaModuleState, evaluateShipDogma } from './dogma';
 import { DAMNATION_ID, DOGMA_FIXTURE, fixtureTypeID, RIFTER_ID } from './fitting.spec-helper';
 
@@ -41,6 +41,15 @@ describe('shipDefenseOf', () => {
     expect(resonances('online')).toEqual(shipDefenseOf(fitted(RIFTER_ID)).shield.resonances);
     expect(resonances('active').em).toBeCloseTo(0.675, 12);
     expect(resonances('active').explosive).toBeCloseTo(0.5 * 0.675, 12);
+  });
+});
+
+describe('defenseLayerOf', () => {
+  it('builds a layer as shipDefenseOf does, and shipDefenseFrom sums the EHP', () => {
+    const rifter = shipDefenseOf(fitted(RIFTER_ID));
+    const armor = defenseLayerOf(rifter.armor.hp, rifter.armor.resonances);
+    expect(armor).toEqual(rifter.armor);
+    expect(shipDefenseFrom({ shield: rifter.shield, armor, structure: rifter.structure, shieldRecharge: rifter.shieldRecharge })).toEqual(rifter);
   });
 });
 

@@ -4,7 +4,8 @@
  * then drives the console's buttons and checks the battle through get_state on the hub: both fleets land and both
  * brains engage; Pull range and Hold change the FC's stance while the calls go on; Retreat reports aligned and Warp
  * out lands off grid; a settings drop changes the doctrine without a reload; two Resets give the same landing ticks
- * and decision logs. Needs no tools-core. Build first (dbx-claude-build scene-director and battle-console), then:
+ * and decision logs (the duel runs `death: "flag"`: its stand-in guns deal damage, but every ship keeps flying); then a
+ * second zip, a brawl, replaces it and fights to a winner with the same kills across two Resets. Needs no tools-core. Build first (dbx-claude-build scene-director and battle-console), then:
  *
  *   node dist/apps/scene-director/verify-console.js [--only <text>] [--headed] [--console <dir>]
  *   npx nx run scene-director:verify-console
@@ -26,6 +27,7 @@ import { SceneFileStore } from './lib/store/scene-files';
 
 const DNA = 'wreck_s:genericbase:generic';
 const SCENARIO_ID = 'verify-console-duel';
+const BRAWL_ID = 'verify-console-brawl';
 
 interface FcState {
   readonly state?: string;
@@ -41,8 +43,9 @@ interface FcState {
 
 interface ConsoleState {
   readonly simulation: { readonly tick: number };
-  readonly ships: readonly { readonly id: string; readonly position?: SceneVector; readonly stance?: Readonly<Record<string, unknown>> & { readonly state?: string }; readonly arrival?: { readonly state: string; readonly landedAt?: number } }[];
+  readonly ships: readonly { readonly id: string; readonly team?: string; readonly position?: SceneVector; readonly stance?: Readonly<Record<string, unknown>> & { readonly state?: string }; readonly arrival?: { readonly state: string; readonly landedAt?: number }; readonly destroyed?: { readonly tick: number } }[];
   readonly fleets: readonly { readonly id: string; readonly commander: string; readonly personality?: string; readonly ships: readonly string[]; readonly fc?: FcState }[];
+  readonly combat?: { readonly kills: readonly { readonly ship: string; readonly by?: string; readonly module?: string; readonly tick: number }[] };
 }
 
 function Option(name: string, fallback: string): string {
@@ -71,13 +74,26 @@ function Between(a: SceneVector, b: SceneVector): number {
  * @returns The cjs-fleet/1 composition.
  */
 function Composition(id: string): Record<string, unknown> {
-  return { schema: 'cjs-fleet/1', id, commander: { dna: DNA }, wings: [{ id: 'wing-1', squads: [{ id: 'dps', role: 'dps', ships: [{ dna: DNA, count: 2 }] }, { id: 'logi', role: 'logi', ships: [{ dna: DNA }] }] }] };
+  return {
+    schema: 'cjs-fleet/1',
+    id,
+    commander: { dna: DNA },
+    wings: [
+      {
+        id: 'wing-1',
+        squads: [
+          { id: 'dps', role: 'dps', ships: [{ dna: DNA, count: 2 }] },
+          { id: 'logi', role: 'logi', ships: [{ dna: DNA }] }
+        ]
+      }
+    ]
+  };
 }
 
 /**
  * The zip the console loads: the scenario, its two compositions and blue's doctrine as separate parts (offline: dna
- * lines, no location, reach in metres, retreat away or a point). They engage `in-range`: the stand-ins land outside
- * lock range, so `on-sight` would never fire.
+ * lines, no location, reach in metres, retreat away or a point). They engage `in-range` (`on-sight` works offline too:
+ * stand-ins carry stand-in guns and a lock range); death `flag` keeps every ship flying for the lever checks.
  *
  * @param directory - Where to write it.
  * @returns The zip's path.
@@ -89,7 +105,7 @@ async function WriteScenarioZip(directory: string): Promise<string> {
       id: SCENARIO_ID,
       name: 'Verify console duel',
       description: 'Two stand-in fleets warp in and fight.',
-      combat: { seed: 11 },
+      combat: { seed: 11, death: 'flag' },
       range: 30_000,
       heading: 90,
       sides: [
@@ -108,6 +124,44 @@ async function WriteScenarioZip(directory: string): Promise<string> {
   }
 
   const file = path.join(directory, 'duel.zip');
+  await writeFile(file, Buffer.from(await (await writer.close()).arrayBuffer()));
+  return file;
+}
+
+/**
+ * The brawl zip: blue 4 against red 2 stand-in cruisers, 8 km apart, warping in to an explode fight; both doctrines
+ * engage `on-sight` with a named reach (falloff).
+ *
+ * @param directory - Where to write it.
+ * @returns The zip's path.
+ */
+async function WriteBrawlZip(directory: string): Promise<string> {
+  const composition = (id: string, dps: number) => ({ schema: 'cjs-fleet/1', id, commander: { dna: DNA }, wings: [{ id: 'wing-1', squads: [{ id: 'dps', role: 'dps', ships: [{ dna: DNA, count: dps }] }] }] });
+  const doctrine = { extends: 'line', command: { ability: 1 }, engage: 'on-sight', targeting: { reach: 'falloff' }, movement: { stance: 'hold' } };
+  const parts: Record<string, unknown> = {
+    'brawl/scenario.json': {
+      schema: 'cjs-scenario/1',
+      id: BRAWL_ID,
+      name: 'Verify console brawl',
+      description: 'Four stand-ins against two, to the last ship.',
+      combat: { seed: 5, death: 'explode' },
+      range: 8000,
+      heading: 90,
+      sides: [
+        { fleet: 'blue', team: 'blue', composition: 'brawl-blue', warpIn: true, settings: { personality: doctrine } },
+        { fleet: 'red', team: 'red', composition: 'brawl-red', warpIn: true, settings: { personality: doctrine } }
+      ]
+    },
+    'brawl/fleets/brawl-blue.json': composition('brawl-blue', 3),
+    'brawl/fleets/brawl-red.json': composition('brawl-red', 1)
+  };
+  const writer = new ZipWriter(new BlobWriter('application/zip'), { useWebWorkers: false });
+
+  for (const [name, json] of Object.entries(parts)) {
+    await writer.add(name, new TextReader(JSON.stringify(json, null, 2)));
+  }
+
+  const file = path.join(directory, 'brawl.zip');
   await writeFile(file, Buffer.from(await (await writer.close()).arrayBuffer()));
   return file;
 }
@@ -213,6 +267,26 @@ async function LandAndEngage(seconds: number): Promise<{ landings: Record<string
 }
 
 /**
+ * Waits until one team has no ship left: returns each kill relative to the run's first landing and the winner.
+ *
+ * @param seconds - The budget.
+ * @returns The kills and the winner.
+ */
+async function FightToWinner(seconds: number): Promise<{ readonly kills: string; readonly winner: string }> {
+  const landings: number[] = [];
+  const TeamAlive = (state: ConsoleState, team: string) => state.ships.filter((ship) => ship.team === team && !ship.destroyed).length;
+  const state = await WaitFor('one side has no ship left', seconds, (polled) => {
+    for (const ship of polled.ships) if (ship.arrival?.landedAt != null) landings.push(ship.arrival.landedAt);
+    const alive = ['blue', 'red'].map((team) => TeamAlive(polled, team));
+    return polled.ships.length && alive.includes(0) ? null : `alive blue ${alive[0]}, red ${alive[1]}`;
+  });
+  const first = Math.min(...landings);
+  const kills = JSON.stringify((state.combat?.kills ?? []).map((kill) => [kill.ship, kill.by, kill.module, kill.tick - first]));
+  const winner = ['blue', 'red'].filter((team) => TeamAlive(state, team) > 0).join() || 'none';
+  return { kills, winner };
+}
+
+/**
  * Resets through the scenario card and its confirmation.
  *
  * @param page - The console.
@@ -305,7 +379,10 @@ try {
     });
     await Command(page, 'blue', 'warp-out');
     await Delay(1000);
-    const refused = await Card(page, 'blue').locator('.console-fleet-error').textContent({ timeout: 500 }).catch(() => null);
+    const refused = await Card(page, 'blue')
+      .locator('.console-fleet-error')
+      .textContent({ timeout: 500 })
+      .catch(() => null);
     Expect(!refused, `Warp out: ${refused}`);
     const landed = await WaitFor('blue lands off grid', 60, (state) => {
       const blue = ShipOf(state, FleetOf(state, 'blue')?.commander ?? '')?.position;
@@ -319,6 +396,28 @@ try {
     return `aligned, then ${blue && red ? Math.round(Between(blue, red) / 1000) : '?'} km from red`;
   });
 
+  await Check('a scenario fight ends with a winner, with equal kill ticks across two Resets', async () => {
+    try {
+      await call('time_control', { rate: 4 });
+      await page.locator('.console-scenario-load input[type=file]').setInputFiles(await WriteBrawlZip(files));
+      await page.locator('mat-dialog-container').getByRole('button', { name: 'Load' }).click();
+      await WaitFor('the brawl loads', 30, (state) => (state.ships.some((ship) => ship.arrival && ship.arrival.state !== 'landed') && state.ships.length === 6 ? null : `${state.ships.length} ships`));
+      const loaded = await FightToWinner(120);
+      Expect(loaded.winner === 'blue', `winner ${loaded.winner}: ${loaded.kills}`);
+      const bar = Card(page, 'red').locator('.console-fleet-command button').first();
+      for (let attempt = 0; attempt < 40 && !(await bar.isDisabled()); attempt++) await Delay(250);
+      Expect(await bar.isDisabled(), 'the red command bar is not blocked');
+      const runs: Awaited<ReturnType<typeof FightToWinner>>[] = [];
+      for (let run = 0; run < 2; run++) {
+        await Reset(page);
+        runs.push(await FightToWinner(120));
+      }
+      Expect(runs[0].kills === runs[1].kills && runs[0].winner === runs[1].winner, `${runs[0].winner} ${runs[0].kills} vs ${runs[1].winner} ${runs[1].kills}`);
+      return `blue won; kills ${runs[0].kills} (two Resets)`;
+    } finally {
+      await call('time_control', { rate: 1, pause: false });
+    }
+  });
 } finally {
   await browser.close();
   await hub.Stop();

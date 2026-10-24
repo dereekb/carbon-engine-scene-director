@@ -84,7 +84,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, NO_FALLOFF_METRES, shipOrderTarget, toFollowTolerance, unitHash, type SceneShip, type SceneVector, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
+import { APPROACH_RANGE, formatSceneDistance, isTargetShipOrder, MIN_WARP_DISTANCE, NO_FALLOFF_METRES, shipOrderTarget, toFollowTolerance, unitHash, type SceneShip, type SceneVector, type ShipClass, type ShipOrder, type ShipOrderType } from '@scene-director/scene';
 import { TICKS_PER_MS } from './clock';
 import { CapturePark, RestorePark, type ParkSnapshot } from './destiny-snapshot';
 import { CycleEnd } from './module-cycle';
@@ -381,6 +381,10 @@ export interface ShipHull {
    * The SOF bounding-sphere radius, in metres.
    */
   readonly radius: Maybe<number>;
+  /**
+   * A stand-in's class (no EVE data, `ships[].standIn.class`): ShipClassOf takes it over the category and radius.
+   */
+  readonly shipClass?: Maybe<ShipClass>;
 }
 
 /**

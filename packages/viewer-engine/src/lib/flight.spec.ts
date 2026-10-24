@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { findBakedPropMod } from '@scene-director/scene';
+import { findBakedPropMod, standInCombatOf } from '@scene-director/scene';
 import { CLASS_RIG_SIZES, HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, ShipClassOf, type PublishedHull } from './flight';
 import { PageEveDataOf } from './eve-data';
 import { ResolveShipPropMod } from './prop-mods';
@@ -38,6 +38,18 @@ describe('ResolveFlight', () => {
     expect(frigate.typeID).toBeUndefined();
     expect(ResolveFlight({ published: null, hull: { category: 'Mystery', radius: 726 }, overrides: null }).maxVelocity).toBe(137.5);
     expect(ResolveFlight({ published: null, hull: null, overrides: null })).toMatchObject({ maxVelocity: 287.5, radius: 100, source: 'class' });
+  });
+
+  it("flies a stand-in's class, and carries its defense and targeting on the table math", () => {
+    const frigate = ResolveFlight({ published: null, hull: { category: null, radius: null, shipClass: 'frigate' }, overrides: null });
+    expect(frigate).toMatchObject({ mass: 1.2e6, maxVelocity: 437.5, radius: 100, source: 'class' });
+    expect(ShipClassOf({ category: null, radius: null, shipClass: 'capital' })).toBe('capital');
+    expect(CLASS_RIG_SIZES[ShipClassOf({ category: null, radius: null, shipClass: 'titan' })]).toBe(4);
+    const combat = standInCombatOf('cruiser');
+    const flight = ResolveFlight({ published: null, hull: null, overrides: null, standIn: combat });
+    expect(flight).toMatchObject({ math: 'table', source: 'class', defense: combat.defense, targeting: { maxTargetRange: 60_000, scanResolution: 350, maxLockedTargets: 6 } });
+    expect(flight.capacitor).toBeUndefined();
+    expect(ResolveFlight({ published: null, hull: null, overrides: null }).defense).toBeUndefined();
   });
 });
 

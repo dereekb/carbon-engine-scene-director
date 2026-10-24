@@ -187,6 +187,7 @@ import {
   type HpSetCommand,
   type HpSetIntent,
   sceneCombatOf,
+  standInCombatOf,
   autoCameraReferences,
   normalizeAutoCameraCommand,
   type CameraDirectorPicture,
@@ -259,6 +260,7 @@ import {
   DogmaStateOf,
   FitLookup,
   FleetModuleCountsOf,
+  IsFitResolved,
   ResolveShipFitting,
   ShipCapacitorReportOf,
   ShipDefenseReportOf,
@@ -272,7 +274,8 @@ import {
   type ShipFitReport,
   type ShipModuleRowState
 } from './fittings';
-import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, type HullStatsAnswer, type ShipFlight } from './flight';
+import { HullStatsKey, HullStatsLookup, ResolveFlight, RunningFlight, ShipClassOf, type HullStatsAnswer, type ShipFlight } from './flight';
+import { StandInFittingOf, StandInHullOf, StandInModuleSpecsOf } from './stand-in-combat';
 import { CombatProfileOf, HeadingVectorOf, IncomingRepsOf, RemainingEhpOf, TackleModulesOf, TackleOn } from './pilot-facts';
 import { ShipPilots, shipsTakenOver, type PilotFormation, type ShipStanceReport } from './pilots';
 import { type FleetCommandReport, FleetCommanders, type ShipPilotReport } from './fleet-commanders';
@@ -297,7 +300,7 @@ import { LocationDressing } from './location-dressing';
 import { ModuleAudioPost } from './module-audio';
 import { ModuleEffects, type ModuleEffectsReport } from './module-effects';
 import { ModuleFxCommands, RunningModuleFxCommands } from './module-fx';
-import { ShipModules, type CapacitorLanding, type ShipModuleEvent, type TargetingModule } from './modules';
+import { ShipModules, type CapacitorLanding, type ShipModuleEvent, type ShipModuleSpec, type TargetingModule } from './modules';
 import { ShipMissiles, type ShipMissilesReport } from './missile-effects';
 import { MissileFlightId, MissileFlights, type MissileFlight, type MissileFlightsReport } from './missile-flights';
 import { MissileLookup } from './missile-lookup';
@@ -309,7 +312,7 @@ import { PropModKey, PropModLookup, PropModLookupTarget, ResolveShipPropMod, Rig
 import { ErrorText, ExpectedResourceRefusals, ResourceRefusals, ResourceValues } from './resources';
 import { quat, vec3, type EveShip2, type Vec3 } from './runtime';
 import { BuildShipValues, HydrateShip, RetireShips } from './ships';
-import { DrawsAsCube, OBJECT_STAND_IN_COLOR, StandInTeamColor, type StandInCube } from './stand-ins';
+import { DrawsAsCube, OBJECT_STAND_IN_COLOR, STAND_IN_DEATH_SECONDS, StandInDeathPop, StandInHitColor, StandInShots, StandInTeamColor, StandInTracerOf, type StandInCube } from './stand-ins';
 import { EVE_DATA_ON, EveDataReport, type PageEveData } from './eve-data';
 import { IsWorkingCopyKey, type SceneStore } from './store';
 import type { FleetView } from './api';
@@ -1221,6 +1224,11 @@ export class Director {
    * run), onChange is a no-op, and Hide only marks (the hull comes off at the landing).
    */
   private silent = false;
+  /**
+   * Stand-in shots drawing as tracers and hit flashes (no EVE data, with an engine): presentation only, cleared on a
+   * load and a time jump.
+   */
+  private readonly standInShots = new StandInShots();
   /**
    * The movie owned the camera when the jump began (Movie mode M4): the jump restores the rig and the camera director
    * with the scene, the director steps through the re-simulation, and the landing does not rebase or clear them.
@@ -2482,7 +2490,7 @@ export class Director {
         skipped.push({ id, reason: 'it was destroyed' });
         continue;
       }
-      if (!resolved?.dogma) {
+      if (!resolved || !IsFitResolved(resolved)) {
         skipped.push({ id, reason: resolved ? `its fit has not resolved: ${resolved.note ?? 'waiting for the hub'}` : docs.get(id)?.fit ? 'its fit has not resolved yet' : 'it has no fit (ships[].fit)' });
         continue;
       }
@@ -2628,13 +2636,13 @@ export class Director {
     const warnings: string[] = [];
     for (const id of selected.ships) {
       const resolved = this.fittings.get(id);
-      const weapons = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, command.modules).modules.filter((module) => module.weapon != null) : [];
+      const weapons = resolved && IsFitResolved(resolved) ? selectFittedModules({ modules: resolved.modules }, command.modules).modules.filter((module) => module.weapon != null) : [];
       let reason: Maybe<string> = null;
       if (target === id) reason = 'it cannot engage itself';
       else if (this.combat.IsDestroyed(id)) reason = 'it was destroyed';
       else if (this.world.InWarp(id)) reason = 'it is in warp';
       else if (kind === 'ship' && this.world.InWarp(target)) reason = `its target "${target}" is in warp`;
-      else if (!resolved?.dogma) reason = resolved ? `its fit has not resolved: ${resolved.note ?? 'waiting for the hub'}` : 'its weapons have not resolved yet';
+      else if (!IsFitResolved(resolved)) reason = resolved ? `its fit has not resolved: ${resolved.note ?? 'waiting for the hub'}` : 'its weapons have not resolved yet';
       else if (!this.LockTargeting(id)) reason = 'it has no targeting numbers (no EVE dogma for its hull)';
       else if (!weapons.length) reason = `it fits no weapon matching ${command.modules.join(', ')}`;
       if (reason) {
@@ -2803,7 +2811,7 @@ export class Director {
       // A fleet member holds (keeps the call and its locks, unarmed) or stands down from the call (unlock).
       const held = this.fleetTargets.Hold(id, command.unlock ? 'stand-down' : 'hold') ? (command.unlock ? ('stand-down' as const) : ('hold' as const)) : null;
       const resolved = this.fittings.get(id);
-      const weapons = resolved?.dogma ? selectFittedModules({ modules: resolved.modules }, engagement?.modules ?? DEFAULT_ENGAGE_MODULES).modules.filter((module) => module.weapon != null) : [];
+      const weapons = resolved && IsFitResolved(resolved) ? selectFittedModules({ modules: resolved.modules }, engagement?.modules ?? DEFAULT_ENGAGE_MODULES).modules.filter((module) => module.weapon != null) : [];
       const modules: string[] = [];
       for (const module of weapons) {
         const state = this.modules.CycleState(id, module.key);
@@ -3067,11 +3075,12 @@ export class Director {
           const seed = sceneCombatOf(this.scene ?? {}).seed;
           this.explosions.Start(id, { ship: this.live.get(id)?.ship ?? null, curves, choice: death.choice, radius: this.flights.get(id)?.radius ?? UNBUILT_RADIUS, at: death.start, seed });
         } else if (!this.explosions) {
+          // Without EVE data no explosion file loads: the stand-in pops (DriveStandIns) and hides at once.
           const path = death.choice.resPath;
-          const facts = this.explosionFiles.Cached(path)?.facts ?? null;
-          if (!facts && !this.explosionFiles.Failure(path)) continue;
+          const facts = this.eveData.on ? (this.explosionFiles.Cached(path)?.facts ?? null) : null;
+          if (this.eveData.on && !facts && !this.explosionFiles.Failure(path)) continue;
           death.begun = true;
-          death.schedule = ExplosionSchedule({ start: death.start / TICKS_PER_SECOND, facts, deathTick: death.kill.tick, lingerSeconds: death.choice.lingerSeconds, tickSeconds });
+          death.schedule = ExplosionSchedule({ start: death.start / TICKS_PER_SECOND, facts, deathTick: death.kill.tick, lingerSeconds: death.choice.lingerSeconds, tickSeconds, ...(this.eveData.on ? {} : { hideAfter: STAND_IN_DEATH_SECONDS }) });
         }
       }
       const { schedule } = death;
@@ -3112,23 +3121,48 @@ export class Director {
     const engine = this.engine;
     if (!engine) return;
     const cubes: StandInCube[] = [];
+    const seconds = now / TICKS_PER_SECOND;
     for (const doc of this.scene?.ships ?? []) {
       const status = this.live.get(doc.id)?.status;
       const curves = status && DrawsAsCube(status) ? this.world.Curves(doc.id) : null;
       if (!curves) continue;
-      cubes.push({
-        position: curves.translation.GetValueAt__Ticks(now, vec3.create()),
-        rotation: curves.rotation.GetValueAt__Ticks(now, quat.create()),
-        radius: this.world.Radius(doc.id) ?? UNBUILT_RADIUS,
-        color: StandInTeamColor(doc.team)
-      });
+      let radius = this.world.Radius(doc.id) ?? UNBUILT_RADIUS;
+      let color = StandInTeamColor(doc.team);
+      // A dead stand-in pops from its explosion's start until it hides; a hit one flashes toward white.
+      const death = this.eveData.on ? null : this.deaths.get(doc.id);
+      const flash = this.standInShots.FlashOf(doc.id, seconds);
+      if (death?.start != null && now >= death.start) {
+        const pop = StandInDeathPop((seconds - death.start / TICKS_PER_SECOND) / STAND_IN_DEATH_SECONDS);
+        radius *= pop.scale;
+        color = pop.color;
+      } else if (flash != null) {
+        color = StandInHitColor(color, flash);
+      }
+      cubes.push({ position: curves.translation.GetValueAt__Ticks(now, vec3.create()), rotation: curves.rotation.GetValueAt__Ticks(now, quat.create()), radius, color });
     }
     for (const doc of this.scene?.objects ?? []) {
       const entry = this.objects.Entry(doc.id);
       if (!entry || !DrawsAsCube(entry.status)) continue;
       cubes.push({ position: doc.position, rotation: DocumentRotation(doc.rotation), radius: ObjectBallRadius({ radius: doc.radius, sofRadius: entry.sofRadius }).radius, color: OBJECT_STAND_IN_COLOR });
     }
-    engine.SetStandIns(cubes);
+    engine.SetStandIns(cubes, this.StandInTracers(now, engine.camera.Eye().position));
+  }
+
+  /**
+   * The stand-in shots' tracers at `now`: from the shooter's drawn ball to its target's (an object's placement).
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   * @param eye - The camera's eye, world metres.
+   * @returns The boxes.
+   */
+  private StandInTracers(now: number, eye: ArrayLike<number>): StandInCube[] {
+    const objects = new Map((this.scene?.objects ?? []).map((doc) => [doc.id, doc]));
+    return this.standInShots.Live(now / TICKS_PER_SECOND).flatMap((shot) => {
+      const from = this.world.Curves(shot.ship)?.translation.GetValueAt__Ticks(now, vec3.create());
+      const to = this.world.Curves(shot.target)?.translation.GetValueAt__Ticks(now, vec3.create()) ?? objects.get(shot.target)?.position;
+      const tracer = from && to ? StandInTracerOf({ from, to, targetRadius: this.world.Radius(shot.target) ?? UNBUILT_RADIUS, hit: shot.hit, side: shot.side, eye, color: shot.color }) : null;
+      return tracer ? [tracer] : [];
+    });
   }
 
   /**
@@ -3495,6 +3529,7 @@ export class Director {
    */
   private BeginJump(): void {
     this.moduleEffectsDrawn?.Clear();
+    this.standInShots.Clear();
     this.explosionsDrawn?.Clear();
     this.missileDrawingDrawn?.Clear();
     this.warpEffectsDrawn?.Clear();
@@ -3581,8 +3616,9 @@ export class Director {
     const tickSeconds = this.world.master.tickInterval / 1000;
     const plan = ExplosionReplays(
       [...this.deaths].map(([id, death]) => {
-        const facts = this.explosionFiles.Cached(death.choice.resPath)?.facts ?? null;
-        const schedule = death.schedule ?? (death.start != null && facts ? ExplosionSchedule({ start: death.start / TICKS_PER_SECOND, facts, deathTick: death.kill.tick, lingerSeconds: death.choice.lingerSeconds, tickSeconds }) : null);
+        const facts = this.eveData.on ? (this.explosionFiles.Cached(death.choice.resPath)?.facts ?? null) : null;
+        const known = facts != null || !this.eveData.on;
+        const schedule = death.schedule ?? (death.start != null && known ? ExplosionSchedule({ start: death.start / TICKS_PER_SECOND, facts, deathTick: death.kill.tick, lingerSeconds: death.choice.lingerSeconds, tickSeconds, ...(this.eveData.on ? {} : { hideAfter: STAND_IN_DEATH_SECONDS }) }) : null);
         return [id, { start: death.start, hide: schedule ? Math.round(schedule.hide * TICKS_PER_SECOND) : null, begun: death.begun, hidden: death.hidden, gone: death.gone }] as const;
       }),
       target
@@ -4839,7 +4875,7 @@ export class Director {
       return;
     }
     const resolved = this.fittings.get(doc.id);
-    if (!resolved || resolved.dogma || (!resolved.pending && answer)) return;
+    if (!resolved || resolved.dogma || resolved.standIn || (!resolved.pending && answer)) return;
     const { text } = resolved;
     void this.fitLookup.Prepare({ text, typeIDs: resolved.typeIDs }).then(() => {
       const current = this.scene?.ships.find((ship) => ship.id === doc.id);
@@ -4886,7 +4922,7 @@ export class Director {
    * @returns It, or null for "none".
    */
   private PropModTarget(doc: SceneShip, answer: Maybe<HullStatsAnswer>): Maybe<string | number> {
-    return PropModLookupTarget(this.PropModModule(doc), RigSizeOf({ published: answer?.hull, hull: this.live.get(doc.id)?.hull }));
+    return PropModLookupTarget(this.PropModModule(doc), RigSizeOf({ published: answer?.hull, hull: this.HullOf(doc) }));
   }
 
   /**
@@ -4949,7 +4985,9 @@ export class Director {
     if (this.IsDead(doc.id)) return [];
     const resolved = this.fittings.get(doc.id);
     const dogma = this.LiveDogma(doc.id, resolved?.dogma);
-    const specs = resolved && dogma ? ShipModuleSpecsOf({ ...resolved, dogma }, this.fitLookup, doc.stats) : [];
+    let specs: ShipModuleSpec[] = [];
+    if (resolved?.standIn) specs = StandInModuleSpecsOf(resolved);
+    else if (resolved && dogma) specs = ShipModuleSpecsOf({ ...resolved, dogma }, this.fitLookup, doc.stats);
     const signature = JSON.stringify(specs);
     let events: ShipModuleEvent[] = [];
     if (this.moduleSpecs.get(doc.id) !== signature) {
@@ -5056,7 +5094,7 @@ export class Director {
       const doc = docs.get(command.ship);
       // A removed ship's emitter is already released: its voices stopped with it.
       if (!doc) continue;
-      const size = HULL_SIZE_CLASSES[RigSizeOf({ published: this.hullStats.Cached(doc)?.hull, hull: this.live.get(command.ship)?.hull })];
+      const size = HULL_SIZE_CLASSES[RigSizeOf({ published: this.hullStats.Cached(doc)?.hull, hull: this.HullOf(doc) })];
       const { ship, events: sounds, stops } = ModuleAudioPost(command, size);
       if (sounds.length || stops.length) this.audio.Post({ ship, tick: command.tick, events: sounds, stops, placement: this.AudioPlacement(ship, this.clock.now) });
     }
@@ -5172,6 +5210,12 @@ export class Director {
     const present = this.world.Curves(shot.ship) != null && (this.world.Curves(shot.target) != null || this.IsAuthoredObject(shot.target));
     if (!present || this.world.InWarp(shot.ship) || (shot.targetKind === 'ship' && this.world.InWarp(shot.target))) return null;
     const sound: Omit<TurretShotSound, 'at'> = { ship: shot.ship, module: shot.module, target: shot.target, targetKind: shot.targetKind, ...(shot.missed === true ? { missed: true } : {}), tick: shot.tick };
+    // Without EVE data nothing mounts: the shot draws as a stand-in tracer (a miss passes its target on a side by the
+    // cycle's parity).
+    if (!this.eveData.on && this.engine && !this.silent) {
+      const team = this.scene?.ships.find((doc) => doc.id === shot.ship)?.team;
+      this.standInShots.Add({ ship: shot.ship, target: shot.target, at: now / TICKS_PER_SECOND, hit: shot.missed !== true, side: shot.cycle % 2 === 0 ? 1 : -1, color: StandInTeamColor(team) });
+    }
     if (!this.turrets) return { ...sound, at: now };
     const burst = this.turrets.Fire(shot.ship, shot.module, shot.target, shot.missed === true);
     if (!burst) return null;
@@ -5329,7 +5373,7 @@ export class Director {
   private ArmWeapons(id: string, selectors: readonly string[], boundary: number): void {
     const target = this.targets.Of(id);
     const resolved = this.fittings.get(id);
-    if (!target || !resolved?.dogma || this.world.InWarp(id)) return;
+    if (!target || !resolved || !IsFitResolved(resolved) || this.world.InWarp(id)) return;
     const { modules } = selectFittedModules({ modules: resolved.modules }, selectors);
     for (const module of modules) {
       if (module.weapon == null || this.modules.CycleState(id, module.key) !== 'online') continue;
@@ -5550,7 +5594,7 @@ export class Director {
   private Flight(doc: SceneShip, answer: Maybe<HullStatsAnswer>): Maybe<ShipFlight> {
     let flight: Maybe<ShipFlight> = null;
     try {
-      const hull = this.live.get(doc.id)?.hull;
+      const hull = this.HullOf(doc);
       const module = this.PropModModule(doc);
       const rigSize = RigSizeOf({ published: answer?.hull, hull });
       const target = PropModLookupTarget(module, rigSize);
@@ -5561,7 +5605,7 @@ export class Director {
       // Kept before the math, so a ship that cannot fly these states is not tried again every tick.
       this.flownStates.set(doc.id, FlownKey(dogma, targeting));
       const incoming = IncomingModifiersOf(targeting);
-      const input = { published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma, compute: (stats: ShipStatsInput) => this.fitLookup.ShipStats(stats) };
+      const input = { published: answer?.hull, note: answer ? answer.note : LOOKUP_PENDING_NOTE, hull, overrides: doc.stats, propMod, dogma, standIn: fitting?.standIn, compute: (stats: ShipStatsInput) => this.fitLookup.ShipStats(stats) };
       flight = ResolveFlight({ ...input, incoming });
       if (incoming.length) this.unaffectedFlights.set(doc.id, ResolveFlight(input));
       else this.unaffectedFlights.delete(doc.id);
@@ -5580,7 +5624,28 @@ export class Director {
    * @returns The resolved fit; null for a ship without one.
    */
   private ResolveFitting(doc: SceneShip, answer: Maybe<HullStatsAnswer>, propMod: Maybe<ResolvedShipPropMod>): Maybe<ResolvedShipFitting> {
-    const fitting = ResolveShipFitting({
+    const fitting = this.eveData.on ? this.ResolveEveFitting(doc, answer, propMod) : StandInFittingOf({ doc, combat: standInCombatOf(ShipClassOf(this.HullOf(doc))), propMod: propMod ? { name: propMod.stats.name, typeID: propMod.stats.typeID } : null, note: this.eveData.note });
+    if (fitting) this.fittings.set(doc.id, fitting);
+    else this.fittings.delete(doc.id);
+    return fitting;
+  }
+
+  /**
+   * The hull a ship's class numbers read: its live SOF hull, else without EVE data its stand-in class
+   * (`ships[].standIn.class`, StandInHullOf).
+   *
+   * @param doc - The document ship.
+   * @returns The hull; null when nothing names its class (the cruiser class).
+   */
+  private HullOf(doc: SceneShip): Maybe<ShipHull> {
+    return this.live.get(doc.id)?.hull ?? (this.eveData.on ? null : StandInHullOf(doc));
+  }
+
+  /**
+   * A ship's fit through the EVE data: its own, else its default weapons.
+   */
+  private ResolveEveFitting(doc: SceneShip, answer: Maybe<HullStatsAnswer>, propMod: Maybe<ResolvedShipPropMod>): Maybe<ResolvedShipFitting> {
+    return ResolveShipFitting({
       doc,
       scene: this.scene,
       lookup: this.fitLookup,
@@ -5590,9 +5655,6 @@ export class Director {
       fallback: this.DefaultFallback(doc, answer),
       sofRace: doc.dna.split(':')[2] ?? null
     });
-    if (fitting) this.fittings.set(doc.id, fitting);
-    else this.fittings.delete(doc.id);
-    return fitting;
   }
 
   /**
@@ -6272,7 +6334,7 @@ export class Director {
     let condition: AutoRepairCondition = 'ready';
     if (this.combat.IsDestroyed(id) || this.IsDead(id)) condition = 'destroyed';
     else if (this.world.InWarp(id) || this.world.Arriving(id)) condition = 'in-warp';
-    else if (!this.world.Curves(id) || !this.fittings.get(id)?.dogma) condition = 'waiting';
+    else if (!this.world.Curves(id) || !IsFitResolved(this.fittings.get(id))) condition = 'waiting';
     return condition;
   }
 
@@ -6351,6 +6413,7 @@ export class Director {
       this.Retire(id);
     }
     this.deaths.clear();
+    this.standInShots.Clear();
     this.liveFleets = null;
   }
 
@@ -6373,7 +6436,7 @@ export class Director {
     const record = typeID == null ? null : this.fitLookup.Bundle()?.types[typeID];
     const choice = shipExplosionOf({
       groupID: record?.groupID,
-      classRigSize: RigSizeOf({ published: answer?.hull, hull: this.live.get(id)?.hull }),
+      classRigSize: RigSizeOf({ published: answer?.hull, hull: doc ? this.HullOf(doc) : this.live.get(id)?.hull }),
       raceID: record?.raceID,
       sofRace: doc?.dna.split(':')[2],
       seed: sceneCombatOf(this.scene ?? {}).seed,
@@ -6381,7 +6444,8 @@ export class Director {
     });
     const removeTick = ExplosionRemoveTick(kill.tick, choice.lingerSeconds, this.world.master.tickInterval / 1000);
     this.deaths.set(id, { kill, choice, removeTick, start: null, begun: false, schedule: null, posted: 0, hidden: false, gone: false });
-    this.explosionFiles.Load(choice.resPath).catch((error: unknown) => console.warn(`ship ${id}: its explosion ${choice.resPath} did not load: ${ErrorText(error)}`));
+    // Without EVE data the explosion is only chosen (its timing captured, its file never asked for): the stand-in pops.
+    if (this.eveData.on) this.explosionFiles.Load(choice.resPath).catch((error: unknown) => console.warn(`ship ${id}: its explosion ${choice.resPath} did not load: ${ErrorText(error)}`));
     this.ModuleOutputs(this.modules.Remove(id, this.world.tick, 'its target was destroyed'));
     this.moduleSpecs.delete(id);
     this.locks.Remove(id);

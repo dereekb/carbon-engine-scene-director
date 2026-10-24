@@ -15,6 +15,7 @@ import { readScenePosition } from './extent';
 import { applyFitOperation, FIT_OPERATIONS } from './fitting/operation';
 import { applyCombatOperation, COMBAT_OPERATIONS, normalizeSceneCombat, type SceneCombat } from './combat/document';
 import { applyImmunityOperation, IMMUNITY_OPERATIONS, normalizeShipImmunity, sameImmunity, type ShipImmunity } from './combat/immunity';
+import { normalizeShipStandIn, sameStandIn, type SceneShipStandIn } from './combat/stand-ins';
 import { fitTextOf, normalizeSceneFits, normalizeShipFit } from './fitting/fit';
 import { keepSceneArrivals, readWarpIn, type SceneArrival, toArrivalLane } from './arrivals/arrival';
 import { applyPersonalityOperation, normalizeScenePersonalities, PERSONALITY_OPERATIONS } from './personalities/document';
@@ -107,6 +108,12 @@ export interface SceneShip {
    * the ship. A rule of the scene, saved like combat.death; omitted when not immune.
    */
   immune?: ShipImmunity;
+  /**
+   * Used only without EVE data (combat/stand-ins.ts): `class` picks the class its stand-in cube flies and fights as
+   * (its flight numbers, prop mod size, stand-in guns, HP and targeting); a cruiser when omitted. Stored and ignored
+   * with EVE data.
+   */
+  standIn?: SceneShipStandIn;
 }
 
 /**
@@ -265,7 +272,7 @@ export interface SceneDiff {
 type SceneDraft = JsonObject & { ships: JsonObject[]; camera: JsonObject; environment: JsonObject };
 
 const SCENE_KEYS = new Set<string>(['schema', 'name', 'environment', 'location', 'camera', 'ships', 'fleets', 'objects', 'asteroidFields', 'fits', 'personalities', 'combat', 'timeline']);
-const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders', 'stance', 'immune']);
+const SHIP_KEYS = new Set<string>(['id', 'dna', 'name', 'team', 'position', 'rotation', 'type', 'stats', 'propMod', 'fit', 'pilot', 'orders', 'stance', 'immune', 'standIn']);
 
 const CAMERA_KEYS = new Set<string>(['target', 'distance', 'yaw', 'pitch', 'fov', 'mode']);
 const ENVIRONMENT_KEYS = new Set<string>(['universe']);
@@ -385,9 +392,10 @@ export function normalizeScene(input: unknown): NormalizedScene {
  * Operations:
  *   { op: "add_ship", ship, warpIn? }   warpIn (true, or { stagger?, together? }): it lands from warp at its placement,
  *                                       along its rotation's yaw (the result's arrivals; the page plans it)
- *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot?, stance?, immune? } }
- *                                       each key replaces the ship's value (stats, propMod, orders and stance as a
- *                                       whole); null clears type, stats, propMod, fit, pilot, orders, stance and immune
+ *   { op: "update_ship", id, set: { dna?, name?, team?, position?, rotation?, type?, stats?, propMod?, fit?, orders?, pilot?, stance?, immune?, standIn? } }
+ *                                       each key replaces the ship's value (stats, propMod, orders, stance and standIn
+ *                                       as a whole); null clears type, stats, propMod, fit, pilot, orders, stance,
+ *                                       immune and standIn
  *   { op: "remove_ship", id }               also takes the ship out of its fleet (a fleet commander is refused) and off
  *                                       every fleet's, wing's and squad's called targets, with a warning
  *   { op: "set_camera", camera }            merged into the current camera
@@ -589,7 +597,8 @@ export function diffScenes(before: Maybe<SceneDocument>, after: SceneDocument): 
     } else if (old.dna === ship.dna) {
       if (!sameJson(old.position, ship.position) || !sameJson(old.rotation, ship.rotation)) diff.moved.push(ship);
       if (old.name !== ship.name || old.team !== ship.team) diff.relabelled.push(ship);
-      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(pilotFlightPart(old.pilot), pilotFlightPart(ship.pilot)) || !sameJson(old.propMod?.module, ship.propMod?.module) || fitTextOf(old, before) !== fitTextOf(ship, after)) diff.retuned.push(ship);
+      if (!sameJson(old.type, ship.type) || !sameJson(old.stats, ship.stats) || !sameJson(pilotFlightPart(old.pilot), pilotFlightPart(ship.pilot)) || !sameJson(old.propMod?.module, ship.propMod?.module) || fitTextOf(old, before) !== fitTextOf(ship, after) || !sameStandIn(old.standIn, ship.standIn))
+        diff.retuned.push(ship);
     } else {
       diff.rebuilt.push(ship);
     }
@@ -721,5 +730,9 @@ function normalizeShip(input: unknown, where: string, context: NormalizeShipCont
   const immune = normalizeShipImmunity({ input: input['immune'], where: `${where}.immune` });
   problems.push(...immune.problems);
   if (immune.immune != null) ship.immune = immune.immune;
+  const standIn = normalizeShipStandIn({ input: input['standIn'], where: `${where}.standIn` });
+  problems.push(...standIn.problems);
+  warnings.push(...standIn.warnings);
+  if (standIn.standIn) ship.standIn = standIn.standIn;
   return ship;
 }

@@ -343,8 +343,9 @@ members ever fly a stopped tick (rules: `sd-fleets` "Edits and fallback").
   and releases the rest. So a `set_target` to a new ship keeps the old lock while the guns still fire at it.
 - **Limit**: `maxLocks = shipLockLimit(targeting, MAX_SKILLS_PILOT)` (Rifter 4, the pilot 12). `Request` at the limit
   frees a lock outside the ship's wanted set, else refuses (`it holds 4 locks, its most`).
-- **No targeting numbers** (the table path, no EVE dogma for the hull): `Request` refuses (`it cannot lock: no EVE dogma
-  for its hull`) and `Hold` is null, so its turrets fire unlocked as before (and do no damage: no combat numbers).
+- **No targeting numbers** (the table path, no EVE dogma for the hull, with EVE data): `Request` refuses (`it cannot
+  lock: no EVE dogma for its hull`) and `Hold` is null, so its turrets fire unlocked as before (and do no damage: no
+  combat numbers). Stand-ins without EVE data have numbers (Stand-in combat below).
 - **The gate** (`ModuleCycle.Boundary(boundary, { hold })`, through `ShipModulesPort.LockHold` = `ShipLocks.Hold`):
   an activating turret with a hold stays `activating` with the hold as its note (`waiting for its lock on "x" (1.6
   s)`): EVE's pre-activation. A running turret whose lock is lost stops at its cycle end (`it lost its lock on "x"`).
@@ -590,6 +591,39 @@ Plan: `~/.claude/plans/damage-immunity-and-a-generic-apply-to-fleet-apply-to-sce
 - **Files**: `combat/immunity.ts` (field, op, command, warning), `combat/damage.ts` (the rule), `combat/accuracy.ts`
   (`immune`), `combat/kill.ts` (`absorbed`), `scene.ts` (`SceneShip.immune`, `SceneDiff.immunity`). Specs:
   `immunity.spec.ts`, `damage.spec.ts` (the table, real resonances, no mutation), `scene.spec.ts` (round trip, diff).
+
+## Stand-in combat (no EVE data)
+
+Without EVE data every ship fights with class values, not dogma (`packages/scene` `combat/stand-ins.ts`,
+`STAND_IN_CLASS_COMBAT`; the page's `stand-in-combat.ts`), through the unchanged pipeline.
+
+- **The table** (per class: guns × per shot / cycle, optimal + falloff, tracking, HP shield / armor / structure, lock
+  range, scan res, max locks): frigate 3 × 60 / 2 s, 1.5 + 5 km, 300, 500 / 500 / 450, 30 km, 800 mm, 4; destroyer
+  6 × 45 / 2.5 s; cruiser 4 × 110 / 3 s, 4 + 8 km, 60, 2,000 × 3, 60 km, 350 mm, 6; battlecruiser 6 × 180 / 4 s;
+  battleship 7 × 330 / 4.5 s, 8 + 12 km, 10, 8,500 / 9,000 / 10,000, 100 km, 150 mm; capital and titan rough. Anchored
+  on the fixture's max-skills Rifter / Punisher, Ferox and Megathron. Half thermal, half kinetic; EVE's base T1 hull
+  resonances on every class; signature resolution 40,000; no capacitor, no missiles, no other modules. The signature
+  stays the class flight numbers' (with the MWD bloom). Bands the spec pins: EHP and paper DPS non-decreasing frigate
+  to titan, lock range past optimal + falloff, own-class kills at rest in 15–120 s.
+- **The class**: `ships[].standIn.class`, else the flight's class (a cruiser: no SOF hull offline). `Director.HullOf`
+  gives the live hull, else offline `StandInHullOf` (`ShipHull.shipClass`, which `ShipClassOf` takes first), at the four
+  hull reads, so one class drives the flight numbers, the prop mod size, module audio size and the explosion choice.
+  The ball stays 100 m (class sizes are the DNA follow-up).
+- **The gate**: offline `ResolveFitting` returns `StandInFittingOf` for every ship (fitted or not; key `stand-in`,
+  `dogma` null, `standIn` the numbers, `pending` false). `ResolveFlight({ standIn })` puts its `defense` and `targeting`
+  on the flight (`math` table), so `DamageModel` tracks it and `ShipLocks` locks with EVE's lock time; `SyncModules`
+  gives `StandInModuleSpecsOf`. `IsFitResolved` (dogma or stand-in) replaced the `resolved?.dogma` gates in
+  `switch_modules`, `engage`, `cease_fire`, `ArmWeapons` and auto-repair's condition. `set_hp`, free fire, the FC
+  brain's `FleetReachNumbers`, kills, succession and get_state's fit rows (`math: stand-in`) follow.
+- **Death**: `Destroy` chooses the explosion (timing from the captured constants: `removesAt` as with EVE data) but
+  loads no file offline; `DriveExplosions` schedules at once with `facts: null` and `hideAfter: STAND_IN_DEATH_SECONDS`
+  (1 s: the pop, `sd-runtime` → Stand-ins). `eveData.refused` stays 0 through locks, shots, kills and removals.
+- **Determinism**: the numbers are a pure function of the document, resolved synchronously (no `SimInput`, nothing
+  pending); shots use the keyed RNG with stable `high-<n>` keys. verify-page `--eve-data off` (2026-10-24): a lock in
+  6.331 s and a kill by `h1:high-2` in 14 ticks for seed 1 (twice), `h2:high-1` for seed 2; two loads at rate 4 kill
+  red-1 / red-2 / red-3 at +13 / +20 / +24 ticks from the first blue decision both times; a jump back replays the kill
+  at the same tick with no drift. After a lent call's target dies the fleet's queue (not a new brain decision) carries
+  the call on.
 
 ## Tools
 

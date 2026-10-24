@@ -1,6 +1,24 @@
 import { describe, expect, it } from 'vitest';
 import { quat, vec3 } from './runtime-sim';
-import { DrawsAsCube, NEUTRAL_STAND_IN_COLOR, PackStandInCubes, STAND_IN_FLOATS, StandInTeamColor, StandInViewProjection, type StandInCube } from './stand-ins';
+import {
+  DrawsAsCube,
+  NEUTRAL_STAND_IN_COLOR,
+  PackStandInCubes,
+  STAND_IN_DEATH_COLOR,
+  STAND_IN_DEATH_SCALE,
+  STAND_IN_FLOATS,
+  STAND_IN_HIT_FLASH_SECONDS,
+  STAND_IN_MISS_OFFSET,
+  STAND_IN_TRACER_SECONDS,
+  STAND_IN_TRACER_WIDTH,
+  StandInDeathPop,
+  StandInHitColor,
+  StandInShots,
+  StandInTeamColor,
+  StandInTracerOf,
+  StandInViewProjection,
+  type StandInCube
+} from './stand-ins';
 
 /**
  * A column-major 4×4 times a point.
@@ -46,6 +64,77 @@ describe('PackStandInCubes', () => {
   it('packs the colour after the matrix, one cube per stride', () => {
     expect(Array.from(packed.subarray(16, 20))).toEqual([0.1, 0.2, 0.3, 1].map(Math.fround));
     expect(Array.from(packed.subarray(STAND_IN_FLOATS, 2 * STAND_IN_FLOATS))).toEqual(Array.from(packed.subarray(0, STAND_IN_FLOATS)));
+  });
+});
+
+describe('PackStandInCubes with half extents', () => {
+  it('scales each axis by its own half extent', () => {
+    const box: StandInCube = { position: [0, 0, 0], rotation: [0, 0, 0, 1], radius: 1, halfExtents: [2, 3, 50], color: [1, 1, 1] };
+    const model = PackStandInCubes([box], [0, 0, 0], new Float32Array(STAND_IN_FLOATS)).subarray(0, 16);
+    expect([model[0], model[5], model[10]]).toEqual([2, 3, 50]);
+  });
+});
+
+describe('StandInTracerOf', () => {
+  const base = { from: [0, 0, 0], to: [0, 0, 1000], targetRadius: 100, side: 1 as const, eye: [0, 500, 500], color: [0.2, 0.4, 0.8] as const };
+
+  it('spans shooter to target, its +Z along the shot, its width from the eye distance', () => {
+    const tracer = StandInTracerOf({ ...base, hit: true });
+    expect(tracer).not.toBeNull();
+    expect(Array.from(tracer?.position ?? [])).toEqual([0, 0, 500]);
+    expect(tracer?.halfExtents?.[2]).toBe(500);
+    expect(tracer?.halfExtents?.[0]).toBeCloseTo((STAND_IN_TRACER_WIDTH * 500) / 2, 9);
+    const nose = vec3.transformQuat(vec3.create(), [0, 0, 1], tracer?.rotation as never);
+    expect(nose[2]).toBeCloseTo(1, 9);
+    [0.6, 0.7, 0.9].forEach((channel, index) => expect(tracer?.color[index]).toBeCloseTo(channel, 9));
+    const sideways = StandInTracerOf({ ...base, to: [1000, 0, 0], hit: true });
+    expect(vec3.transformQuat(vec3.create(), [0, 0, 1], sideways?.rotation as never)[0]).toBeCloseTo(1, 9);
+    expect(StandInTracerOf({ ...base, to: [0, 0, -1000], hit: true })?.position[2]).toBe(-500);
+  });
+
+  it('ends a miss past and aside of its target, the side by parity', () => {
+    const left = StandInTracerOf({ ...base, hit: false });
+    const right = StandInTracerOf({ ...base, hit: false, side: -1 });
+    const offset = STAND_IN_MISS_OFFSET * 100;
+    expect(left?.position[2]).toBeCloseTo((1000 + offset) / 2, 6);
+    expect(left?.position[0]).toBeCloseTo(-(right?.position[0] ?? 0), 6);
+    expect(Math.abs(left?.position[0] ?? 0)).toBeCloseTo(offset / 2, 6);
+  });
+
+  it('draws nothing when the ends meet', () => {
+    expect(StandInTracerOf({ ...base, to: [0, 0, 0], hit: true })).toBeNull();
+  });
+});
+
+describe('StandInDeathPop and StandInHitColor', () => {
+  it('swells orange to white over the pop', () => {
+    expect(StandInDeathPop(0)).toEqual({ scale: 1, color: STAND_IN_DEATH_COLOR });
+    expect(StandInDeathPop(1)).toEqual({ scale: STAND_IN_DEATH_SCALE, color: [1, 1, 1] });
+    expect(StandInDeathPop(2).scale).toBe(STAND_IN_DEATH_SCALE);
+  });
+
+  it('flashes white back to its colour', () => {
+    expect(StandInHitColor([0.2, 0.4, 0.6], 0)).toEqual([1, 1, 1]);
+    [0.2, 0.4, 0.6].forEach((channel, index) => expect(StandInHitColor([0.2, 0.4, 0.6], 1)[index]).toBeCloseTo(channel, 9));
+  });
+});
+
+describe('StandInShots', () => {
+  it('keeps tracers for their window, flashes hits, prunes and clears', () => {
+    const shots = new StandInShots();
+    shots.Add({ ship: 'a', target: 'b', at: 10, hit: true, side: 1, color: [1, 0, 0] });
+    shots.Add({ ship: 'a', target: 'b', at: 10.1, hit: false, side: -1, color: [1, 0, 0] });
+    expect(shots.Live(10.05)).toHaveLength(1);
+    expect(shots.Live(10.15)).toHaveLength(2);
+    expect(shots.FlashOf('b', 10.1)).toBeCloseTo(0.1 / STAND_IN_HIT_FLASH_SECONDS, 9);
+    expect(shots.FlashOf('a', 10.1)).toBeNull();
+    expect(shots.Live(10 + STAND_IN_TRACER_SECONDS + 0.01)).toHaveLength(1);
+    expect(shots.size).toBe(1);
+    shots.Live(11);
+    expect(shots.size).toBe(0);
+    shots.Add({ ship: 'a', target: 'b', at: 12, hit: true, side: 1, color: [1, 0, 0] });
+    shots.Clear();
+    expect(shots.Live(12)).toEqual([]);
   });
 });
 

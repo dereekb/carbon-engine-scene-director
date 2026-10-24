@@ -143,7 +143,7 @@ export function EveDataStatusOf(mode: EveDataMode): EveDataStatus {
   return mode === 'off'
     ? {
         mode,
-        note: `no EVE data: ${NO_EVE_DATA}. Ships and objects draw as stand-in cubes on a green screen and fly class numbers; search_hulls, search_map, get_system, set_location, search_objects, and lookups by EVE name refuse.`
+        note: `no EVE data: ${NO_EVE_DATA}. Ships and objects draw as stand-in cubes on a green screen, fly class numbers and fight with stand-in guns by class (ships[].standIn.class; a cruiser otherwise); search_hulls, search_map, get_system, set_location, search_objects, and lookups by EVE name refuse.`
       }
     : { mode };
 }

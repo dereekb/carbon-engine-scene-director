@@ -115,6 +115,11 @@ describe('ExplosionSchedule', () => {
     expect(ExplosionRemoveTick(10, 21, 0.5)).toBe(56);
     expect(ExplosionRemoveTick(10, 21.2, 1)).toBe(34);
   });
+
+  it('without facts and with hideAfter (a stand-in pop) hides that long after the start, with no sounds', () => {
+    const plain = ExplosionSchedule({ start: 3, facts: null, deathTick: 10, lingerSeconds: 21, tickSeconds: 1 });
+    expect(ExplosionSchedule({ start: 3, facts: null, deathTick: 10, lingerSeconds: 21, tickSeconds: 1, hideAfter: 1 })).toEqual({ ...plain, hide: 4 });
+  });
 });
 
 describe('ExplosionReplays (sd-time)', () => {
