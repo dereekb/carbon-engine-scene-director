@@ -1,0 +1,156 @@
+import { describe, expect, it } from 'vitest';
+import type { CameraDirectorPicture, CinemaDriver, DirectorShip, SceneFleet, SceneVector } from '@scene-director/scene';
+import { CameraDirector, CameraDirectorText, DIRECTOR_SETTLE_SECONDS, type CameraDirectorCinema, type CameraDirectorPort } from './camera-director';
+
+function Ship(id: string, team: string, position: SceneVector, forward: SceneVector): DirectorShip {
+  return { id, team, position, velocity: [0, 0, 0], speed: 0, forward, radius: 50, maxVelocity: 400, health: 1, remaining: 5000, total: 5000 };
+}
+
+function Picture(tick: number): CameraDirectorPicture {
+  const ships: DirectorShip[] = [];
+  const fleets: SceneFleet[] = [];
+  for (const [team, z, heading] of [
+    ['blue', 0, 1],
+    ['red', 20000, -1]
+  ] as const) {
+    for (let i = 0; i < 4; i += 1) ships.push(Ship(`${team}-${i}`, team, [(i - 2) * 600, 0, z], [0, 0, heading]));
+    fleets.push({ id: team, commander: `${team}-0`, wings: [{ id: `${team}-w`, squads: [{ id: `${team}-s`, role: 'dps', members: [`${team}-1`, `${team}-2`, `${team}-3`] }] }] } as SceneFleet);
+  }
+  return { tick, time: tick, ships, fleets, sunDirection: [0.6, -0.3, 0.74] };
+}
+
+class FakeRig {
+  cinema: { -readonly [K in keyof CameraDirectorCinema]: CameraDirectorCinema[K] } = { driving: false, driver: 'user', paused: false, handingBack: false, releasesAt: null };
+  plays: { shot: Record<string, unknown>; at: number }[] = [];
+  releases: string[] = [];
+  standby = false;
+  settled = true;
+
+  Port(): CameraDirectorPort {
+    return {
+      Facts: (tick) => Picture(tick),
+      Cinema: () => ({ ...this.cinema }),
+      Play: (shot, at) => {
+        this.plays.push({ shot, at });
+        this.Drive('director');
+      },
+      Release: (note) => {
+        this.releases.push(note);
+        this.cinema = { ...this.cinema, driving: false, driver: 'user' };
+      },
+      Standby: (on) => {
+        this.standby = on;
+      },
+      Seed: () => 7,
+      Settled: () => this.settled,
+      Silent: () => false
+    };
+  }
+
+  Drive(driver: CinemaDriver, extra: Partial<CameraDirectorCinema> = {}): void {
+    this.cinema = { driving: true, driver, paused: false, handingBack: false, releasesAt: null, ...extra };
+  }
+}
+
+function Setup(): { rig: FakeRig; director: CameraDirector } {
+  const rig = new FakeRig();
+  return { rig, director: new CameraDirector(rig.Port()) };
+}
+
+const AT = (tick: number) => ({ tick, time: tick, at: tick * 1e7 });
+
+describe('CameraDirector', () => {
+  it('takes the camera at once on auto_camera, stands by, and cuts at boundaries', () => {
+    const { rig, director } = Setup();
+    const result = director.Command({ pace: 'fast' }, { source: 'claude', ...AT(0) });
+    expect(rig.plays).toHaveLength(1);
+    expect(rig.standby).toBe(true);
+    expect(result.director).toMatchObject({ on: true, state: 'driving', source: 'claude', bias: { pace: 'fast', hold: { min: 3, max: 7 } } });
+    expect(result.director.pick?.why).toMatch(/ · /);
+    for (let tick = 1; tick <= 30; tick += 1) director.Boundary(tick, tick, tick * 1e7);
+    expect(rig.plays.length).toBeGreaterThanOrEqual(4);
+    expect(rig.plays.every((play, index) => index === 0 || play.at > rig.plays[index - 1].at)).toBe(true);
+    expect(director.Report(30).cuts).toBe(rig.plays.length);
+    expect(director.Log().length).toBe(rig.plays.length);
+    expect(CameraDirectorText(director.Report(30))).toMatch(/^driving · /);
+  });
+
+  it("yields to Claude's shot and takes the camera back when it hands back", () => {
+    const { rig, director } = Setup();
+    director.Command({}, { source: 'claude', ...AT(0) });
+    rig.Drive('claude', { releasesAt: 5e7 });
+    director.Boundary(1, 1, 1e7);
+    expect(director.Report(1)).toMatchObject({ state: 'yielded', yieldedTo: 'claude' });
+    const before = rig.plays.length;
+    director.Boundary(5, 5, 5e7);
+    expect(rig.plays.length).toBe(before + 1);
+    expect(director.Report(5).state).toBe('driving');
+  });
+
+  it('stays yielded to the user until auto_camera hands the camera back', () => {
+    const { rig, director } = Setup();
+    director.Command({}, { source: 'claude', ...AT(0) });
+    director.Yield('user', 'the pointer took the camera');
+    rig.cinema = { ...rig.cinema, driving: false, driver: 'user' };
+    const before = rig.plays.length;
+    for (let tick = 1; tick <= 20; tick += 1) director.Boundary(tick, tick, tick * 1e7);
+    expect(rig.plays.length).toBe(before);
+    expect(director.Report(20)).toMatchObject({ state: 'yielded', yieldedTo: 'user' });
+    expect(CameraDirectorText(director.Report(20))).toMatch(/yielded to you · D hands back/);
+    director.Command({ favour: 'wide' }, { source: 'claude', ...AT(21) });
+    expect(rig.plays.length).toBe(before + 1);
+    expect(director.Report(21)).toMatchObject({ state: 'driving', bias: { favour: 'wide' } });
+  });
+
+  it('turns off, releasing its shot to the user; D toggles it', () => {
+    const { rig, director } = Setup();
+    director.Command({}, { source: 'claude', ...AT(0) });
+    const off = director.Command({ on: false }, { source: 'claude', ...AT(1) });
+    expect(off.director).toMatchObject({ on: false, state: 'off' });
+    expect(rig.releases).toHaveLength(1);
+    expect(rig.standby).toBe(false);
+    expect(director.Toggle(AT(2))).toMatchObject({ on: true, state: 'driving', source: 'user' });
+    expect(director.Toggle(AT(3))).toMatchObject({ on: false });
+  });
+
+  it("picks a cue's director at its boundary, and turns it off on a load or with the timeline's camera", () => {
+    const { rig, director } = Setup();
+    director.Command({}, { source: 'timeline', ...AT(1), defer: true });
+    expect(rig.plays).toHaveLength(0);
+    director.Boundary(1, 1, 1e7);
+    expect(rig.plays).toHaveLength(1);
+    expect(rig.plays[0].at).toBe(1e7);
+    director.Clear({ load: true, time: 0 });
+    expect(director.Report(0)).toMatchObject({ on: false });
+    director.Command({}, { source: 'timeline', ...AT(2) });
+    director.TimelineCameraOff(3);
+    expect(director.Report(3).on).toBe(false);
+    // One Claude turned on survives a load.
+    director.Command({}, { source: 'claude', ...AT(4) });
+    director.Clear({ load: true, time: 0 });
+    expect(director.Report(0).on).toBe(true);
+  });
+
+  it('waits for an unsettled scene, at most DIRECTOR_SETTLE_SECONDS', () => {
+    const { rig, director } = Setup();
+    rig.settled = false;
+    director.Command({}, { source: 'claude', ...AT(0) });
+    rig.plays = [];
+    rig.cinema = { ...rig.cinema, driving: false, driver: 'user' };
+    director.Boundary(1, 1, 1e7);
+    expect(rig.plays).toHaveLength(0);
+    expect(director.Report(1)).toMatchObject({ state: 'waiting', note: 'waiting for the scene to settle' });
+    director.Boundary(DIRECTOR_SETTLE_SECONDS, DIRECTOR_SETTLE_SECONDS, DIRECTOR_SETTLE_SECONDS * 1e7);
+    expect(rig.plays).toHaveLength(1);
+  });
+
+  it('picks again when its shot is lost between boundaries', () => {
+    const { rig, director } = Setup();
+    director.Command({}, { source: 'claude', ...AT(0) });
+    rig.cinema = { ...rig.cinema, driving: false, driver: 'user' };
+    expect(director.Lost()).toBe(true);
+    director.TakeBack(0, 0.5, 5e6);
+    expect(rig.plays).toHaveLength(2);
+    expect(director.Lost()).toBe(false);
+  });
+});

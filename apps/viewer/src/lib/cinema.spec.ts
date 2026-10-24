@@ -197,6 +197,39 @@ describe('CinemaRig', () => {
     expect(rig.Report().state).toBe('idle');
   });
 
+  it('stands by for the director: holds a release-ending Claude shot, never the director\'s own, and tells when it releases', () => {
+    const scene = Scene([Ship('a', [0, 0, 0])]);
+    const rig = new CinemaRig();
+    rig.SetStandby(true);
+    rig.Play({ shots: [{ hardpoint: { name: 'chase', ship: 'a' }, duration: 2 }, { hardpoint: { name: 'hero-port', ship: 'a' }, duration: 3 }] }, 0);
+    expect(rig.ReleasesAt()).toBe(5 * SECOND);
+    rig.Frame(0, () => scene);
+    expect(rig.HandingBack(4 * SECOND)).toBe(false);
+    rig.Frame(6 * SECOND, () => scene);
+    expect(rig.Report().state).toBe('playing');
+    expect(rig.HandingBack(6 * SECOND)).toBe(true);
+    // The director's own release-ending shot still releases.
+    rig.Play({ hardpoint: { name: 'chase', ship: 'a' }, duration: 2 }, 6 * SECOND, 'director');
+    rig.Frame(6 * SECOND, () => scene);
+    rig.Frame(8 * SECOND, () => scene);
+    expect(rig.Report().state).toBe('releasing');
+    // A hold-ending or open-ended shot never releases.
+    rig.Play({ hardpoint: { name: 'chase', ship: 'a' }, duration: 2, end: 'hold' }, 0);
+    expect(rig.ReleasesAt()).toBeNull();
+    rig.Play({ hardpoint: { name: 'chase', ship: 'a' } }, 0);
+    expect(rig.ReleasesAt()).toBeNull();
+  });
+
+  it('changes nothing without standby', () => {
+    const scene = Scene([Ship('a', [0, 0, 0])]);
+    const rig = new CinemaRig();
+    rig.Play({ hardpoint: { name: 'chase', ship: 'a' }, duration: 2 }, 0);
+    rig.Frame(0, () => scene);
+    expect(rig.HandingBack(3 * SECOND)).toBe(false);
+    rig.Frame(2 * SECOND, () => scene);
+    expect(rig.Report().state).toBe('releasing');
+  });
+
   it('holds still while the clock is paused', () => {
     const rig = new CinemaRig();
     rig.Play({ hardpoint: { name: 'chase', ship: 'a' }, lag: { eye: 1 }, moves: [{ type: 'orbit', rate: 30 }] }, 0);

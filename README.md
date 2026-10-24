@@ -67,6 +67,12 @@ What works today:
   and engagements, timed moves and waypoint fly-throughs over moving hulls, a
   letterbox and a clean HUD, directed by Claude over MCP: hardpoint listing,
   shots, sequences and a named shot library.
+- **Director camera**: `auto_camera` hands the camera to an automatic director
+  that cuts between hardpoints and library shots by what is happening
+  (engagements, called primaries, ships about to die and exploding, warp-ins,
+  reps, MWD bursts, close passes), keeps one side of the action and varies wide,
+  medium and close; biased by Claude, taken over and handed back at any time,
+  and cueable on the timeline.
 - **Timeline**: a scene carries a script: cues at set times run any lever (ship
   and fleet orders, called targets, prop mods, modules, engagements, camera shots,
   warp-in adds) and ships fly their own order lists, played on Destiny ticks once
@@ -190,6 +196,7 @@ connected tab.
 | `screenshot` | page | the next frame as a PNG |
 | `frame_camera` | page | points the camera at a ship or object and follows it, or fits all ships (all objects when there are none) |
 | `list_hardpoints` / `play_shot` / `play_sequence` / `stop_shot` / `resume_shot` / `list_shots` | page (list_shots: hub) | the cinematic camera: a subject's hardpoints; shots, sequences, free poses and named library shots on the scene clock; pause, resume, hand back to the user |
+| `auto_camera` | page | the director camera on or off, and its bias |
 | `time_control` | page | pause or play, slow motion or fast-forward the scene, and jump back or seek within the recorded window |
 | `timeline` | page | the scene's script: status (every cue and ship script), play, pause, restart; the lever tools and `add_ships`, `add_fleet_composition`, `stage_engagement`, `add_objects` take `at` to add a cue instead of acting now |
 

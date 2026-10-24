@@ -336,6 +336,11 @@ describe('CombatRules missiles', () => {
     expect(rules.TakenSince('punisher', 26, 20)).toBeCloseTo(first.damage + second.damage, 0);
     expect(rules.TakenSince('rifter', 26, 10)).toBe(0);
     expect(rules.TakenSince('nobody', 26, 10)).toBe(0);
+    // Its twins for the camera director: what the shooter dealt, and what repairs restored.
+    expect(rules.DealtSince('rifter', 26, 20)).toBeCloseTo(first.damage + second.damage, 0);
+    expect(rules.DealtSince('rifter', 26, 10)).toBeCloseTo(second.damage, 0);
+    expect(rules.DealtSince('punisher', 26, 20)).toBe(0);
+    expect(rules.RepairedSince('punisher', 26, 20)).toBe(0);
   });
 });
 

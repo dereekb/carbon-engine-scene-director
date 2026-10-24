@@ -423,8 +423,26 @@ export class CombatRules {
    * @returns The HP.
    */
   TakenSince(id: string, boundary: number, seconds: number): number {
+    return this.WindowSince(this.tallies.get(id)?.takenWindow, boundary, seconds);
+  }
+
+  /**
+   * HP a ship's shots dealt over the trailing seconds (the camera director's picture).
+   */
+  DealtSince(id: string, boundary: number, seconds: number): number {
+    return this.WindowSince(this.tallies.get(id)?.dealtWindow, boundary, seconds);
+  }
+
+  /**
+   * HP repairs restored on a ship over the trailing seconds (the camera director's picture).
+   */
+  RepairedSince(id: string, boundary: number, seconds: number): number {
+    return this.WindowSince(this.tallies.get(id)?.repairedWindow, boundary, seconds);
+  }
+
+  private WindowSince(window: Maybe<readonly { readonly tick: number; readonly amount: number }[]>, boundary: number, seconds: number): number {
     const since = boundary - seconds / this.port.tickSeconds;
-    return (this.tallies.get(id)?.takenWindow ?? []).reduce((sum, row) => (row.tick > since ? sum + row.amount : sum), 0);
+    return (window ?? []).reduce((sum, row) => (row.tick > since ? sum + row.amount : sum), 0);
   }
 
   /**

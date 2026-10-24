@@ -149,7 +149,7 @@ Sources: EVE University "Missile mechanics" / "Missiles"; Pyfa (`missileMaxRange
 | File | Holds |
 |---|---|
 | `viewer/locks.ts` | `ShipLocks` over `ShipLocksPort` (`SurfaceDistance`, `InWarp`, `IsTargetable`, `Targeting`, `SignatureOf`, `tickSeconds`): `Request`, `Keep` / `Release`, `Boundary(tick, wanted)`, `IsLocked`, `Hold`, `Of` / `On`, `Lockers` (locking or locked only), `Remove`, `OnWarpEnter`, `Clear`, `Report` |
-| `viewer/combat.ts` | `CombatRules` over `CombatPort` (`Accuracy`, `Speed`, `Weapon`, `SignatureOf`, `KindOf`): `SetCombat`, `Recharge`, `Resolve`, `IsDestroyed`, `KillOf`, `Kills`, `Totals`, `Report`, `Attackers`, `TakenSince`, `RecordRepair`, `Remove`, `Clear`; `DPS_WINDOW_SECONDS` (20), `COMBAT_ROWS` (3) |
+| `viewer/combat.ts` | `CombatRules` over `CombatPort` (`Accuracy`, `Speed`, `Weapon`, `SignatureOf`, `KindOf`): `SetCombat`, `Recharge`, `Resolve`, `IsDestroyed`, `KillOf`, `Kills`, `Totals`, `Report`, `Attackers`, `TakenSince` (and its twins `DealtSince`, `RepairedSince`: the camera director's picture), `RecordRepair`, `Remove`, `Clear`; `DPS_WINDOW_SECONDS` (20), `COMBAT_ROWS` (3) |
 | `viewer/module-cycle.ts` | the gate `Boundary(boundary, { hold })` and `activations` (every event carries `activation`) |
 | `viewer/modules.ts` | port `LockHold?`, the lost-lock stop, the lock-gated retarget (`IsLockGated`: weapons and remote repairers; the `retarget` switch option), `Remove(id, boundary, why)`, `Spec`, `LockAims`, `WeaponKeys` (turrets and launchers), `RemoteRepairers`; specs carry `combat` / `missile` (`ShipModuleSpecsOf`) |
 | `viewer/damage.ts` | `ApplyHit`, `Recharge`, `Destroyed` (`capacitor.ts`' `CapacitorFractionAfter` is `passiveRecharge` too: one formula) |

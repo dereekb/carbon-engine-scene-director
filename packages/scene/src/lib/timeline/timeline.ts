@@ -18,6 +18,7 @@ import type { ModuleSwitch } from '../fitting/switch';
 import type { TargetCommand } from '../weapons/target';
 import type { CeaseFireCommand, EngageCommand } from '../combat/commands';
 import type { AutoRepairCommand } from '../logi/auto-repair';
+import type { AutoCameraCommand } from '../cinema/director/command';
 
 /**
  * Seconds: the latest a cue may fire, and the longest a ship step may wait or last (a day).
@@ -63,7 +64,7 @@ export const SCRIPT_STOPPED_SPEED = 1;
 /**
  * The levers a cue can pull, each named after its MCP tool.
  */
-export const TIMELINE_ACTION_NAMES = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire', 'auto_repair', 'play_shot', 'play_sequence', 'stop_shot', 'patch_scene'] as const;
+export const TIMELINE_ACTION_NAMES = ['order_ship', 'order_fleet', 'switch_prop_mods', 'switch_modules', 'set_target', 'engage', 'cease_fire', 'auto_repair', 'play_shot', 'play_sequence', 'stop_shot', 'auto_camera', 'patch_scene'] as const;
 
 export type TimelineActionName = (typeof TIMELINE_ACTION_NAMES)[number];
 
@@ -120,6 +121,7 @@ export interface TimelineActionArgs {
   readonly play_shot: JsonObject;
   readonly play_sequence: JsonObject;
   readonly stop_shot: StopShotCueAction;
+  readonly auto_camera: AutoCameraCommand;
   readonly patch_scene: PatchSceneCueAction;
 }
 

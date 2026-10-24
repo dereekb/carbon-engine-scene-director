@@ -174,6 +174,11 @@ import {
   normalizeCeaseFireCommand,
   normalizeEngageCommand,
   sceneCombatOf,
+  autoCameraReferences,
+  normalizeAutoCameraCommand,
+  type CameraDirectorPicture,
+  type CameraDirectorSource,
+  type DirectorShip,
   shipExplosionOf,
   type ShipExplosionChoice,
   type ShipKill,
@@ -215,6 +220,7 @@ import { PageAudio } from './audio';
 import { DriveBoosters } from './boosters';
 import { CameraFollow, PickShip, ReframesAfterEdit, type FollowedShip, type PickSphere } from './camera';
 import { CINEMA_DEFAULT_ASPECT, CinemaReleases, CinemaRig, type CinemaPlayer, type CinemaPlayResult, type CinemaReport } from './cinema';
+import { CameraDirector } from './camera-director';
 import { AttachShipCurves, DEFAULT_SHIP_PHYSICS, DocumentRotation, type DestinySnapshot, type DestinyWorld, type PropModEvent, type PropModState, type ShipHull, type ShipMotion, type ShipPhysics, type ShipTackle } from './destiny';
 import { DamageModel, type DamageReport, ImpactsHealed } from './damage';
 import { ExplosionFiles, ExplosionRemoveTick, ExplosionReplays, ExplosionSchedule, type ExplosionTimes } from './explosion-plan';
@@ -1043,6 +1049,14 @@ export class Director {
    */
   readonly cinema = new CinemaRig();
   /**
+   * The automatic camera director (auto_camera, camera-director.ts): a standing driver of the rig.
+   */
+  readonly cameraDirector: CameraDirector;
+  /**
+   * The exact scene clock tick of the boundary being stepped (OnBeforeBoundary's), where director shots start.
+   */
+  private boundaryTime = 0;
+  /**
    * The location answer's celestials as the cinema reads them, kept per answer.
    */
   private cinemaCelestials: Maybe<{ readonly answer: object; readonly list: CinemaCelestial[] }> = null;
@@ -1109,6 +1123,19 @@ export class Director {
     // Fleets fly and take orders as they are live: the destroyed taken out (toLiveFleetScene).
     this.following = new FleetFollowing({ world, scene: () => this.LiveFleets()?.scene ?? null, radiusOf: (id) => this.FormationRadius(id) });
     this.orders = new FleetOrders({ world, following: this.following, scene: () => this.LiveFleets()?.scene ?? null, reactionOf: (id) => this.ReactionOf(id), seedTick: (tick) => this.SeedTick(tick) });
+    this.cameraDirector = new CameraDirector({
+      Facts: (tick, time) => this.CameraFacts(tick, time),
+      Cinema: () => ({ driving: this.cinema.driving, driver: this.cinema.driving ? this.cinema.player : 'user', paused: this.cinema.paused, handingBack: this.cinema.HandingBack(this.clock.now), releasesAt: this.cinema.ReleasesAt() }),
+      Play: (shot, at) => {
+        this.cinema.Play(shot, at, 'director');
+        this.onChange();
+      },
+      Release: (note) => this.ReleaseCinema({ adopt: true, note }),
+      Standby: (on) => this.cinema.SetStandby(on),
+      Seed: () => sceneCombatOf(this.scene ?? {}).seed,
+      Settled: () => this.SceneSettled().settled,
+      Silent: () => this.silent
+    });
     this.arrivals = new Arrivals({
       world,
       placement: (id) => this.scene?.ships.find((doc) => doc.id === id) ?? null,
@@ -1366,6 +1393,8 @@ export class Director {
       if (this.missileHits.length) this.Shots([]);
       // Arriving groups plan once ready; their warp-ins start at this boundary at the earliest.
       this.arrivals.Boundary(boundary);
+      // Last: the camera director sees this boundary's kills, calls, removals and arrivals.
+      this.cameraDirector.Boundary(this.SeedTick(boundary), this.SceneSeconds(boundary), this.boundaryTime);
     });
     world.OnWarp((event) => {
       if (event.kind === 'enter') {
@@ -1393,7 +1422,18 @@ export class Director {
       })
     });
     // Cues fire before the boundary's prop mods: a cue is the same call made just before that tick.
-    world.OnBeforeBoundary((boundary, time) => this.timeline.Boundary(boundary, time, this.scene?.ships ?? []));
+    world.OnBeforeBoundary((boundary, time) => {
+      this.boundaryTime = time;
+      this.timeline.Boundary(boundary, time, this.scene?.ships ?? []);
+    });
+    // The camera director's events: kills and called primaries at their boundary, warps and prop mods after the evolve
+    // (they reach the next boundary's step).
+    this.OnKill((kill) => this.cameraDirector.Event({ kind: 'kill', tick: this.SeedTick(kill.tick), ship: kill.ship, by: kill.by }));
+    this.OnPrimary((change) => this.cameraDirector.Event({ kind: 'primary', tick: this.SeedTick(change.tick), fleet: change.group.fleet, group: change.group.id, primary: change.primary, previous: change.previous }));
+    world.OnWarp((event) => this.cameraDirector.Event({ kind: 'warp', tick: this.SeedTick(event.tick), ship: event.id, phase: event.kind === 'enter' ? 'enter' : 'exit', ...(event.arrival ? { arrival: true } : {}) }));
+    world.OnPropMod((event) => {
+      if (event.kind === 'on') this.cameraDirector.Event({ kind: 'prop-mod', tick: this.SeedTick(event.tick), ship: event.id });
+    });
     if (engine) this.AttachCameraControls(engine.canvas);
   }
 
@@ -1427,7 +1467,8 @@ export class Director {
       play_shot: (args) => this.PlayShot(args),
       play_sequence: (args) => this.PlayShot({ shots: args['shots'] }),
       stop_shot: (args) => this.StopShot(args),
-      resume_shot: () => this.ResumeShot()
+      resume_shot: () => this.ResumeShot(),
+      auto_camera: (args) => this.AutoCamera(args)
     };
     // Live commands go on the time-control tape: a jump back replays them at their ticks (sd-time).
     for (const tool of JOURNALED_TOOLS) {
@@ -2449,7 +2490,12 @@ export class Director {
     const view = this.engine?.camera;
     if (view) this.cameraFollow.Frame(now, view, (id) => this.DrawnShip(id, now));
     // The rig runs without a renderer too, so get_state's cinema reports headless.
-    const frame = this.cinema.Frame(now, () => this.CinemaScene(now));
+    let frame = this.cinema.Frame(now, () => this.CinemaScene(now));
+    // The director's shot lost its subject between boundaries: it picks again now (the one frame-timed path).
+    if (!this.cinema.driving && this.cameraDirector.Lost()) {
+      this.cameraDirector.TakeBack(this.SeedTick(this.world.tick), this.SceneSeconds(this.world.tick), now);
+      if (this.cinema.driving) frame = this.cinema.Frame(now, () => this.CinemaScene(now));
+    }
     this.engine?.SetCinematicFrame(frame);
   }
 
@@ -2473,8 +2519,16 @@ export class Director {
    * `pause` freezes the shot instead.
    */
   StopShot({ pause = false, adopt = true, cut = false }: { readonly pause?: unknown; readonly adopt?: unknown; readonly cut?: unknown } = {}): CinemaReport {
+    const driver = this.cinema.driving ? this.cinema.player : null;
     if (pause === true) this.cinema.Pause(this.clock.now);
-    else this.ReleaseCinema({ adopt: adopt !== false, cut: cut === true, note: 'stop_shot handed the camera back' });
+    else if (driver != null && driver !== 'director' && this.cameraDirector.StandingBy()) {
+      // Over Claude's or the timeline's shot, a standing-by director takes the camera back at once.
+      this.cameraDirector.TakeBack(this.SeedTick(this.world.tick), this.SceneSeconds(this.world.tick), this.clock.now);
+      if (this.cinema.player !== 'director') this.ReleaseCinema({ adopt: adopt !== false, cut: cut === true, note: 'stop_shot handed the camera back' });
+    } else {
+      if (driver === 'director') this.cameraDirector.Yield('user', 'stop_shot handed the camera to the user: auto_camera or D hands it back');
+      this.ReleaseCinema({ adopt: adopt !== false, cut: cut === true, note: 'stop_shot handed the camera back' });
+    }
     this.onChange();
     return this.cinema.Report(this.clock.now);
   }
@@ -2785,6 +2839,8 @@ export class Director {
     this.ReplayEffects(to);
     this.engine?.ResetSceneTime(to);
     this.cinema.Rebase(delta);
+    // The director's memory holds the abandoned future: it picks fresh from the landing.
+    this.cameraDirector.Clear({ keep: 'settings', time: this.SceneSeconds(this.world.tick) });
     this.audio.Mute(this.time?.muted ?? false);
     this.onChange();
   }
@@ -2910,6 +2966,7 @@ export class Director {
     if (typeof camera === 'boolean') {
       this.timeline.SetCamera(camera);
       if (!camera && this.cinema.Report(this.clock.now).driver === 'timeline') this.ReleaseCinema({ adopt: true, note: "the timeline's camera was switched off" });
+      if (!camera) this.cameraDirector.TimelineCameraOff(this.SceneSeconds(this.world.tick));
     }
     let load: Maybe<Record<string, unknown>> = null;
     if (action === 'play') this.timeline.Play();
@@ -3009,6 +3066,8 @@ export class Director {
         if (driver !== 'timeline') return { state: 'skipped', note: driver === 'user' ? "no timeline shot is playing: the camera is the user's" : `the camera is ${driver}'s` };
         return Fired(this.StopShot(input));
       }
+      case 'auto_camera':
+        return Fired(this.AutoCamera(input, 'timeline', time));
       case 'patch_scene':
         return Fired(this.CueEdit(input['operations'], cue));
     }
@@ -3089,7 +3148,7 @@ export class Director {
       scene: this.scene ? { name: this.scene.name, universe: this.scene.environment.universe, ships: this.scene.ships.length, fleets: this.scene.fleets?.length ?? 0, objects: this.scene.objects?.length ?? 0, asteroidFields: this.scene.asteroidFields?.length ?? 0 } : null,
       location: this.LocationState(),
       camera: this.engine ? { ...this.engine.camera.Get(), view: this.cinema.active ? 'cinema' : 'orbit', drawn: DrawnCameraReport(this.engine.DrawnCamera()) } : null,
-      cinema: this.cinema.Report(this.clock.now),
+      cinema: { ...this.cinema.Report(this.clock.now), director: this.cameraDirector.Report(this.SceneSeconds(this.world.tick)) },
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, ...(this.clock.held ? { held: true } : {}), warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
       time: this.time?.Report() ?? null,
@@ -3140,6 +3199,7 @@ export class Director {
    * scene edits (camera.ts's ReframesAfterEdit).
    */
   async FrameCamera({ target, yaw, pitch, distance, mode, persist = false }: FrameCameraArgs = {}): Promise<unknown> {
+    this.cameraDirector.Yield('user', 'frame_camera took the camera');
     this.cinema.Release(this.clock.now, { note: 'frame_camera took the camera' });
     const camera: SceneCamera = { ...this.Current().camera, target: target ?? null };
     if (IsFiniteNumber(yaw)) camera.yaw = yaw;
@@ -3364,6 +3424,7 @@ export class Director {
     const subjectLeft = this.cinema.Subjects().some((id) => diff.removed.some((doc) => doc.id === id) || diff.objects.removed.some((doc) => doc.id === id));
     // A load or a removed subject forgets the shot; a camera change keeps it resumable.
     if (cinema === 'cut') this.cinema.Stop(this.clock.now, { cut: true, forget: true, note: 'a scene load cut the shot' });
+    if (restart) this.cameraDirector.Clear({ load: true, time: 0 });
     else if (cinema === 'release') this.cinema.Release(this.clock.now, subjectLeft ? { note: 'its subject left the scene', forget: true } : { note: "the document's camera changed" });
     if (restart || diff.location) {
       this.location.Update(scene.location ?? null, { retry: restart });
@@ -4501,6 +4562,113 @@ export class Director {
   }
 
   /**
+   * Scene seconds since the last load at a world tick (the camera director's clock).
+   */
+  private SceneSeconds(tick: number): number {
+    return this.SeedTick(tick) * (this.world.master.tickInterval / 1000);
+  }
+
+  /**
+   * auto_camera: the director on or off and its bias (camera-director.ts). A live call picks at once; a cue's pick
+   * happens at its boundary's step. follow and teams must name a fleet, ship or team of the live scene.
+   *
+   * @throws {Error} On bad arguments or an unknown fleet, ship or team.
+   */
+  AutoCamera(args: Record<string, unknown>, source: CameraDirectorSource = 'claude', at = this.clock.now): object {
+    const command = normalizeAutoCameraCommand(args);
+    const scene = this.LiveFleets()?.scene ?? this.scene;
+    const problems: string[] = [];
+    for (const reference of autoCameraReferences(command)) {
+      if (reference.kind === 'fleet' && !(scene?.fleets ?? []).some((fleet) => fleet.id === reference.id)) problems.push(`auto_camera.${reference.path}: no fleet "${reference.id}"`);
+      else if (reference.kind === 'ship' && !(scene?.ships ?? []).some((ship) => ship.id === reference.id)) problems.push(`auto_camera.${reference.path}: no ship "${reference.id}"`);
+      else if (reference.kind === 'team' && !(scene?.ships ?? []).some((ship) => ship.team === reference.id)) problems.push(`auto_camera.${reference.path}: no ship is on team "${reference.id}"`);
+    }
+    if (problems.length) throw new Error(problems.join('; '));
+    const tick = this.SeedTick(this.world.tick);
+    const result = this.cameraDirector.Command(command, { source, tick, time: this.SceneSeconds(this.world.tick), at, defer: source === 'timeline' });
+    this.onChange();
+    return { director: result.director, cinema: this.cinema.Report(this.clock.now), log: result.log };
+  }
+
+  /**
+   * The camera director's picture (camera-director.ts): every ship with a ball (the lingering dead too) at its Destiny
+   * master state with its health, combat windows, target, attackers, rep target, prop mod, warp, arrival and death; the
+   * live fleets and their called primaries; the arrival groups; the sun, the location's celestials and the objects.
+   */
+  private CameraFacts(tick: number, time: number): Maybe<CameraDirectorPicture> {
+    const scene = this.scene;
+    if (!scene) return null;
+    const boundary = this.world.tick;
+    const tickSeconds = this.world.master.tickInterval / 1000;
+    const ships: DirectorShip[] = [];
+    for (const doc of scene.ships) {
+      const motion = this.world.Motion(doc.id);
+      if (!motion) continue;
+      let hp = 0;
+      let max = 0;
+      for (const layer of Object.values(this.damage.Health(doc.id) ?? {})) {
+        hp += layer.hp;
+        max += layer.max;
+      }
+      const death = this.deaths.get(doc.id);
+      const arrival = this.world.Arriving(doc.id) ? motion.arrival : null;
+      const warp = motion.warp;
+      const target = this.targets.Of(doc.id);
+      const repairing = this.autoRepair.Report(doc.id, boundary)?.target;
+      const kind = this.flights.get(doc.id)?.propMod?.kind;
+      const attackers = this.combat.Attackers(doc.id, boundary);
+      ships.push({
+        id: doc.id,
+        ...(doc.name ? { name: doc.name } : {}),
+        ...(doc.team != null ? { team: doc.team } : {}),
+        position: motion.position,
+        velocity: motion.velocity,
+        speed: motion.speed,
+        forward: HeadingVectorOf(motion.heading),
+        radius: motion.physics.radius,
+        maxVelocity: motion.physics.maxVelocity,
+        health: max > 0 ? hp / max : 1,
+        remaining: hp,
+        total: max,
+        pressure: this.combat.TakenSince(doc.id, boundary, 5) / 5,
+        repaired: this.combat.RepairedSince(doc.id, boundary, 5) / 5,
+        dealt: this.combat.DealtSince(doc.id, boundary, 3) / 3,
+        ...(target ? { target } : {}),
+        ...(attackers.length ? { attackedBy: attackers } : {}),
+        ...(repairing ? { repairing } : {}),
+        ...(kind ? { propMod: { kind: kind === 'afterburner' ? 'ab' : 'mwd', running: motion.propMod.running } } : {}),
+        ...(warp && !arrival ? { warp: { phase: warp.phase, landing: warp.landing, ...(warp.phase === 'warping' || warp.phase === 'exiting' ? { landsIn: warp.remaining / Math.max(1, motion.speed) } : {}) } } : {}),
+        ...(arrival ? { arriving: { landing: arrival.landing, ...(arrival.landsIn != null ? { landsIn: arrival.landsIn } : {}) } } : {}),
+        ...(death && !death.gone ? { destroyed: { tick: this.SeedTick(death.kill.tick), removesIn: (death.removeTick - boundary) * tickSeconds } } : {})
+      });
+    }
+    const fleets = this.LiveFleets()?.scene.fleets ?? scene.fleets ?? [];
+    const primaries: Record<string, string[]> = {};
+    for (const fleet of fleets) {
+      const members = [fleet.commander, ...fleet.wings.flatMap((wing) => wing.squads.flatMap((squad) => squad.members))];
+      const called = [...new Set(members.flatMap((id) => this.fleetTargets.CallOf(id)?.target ?? []))];
+      if (called.length) primaries[fleet.id] = called;
+    }
+    const arrivals = this.arrivals.Report().map((group) => ({ group: group.group, ...(group.fleet ? { fleet: group.fleet } : {}), ships: group.ships.map((ship) => ship.id), state: group.state, ...(group.lands ? { lands: group.lands.first } : {}) }));
+    return {
+      tick,
+      time,
+      death: sceneCombatOf(scene).death,
+      ships,
+      fleets,
+      ...(Object.keys(primaries).length ? { primaries } : {}),
+      ...(arrivals.length ? { arrivals } : {}),
+      sunDirection: this.SunDirection(),
+      celestials: this.CinemaCelestials(),
+      objects: (scene.objects ?? []).map((doc) => {
+        const sphere = this.ObjectSphere(doc);
+        const rotation = DocumentRotation(doc.rotation);
+        return { id: doc.id, centre: ToVector(sphere.centre), radius: sphere.radius, rotation: [rotation[0], rotation[1], rotation[2], rotation[3]] };
+      })
+    };
+  }
+
+  /**
    * Starts the lookups of every ship a scripted document's patch cues add or change (timelinePatchScenes), so their
    * flight numbers are cached when the cue fires: Retune flies them at once and their warp-ins plan at the cue's own
    * boundary. Ships the live scene already holds as they are are skipped (Retune looks them up).
@@ -5388,8 +5556,20 @@ export class Director {
     canvas.addEventListener('pointerup', release);
     canvas.addEventListener('pointercancel', release);
     addEventListener('keydown', (event) => {
-      if (event.key.toLowerCase() === 'c' && !event.ctrlKey && !event.metaKey && !event.altKey) this.ChangeCamera({ mode: this.cameraFollow.mode === 'chase' ? 'orbit' : 'chase' });
+      if (event.ctrlKey || event.metaKey || event.altKey) return;
+      const key = event.key.toLowerCase();
+      const typing = event.target instanceof HTMLElement && event.target.closest('input, textarea, select, [contenteditable]') != null;
+      if (key === 'c') this.ChangeCamera({ mode: this.cameraFollow.mode === 'chase' ? 'orbit' : 'chase' });
+      else if (key === 'd' && !typing) this.ToggleDirector();
     });
+  }
+
+  /**
+   * D: the camera director off while its shot drives, else on and taking the camera now.
+   */
+  private ToggleDirector(): void {
+    this.cameraDirector.Toggle({ tick: this.SeedTick(this.world.tick), time: this.SceneSeconds(this.world.tick), at: this.clock.now });
+    this.onChange();
   }
 
   /**
@@ -5397,6 +5577,7 @@ export class Director {
    */
   private TakeOverCinema(): void {
     if (!this.cinema.driving || !this.engine) return;
+    this.cameraDirector.Yield('user', 'the pointer took the camera: auto_camera or D hands it back');
     this.ReleaseCinema({ adopt: true, note: 'the pointer took the camera' });
     this.onChange();
   }
@@ -5447,6 +5628,7 @@ export class Director {
    * queue, which may be busy building ships, and that apply skips re-framing the same camera.
    */
   private ChangeCamera(change: Partial<SceneCamera>): void {
+    if (this.cinema.driving) this.cameraDirector.Yield('user', 'a camera change took the camera');
     this.cinema.Release(this.clock.now, { note: 'a camera change took the camera' });
     const view = this.engine?.camera;
     const live = view ? { yaw: Math.round((((view.yaw % 360) + 360) % 360) * 10) / 10, pitch: Math.round(view.pitch * 10) / 10, distance: Math.max(1, Math.round(view.distance)) } : {};

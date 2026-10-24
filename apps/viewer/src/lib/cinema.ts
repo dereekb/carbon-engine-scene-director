@@ -235,6 +235,7 @@ export class CinemaRig {
   private reportedAt = 0;
   private pausedAt: Maybe<number> = null;
   private stopped: Maybe<StoppedShots> = null;
+  private standby = false;
 
   /**
    * True while a shot plays, is paused, or the release blend runs.
@@ -252,6 +253,53 @@ export class CinemaRig {
    */
   get driving(): boolean {
     return this.state === 'playing' || this.state === 'paused';
+  }
+
+  /**
+   * Who drives while a shot plays or is paused.
+   */
+  get player(): CinemaPlayer {
+    return this.driver;
+  }
+
+  get paused(): boolean {
+    return this.state === 'paused';
+  }
+
+  /**
+   * The automatic director stands by (camera-director.ts): the last shot of another driver that reaches its end with
+   * `end: "release"` holds its last frame instead of releasing, until the director takes the camera back at its next
+   * boundary, so the hand-back is a cut rather than a flash of the orbit camera.
+   */
+  SetStandby(on: boolean): void {
+    this.standby = on;
+  }
+
+  /**
+   * True while a release-ending shot of another driver holds for the standing-by director.
+   *
+   * @param now - The scene clock, in integer 100 ns ticks.
+   */
+  HandingBack(now: number): boolean {
+    const at = this.ReleasesAt();
+    return this.standby && this.driver !== 'director' && at != null && now >= at;
+  }
+
+  /**
+   * The exact scene tick the playing sequence releases at: its run's start plus the rest of its durations. Null while
+   * paused or releasing, when a shot holds until stopped, or when the last shot ends `hold`.
+   */
+  ReleasesAt(): Maybe<number> {
+    const run = this.run;
+    if (this.state !== 'playing' || !run) return null;
+    let at = run.start;
+    let releases = true;
+    for (let index = this.index; index < this.shots.length && releases; index += 1) {
+      const shot = this.shots[index];
+      if (shot.duration == null || (index === this.shots.length - 1 && shot.end === 'hold')) releases = false;
+      else at += Math.round(shot.duration * TICKS_PER_SECOND);
+    }
+    return releases ? at : null;
   }
 
   /**
@@ -509,7 +557,8 @@ export class CinemaRig {
     // Advance the sequence on each shot's duration, from its exact end so the timing never drifts.
     while (run?.shot.duration != null && shotNow - run.start >= run.shot.duration * TICKS_PER_SECOND) {
       if (this.index + 1 >= this.shots.length) {
-        if (run.shot.end === 'hold') {
+        // A standing-by director takes another driver's release-ending shot back at its boundary: hold until then.
+        if (run.shot.end === 'hold' || (this.standby && this.driver !== 'director')) {
           holding = true;
           break;
         }

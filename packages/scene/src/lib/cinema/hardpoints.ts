@@ -87,7 +87,7 @@ export const SHIP_HARDPOINTS: readonly ShipHardpointRow[] = [
     fov: 45,
     up: 'frame',
     special: 'over-the-shoulder',
-    description: 'behind and to starboard of the hull, looking at its target (the `target` ship; default the nearest enemy)'
+    description: 'behind and to starboard (`side`) of the hull, looking at its target (the `target` ship; default the nearest enemy)'
   },
   { name: 'flyby', direction: [1, 0.4, 0.13], fill: 0.5, fov: 40, up: 'frame', special: 'flyby', anchored: true, description: "a fixed point ahead on the ship's path, panning as it flies past" },
   { name: 'warp-landing', direction: [1, 0, 0], fill: 0.8, fov: 50, up: 'frame', special: 'warp-landing', anchored: true, description: WARP_LANDING_DESCRIPTION }
@@ -208,7 +208,8 @@ export interface HardpointRef {
    */
   readonly bank?: boolean;
   /**
-   * Which side the overlook (of the axis), warp-landing (of the lane) and the landmark hero and foreground take.
+   * Which side the overlook (of the axis), warp-landing (of the lane), over-the-shoulder (the shoulder) and the landmark
+   * hero and foreground take.
    */
   readonly side?: 'port' | 'starboard';
 }
@@ -322,7 +323,8 @@ function overTheShoulder(ref: HardpointRef, scene: CinemaScene, ship: CinemaShip
     const up = orthogonalizeVec(frame.up, toTarget) ?? frame.up;
     const r = frame.radius;
     let eye = addScaledVec(frame.centre, toTarget, -2.4 * r);
-    eye = addScaledVec(eye, side, 1.0 * r);
+    // The starboard shoulder by default; `side: 'port'` takes the left one, so a shot / reverse shot keeps one side of the line.
+    eye = addScaledVec(eye, side, (ref.side === 'port' ? -1 : 1) * r);
     eye = addScaledVec(eye, up, 0.6 * r);
     resolved = { pose: { eye, look: [...target.frameCentre], up, fov }, subject: frame, ...(ref.target == null ? { note: `looking at ${target.id}` } : {}) };
   }

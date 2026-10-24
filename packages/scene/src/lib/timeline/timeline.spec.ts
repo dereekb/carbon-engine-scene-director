@@ -339,3 +339,20 @@ describe('removal pruning', () => {
     expect(cues(applySceneOperations(document, [{ op: 'remove_fleet', fleet: 'blue' }]).scene).map((cue) => cue.id)).toEqual(['ship', 'at', 'mwd', 'solo', 'camera']);
   });
 });
+
+describe('auto_camera cues', () => {
+  it('reads an auto_camera cue as a camera action, checks its references, and keeps it when the followed fleet goes', () => {
+    const timeline = [{ id: 'director', at: 30, auto_camera: { follow: { fleet: 'blue' }, favour: 'wide' } }];
+    const document = scene({ timeline }).scene;
+    const cue = cues(document)[0];
+    expect(cueActionOf(cue)).toEqual({ name: 'auto_camera', args: { follow: { fleet: 'blue' }, favour: 'wide' } });
+    expect(TIMELINE_ACTIONS.auto_camera.kind({})).toBe('camera');
+    const problems = problemsOf(() => scene({ timeline: [{ id: 'bad', at: 1, auto_camera: { follow: { ship: 'nobody' }, teams: ['blue', 'green'] } }] })).join('\n');
+    expect(problems).toMatch(/auto_camera\.follow\.ship: no ship "nobody"/);
+    expect(problems).toMatch(/auto_camera\.teams\[1\]: no ship is on team "green"/);
+    expect(problemsOf(() => scene({ timeline: [{ id: 'bad', at: 1, auto_camera: { favour: 'huge' } }] })).join('\n')).toMatch(/favour must be one of/);
+    const result = applySceneOperations(document, [{ op: 'remove_fleet', fleet: 'blue' }]);
+    expect(cueActionOf(cues(result.scene)[0]).args).toEqual({ favour: 'wide' });
+    expect(result.warnings).toContain('timeline: cue "director" (auto_camera at 30 s) no longer names "blue" (it was removed)');
+  });
+});

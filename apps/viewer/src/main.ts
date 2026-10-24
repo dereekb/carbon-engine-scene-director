@@ -31,6 +31,7 @@ import { ObjectsText } from './lib/objects';
 import { TimelineText } from './lib/timeline';
 import { TimeControl, TimeText } from './lib/time-control';
 import { LetterboxRect } from './lib/cinema';
+import { CameraDirectorText } from './lib/camera-director';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
 
@@ -109,6 +110,8 @@ class Overlay {
     if (fieldsText) rows.push(['fields', fieldsText]);
     const timeline = TimelineText(director?.timeline.Summary());
     if (timeline) rows.push(['timeline', timeline]);
+    const camera = director ? CameraDirectorText(director.cameraDirector.Report()) : null;
+    if (camera) rows.push(['director', camera]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
@@ -134,7 +137,7 @@ class Overlay {
       <h1>scene-director</h1>
       <dl>${rows.map(([key, value]) => `<dt>${key}</dt><dd>${Escape(value)}</dd>`).join('')}</dl>
       ${list}
-      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · L letterbox · Space pauses · [ ] slower or faster · ← back 10 s · H hides this</p>`;
+      <p class="hint">Drag to orbit · shift-drag to pan · wheel to zoom · alt-click a ship or object to follow it · C chase camera · D director camera · L letterbox · Space pauses · [ ] slower or faster · ← back 10 s · H hides this</p>`;
     const shipList = this.element.querySelector('ul');
     if (shipList) shipList.scrollTop = scrolled;
   }

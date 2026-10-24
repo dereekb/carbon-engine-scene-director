@@ -14,6 +14,7 @@ import { normalizeTargetCommand } from '../weapons/target';
 import { normalizeCeaseFireCommand, normalizeEngageCommand } from '../combat/commands';
 import { normalizeAutoRepairCommand } from '../logi/auto-repair';
 import { cameraPathAnchors, cameraShotSubjects, type CameraShot, normalizeCameraSequence, normalizeCameraShot } from '../cinema/shot';
+import { autoCameraReferences, normalizeAutoCameraCommand, type AutoCameraCommand } from '../cinema/director/command';
 import type { FleetSelection } from '../fleets/selection';
 import { type SceneDocument, SceneError } from '../scene';
 import { MAX_CUE_OPERATIONS, TIMELINE_ACTION_NAMES, TIMELINE_OPERATION_NAMES, type TimelineActionKind, type TimelineActionName } from './timeline';
@@ -337,6 +338,13 @@ export const TIMELINE_ACTIONS: Readonly<Record<TimelineActionName, TimelineActio
     references: (args) => stringsOrObjects(args['shots']).flatMap((shot, index) => shotReferences(normalizeCameraShot(shot).shot, isLibraryShot(shot) ? `shots[${index}].` : `shots[${index}].hardpoint.`))
   },
   stop_shot: { name: 'stop_shot', kind: camera, read: readStopShot, references: () => [] },
+  auto_camera: {
+    name: 'auto_camera',
+    kind: camera,
+    read: (input, where) => readWith(() => normalizeAutoCameraCommand(input, where)),
+    // The followed fleet or ship is an entry: removing it drops `follow` and keeps the cue.
+    references: (args) => autoCameraReferences(args as AutoCameraCommand).map((reference): CueReference => ({ ...reference, ...(reference.kind === 'team' ? {} : { entry: true }) }))
+  },
   patch_scene: { name: 'patch_scene', kind: documentKind, read: readPatch, references: () => [] }
 };
 

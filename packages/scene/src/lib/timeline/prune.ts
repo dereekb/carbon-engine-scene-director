@@ -92,12 +92,14 @@ function pruneCue(cue: JsonObject, removal: TimelineRemoval): Maybe<PruneResult>
 
 /**
  * Drops removed ids from the list entries a cue's arguments carry: a `ships` selection, a targets order's queue, set
- * and drop.
+ * and drop, and auto_camera's `follow`.
  */
 function shrinkLists(args: JsonObject, ids: ReadonlySet<string>): JsonObject {
   const keep = (list: unknown): unknown => (Array.isArray(list) ? list.filter((id) => !ids.has(id as string)) : list);
   const shrunk: JsonObject = { ...args };
   if (Array.isArray(args['ships'])) shrunk['ships'] = keep(args['ships']);
+  const follow = args['follow'];
+  if (isPlainObject(follow) && ids.has((follow['fleet'] ?? follow['ship']) as string)) delete shrunk['follow'];
   const order = args['order'];
   if (isPlainObject(order) && order['type'] === 'targets') {
     const next: JsonObject = { ...order };

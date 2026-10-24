@@ -107,13 +107,15 @@ export const CAMERA_SHOT_LIBRARY: readonly CameraShotLibraryEntry[] = [
   },
   {
     name: 'battle-fly-through',
-    description: 'a low pass through the heat of the battle, across the axis between the fleets from port to starboard, zooming in then out',
+    description: 'a low pass through the heat of the battle, across the axis between the fleets from port to starboard (`side`: the side it starts on), zooming in then out',
     subject: 'engagement',
-    options: ['teams'],
+    options: ['teams', 'side'],
     duration: 18,
     example: { shot: 'battle-fly-through' },
-    build: ({ hardpoint, duration }) => {
+    build: ({ hardpoint, side, duration }) => {
       const half = (duration ?? 18) / 2;
+      // A starboard start mirrors the path's starboard coordinate.
+      const mirror = side === 'starboard' ? -1 : 1;
       return {
         hardpoint: { name: 'overlook', ...hardpoint },
         ...timed(duration),
@@ -126,11 +128,11 @@ export const CAMERA_SHOT_LIBRARY: readonly CameraShotLibraryEntry[] = [
             look: 'subject',
             easing: EASE,
             points: [
-              [-0.3, -1.4, 0.3],
-              [-0.12, -0.55, 0.1],
-              [0.05, 0.3, 0.04],
-              [0.2, 0.85, 0.08],
-              [0.35, 1.45, 0.25]
+              [-0.3, -1.4 * mirror, 0.3],
+              [-0.12, -0.55 * mirror, 0.1],
+              [0.05, 0.3 * mirror, 0.04],
+              [0.2, 0.85 * mirror, 0.08],
+              [0.35, 1.45 * mirror, 0.25]
             ]
           },
           { type: 'zoom', fov: 30, duration: half, easing: EASE },
@@ -205,11 +207,11 @@ export const CAMERA_SHOT_LIBRARY: readonly CameraShotLibraryEntry[] = [
   },
   {
     name: 'over-the-shoulder',
-    description: 'behind and to starboard of the ship, looking at its target (`target`; default the nearest enemy)',
+    description: 'behind and to starboard (`side`) of the ship, looking at its target (`target`; default the nearest enemy)',
     subject: 'ship',
-    options: ['ship', 'target'],
+    options: ['ship', 'target', 'side'],
     example: { shot: 'over-the-shoulder', ship: 'tfis-fc' },
-    build: ({ hardpoint, duration }) => ({ hardpoint: { name: 'over-the-shoulder', ...hardpoint }, ...timed(duration), transition: blend(1.5), lag: { look: 0.4 } })
+    build: ({ hardpoint, side, duration }) => ({ hardpoint: { name: 'over-the-shoulder', ...(side ? { side } : {}), ...hardpoint }, ...timed(duration), transition: blend(1.5), lag: { look: 0.4 } })
   }
 ];
 

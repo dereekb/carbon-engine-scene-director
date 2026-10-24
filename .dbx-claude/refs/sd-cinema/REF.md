@@ -55,7 +55,7 @@
   `nothing to resume: no shot is paused or stopped`; a no-op while playing.
 - **What clears the record**: a new play, a load (`Stop({ cut, forget })`), removing the shot's subject, a hardpoint
   with no pose, a shot or sequence finishing. A camera change, `frame_camera`, the pointer and `stop_shot` keep it.
-- **Drivers** (`CINEMA_DRIVERS`): `claude`, `director` (reserved for the automatic camera; nothing passes it yet),
+- **Drivers** (`CINEMA_DRIVERS`): `claude`, `director` (the automatic camera, `auto_camera`: below),
   `timeline` (the scene's camera cues), `user` whenever the orbit camera has (or is getting) the view. Never null.
 - **Timeline cues** (`sd-timeline`) embed the play_shot / play_sequence object unchanged (library references included)
   and play through `Director.PlayShot(args, 'timeline', time)` from the cue's boundary scene time (so `elapsed` is
@@ -86,6 +86,35 @@ append after the library's. Every library move is scale-free (an allow-list spec
 | `hero` | ship (`side`, default port) | 10 s | `hero-<side>`, `orbit` subject-up ±25° toward the beam (+ port, a spec pins it) + `push` ×0.85 |
 | `flyby` | ship | 10 s | `flyby`, cut, look lag 0.15 |
 | `over-the-shoulder` | ship (`target`) | holds | `over-the-shoulder`, blend 1.5 s, look lag 0.4 |
+
+## Director mode (`auto_camera`)
+
+The camera directs itself: cuts between hardpoints and library shots by an interest score over live events. Pure and
+node-tested in `packages/scene/src/lib/cinema/director/` (camelCase; deterministic for a picture, event stream and
+seed); the page's `apps/viewer/src/lib/camera-director.ts` (`CameraDirector` over a `CameraDirectorPort`) collects
+events and plays the picks through the rig as driver `director`.
+
+| File | Holds |
+|---|---|
+| `director/command.ts` | `normalizeAutoCameraCommand`, `resolveCameraDirectorSettings` (per-key merge, null resets), `directorHold`, `DIRECTOR_PACES` (slow 6–20, normal 4–12, fast 3–7 s), `autoCameraReferences` |
+| `director/picture.ts` | `CameraDirectorPicture` (master state, health, combat windows, warps, arrivals), `toDirectorScene` (EVE radius, 16:9) |
+| `director/events.ts` | `CameraDirectorEvent` (kill, primary, warp, prop-mod; scene ticks), `DIRECTOR_EVENT_WEIGHTS` (starting values), `sortDirectorEvents` |
+| `director/interest.ts` | I(s) = (E + C + base) × R; derived engage / arrival lead / Destiny warp lead / bloom / pass; capped subjects |
+| `director/framings.ts` | `DIRECTOR_FRAMINGS` (20 framings, scales, weights, variants), `toFramingShot` → play_shot JSON |
+| `director/axis.ts` | the axis (teams a→b in id order, else motion), `viewSideOf` (view direction, 20° neutral), `flybyViewSide`, `leanOf`, `axisResets` (60°) |
+| `director/step.ts` | `stepCameraDirector` (modes drive / take / watch), the cut rules, transitions, `recordDirectorCut`, `eyeInsideLandmark`, `engagementCoreFactor` |
+| `director/report.ts` | `CameraDirectorReport` (get_state `cinema.director`), `describeDirectorPick`, `cameraDirectorText` (HUD) |
+
+- **Hand-offs**: any `auto_camera` call turns it on (a live call picks at once; a cue picks at its boundary's step).
+  Claude's and the timeline's shots take precedence: the rig's standby (`SetStandby`) holds their release-ending last
+  frame and the director takes back at the first boundary at or past `ReleasesAt()`. `stop_shot` over them hands back
+  at once; over the director's own shot, the pointer, a camera change and `frame_camera` yield to the user until
+  `auto_camera` or D. `timeline { camera: false }` and a load turn a cue-sourced director off; a jump clears its memory
+  (`EndJump`). A shot lost between boundaries (`Lost()`) is re-picked in `TrackCamera`, the one frame-timed path.
+- **Decisions** run at the end of the Director's `OnBoundary` listener, from `CameraFacts()` (master state, never drawn),
+  stamped at `OnBeforeBoundary`'s exact grid time; warp and prop-mod events reach the next boundary.
+- Not yet done (the follow-up queue item): verify-page `director:` checks, the real-GPU check and constant tuning, and
+  the dated evidence here.
 
 ## Across a time-control jump (`sd-time`)
 

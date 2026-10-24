@@ -43,7 +43,8 @@ The director is both ports.
   keep their document order, which is the order they fire in. Messages index the **input** position.
 - **Actions** are the lever tools' names with the tool's arguments as the value: `order_ship` (`{ id, order }`),
   `order_fleet`, `switch_prop_mods`, `switch_modules`, `set_target`, `engage`, `cease_fire`, `auto_repair`,
-  `play_shot`, `play_sequence`, `stop_shot`, `patch_scene` (`{ operations }`). Each is read by its tool's normalizer and
+  `play_shot`, `play_sequence`, `stop_shot`, `auto_camera` (kind camera: `sd-cinema`'s director; removing the followed
+  fleet or ship drops `follow` and keeps the cue), `patch_scene` (`{ operations }`). Each is read by its tool's normalizer and
   stored normalized, except camera shots (stored as written: a library shot expands when it plays) and patches (as
   written: ops apply when the cue fires). A patch cue may not carry the timeline ops or `set_environment` (a reload).
 - **Kinds** (`entry.kind(args)`): `live` (orders, switches, locks, called targets: `order_fleet` targets is live since
