@@ -508,6 +508,9 @@ hulls that look battle damaged for a shot, or a low-HP fight without waiting for
   264.6, 343.5]; a shield set to 0 read 5.8 HP after 10 boundaries (the curve's 5.758), then a Punisher's first hits
   landed on armor (281.3 → 145); six refusals with their texts and nothing changed; three fitted Slashers pending
   (`loading the fit's dogma`) took the set before the next boundary.
+  Full verify-page (2026-10-24, after H2/H3, headless in `--only` batches): 182 ok, 1 skip (SOF audio, no renderer), 1
+  FAIL, the warp-in shot's flank-port refusal (it predates set_hp and is filed); `screenshot` needs a renderer; no
+  flakes. Checks 73–91 share the TFIs and `flw` fleets, so run them in one batch or they fail.
 - **Real GPU** (2026-10-24, H3, Windows Chrome NVIDIA, 1600 × 900; the TFIs at the Jita CNAP with a squad per tier;
   `.scratch/hp-gpu/`). The look, its thresholds and recipes are in sd-cinema → Battle-damaged looks; the overlay counts
   were read over CDP.
