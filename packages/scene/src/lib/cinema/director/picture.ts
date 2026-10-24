@@ -165,6 +165,8 @@ export function toDirectorScene(picture: CameraDirectorPicture): CinemaScene {
     sunDirection: picture.sunDirection,
     celestials: picture.celestials ?? [],
     objects: picture.objects ?? [],
-    aspect: DIRECTOR_ASPECT
+    aspect: DIRECTOR_ASPECT,
+    // Built once per step and never changed: every candidate's hardpoint shares its group and engagement selections.
+    memo: new Map()
   };
 }

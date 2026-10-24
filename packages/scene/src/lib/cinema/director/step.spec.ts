@@ -129,7 +129,13 @@ describe('camera director step', () => {
     const { memory, tick, ship } = untilShip(calm);
     const frame = (at: number) => {
       const { ships, fleets } = twoFleets();
-      return { picture: directorPicture(at, ships.filter((candidate) => candidate.id !== ship), fleets) };
+      return {
+        picture: directorPicture(
+          at,
+          ships.filter((candidate) => candidate.id !== ship),
+          fleets
+        )
+      };
     };
     const run = runDirector(1, frame, { memory, from: tick + 1 });
     expect(run.results[0].cut?.why).toMatch(/lost its subject/);
@@ -177,18 +183,27 @@ describe('camera director step', () => {
     expect(cutsOf(runDirector(50, fight, { seed: 99 }))).not.toEqual([]);
   });
 
-  // The plan's budget is 20 ms; 50 ms here keeps the spec stable under a loaded parallel suite (33 ms seen).
-  it('steps a 500-ship fight in under 50 ms', () => {
+  // ~4 ms on an idle box; the best of three steps keeps the 20 ms budget stable under a loaded parallel suite.
+  it('steps a 500-ship fight in under 20 ms', () => {
     const ships: DirectorShip[] = [];
     for (let i = 0; i < 500; i += 1) {
       const team = i < 250 ? 'blue' : 'red';
       const k = i % 250;
       ships.push(directorShip(`${team}-${k}`, [(k % 25) * 300, Math.floor(k / 25) * 200, team === 'blue' ? 0 : 30000], { team, velocity: [0, 0, team === 'blue' ? 150 : -150], dealt: k % 3 ? 30 : 0, target: `${team === 'blue' ? 'red' : 'blue'}-${k}`, pressure: k % 5 ? 20 : 0, health: 0.8 }));
     }
-    const fleets = ['blue', 'red'].map((team) => directorFleet(team, `${team}-0`, ships.filter((ship) => ship.team === team && ship.id !== `${team}-0`).map((ship) => ship.id)));
+    const fleets = ['blue', 'red'].map((team) =>
+      directorFleet(
+        team,
+        `${team}-0`,
+        ships.filter((ship) => ship.team === team && ship.id !== `${team}-0`).map((ship) => ship.id)
+      )
+    );
     const run = runDirector(2, (tick) => ({ picture: directorPicture(tick, ships, fleets) }));
-    const started = performance.now();
-    stepCameraDirector({ picture: directorPicture(2, ships, fleets), events: [], settings: DEFAULT_CAMERA_DIRECTOR_SETTINGS, memory: run.memory, seed: 7, mode: 'drive' });
-    expect(performance.now() - started).toBeLessThan(50);
+    const times = [0, 1, 2].map(() => {
+      const started = performance.now();
+      stepCameraDirector({ picture: directorPicture(2, ships, fleets), events: [], settings: DEFAULT_CAMERA_DIRECTOR_SETTINGS, memory: run.memory, seed: 7, mode: 'drive' });
+      return performance.now() - started;
+    });
+    expect(Math.min(...times)).toBeLessThan(20);
   });
 });

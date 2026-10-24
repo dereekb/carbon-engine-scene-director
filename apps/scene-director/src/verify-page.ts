@@ -522,7 +522,7 @@ interface ViewerState {
  */
 interface CinemaStateReport {
   readonly state: 'idle' | 'playing' | 'paused' | 'releasing';
-  readonly driver: 'claude' | 'director' | 'user';
+  readonly driver: 'claude' | 'director' | 'timeline' | 'user';
   readonly shot: Maybe<{
     readonly library?: string;
     readonly hardpoint?: { readonly name: string };
@@ -536,6 +536,37 @@ interface CinemaStateReport {
   readonly pose: Maybe<{ readonly eye: number[]; readonly look: number[] }>;
   readonly near: Maybe<number>;
   readonly note: Maybe<string>;
+  readonly director?: DirectorStateReport;
+}
+
+/**
+ * get_state.cinema.director (packages/scene cinema/director/report.ts), the parts the director checks read.
+ */
+interface DirectorStateReport {
+  readonly on: boolean;
+  readonly state: 'off' | 'waiting' | 'driving' | 'paused' | 'yielded';
+  readonly yieldedTo?: 'user' | 'claude' | 'timeline';
+  readonly source?: string;
+  readonly pick?: { readonly framing: string; readonly shot: { readonly subject: string }; readonly scale: string; readonly side: string; readonly since: number; readonly score: number; readonly why: string; readonly event?: { readonly kind: string } };
+  readonly axis?: { readonly kind: 'teams' | 'motion'; readonly side: string };
+  readonly cuts: number;
+  readonly cost: { readonly lastMs: number; readonly maxMs: number };
+  readonly note?: string;
+}
+
+/**
+ * One cut of the director's log (cinema/director/step.ts DirectorCutLogEntry).
+ */
+interface DirectorCutReport {
+  readonly tick: number;
+  readonly at: number;
+  readonly framing: string;
+  readonly subject: string;
+  readonly scale: string;
+  readonly side: 'port' | 'starboard' | 'neutral';
+  readonly crossing?: true;
+  readonly free?: true;
+  readonly why: string;
 }
 
 /**
@@ -4937,6 +4968,220 @@ try {
       return `${shot.width}x${shot.height} -> ${SCREENSHOT_FILE}`;
     });
   }
+
+  // The camera director (auto_camera): each check loads its own scene; --only director: runs them alone. The whole cut
+  // log is read off the page (auto_camera's result holds it, but any call picks again).
+  const DirectorOf = (state: ViewerState): Maybe<DirectorStateReport> => cinemaOf(state).director ?? null;
+  // The log's ticks count from the load (the director's seed tick): back to world ticks here.
+  const DirectorLog = (): Promise<DirectorCutReport[]> =>
+    page.evaluate(() => {
+      const { director } = (globalThis as unknown as { readonly sceneDirector: { readonly director: { readonly loadTick: number; readonly cameraDirector: { Log(): DirectorCutReport[] } } } }).sceneDirector;
+      return director.cameraDirector.Log().map((cut) => ({ ...cut, tick: cut.tick + director.loadTick }));
+    });
+  const DirectorShips = (fleet: string, team: Maybe<string>, z: number, count: number, extra: object = {}) => Array.from({ length: count }, (_, i) => Scripted(`${fleet}-${i}`, [(i - (count - 1) / 2) * 600, 0, z], { ...(team ? { team } : {}), ...extra }));
+  const DirectorFleet = (id: string, count: number) => ({ id, commander: `${id}-0`, wings: [{ id: `${id}-w`, squads: [{ id: `${id}-s`, role: 'dps', members: Array.from({ length: count - 1 }, (_, i) => `${id}-${i + 1}`) }] }] });
+  const SideValue = (side: string): number => (side === 'starboard' ? 1 : side === 'port' ? -1 : 0);
+  // The 180-degree rule over a log: a cut to the far side needs a crossing (the fly-through, or after a neutral shot) or
+  // a free side (no axis, or the axis turned past 60 degrees). A crossing framing flips the kept side.
+  const AxisBreaks = (log: readonly DirectorCutReport[]): string[] => {
+    const breaks: string[] = [];
+    let kept = 0;
+    for (const cut of log) {
+      const view = SideValue(cut.side);
+      if (cut.free) kept = 0;
+      if (kept && view === -kept && !cut.crossing) breaks.push(`${cut.tick} ${cut.framing} ${cut.side} (kept ${kept})`);
+      if (cut.framing === 'battle-fly-through') kept = view === 1 ? -1 : 1;
+      else if (view) kept = view;
+    }
+    return breaks;
+  };
+  const CutText = (log: readonly DirectorCutReport[]): string => log.map((cut) => `${cut.tick} ${cut.framing}/${cut.subject}/${cut.scale}/${cut.side}`).join(', ');
+  const DirectorScene = (name: string, fly = true) => ({
+    name,
+    ships: [...DirectorShips('blue', 'blue', 0, 5, fly ? { orders: [{ type: 'direction', direction: [0.2, 0, 1] }] } : {}), ...DirectorShips('red', 'red', 25000, 5, fly ? { orders: [{ type: 'direction', direction: [-0.2, 0, -1] }] } : {})],
+    fleets: [DirectorFleet('blue', 5), DirectorFleet('red', 5)]
+  });
+  const directorLogs: DirectorCutReport[][] = [];
+
+  await Check('director: auto_camera fast drives two fleets, cuts 3-7 s apart with no repeat and mixed scales', async () => {
+    await call('load_scene', { scene: DirectorScene('verify-director') });
+    await Delay(1500);
+    const before = (await call<ViewerState>('get_state')).simulation.tick;
+    await call('auto_camera', { pace: 'fast' });
+    const driving = await WaitFor('the director drives', 5, (polled) => (cinemaOf(polled).driver === 'director' && DirectorOf(polled)?.state === 'driving' ? null : Show(DirectorOf(polled))));
+    Expect(driving.simulation.tick <= before + 2, `driving at tick ${driving.simulation.tick}, asked at ${before}`);
+    const pick = DirectorOf(driving)?.pick;
+    Expect(pick != null && pick.why.length > 0 && typeof pick.score === 'number', Show(pick));
+    await Delay(30000);
+    const cuts = await DirectorLog();
+    directorLogs.push(cuts);
+    const gaps = cuts.slice(1).map((cut, index) => cut.tick - cuts[index].tick);
+    Expect(cuts.length >= 4, `${cuts.length} cuts in 30 s: ${CutText(cuts)}`);
+    Expect(
+      gaps.every((gap) => gap >= 2 && gap <= 7),
+      `gaps ${gaps.join(', ')}: ${CutText(cuts)}`
+    );
+    const repeats = cuts.slice(1).filter((cut, index) => cut.framing === cuts[index].framing && cut.subject === cuts[index].subject);
+    Expect(!repeats.length, `repeats ${CutText(repeats)}`);
+    const scales = new Set(cuts.slice(0, 6).map((cut) => cut.scale));
+    Expect(scales.size >= 2, `scales ${[...scales].join(', ')} in ${CutText(cuts.slice(0, 6))}`);
+    const state = DirectorOf(await call<ViewerState>('get_state'));
+    return `${cuts.length} cuts, gaps ${gaps.join('/')} s, scales ${[...scales].join('/')}; cost ${state?.cost.lastMs} ms (max ${state?.cost.maxMs}); first: ${pick?.framing} on ${pick?.shot.subject} (${pick?.why})`;
+  });
+
+  await Check("director: Claude's shot takes the camera and hands it back at its end; stop_shot yields to the user", async () => {
+    await call('load_scene', { scene: DirectorScene('verify-director-handoff') });
+    await call('auto_camera', { pace: 'fast' });
+    await WaitFor('the director drives', 5, (polled) => (DirectorOf(polled)?.state === 'driving' ? null : Show(DirectorOf(polled))));
+    await playShot({ hardpoint: { name: 'chase', ship: 'blue-0' }, duration: 2, end: 'release' });
+    const yielded = DirectorOf(await call<ViewerState>('get_state'));
+    Expect(yielded?.state === 'yielded' && yielded.yieldedTo === 'claude', Show(yielded));
+    const drivers: string[] = [];
+    const back = await WaitFor(
+      'the director takes back',
+      8,
+      (polled) => {
+        const driver = cinemaOf(polled).driver;
+        if (drivers[drivers.length - 1] !== driver) drivers.push(driver);
+        return driver === 'director' ? null : `${driver} ${Show(DirectorOf(polled)?.state)}`;
+      },
+      1
+    );
+    Expect(!drivers.includes('user'), `drivers ${drivers.join(' -> ')}`);
+    await call('stop_shot', {});
+    const stopped = await call<ViewerState>('get_state');
+    Expect(DirectorOf(stopped)?.state === 'yielded' && DirectorOf(stopped)?.yieldedTo === 'user' && cinemaOf(stopped).driver === 'user', Show({ driver: cinemaOf(stopped).driver, director: DirectorOf(stopped) }));
+    const resumed = await call<{ readonly director: DirectorStateReport }>('auto_camera', {});
+    Expect(resumed.director.state === 'driving', Show(resumed.director));
+    return `drivers ${drivers.join(' -> ')} (back at tick ${back.simulation.tick}); stop_shot: yielded to user; auto_camera {}: ${resumed.director.state}`;
+  });
+
+  await Check('director: (SDE) a doomed ship is framed into its kill, held through the blast, cut away before removal', async () => {
+    const red = (id: string, position: SceneVector) => ({ ...Rifter(id, position), team: 'red' });
+    const blue = (id: string, position: SceneVector) => ({ ...Punisher(id, position), team: 'blue' });
+    await LoadCombatScene([blue('p1', [0, 0, 0]), blue('p2', [800, 0, 0]), blue('p3', [-800, 0, 0]), red('r1', [0, 0, 6000]), red('r2', [900, 0, 6500]), red('r3', [-900, 0, 6500])], { seed: 7, death: 'explode' });
+    await call('auto_camera', {});
+    await call('engage', { ships: ['p1', 'p2', 'p3'], target: 'r1' });
+    await call('engage', { ships: ['r1', 'r2', 'r3'], target: 'p1' });
+    const samples: { tick: number; subject: string; framing: string }[] = [];
+    const done = await WaitFor('two kills and 12 s past the first', 150, (polled) => {
+      const pick = DirectorOf(polled)?.pick;
+      if (pick) samples.push({ tick: polled.simulation.tick, subject: pick.shot.subject, framing: pick.framing });
+      const kills = polled.combat?.kills ?? [];
+      return kills.length >= 2 || (kills.length === 1 && polled.simulation.tick >= kills[0].tick + 12) ? null : `kills ${kills.length}, shots ${polled.combat?.shots ?? 0}`;
+    });
+    const kills = (done.combat?.kills ?? []).slice(0, 2);
+    const removal = Math.max(...kills.map((kill) => ShipIn(done, kill.ship).destroyed?.explosion?.removesAt ?? kill.tick + 10));
+    const removed = await WaitFor('the wrecks are removed', 45, (polled) => (polled.simulation.tick >= removal + 1 ? null : `tick ${polled.simulation.tick} of ${removal}`));
+    const log = await DirectorLog();
+    directorLogs.push(log);
+    const onVictim = (subject: string, victim: string): boolean => subject === victim || subject.endsWith(`→ ${victim}`);
+    const lines: string[] = [];
+    let framedKills = 0;
+    for (const kill of kills) {
+      const removesAt = ShipIn(removed, kill.ship).destroyed?.explosion?.removesAt ?? ShipIn(done, kill.ship).destroyed?.explosion?.removesAt ?? kill.tick + 10;
+      // The pick standing at the kill (a doom shot), or the cut the kill event makes at the next boundaries.
+      const standing = [...log].reverse().find((cut) => cut.tick <= kill.tick);
+      const framed = log.find((cut) => onVictim(cut.subject, kill.ship) && cut.tick <= kill.tick + 2 && cut.tick >= (standing?.tick ?? kill.tick));
+      // A kill inside another kill framing's hold is not cut to: that blast stays on screen.
+      if (!framed && standing?.framing === 'kill' && !onVictim(standing.subject, kill.ship) && kill.tick - standing.tick < 8) {
+        lines.push(`${kill.ship} at ${kill.tick}: inside the kill hold on ${standing.subject} from ${standing.tick}`);
+        continue;
+      }
+      Expect(framed != null, `${kill.ship} died at ${kill.tick}: ${CutText(log.filter((cut) => cut.tick >= kill.tick - 8 && cut.tick <= kill.tick + 4))}`);
+      const away = log.find((cut) => cut.tick > (framed?.tick ?? kill.tick) && !onVictim(cut.subject, kill.ship));
+      Expect(away != null && away.tick >= kill.tick + 3 && away.tick < removesAt, `${kill.ship} died at ${kill.tick}, removed at ${removesAt}; cut away at ${away?.tick}: ${CutText(log.filter((cut) => cut.tick >= kill.tick - 8))}`);
+      lines.push(`${kill.ship} at ${kill.tick}: ${framed?.framing} from ${framed?.tick}, away at ${away?.tick} (removed ${removesAt})`);
+      framedKills += 1;
+    }
+    Expect(framedKills >= 1, lines.join('; '));
+    return lines.join('; ');
+  });
+
+  await Check('director: the 180-degree rule holds over the fight logs', async () => {
+    if (!directorLogs.length) throw new Error('no director log from the checks before');
+    const breaks = directorLogs.flatMap((log) => AxisBreaks(log));
+    Expect(!breaks.length, `breaks ${breaks.join('; ')}`);
+    const sided = directorLogs.flat().filter((cut) => cut.side !== 'neutral').length;
+    return `${directorLogs.flat().length} cuts over ${directorLogs.length} logs, ${sided} sided, no break`;
+  });
+
+  await Check('director: (SDE) a warpIn group gets the warp-in shot before its first landing', async () => {
+    await call('load_scene', { scene: DirectorScene('verify-director-warp-in', false) });
+    await call('auto_camera', {});
+    await WaitFor('the director drives', 5, (polled) => (DirectorOf(polled)?.state === 'driving' ? null : Show(DirectorOf(polled))));
+    await call('add_ships', { hull: 'Rifter', count: 3, position: [8000, 0, 12000], team: 'green', fleet: { new: true, id: 'late' }, warpIn: true }).catch(SkipWithoutSde);
+    const landed = new Set<string>();
+    let warpIn: Maybe<{ tick: number; note: Maybe<string> }> = null;
+    let first: Maybe<number> = null;
+    await WaitFor('the group lands', 90, (polled) => {
+      const pick = DirectorOf(polled)?.pick;
+      if (!warpIn && pick?.framing === 'warp-in' && first == null) warpIn = { tick: polled.simulation.tick, note: cinemaOf(polled).note };
+      for (const ship of polled.ships) if (ship.id.startsWith('late') && ship.arrival?.state === 'landed') landed.add(ship.id);
+      if (landed.size && first == null) first = polled.simulation.tick;
+      return landed.size >= 3 ? null : `landed ${landed.size}; pick ${pick?.framing} ${pick?.shot.subject}`;
+    });
+    const log = await DirectorLog();
+    const cut = log.find((entry) => entry.framing === 'warp-in');
+    Expect(cut != null && first != null && cut.tick <= first, `first landing ${first}: ${CutText(log)}`);
+    return `warp-in at tick ${cut?.tick} on ${cut?.subject}, first landing ${first}; ${cut?.why}`;
+  });
+
+  await Check('director: a scripted scene cuts the same after a timeline restart', async () => {
+    const scripted = DirectorScene('verify-director-replay');
+    // Off first: a Claude-sourced director survives the load and would keep the cue's settings across the restart.
+    await call('auto_camera', { on: false });
+    await LoadTimeline({
+      ...scripted,
+      timeline: [
+        { id: 'camera', at: 1, auto_camera: { pace: 'fast' } },
+        { id: 'fight', at: 2, engage: { ships: ['blue-0', 'blue-1'], target: 'red-0' } }
+      ]
+    });
+    const Run = async (): Promise<string[]> => {
+      await Played('the timeline reaches 31 s', 60, 31);
+      const report = await TimelineTool();
+      const start = report.startedAt ?? 0;
+      return (await DirectorLog()).filter((cut) => cut.tick >= start && cut.tick < start + 31).map((cut) => `${cut.tick - start} ${cut.framing} ${cut.subject}`);
+    };
+    const first = await Run();
+    await TimelineTool({ action: 'restart' });
+    const second = await Run();
+    Expect(first.length >= 4, `${first.length} cuts: ${first.join(', ')}`);
+    Expect(Show(first) === Show(second), `first: ${first.join(', ')}\nsecond: ${second.join(', ')}`);
+    return `${first.length} equal cuts: ${first.slice(0, 4).join(', ')}, ...`;
+  });
+
+  await Check('director: a movement-only fleet cuts across scales on one side of its motion', async () => {
+    await call('load_scene', { scene: { name: 'verify-director-motion', ships: DirectorShips('solo', null, 0, 5, { orders: [{ type: 'direction', direction: [1, 0, 0.3] }] }), fleets: [DirectorFleet('solo', 5)] } });
+    await Delay(1500);
+    await call('auto_camera', { pace: 'fast' });
+    await Delay(30000);
+    const state = DirectorOf(await call<ViewerState>('get_state'));
+    const log = await DirectorLog();
+    const scales = new Set(log.map((cut) => cut.scale));
+    const sides = new Set(log.filter((cut) => cut.side !== 'neutral' && !cut.crossing).map((cut) => cut.side));
+    Expect(state?.axis?.kind === 'motion', Show(state?.axis));
+    Expect(scales.size >= 2 && sides.size <= 1 && !AxisBreaks(log).length, `scales ${[...scales].join(', ')}, sides ${[...sides].join(', ')}: ${CutText(log)}`);
+    return `${log.length} cuts, scales ${[...scales].join('/')}, side ${[...sides].join('') || 'neutral'}; axis ${state?.axis?.kind}`;
+  });
+
+  await Check('director: camera off skips an auto_camera cue; auto_camera { on: false } gives the user the camera', async () => {
+    // A Claude-sourced director survives a load: off first, so only the cue could turn it on.
+    await call('auto_camera', { on: false });
+    await LoadTimeline({ ...DirectorScene('verify-director-off'), timeline: [{ id: 'camera', at: 3, auto_camera: {} }] });
+    await TimelineTool({ camera: false });
+    await Played('the timeline reaches 4 s', 30, 4);
+    const report = await TimelineTool({ camera: true });
+    const cue = report.list.find((entry) => entry.id === 'camera');
+    Expect(cue?.state === 'skipped' && DirectorOf(await call<ViewerState>('get_state'))?.on !== true, Show(cue));
+    await call('auto_camera', {});
+    await WaitFor('the director drives', 5, (polled) => (DirectorOf(polled)?.state === 'driving' ? null : Show(DirectorOf(polled))));
+    const off = await call<{ readonly director: DirectorStateReport; readonly cinema: CinemaStateReport }>('auto_camera', { on: false });
+    const state = await call<ViewerState>('get_state');
+    Expect(!off.director.on && cinemaOf(state).driver === 'user', Show({ director: off.director, driver: cinemaOf(state).driver }));
+    return `cue ${cue?.state} (${cue?.note}); on: false -> driver ${cinemaOf(state).driver}`;
+  });
 
   const errors = await call<LogEntry[]>('page_log', { level: 'error', limit: 20 });
   const unexpected = errors.filter((entry) => !/bogus|nosuchhull|renderer unavailable/u.test(entry.message));

@@ -61,6 +61,12 @@ export const SUN_VERTICAL_DEGREES = 15;
  */
 export const LANDMARK_EYE_CLEARANCE = 1.1;
 /**
+ * A station's or stargate's map radius is an approach envelope, not its hull (the CNAP's is 100 km; its SOF sphere
+ * 156 km, from its spires): the eye guard takes this share of it, or a scene parked 30 km off the station would refuse
+ * every eye on the station's side (seen on the real GPU, 2026-10-24).
+ */
+export const STRUCTURE_EYE_FRACTION = 0.5;
+/**
  * The variety waiver: a subject this interesting by events may be shown again soon.
  */
 export const VARIETY_WAIVER_INTEREST = 5;
@@ -122,6 +128,14 @@ export interface DirectorCutLogEntry {
   readonly subject: string;
   readonly scale: DirectorScale;
   readonly side: DirectorSide;
+  /**
+   * The cut crosses the axis on purpose: a crossing framing (the fly-through), or a crossing after a neutral shot.
+   */
+  readonly crossing?: true;
+  /**
+   * No side was kept before the cut (the first cut, no axis, or the axis turned past AXIS_RESET_DEGREES).
+   */
+  readonly free?: true;
   readonly why: string;
 }
 
@@ -265,16 +279,24 @@ export function stepCameraDirector(input: CameraDirectorStepInput): CameraDirect
     const killed = events.some((event) => event.kind === 'kill' && (current.subject.kind === 'ship' ? current.subject.ship === event.ship : current.subject.kind === 'pair' && current.subject.target === event.ship));
     const victim = current.subject.kind === 'pair' ? current.subject.target : current.subject.kind === 'ship' ? current.subject.ship : null;
     const max = current.framing === 'warp-in' ? Math.max(2 * current.max, (current.landing ?? time) + WARP_IN_LANDED_HOLD - current.since) : current.max;
+    // An urgent subject (a kill, an arrival about to land) takes the camera after URGENT_MIN_HOLD, the hold or not; never
+    // from a kill framing inside its hold (the blast stays on screen).
+    const urgent = best.scored.events >= URGENT_INTEREST && held >= URGENT_MIN_HOLD && best.scored.subject.key !== current.subject.key && !(current.framing === 'kill' && held < current.min);
     if (live == null) choose(best, `the last shot (${current.framing} ${current.label}) lost its subject`);
     else if (killed && current.framing !== 'kill') {
       const kill = candidates.find((candidate) => candidate.row.name === 'kill' && candidate.scored.subject.kind === 'ship' && candidate.scored.subject.ship === victim);
       if (kill) choose(kill, 'blending to the kill', { transition: 'blend', blend: KILL_BLEND_SECONDS, min: KILL_HOLD });
       else pick = { ...current, min: Math.max(current.min, held + KILL_HOLD) };
     } else if (killed) pick = { ...current, min: Math.max(current.min, held + KILL_HOLD) };
-    else if (held < current.min) {
-      if (best.scored.events >= URGENT_INTEREST && held >= URGENT_MIN_HOLD && best.scored.subject.key !== current.subject.key) choose(best, 'cut early (urgent)');
-    } else if (held >= max) choose(candidates.find((candidate) => candidate.key !== current.key), `the last shot held ${Math.round(held)} s`);
-    else if (best.key !== current.key && best.score > live * CUT_RATIO) choose(best, `beats the last shot ×${round(best.score / Math.max(1e-6, live), 1)}`);
+    else if (urgent) choose(best, held < current.min ? 'cut early (urgent)' : 'urgent', best.row.name === 'kill' ? { min: KILL_HOLD } : {});
+    else if (held >= current.min) {
+      if (held >= max)
+        choose(
+          candidates.find((candidate) => candidate.key !== current.key),
+          `the last shot held ${Math.round(held)} s`
+        );
+      else if (best.key !== current.key && best.score > live * CUT_RATIO) choose(best, live < 0.05 ? 'the last shot went quiet' : `beats the last shot ×${round(best.score / live, 1)}`);
+    }
   }
   memory = cut ? recordDirectorCut(memory, cut, axis, time, picture.tick) : { ...memory, current: pick };
   return { memory, cut, pick, candidates: reports, axis, ...(note ? { note } : {}) };
@@ -347,11 +369,12 @@ function applies(row: DirectorFramingRow, scored: ScoredDirectorSubject, context
 }
 
 /**
- * Whether an eye stands inside a landmark (a scene object or a celestial) × LANDMARK_EYE_CLEARANCE.
+ * Whether an eye stands inside a landmark (a scene object or a celestial; a station or gate at STRUCTURE_EYE_FRACTION of its
+ * map radius) × LANDMARK_EYE_CLEARANCE.
  */
 export function eyeInsideLandmark(eye: SceneVector, scene: CinemaScene): boolean {
   const inside = (centre: SceneVector, radius: number): boolean => radius > 0 && distanceVec(eye, centre) < radius * LANDMARK_EYE_CLEARANCE;
-  return (scene.objects ?? []).some((object) => inside(object.centre, object.radius)) || (scene.celestials ?? []).some((celestial) => inside(celestial.position, celestial.radius));
+  return (scene.objects ?? []).some((object) => inside(object.centre, object.radius)) || (scene.celestials ?? []).some((celestial) => inside(celestial.position, celestial.kind === 'station' || celestial.kind === 'stargate' ? celestial.radius * STRUCTURE_EYE_FRACTION : celestial.radius));
 }
 
 function scaleWeight(scale: DirectorScale, favour: Maybe<DirectorScale>): number {
@@ -378,7 +401,13 @@ function buildCandidates(context: CandidateContext): DirectorCandidate[] {
       const scale = framingScale(row, scored.subject);
       for (const variant of row.variants ?? [undefined]) {
         const radius = scored.subject.kind === 'ship' ? (facts.ships.get(scored.subject.ship)?.ship.radius ?? 0) : 0;
-        const framed = toFramingShot(row, scored.subject, variant, { transition: { type: 'cut' }, coreFactor, teams: settings.teams, radius, ...(landmark?.kind === 'landmark' ? { landmark: { ...(landmark.object != null ? { object: landmark.object } : {}), ...(landmark.celestial != null ? { celestial: landmark.celestial } : {}) } } : {}) });
+        const framed = toFramingShot(row, scored.subject, variant, {
+          transition: { type: 'cut' },
+          coreFactor,
+          teams: settings.teams,
+          radius,
+          ...(landmark?.kind === 'landmark' ? { landmark: { ...(landmark.object != null ? { object: landmark.object } : {}), ...(landmark.celestial != null ? { celestial: landmark.celestial } : {}) } } : {})
+        });
         if (!framed) continue;
         const resolved = resolveHardpoint(framed.hardpoint, scene);
         const pose = resolved.pose;
@@ -532,7 +561,7 @@ function toPick(context: PickContext): DirectorPick {
   const event = scored.terms.find((term) => term.event)?.event;
   const framing = [[row.name, ...(variant ? [variant] : [])].join(' '), ...candidate.notes].join(', ');
   const why = [top?.why ?? subjectText, `${framing} on ${subjectText}`, context.reason].join(' · ');
-  const arrival = subject.kind === 'group' ? (subject.arrival ? context.memory.arrivals[subject.arrival] : undefined) ?? context.memory.arrivals[`warp:${subject.key}`] : undefined;
+  const arrival = subject.kind === 'group' ? ((subject.arrival ? context.memory.arrivals[subject.arrival] : undefined) ?? context.memory.arrivals[`warp:${subject.key}`]) : undefined;
   return {
     key: candidate.key,
     framing: row.name,
@@ -587,7 +616,7 @@ export function recordDirectorCut(memory: CameraDirectorMemory, cut: DirectorPic
   else if (DIRECTOR_FRAMING_ROWS.get(cut.framing)?.crossing) side = { value: view === 1 ? -1 : 1, forward: axis.forward, key: axis.key };
   else if (view !== 0) side = { value: view, forward: axis.forward, key: axis.key };
   const recent: DirectorRecentShot = { at: time, framing: cut.framing, subject: cut.subject.key, label: cut.label, scale: cut.scale, side: cut.side, why: cut.why };
-  const entry: DirectorCutLogEntry = { tick, at: round(time, 3), framing: cut.framing, subject: cut.label, scale: cut.scale, side: cut.side, why: cut.why };
+  const entry: DirectorCutLogEntry = { tick, at: round(time, 3), framing: cut.framing, subject: cut.label, scale: cut.scale, side: cut.side, ...(cut.crossing ? { crossing: true } : {}), ...(memory.side == null ? { free: true } : {}), why: cut.why };
   return {
     ...memory,
     side,

@@ -16,7 +16,7 @@
 | `packages/scene/src/lib/cinema/vectors.ts` | float64 vectors and `[x, y, z, w]` quaternions (`quatLookRotation`, `slerpQuat`, `headingAxes`, `fromFrame`), `WORLD_UP` |
 | `cinema/pose.ts` | `CameraPose { eye, look, up, fov }`, `blendPoses` (lerp eye, slerp orientation with roll, fov in tan(fov/2)), `rollPose`, `toOrbitView` / `fromOrbitView`, `poseViewMatrix` |
 | `cinema/framing.ts` | `viewHalfExtents` / `fitDistance` (Carbon's aspect clamp `CARBON_ASPECT_CLAMP` 1.6), `clearHulls` (`HULL_CLEARANCE` 1.15 radii), `cameraClips` |
-| `cinema/subjects.ts` | `CinemaShip`, `CinemaScene`, `shipFrame`, `groupFrame`, `selectCinemaGroup`, `engagementFrame`, `cinemaSpheres`, `cinemaAnchor` |
+| `cinema/subjects.ts` | `CinemaShip`, `CinemaScene` (+ an optional `memo`: `cinemaMemo` caches team, group and engagement selections on a scene that never changes, the director's), `shipFrame`, `groupFrame`, `selectCinemaGroup`, `engagementFrame`, `cinemaSpheres`, `cinemaAnchor` |
 | `cinema/subjects.ts` (also) | `CinemaWarp` / `CinemaScene.warpOf`, `findLandmark`, `sceneFocus`, `landmarkFrame` |
 | `cinema/hardpoints.ts` | the four catalogs, `HardpointAnchor`, `resolveHardpoint`, `listHardpoints` / `toHardpointListing` (list_hardpoints), `findCelestial` |
 | `cinema/shot.ts` | the JSON shot spec: `normalizeCameraShot` / `normalizeCameraSequence` → `{ shot, problems, warnings }`, `normalizeHardpointSubject`, `listCameraShots`, `CAMERA_MOVE_TYPES`, `CINEMA_EASINGS`, `CAMERA_SHOT_ENDS`, `CINEMA_DRIVERS` |
@@ -113,8 +113,66 @@ events and plays the picks through the rig as driver `director`.
   (`EndJump`). A shot lost between boundaries (`Lost()`) is re-picked in `TrackCamera`, the one frame-timed path.
 - **Decisions** run at the end of the Director's `OnBoundary` listener, from `CameraFacts()` (master state, never drawn),
   stamped at `OnBeforeBoundary`'s exact grid time; warp and prop-mod events reach the next boundary.
-- Not yet done (the follow-up queue item): verify-page `director:` checks, the real-GPU check and constant tuning, and
-  the dated evidence here.
+
+### The model
+
+- **Interest** per subject (ships, pairs, fleets / wings / squads, arrival groups, the engagement, landmarks; capped):
+  I = (E + C + base) × R. E: decayed events (w × 2^(−age / halfLife), `DIRECTOR_EVENT_WEIGHTS`: kill victim 10,
+  arrival 9, engage 7, primary 5, warp exit 6, pass 4, prop-mod bloom 4); C: continuous terms (doom: under
+  `DOOM_HEALTH` 0.6 with under `DOOM_SECONDS` 10 to live, heat, logi, motion); R: recognisability (the FC, the called
+  primary, the followed subject ×2.5, hull size). Derived in the step: engage (a team opens fire after
+  `ENGAGE_QUIET_SECONDS`), the arrival lead (`ARRIVAL_LEAD_SECONDS` 5 before a group's first landing), a Destiny warp
+  landing near the action, a fleet's MWD bloom, close passes (`closePasses`, swept along x).
+- **Framings** (`DIRECTOR_FRAMINGS`): each row a hardpoint or library shot on a subject kind with a scale (wide /
+  medium / close), a weight and its variants; `applies` gates them (bow-on and chase need speed, kill a doomed or killed
+  ship with ≥ 3 s before removal, warp-in an arrival lead, overlook-pull-out the first 10 s of an engagement). Every
+  candidate must resolve on the director's own scene (`toDirectorScene`: EVE radius, 16:9, a `memo` so group, team and
+  engagement selections are computed once per step) and keep its eye out of a landmark × 1.1 (`eyeInsideLandmark`; a
+  station or gate at `STRUCTURE_EYE_FRACTION` 0.5 of its map radius).
+- **Score** = I × weight × favour × rhythm (a third same-scale shot ×0.3, wide after wide ×0.5) × variety (the same
+  framing + subject in the recent five ×0.25, the last shot's framing ×0.5) × axis × a seeded ±3 % jitter.
+- **Holds and cuts**: pace presets slow 6–20, normal 4–12, fast 3–7 s (`hold` wins). Past min, cut when the best beats
+  the live score × `CUT_RATIO` 1.4 (the live score's continuity falls from ×1.25 to ×0.75 over the hold); at max, cut to
+  the best other. An urgent subject (events ≥ `URGENT_INTEREST` 8: a kill, an arrival lead) cuts after
+  `URGENT_MIN_HOLD` 2 s, hold or not, never from a kill framing inside its hold. A kill on the framed ship blends
+  (`KILL_BLEND_SECONDS`) into the `kill` framing (fill `KILL_FILL` 0.25, 0.4 over 300 m) and holds `KILL_HOLD` 4 s; a
+  removal within `REMOVAL_CUT_SECONDS` re-picks. Warp-in holds to 2 × max, 3 s past the first landing.
+- **The 180° rule** (`axis.ts`): the axis runs team a → team b (else the followed or biggest fleet's motion); a shot's
+  side is the view's side of it (20° neutral band). The first sided shot sets the kept side; the far side needs a
+  neutral shot before (×0.6), the fly-through's deliberate cross (which flips the kept side), or an axis that turned
+  over 60° (`axisResets`). The cut log marks `crossing` and `free` (no kept side) cuts.
+- **Bias** (`auto_camera`): follow, favour (×1.8 on the scale, ×0.6 two away), sun (into-sun ×2.5), teams, pace, hold,
+  letterbox, hud, seed. Per key: a value sets, null resets, omitted keeps; it lasts until the tab reloads.
+- **get_state `cinema.director`**: `on`, `state` (off / waiting / driving / paused / yielded), `yieldedTo`, `source`,
+  `bias`, `pick { framing, shot, scale, side, since, holdsFor, score, why, event?, transition }`, 3 `candidates`,
+  `axis`, `cuts`, 5 `recent`, `cost { lastMs, maxMs }`, `note`. auto_camera's result adds the 20-cut `log` (tick from
+  the load, at, framing, subject, scale, side, crossing?, free?, why); verify-page reads it off the page
+  (`director.cameraDirector.Log()`, ticks + `loadTick`) because any auto_camera call picks again.
+- **The cue**: `auto_camera` is a kind `camera` action; `timeline { camera: false }` skips it and turns a cue-sourced
+  director off; removing the followed fleet or ship drops `follow` from the cue.
+- **Determinism**: memory is plain JSON, events sorted, jitter keyed on (seed, scene tick, candidate), the seed the
+  document's combat seed. A scripted scene cuts the same after `timeline restart` (verify-page). A Claude-sourced
+  director stays on across a load or restart and picks at t = 0, and keeps the settings a cue changed: start it from
+  the cue (or turn it off first) for an exactly repeatable opening.
+- **Time control** (`sd-time`): it steps every boundary, fast-forward included (holds in scene time), is neither
+  journaled nor snapshotted, and `EndJump` clears its memory (settings kept).
+- **Cost**: `stepCameraDirector` on 500 ships ~4 ms in node (step.spec's 20 ms budget is the best of three); on the page
+  ~2 ms per boundary (once a second) for 59 ships, including the picture.
+- **Limits**: a second kill inside a kill framing's hold is not cut to, and the next pick may skip its blast; wides of
+  a whole fleet frame its logi 30 km out (behind-fc and flank read as specks on the TFIs); one
+  engagement only (the two biggest teams); kill fill by hull radius, not the explosion file's size; a station's eye
+  guard is a sphere; holds run in scene time, so 4× fast-forward cuts about every second.
+
+### verify-page `--only director:` (eight checks, headless, real tools-core)
+
+(a) fast pace on two stats-only fleets: driving within a boundary, 3–7 s gaps (7/7/7/7 seen), no framing + subject
+repeat, two scales in six cuts; (b) a Claude 2 s release-ending shot yields (claude) and hands back by the next boundary
+with no `user` between, `stop_shot` on the director's shot yields (user), `auto_camera {}` drives; (c, SDE) 3 Punishers
+vs 3 Rifters: each victim framed by its kill tick (a doomed p1 from a tick before), held ≥ 3 s, cut away before removal
+(a kill inside another kill's hold is excused, at least one framed);
+(d) the 180° rule over (a)'s and (c)'s logs; (e, SDE) a `warpIn` add_ships group: warp-in 5 s before its first
+landing; (f) a scripted scene (auto_camera cue at 1, engage at 2): equal cut logs across `timeline restart`; (g)
+movement-only: axis `motion`, three scales, one side; (h) camera off skips the cue, `on: false` gives driver `user`.
 
 ## Across a time-control jump (`sd-time`)
 
@@ -280,6 +338,35 @@ The canvas listeners are capture-phase, so they run before `OrbitCamera`'s own h
   without a renderer). The orbit's existing fields stay.
 
 ## Real-GPU checks
+
+### The director (`auto_camera`, 2026-10-24, Windows Chrome, NVIDIA, 1600 × 900, `?audio=off`)
+
+Private hub on 5522 (temp stores; 5521 was another session's), Jita IV - Moon 4 - CNAP 30 km off, the TFIs (blue,
+brawler), an `auto_camera { follow: { fleet: 'tfis' } }` cue at 1 and 15 Caracals (red, line, 40 km off `tfis-fc`,
+`warpIn`) at 8; `timeline restart`. Driver, rows and screens in `.scratch/director-gpu/` on dbxpc (`drive.mjs <phase>`,
+`sheet.mjs` contact sheets). page_log 0 errors and `gpuErrors` 0 in every run.
+
+- A 100 s run cuts 16 times: establishing on the CNAP, hero FC, **warp-in on fleet red 5 s before its first landing**,
+  hero, behind-fc, then kills (each victim framed at its kill tick, held, cut away before removal), flybys, chases and
+  over-the-shoulders, all on one side (starboard) after the first sided shot. Hero, flyby, chase and over-the-shoulder
+  read well.
+- Two fixes from it: **the eye guard took the CNAP's 100 km map radius** (its SOF sphere is 156 km), so a scene 30 km off
+  it refused every eye on the station side, warp-in and the engagement wides included: stations and gates now guard at
+  half the map radius. **Kill shots at fill 0.12** showed the victim and its blast as a dot: now 0.25 (0.4 over 300 m),
+  the fireball mid-frame with the fight around it. Also: urgent cuts now apply past the min hold (a kill 4 s into a
+  wide waited for the ratio), and engage dropped from 8 to 7 so a fight opening no longer cuts a doomed ship's shot
+  at 2 s.
+- Two `timeline restart`s: equal cut logs from the warp-in on; the openings differed by a tick only because the
+  driver's closing `auto_camera {}` left a Claude-sourced director on (it picks at t = 0).
+- Variants: `favour: 'wide', sun: true` cuts to group wides (behind-fc, flank, leading-edge); overlook reaches the top
+  three but loses on rhythm, and into-sun never qualifies here (its eye lands on the CNAP side). `pace: 'fast'`: 4–7 s
+  holds. Claude's `play_shot { shot: 'hero', ship: 'tfis-fc', duration: 6, end: 'release' }`: claude for 6 boundaries,
+  then director, no `user` between. A canvas pointerdown: yielded (user); D: driving again; the HUD row reads "driving ·
+  hero FC · 0 s (FC passes Eos at 514 m/s)". Movement-only (the TFIs flying, a Caracal fleet passing, no teams): axis
+  `motion` on the FC, wide / medium / close, one side, mostly FC framings.
+- fps: 15–20 mean in the fight (min 1–2 at the Caracals' warp-in builds); over the same 30–60 s window the director off
+  (orbit on the FC) 11.9 and on 14.6, so its pick costs nothing visible; cost ~2 ms mean per boundary, max 6 ms.
+- Open: whole-fleet wides (behind-fc, flank) frame the TFIs' logi 30 km out and draw the hulls as specks.
 
 ### The MCP tools and the library (2026-10-22)
 

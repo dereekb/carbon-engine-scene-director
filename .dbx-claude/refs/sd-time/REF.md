@@ -176,6 +176,10 @@ The window is untouched by a jump: the snapshots after the target are the record
   for every ship and object, cleared first on a hull whose armor or structure fraction rose across the jump
   (`ImpactsHealed`: the runtime's `SetImpactDamageState` only ever adds armor impacts, so a jump back to full HP kept
   the dying hull's holes and fires, drawn as big fireballs on the GPU; `ClearImpactDamage()` then the re-arm); `Engine.ResetSceneTime(target)`; `cinema.Rebase(delta)`; `Mute(rate > 2)`; `onChange`.
+- **The camera director** (`auto_camera`, `sd-cinema`) steps every boundary (fast-forward included, holds in scene
+  time), is neither journaled nor snapshotted (the camera is presentation), steps nothing during a jump's silent
+  re-simulation (`Silent()`), and `EndJump` clears its memory with
+  `Clear({ keep: 'settings' })` so its first picks after a jump never chase the abandoned future.
 
 ## Effects across a jump (T3)
 

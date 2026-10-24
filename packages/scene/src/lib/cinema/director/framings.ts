@@ -41,8 +41,8 @@ export type DirectorFramingName = (typeof DIRECTOR_FRAMING_NAMES)[number];
 /**
  * The fill a kill framing frames its victim at, so the explosion fits (a larger hull: KILL_FILL_LARGE).
  */
-export const KILL_FILL = 0.12;
-export const KILL_FILL_LARGE = 0.3;
+export const KILL_FILL = 0.25;
+export const KILL_FILL_LARGE = 0.4;
 export const KILL_FILL_LARGE_RADIUS = 300;
 /**
  * The look lag of the director's explicit hardpoint shots, seconds.

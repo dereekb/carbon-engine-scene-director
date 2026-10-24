@@ -530,13 +530,25 @@ function groupLabel(key: string): string {
  */
 function closePasses(ships: readonly DirectorShip[]): { a: DirectorShip; b: DirectorShip; speed: number }[] {
   const passes: { a: DirectorShip; b: DirectorShip; speed: number }[] = [];
-  // A relative speed over PASS_MIN_SPEED needs one of the two over half of it: each mover against every other ship once.
-  const movers = ships.filter((ship) => ship.speed > PASS_MIN_SPEED / 2);
-  const moving = new Set(movers);
-  for (const a of movers) {
-    for (const b of ships) {
-      if (b === a || (moving.has(b) && compareDirectorKeys(a.id, b.id) >= 0)) continue;
+  // A relative speed over PASS_MIN_SPEED needs one of the two over half of it. Swept along x: a pair farther apart in x
+  // than the widest reach (the two fastest closing head-on, the largest miss) cannot pass within the lookahead.
+  let fastest = 0;
+  let largest = 0;
+  for (const ship of ships) {
+    fastest = Math.max(fastest, ship.speed);
+    largest = Math.max(largest, ship.radius);
+  }
+  if (fastest <= PASS_MIN_SPEED / 2) return passes;
+  const bound = 2 * fastest * PASS_LOOKAHEAD_SECONDS + Math.max(PASS_MIN_MISS, 8 * largest);
+  const sorted = [...ships].sort((x, y) => x.position[0] - y.position[0]);
+  for (let i = 0; i < sorted.length; i += 1) {
+    const a = sorted[i];
+    const aMoving = a.speed > PASS_MIN_SPEED / 2;
+    for (let j = i + 1; j < sorted.length; j += 1) {
+      const b = sorted[j];
       const px = b.position[0] - a.position[0];
+      if (px > bound) break;
+      if (!aMoving && b.speed <= PASS_MIN_SPEED / 2) continue;
       const py = b.position[1] - a.position[1];
       const pz = b.position[2] - a.position[2];
       const vx = b.velocity[0] - a.velocity[0];

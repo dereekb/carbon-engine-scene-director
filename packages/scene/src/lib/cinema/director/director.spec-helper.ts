@@ -12,7 +12,7 @@ import { stepCameraDirector, type CameraDirectorMemory, type CameraDirectorMode,
 export function directorShip(id: string, position: SceneVector, extra: Partial<DirectorShip> = {}): DirectorShip {
   const velocity = extra.velocity ?? [0, 0, 0];
   const speed = Math.hypot(...velocity);
-  return { id, position, velocity, speed, forward: extra.forward ?? (speed > 1 ? velocity.map((value) => value / speed) as SceneVector : [0, 0, 1]), radius: 50, maxVelocity: 400, health: 1, remaining: 5000, total: 5000, ...extra };
+  return { id, position, velocity, speed, forward: extra.forward ?? (speed > 1 ? (velocity.map((value) => value / speed) as SceneVector) : [0, 0, 1]), radius: 50, maxVelocity: 400, health: 1, remaining: 5000, total: 5000, ...extra };
 }
 
 /**

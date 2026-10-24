@@ -71,7 +71,7 @@ export interface DirectorEventWeight {
 export const DIRECTOR_EVENT_WEIGHTS = {
   kill: { victim: { weight: 10, halfLife: 5 }, killer: { weight: 2, halfLife: 4 }, fleet: { weight: 4, halfLife: 8 }, flagFactor: 0.5 },
   primary: { primary: { weight: 5, halfLife: 6 }, pair: { weight: 3, halfLife: 6 } },
-  engage: { engagement: { weight: 8, halfLife: 10 }, fleet: { weight: 3, halfLife: 10 } },
+  engage: { engagement: { weight: 7, halfLife: 10 }, fleet: { weight: 3, halfLife: 10 } },
   arrival: { group: { weight: 9, halfLife: 8 } },
   warpExit: { group: { weight: 6, halfLife: 6 } },
   warpEnter: { group: { weight: 3, halfLife: 5 } },

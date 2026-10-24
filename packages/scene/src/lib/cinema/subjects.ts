@@ -137,6 +137,31 @@ export interface CinemaScene {
    * The pose the page drew last frame (a blend into the first shot starts from it); null without a renderer.
    */
   readonly camera?: Maybe<CameraPose>;
+  /**
+   * A memo for a scene read many times unchanged (the camera director resolves dozens of hardpoints on one scene per
+   * step): when set, team, group and engagement selections are computed once per key. Never set it on a scene that
+   * changes after it is built.
+   */
+  readonly memo?: Map<string, unknown>;
+}
+
+/**
+ * `compute()` once per key on a scene with a memo; every time on one without.
+ *
+ * @param scene - The scene.
+ * @param key - What is computed, with its arguments.
+ * @param compute - The computation.
+ */
+export function cinemaMemo<T>(scene: CinemaScene, key: string, compute: () => T): T {
+  const memo = scene.memo;
+  let value: T;
+  if (!memo) value = compute();
+  else if (memo.has(key)) value = memo.get(key) as T;
+  else {
+    value = compute();
+    memo.set(key, value);
+  }
+  return value;
 }
 
 /**
@@ -225,10 +250,22 @@ export interface SelectedCinemaGroup {
  * @param options - `arriving`: keep ships still arriving by warp in `ships`.
  */
 export function selectCinemaGroup(scene: CinemaScene, selection: FleetSelection, { arriving = false }: { readonly arriving?: boolean } = {}): SelectedCinemaGroup {
-  const pool = [...scene.ships, ...(scene.arriving ?? [])];
+  return cinemaMemo(scene, `group|${arriving}|${cinemaSelectionKey(selection)}`, () => computeCinemaGroup(scene, selection, arriving));
+}
+
+/**
+ * A selection's memo key.
+ */
+export function cinemaSelectionKey(selection: FleetSelection): string {
+  return `${selection.fleet ?? ''}|${selection.wing ?? ''}|${selection.squad ?? ''}|${(selection.ships ?? []).join(',')}`;
+}
+
+function computeCinemaGroup(scene: CinemaScene, selection: FleetSelection, arriving: boolean): SelectedCinemaGroup {
+  const { pool, byId, landed } = cinemaMemo(scene, 'pool', () => {
+    const all = [...scene.ships, ...(scene.arriving ?? [])];
+    return { pool: all, byId: new Map(all.map((ship) => [ship.id, ship])), landed: new Set(scene.ships.map((ship) => ship.id)) };
+  });
   const { ships: ids, problems } = selectFleetShips({ ships: pool, fleets: scene.fleets ?? [] }, selection, 'subject');
-  const byId = new Map(pool.map((ship) => [ship.id, ship]));
-  const landed = new Set(scene.ships.map((ship) => ship.id));
   const selected = ids.flatMap((id) => byId.get(id) ?? []);
   const incoming = selected.filter((ship) => !landed.has(ship.id));
   const ships = arriving ? selected : selected.filter((ship) => landed.has(ship.id));
@@ -251,6 +288,10 @@ export function selectCinemaGroup(scene: CinemaScene, selection: FleetSelection,
  * The ships of each team, the largest first (ties in document order). Ships with no team are left out.
  */
 export function cinemaTeams(scene: CinemaScene): { readonly team: string; readonly ships: CinemaShip[] }[] {
+  return cinemaMemo(scene, 'teams', () => computeCinemaTeams(scene));
+}
+
+function computeCinemaTeams(scene: CinemaScene): { readonly team: string; readonly ships: CinemaShip[] }[] {
   const teams = new Map<string, CinemaShip[]>();
   for (const ship of scene.ships) {
     if (ship.team == null) continue;
@@ -281,6 +322,10 @@ export interface EngagementFrame extends SubjectFrame {
  * @param teams - The two teams; default the two with the most ships.
  */
 export function engagementFrame(scene: CinemaScene, teams?: readonly [string, string]): Maybe<EngagementFrame> {
+  return cinemaMemo(scene, `engagement|${teams?.join('|') ?? ''}`, () => computeEngagementFrame(scene, teams));
+}
+
+function computeEngagementFrame(scene: CinemaScene, teams?: readonly [string, string]): Maybe<EngagementFrame> {
   const all = cinemaTeams(scene);
   const picked = teams ? teams.map((team) => all.find((entry) => entry.team === team) ?? { team, ships: [] }) : all.slice(0, 2);
   const sides = picked.filter((side) => side.ships.length);
@@ -309,12 +354,17 @@ export function engagementFrame(scene: CinemaScene, teams?: readonly [string, st
 export function nearestEnemyCentroid(scene: CinemaScene, team: Maybe<string>, from: SceneVector): Maybe<SceneVector> {
   let best: Maybe<SceneVector> = null;
   let bestDistance = Infinity;
-  for (const side of cinemaTeams(scene)) {
-    if (side.team === team) continue;
-    const centre = scaleVec(
-      side.ships.reduce<SceneVector>((sum, ship) => addVec(sum, ship.frameCentre), [0, 0, 0]),
-      1 / side.ships.length
-    );
+  const centroids = cinemaMemo(scene, 'team-centroids', () =>
+    cinemaTeams(scene).map((side) => ({
+      team: side.team,
+      centre: scaleVec(
+        side.ships.reduce<SceneVector>((sum, ship) => addVec(sum, ship.frameCentre), [0, 0, 0]),
+        1 / side.ships.length
+      )
+    }))
+  );
+  for (const { team: other, centre } of centroids) {
+    if (other === team) continue;
     const distance = distanceVec(centre, from);
     if (distance < bestDistance) {
       bestDistance = distance;

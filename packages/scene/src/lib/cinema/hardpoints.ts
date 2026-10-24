@@ -18,7 +18,26 @@ import type { SceneVector } from '../scene';
 import { MIN_WARP_DISTANCE } from '../orders';
 import { fitDistance, viewHalfExtents } from './framing';
 import type { CameraPose } from './pose';
-import { aheadOf, CINEMA_ARRIVING_NOTE, engagementFrame, findLandmark, groupFrame, landmarkFrame, nearestEnemyCentroid, nearestOtherShip, sceneFocus, selectCinemaGroup, shipFrame, type CinemaLandmark, type CinemaScene, type CinemaShip, type CinemaWarp, type SubjectFrame } from './subjects';
+import {
+  aheadOf,
+  CINEMA_ARRIVING_NOTE,
+  cinemaMemo,
+  cinemaSelectionKey,
+  engagementFrame,
+  findLandmark,
+  groupFrame,
+  landmarkFrame,
+  nearestEnemyCentroid,
+  nearestOtherShip,
+  sceneFocus,
+  selectCinemaGroup,
+  shipFrame,
+  type CinemaLandmark,
+  type CinemaScene,
+  type CinemaShip,
+  type CinemaWarp,
+  type SubjectFrame
+} from './subjects';
 import { addScaledVec, addVec, crossVec, distanceVec, dotVec, fromFrame, lengthVec, normalizeVec, orthogonalizeVec, scaleVec, subVec, WORLD_UP } from './vectors';
 
 export type HardpointKind = 'ship' | 'group' | 'engagement' | 'landmark';
@@ -477,7 +496,8 @@ function resolveGroupHardpoint(ref: HardpointRef, scene: CinemaScene, anchor: Ma
   const fov = ref.fov ?? row.fov;
   const fill = ref.fill ?? row.fill;
   if (row.name === 'warp-landing') return resolveWarpLanding(ref, scene, group.ships, group.leader, groupLabel(ref), fov, fill, anchor);
-  const frame = groupFrame(group.ships, group.leader);
+  const leader = group.leader;
+  const frame = cinemaMemo(scene, `group-frame|${cinemaSelectionKey(selection)}|${leader.id}`, () => groupFrame(group.ships, leader));
   const { halfWidth, halfHeight } = viewHalfExtents(fov, scene.aspect);
   const { extents } = frame;
   const halfLength = Math.max(-extents.forward[0], extents.forward[1]);
