@@ -5,7 +5,12 @@
  * from real EVE data, scene edits, and IndexedDB storage. With a GPU it also
  * saves a screenshot to .scratch/verify.png.
  *
- *   node dist/apps/scene-director/verify-page.js [--tools-core http://127.0.0.1:5510] [--viewer <dir>] [--headed]
+ *   node dist/apps/scene-director/verify-page.js [--tools-core http://127.0.0.1:5510] [--viewer <dir>] [--headed] [--only <text>] [--tap]
+ *
+ * Each result prints as its check ends. Every label starts with its area (`fleets: `, `combat: `, ...; the list is in
+ * sd-dev-env), so `--only "fleets:"` runs one area. `--tap` makes stdout a TAP version 13 stream. Exits 0 when every check
+ * passed, 1 when one failed, 2 when the run could not proceed (`Bail out!`: tools-core unreachable, a setup failure, an
+ * error outside a check, an `--only` that matched no check).
  *
  * `--eve-data off` is the no-EVE-data run (sd-dev-env): it starts its own hub in the mode, needs no tools-core, and runs
  * only the "no EVE data:" checks (statuses, refusals, zero EVE requests, a quiet page_log):
@@ -60,6 +65,7 @@ import { FleetCompositionFileStore } from './lib/store/composition-files';
 import { MovieFileStore } from './lib/store/movie-files';
 import { FleetPersonalityFileStore } from './lib/store/personality-files';
 import { SceneFileStore } from './lib/store/scene-files';
+import { VerifyReport } from './lib/verify/tap';
 
 /**
  * The shapes of the tool answers this script reads.
@@ -905,35 +911,69 @@ const CONNECT_CHECK = 'the tab connects to the hub';
  * never asked.
  */
 const EVE_DATA_OFF = Option('--eve-data', '') === 'off';
-const status = EVE_DATA_OFF ? null : await toolsCore.Status();
-if (status && !status.reachable) {
-  console.error(status.error);
-  process.exit(1);
+/**
+ * `--tap`: stdout carries only a TAP version 13 stream (sd-dev-env → verify-page); otherwise the `ok    ` / `FAIL  ` /
+ * `skip  ` lines and a tally. Either way each result prints as its check ends.
+ */
+const report = new VerifyReport({ tap: process.argv.includes('--tap'), out: (line) => process.stdout.write(`${line}\n`), err: (line) => process.stderr.write(`${line}\n`) });
+/**
+ * The checks the `--only` filter ran, besides the connect check.
+ */
+let matched = 0;
+
+/**
+ * Exits once stdout has drained: a pipe on macOS writes asynchronously, and process.exit would cut the stream short.
+ *
+ * @param code - The exit code.
+ * @returns Never.
+ */
+async function Exit(code: number): Promise<never> {
+  await new Promise<void>((resolve) => process.stdout.write('', () => resolve()));
+  process.exit(code);
 }
 
+/**
+ * Ends a run that cannot proceed: `Bail out!` (a stderr line without `--tap`) and exit 2.
+ *
+ * @param reason - Why.
+ * @param cleanup - What to close first (the hub, the browser).
+ * @returns Never.
+ */
+async function Bail(reason: string, cleanup?: () => Promise<unknown>): Promise<never> {
+  await cleanup?.().catch(() => undefined);
+  return Exit(report.BailOut(reason));
+}
+
+const status = EVE_DATA_OFF ? null : await toolsCore.Status().catch((error: unknown) => Bail(`tools-core status: ${ErrorMessage(error)}`));
+if (status && !status.reachable) await Bail(status.error ?? `tools-core at ${status.url} is not reachable`);
+
 // Saved scene and fleet composition files go to throwaway directories, never the user's.
-const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-')));
-const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-fleets-')));
-const personalities = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-personalities-')));
-const movies = new MovieFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-movies-')));
+const TempDirectory = (prefix: string): Promise<string> => mkdtemp(path.join(os.tmpdir(), prefix)).catch((error: unknown) => Bail(`no temp directory: ${ErrorMessage(error)}`));
+const scenes = new SceneFileStore(await TempDirectory('scene-director-verify-'));
+const compositions = new FleetCompositionFileStore(await TempDirectory('scene-director-verify-fleets-'));
+const personalities = new FleetPersonalityFileStore(await TempDirectory('scene-director-verify-personalities-'));
+const movies = new MovieFileStore(await TempDirectory('scene-director-verify-movies-'));
 // The audio cache is shared with every hub on the machine (a copy of tools-core's banks, not a store).
-const hub = await new Hub({
-  port: 0,
-  eveData: EVE_DATA_OFF ? 'off' : 'tools-core',
-  toolsCore,
-  viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')),
-  scenes,
-  compositions,
-  personalities,
-  movies,
-  audioCache: EVE_DATA_OFF ? null : new AudioBankCache(),
-  log: () => undefined
-}).Start();
+const hub = await Promise.resolve()
+  .then(() =>
+    new Hub({
+      port: 0,
+      eveData: EVE_DATA_OFF ? 'off' : 'tools-core',
+      toolsCore,
+      viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')),
+      scenes,
+      compositions,
+      personalities,
+      movies,
+      audioCache: EVE_DATA_OFF ? null : new AudioBankCache(),
+      log: () => undefined
+    }).Start()
+  )
+  .catch((error: unknown) => Bail(`the hub did not start: ${ErrorMessage(error)}`));
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 // Autoplay lets the page turn audio on without a gesture, so the audio check sees the engine stems post.
-const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] });
-const results: string[] = [];
-let failed = 0;
+const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] }).catch((error: unknown) => Bail(`Chromium did not launch: ${ErrorMessage(error)}`, () => hub.Stop()));
+report.Start();
 
 /**
  * Polls get_state every 500 ms until a test passes on `streak` polls in a row.
@@ -982,26 +1022,26 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   const state = await call<ViewerState>('get_state');
   const rendering = state.renderer.available;
   const renderer = rendering ? state.renderer.adapter : `unavailable (${state.renderer.reason})`;
-  results.push(`info  renderer: ${renderer}; EVE build ${status.build}`);
+  report.Info(`renderer: ${renderer}; EVE build ${status.build}`);
   /**
    * The TFIs fleet the composition check added, for the follow check after it.
    */
   let tfis: Maybe<AddedFleetResult> = null;
 
-  await Check('get_state reports the environment only with a renderer', async () => {
+  await Check('locations: get_state reports the environment only with a renderer', async () => {
     const { environment } = state;
     Expect(rendering === (environment !== null), rendering ? 'no environment with a renderer' : 'an environment without a renderer');
     return environment ? `background ${environment.background.ready ? 'ready' : 'loading'}, dressing ${environment.dressing.state}` : 'null without a renderer';
   });
 
-  await Check('search_hulls finds frigates', async () => {
+  await Check('ship-stats: search_hulls finds frigates', async () => {
     const found = await call<{ names: string[]; total: number }>('search_hulls', { query: 'f1_t1', limit: 5 });
     Expect(found.names.includes('af1_t1'), `got ${found.names.join(', ')}`);
     return `${found.total} matches`;
   });
 
   let sdeBuild: Maybe<string> = null;
-  await Check('ship_stats reads a hull and a prop mod from the SDE', async () => {
+  await Check('ship-stats: ship_stats reads a hull and a prop mod from the SDE', async () => {
     const answer = await call<ShipStatsAnswer>('ship_stats', { dna: 'mb2_t1:minmatarnavy:minmatar', propMod: 'mwd' }).catch(SkipWithoutSde);
     const { hull, stats, withPropMod } = answer;
     sdeBuild = hull.sdeBuild ?? null;
@@ -1014,24 +1054,24 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     const live = { maxVelocity: stats.maxVelocity, withMwd: withPropMod?.maxVelocity ?? 0, signatureRadius: withPropMod?.signatureRadius ?? 0 };
     const drift = (Object.keys(fixture) as (keyof typeof fixture)[]).filter((key) => Math.abs(fixture[key] - live[key]) > 1e-3);
     const differences = drift.map((key) => `${key} ${live[key]} (fixture ${fixture[key]})`).join(', ');
-    if (drift.length) results.push(`info  SDE ${sdeBuild} differs from the spec fixtures in ${differences}`);
+    if (drift.length) report.Info(`SDE ${sdeBuild} differs from the spec fixtures in ${differences}`);
     return `SDE ${sdeBuild}: TFI ${stats.maxVelocity.toFixed(2)} m/s, align ${stats.alignTime.toFixed(2)} s; with ${answer.propMod?.name} ${withPropMod?.maxVelocity.toFixed(2)} m/s, sig ${withPropMod?.signatureRadius} m`;
   });
 
-  await Check('ship_stats names a prop mod by its EVE name', async () => {
+  await Check('ship-stats: ship_stats names a prop mod by its EVE name', async () => {
     const coldGas = await call<ShipStatsAnswer>('ship_stats', { dna: TFI_DNA, propMod: '500MN Cold-Gas Enduring Microwarpdrive' }).catch(SkipWithoutSde);
     const running = coldGas.withPropMod;
     if (!running) throw new Error('ship_stats gave no Cold-Gas numbers');
     Expect(coldGas.propMod?.typeID === 5945 && running.propModCycleTime === 10, `${JSON.stringify(coldGas.propMod)} cycle ${running?.propModCycleTime}`);
     Expect(running.maxVelocity > coldGas.stats.maxVelocity && running.signatureRadius > coldGas.stats.signatureRadius, JSON.stringify(running));
     // The plan's numbers (SDE 3632936, 2026-10-22); a difference means CCP rebalanced, which is news, not a failure.
-    if (Math.abs(running.maxVelocity - 1166.199853) > 1e-3 || running.signatureRadius !== 2100) results.push(`info  the Cold-Gas TFI flies ${running.maxVelocity} m/s, sig ${running.signatureRadius} (fixture 1166.199853, 2100)`);
+    if (Math.abs(running.maxVelocity - 1166.199853) > 1e-3 || running.signatureRadius !== 2100) report.Info(`the Cold-Gas TFI flies ${running.maxVelocity} m/s, sig ${running.signatureRadius} (fixture 1166.199853, 2100)`);
     const guardian = await call<ShipStatsAnswer>('ship_stats', { type: 11987, propMod: 'ab' });
     Expect(guardian.propMod?.typeID === 12058 && guardian.withPropMod?.propModCycleTime === 7.5, `${JSON.stringify(guardian.propMod)} cycle ${guardian.withPropMod?.propModCycleTime}`);
     return `TFI with ${coldGas.propMod?.name} ${running.maxVelocity.toFixed(2)} m/s, sig ${running.signatureRadius} m, cycle 10 s; Guardian 10MN AB II cycle 7.5 s`;
   });
 
-  await Check("the skill table matches tools-core's dogma evaluation", async () => {
+  await Check("ship-stats: the skill table matches tools-core's dogma evaluation", async () => {
     const ours = await call<ShipStatsAnswer>('ship_stats', { type: 11987 }).catch(SkipWithoutSde);
     const build = sdeBuild ?? ours.hull.sdeBuild;
     const response = await fetch(`${toolsCore.url}/eve/${build}/dogma/evaluate`, {
@@ -1046,7 +1086,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `Guardian ${effective.maxVelocity} m/s, agility ${effective.agility}`;
   });
 
-  await Check('load_scene builds valid ships and reports the bad one', async () => {
+  await Check('scene-document: load_scene builds valid ships and reports the bad one', async () => {
     const result = await call<SceneResult>('load_scene', {
       scene: {
         name: 'verify',
@@ -1064,7 +1104,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `punisher ${byId['punisher'].status}, rifter ${byId['rifter'].status}, bogus failed: ${byId['bogus'].error}`;
   });
 
-  await Check('Destiny holds ships at their document placement', async () => {
+  await Check('scene-document: Destiny holds ships at their document placement', async () => {
     const state = await call<ViewerState>('get_state');
     const placements: Record<string, number[]> = { punisher: [0, 0, 0], rifter: [2500, 0, 0], bogus: [0, 2000, 0] };
     for (const [id, position] of Object.entries(placements)) {
@@ -1074,7 +1114,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `3 balls at rest, tick ${state.simulation.tick}`;
   });
 
-  await Check('ships fly at their Ship-stats numbers', async () => {
+  await Check('scene-document: ships fly at their Ship-stats numbers', async () => {
     const answer = await call<ShipStatsAnswer>('ship_stats', { dna: 'mf1_t1:minmatarbase:minmatar' }).catch(SkipWithoutSde);
     const physicsOf = async (id: string, done: (physics: ShipPhysicsState) => boolean): Promise<ShipPhysicsState> => {
       let physics = ShipIn(await call<ViewerState>('get_state'), id).physics;
@@ -1098,7 +1138,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `rifter flies as ${rifter.typeName} (${rifter.typeID}): ${rifter.maxVelocity} m/s, align ${rifter.alignTime.toFixed(2)} s; stats 200 -> 250 m/s; bogus flies class values`;
   });
 
-  await Check('patch_scene moves, removes and renames without rebuilding', async () => {
+  await Check('scene-document: patch_scene moves, removes and renames without rebuilding', async () => {
     const result = await call<SceneResult>('patch_scene', {
       operations: [
         { op: 'update_ship', id: 'rifter', set: { position: [4000, 0, 0] } },
@@ -1114,7 +1154,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   });
 
   let stoppingSpeed = 0;
-  await Check('order_ship moves a ship through its ball', async () => {
+  await Check('scene-document: order_ship moves a ship through its ball', async () => {
     const ordered = await call<{ id: string; tick: number }>('order_ship', { id: 'rifter', order: { type: 'direction', direction: [0, 0, 1] } });
     Expect(ordered.id === 'rifter', JSON.stringify(ordered));
     let rifter = ShipIn(await call<ViewerState>('get_state'), 'rifter');
@@ -1129,7 +1169,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `z ${rifter.position?.[2]} m at ${rifter.speed} m/s`;
   });
 
-  await Check('stop slows it down', async () => {
+  await Check('scene-document: stop slows it down', async () => {
     await call('order_ship', { id: 'rifter', order: { type: 'stop' } });
     await Delay(3000);
     const rifter = ShipIn(await call<ViewerState>('get_state'), 'rifter');
@@ -1137,7 +1177,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${stoppingSpeed} m/s down to ${rifter.speed} m/s`;
   });
 
-  await Check('bad orders are refused', async () => {
+  await Check('scene-document: bad orders are refused', async () => {
     const refusal = async (args: Record<string, unknown>): Promise<string> => {
       try {
         await call('order_ship', args);
@@ -1163,7 +1203,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
 
   const helpers = new Set(['anchor', 'orbiter', 'keeper', 'chaser', 'goer']);
   try {
-    await Check("orbit, keep-at-range, approach and goto fly at the ships' speeds", async () => {
+    await Check("scene-document: orbit, keep-at-range, approach and goto fly at the ships' speeds", async () => {
       const frigate = 'mf1_t1:minmatarbase:minmatar';
       const amarr = 'af1_t1:amarrbase:amarr';
       const added = await call<SceneResult>('patch_scene', {
@@ -1224,7 +1264,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `orbit ${orbiter.targetDistance} m at ${orbiter.speed} m/s, keep ${keeper.targetDistance} m, approach closest ${closest} m (top ${chaserTop} m/s), goto ${goer.speed} m/s at ${JSON.stringify(goer.position)}, align ${alignTicks} ticks for ${goer.physics?.alignTime.toFixed(2)} s`;
     });
 
-    await Check('removing a target stops its followers', async () => {
+    await Check('scene-document: removing a target stops its followers', async () => {
       const { changes } = await call<SceneResult>('patch_scene', { operations: [{ op: 'remove_ship', id: 'anchor' }] });
       Expect(changes['stopped'] === 3, JSON.stringify(changes));
       const state = await call<ViewerState>('get_state');
@@ -1243,7 +1283,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   }
 
   try {
-    await Check('a ship warps, lands, and refuses orders in warp', async () => {
+    await Check('scene-document: a ship warps, lands, and refuses orders in warp', async () => {
       const added = await call<SceneResult>('patch_scene', {
         operations: [
           { op: 'add_ship', ship: { id: 'warper', dna: 'mf1_t1:minmatarbase:minmatar', position: [-50000, 0, 0] } },
@@ -1335,7 +1375,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
 
   const propModHelpers = new Set(['mwd-tfi', 'ab-guardian', 'audio-probe-tfi']);
   try {
-    await Check("switch_prop_mods runs a ship's MWD at its module's numbers", async () => {
+    await Check("scene-document: switch_prop_mods runs a ship's MWD at its module's numbers", async () => {
       await call('patch_scene', {
         operations: [
           { op: 'add_ship', ship: { id: 'mwd-tfi', dna: TFI_DNA, position: [0, 0, -60000] } },
@@ -1370,7 +1410,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `${tfi.propMod?.name}: ${physics.maxVelocity.toFixed(2)} m/s, sig ${physics.signatureRadius} m; ${ShipIn(fast, 'mwd-tfi').speed} m/s; stopping in ${stopsIn} s, then ${peak} -> ${ShipIn(slowing, 'mwd-tfi').speed} m/s`;
     });
 
-    await Check('set_prop_mods sets the start state', async () => {
+    await Check('scene-document: set_prop_mods sets the start state', async () => {
       const set = await call<SceneResult>('patch_scene', { operations: [{ op: 'set_prop_mods', ships: ['ab-guardian'], active: true }] });
       Expect(set.changes['switched'] === 1, JSON.stringify(set.changes));
       const scene = await call<{ ships: { id: string; propMod?: unknown }[] }>('get_scene');
@@ -1383,11 +1423,11 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `ab-guardian's ${loaded?.name ?? '10MN Afterburner II'} active at once and after a load`;
     });
 
-    await Check('prop mod audio posts the engine stems', async () => {
+    await Check('scene-document: prop mod audio posts the engine stems', async () => {
       const ready = await WaitFor('the audio settles', 90, (state) => (state.audio && state.audio.state !== 'loading' ? null : JSON.stringify(state.audio)));
       const audio = ready.audio as AudioState;
       const why = audio.error ? ` (${audio.error})` : '';
-      results.push(`info  audio: ${audio.state}${why}`);
+      report.Info(`audio: ${audio.state}${why}`);
       Expect(audio.state !== 'on' || audio.context === 'running', `audio on with its AudioContext ${audio.context}`);
       await call('switch_prop_mods', { ships: ['mwd-tfi'], active: true });
       await WaitFor('the MWD active', 4, (state) => (ShipIn(state, 'mwd-tfi').propMod?.state === 'active' ? null : JSON.stringify(ShipIn(state, 'mwd-tfi').propMod)));
@@ -1405,7 +1445,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `${posted.map((entry) => entry.event).join(', ')} (${played}); ${after.audio?.frameErrors ?? 0} audio frames failed in the runtime, ${after.audio?.rescheduled ?? 0} voices rescheduled, ${after.audio?.backendErrors ?? 0} backend calls contained`;
     });
 
-    await Check("SOF ships' own audio emitters stay inert", async () => {
+    await Check("scene-document: SOF ships' own audio emitters stay inert", async () => {
       const before = await call<ViewerState>('get_state');
       if (before.audio?.state !== 'on') throw new Skipped(`audio ${before.audio?.state ?? 'unreported'}`);
       if (!before.renderer.available) throw new Skipped('no renderer, so no ship hydrates');
@@ -1423,7 +1463,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     if (operations.length) await call('patch_scene', { operations });
   }
 
-  await Check('an invalid patch is refused with its problems', async () => {
+  await Check('scene-document: an invalid patch is refused with its problems', async () => {
     let refused: unknown = null;
     try {
       await call('patch_scene', { operations: [{ op: 'update_ship', id: 'nobody', set: {} }] });
@@ -1436,7 +1476,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   });
 
   // The fleet stays in the scene, so the save checks below prove it survives both stores.
-  await Check('get_state reports fleet membership and the fleet tree', async () => {
+  await Check('scene-document: get_state reports fleet membership and the fleet tree', async () => {
     const fleet = { id: 'verify-fleet', commander: 'punisher', wings: [{ id: 'wing-1', squads: [{ id: 'dps', role: 'dps', members: ['rifter'] }] }] };
     const { changes } = await call<SceneResult>('patch_scene', { operations: [{ op: 'add_fleet', fleet }] });
     Expect(changes['regrouped'] === 2 && changes['moved'] === 0 && changes['rebuilt'] === 0 && changes['added'] === 0, JSON.stringify(changes));
@@ -1455,7 +1495,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'rifter anchors on punisher at 2500 m';
   });
 
-  await Check('save, list, open and delete round-trip through IndexedDB', async () => {
+  await Check('scene-document: save, list, open and delete round-trip through IndexedDB', async () => {
     await call('save_scene', { name: 'verify-saved', store: 'browser' });
     Expect(
       (await call<SceneListing>('list_scenes')).scenes.some((entry) => entry.name === 'verify-saved' && entry.store === 'browser'),
@@ -1469,7 +1509,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-saved', store: 'browser' })).deleted, 'not deleted');
   });
 
-  await Check('save, list, open and delete round-trip through scene files', async () => {
+  await Check('scene-document: save, list, open and delete round-trip through scene files', async () => {
     const saved = await call<{ file: string; ships: number }>('save_scene', { name: 'verify-saved-disk' });
     Expect(saved.ships === 2, `saved ${saved.ships} ships`);
     Expect(
@@ -1486,7 +1526,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return saved.file;
   });
 
-  await Check('the working scene survives a reload', async () => {
+  await Check('scene-document: the working scene survives a reload', async () => {
     await page.reload();
     let restored = false;
     for (let attempt = 0; attempt < 100 && !restored; attempt++) {
@@ -1499,7 +1539,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'restored';
   });
 
-  await Check("the dogma path matches tools-core's evaluation on a bare hull", async () => {
+  await Check("fittings: the dogma path matches tools-core's evaluation on a bare hull", async () => {
     await call<ShipStatsAnswer>('ship_stats', { type: 587 }).catch(SkipWithoutSde);
     await call('load_scene', { scene: { name: 'verify-fit', ships: [{ id: 'bare', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', fit: '[Rifter, Bare]' }] } });
     const state = await WaitFor("the bare Rifter's fit resolves", 60, (polled) => {
@@ -1533,7 +1573,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `Rifter ${defense.shield.max} / ${defense.armor.max} / ${defense.structure.max} HP, capacitor ${capacitor.capacity} GJ in ${capacitor.rechargeTime} s: ${pairs.length} values match`;
   });
 
-  await Check('an unfitted ship gets default guns sized for its hull and race', async () => {
+  await Check('weapons: an unfitted ship gets default guns sized for its hull and race', async () => {
     const answer = await call<ShipStatsAnswer>('ship_stats', { dna: 'mf1_t1:minmatarbase:minmatar' }).catch(SkipWithoutSde);
     const ships = [
       { id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar', position: [0, 0, 0] },
@@ -1601,7 +1641,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return guns.every((gun) => (gun.state === 'online' || gun.state === 'reactivating') && why.test(gun.note ?? '')) ? null : JSON.stringify(guns);
     });
 
-  await Check('set_target aims and switch_modules fires turrets on their cycle', async () => {
+  await Check('weapons: set_target aims and switch_modules fires turrets on their cycle', async () => {
     await LoadTurretScene();
     const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
     const [setShip] = set.ships;
@@ -1630,7 +1670,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `3 x ${TURRET_GUN} at ${turretGunTime} s a cycle (ship_stats' number): ${fired} shots in ${elapsed.toFixed(1)} s (expected ${expected.toFixed(1)}), none after the stop`;
   });
 
-  await Check('weapons follow a new target and stop when it is cleared', async () => {
+  await Check('weapons: weapons follow a new target and stop when it is cleared', async () => {
     await LoadTurretScene();
     await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
     await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
@@ -1646,7 +1686,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `retargeted onto punisher-2 at the first cycle once locked (${Shots(retargeted)} shots by then), stopped at the cycle end once cleared`;
   });
 
-  await Check('a removed or warping target clears and stops the guns', async () => {
+  await Check('weapons: a removed or warping target clears and stops the guns', async () => {
     await LoadTurretScene();
     await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'punisher' });
     await GunsRun('punisher');
@@ -1661,7 +1701,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'removing the target stopped the guns at once; its warp broke the target and stopped them';
   });
 
-  await Check('turrets fire at an object', async () => {
+  await Check('weapons: turrets fire at an object', async () => {
     await LoadTurretScene();
     await call<AddObjectsResult>('add_objects', { objects: [{ type: 'Astrahus', id: 'astra', near: { ship: 'rifter', range: 20000 } }] });
     const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'astra' });
@@ -1678,7 +1718,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${Shots(firing)} shots at the Astrahus ${target?.distance} m off (surface to surface); a celestial is refused`;
   });
 
-  await Check('turrets are not refused by range: they wait for the lock', async () => {
+  await Check('weapons: turrets are not refused by range: they wait for the lock', async () => {
     await LoadTurretScene();
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active', target: 'far' });
     Expect(on.ships[0]?.modules.length === 3 && !on.skipped.length, JSON.stringify(on));
@@ -1696,7 +1736,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `not refused at ${target?.distance} m: the guns wait with "${Guns(waiting)[0]?.note}" (effectiveness ${Guns(waiting)[0]?.effectiveness})`;
   });
 
-  await Check('turret sounds post with the shots', async () => {
+  await Check('weapons: turret sounds post with the shots', async () => {
     await LoadTurretScene();
     const beyond = (state: ViewerState) => (state.audio?.gameObjects ?? 0) - (state.audio?.emitters ?? 0);
     const before = await WaitFor('the audio settles', 90, (state) => (state.audio && state.audio.state !== 'loading' ? null : JSON.stringify(state.audio)));
@@ -1748,7 +1788,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
   const ShipGuns = (state: ViewerState, id: string): ShipModuleRowState[] => ShipIn(state, id).fit?.modules.filter((module) => module.combat) ?? [];
 
-  await Check('get_overview measures the fight from one ship', async () => {
+  await Check('piloting: get_overview measures the fight from one ship', async () => {
     const ships = [
       { ...Rifter('rifter', [0, 0, 0]), team: 'blue' },
       { ...Punisher('punisher', [8000, 0, 0]), team: 'red' },
@@ -1775,7 +1815,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `rifter sees punisher at ${punisher.distance} m (in ${punisher.incomingDps} / out ${punisher.outgoingDps} dps, hit ${punisher.hitChance}); ${envelope?.ideal?.type} ideal ${envelope?.ideal?.ideal} m in ${Show(envelope?.ideal?.window)}`;
   });
 
-  await Check('pilots fly their stances: a kiter holds its window and a model takes it over', async () => {
+  await Check('piloting: pilots fly their stances: a kiter holds its window and a model takes it over', async () => {
     interface StanceState {
       readonly state?: string;
       readonly focus?: string;
@@ -1806,7 +1846,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `kites the punisher at ${distance} m in ${Show(window)}; ${StanceOf(manual, 'rifter')?.state} after order_ship, flying again after a stance order`;
   });
 
-  await Check("set_target locks with EVE's lock time and the guns wait for the lock", async () => {
+  await Check("combat: set_target locks with EVE's lock time and the guns wait for the lock", async () => {
     await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [5000, 0, 0])], { death: 'flag' });
     const set = await call<SetTargetResult>('set_target', { ships: ['rifter'], target: 'punisher' });
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['rifter'], modules: ['turret'], state: 'active' });
@@ -1834,7 +1874,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `lockTime ${lock?.lockTime} s (EVE's ${expected.toFixed(3)} from scan ${rifter.targeting?.scanResolution} mm and sig ${signature} m); first shot at tick ${first} (lock due ${due}); at 40 km: "${LockOf(lost, 'rifter', 'punisher')?.note}"`;
   });
 
-  await Check('hits at rest within optimal always hit and land EVE damage through resists', async () => {
+  await Check('combat: hits at rest within optimal always hit and land EVE damage through resists', async () => {
     const loaded = await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0])], { death: 'flag' });
     const [gun] = ShipGuns(loaded, 'p1');
     const damage: Record<string, number> = gun?.combat?.damage ?? {};
@@ -1867,7 +1907,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${shooters.reduce((sum, combat) => sum + (combat?.shots ?? 0), 0)} shots, all hits; ${shieldRows.length} shield rows match the volley through resists; dealt ${dealt.toFixed(1)} = taken ${taken} (HP lost ${lost.toFixed(1)}); shield ${defense?.shield.hp}, armor ${defense?.armor.hp}`;
   });
 
-  await Check('shots in falloff mostly miss, and misses post no impact sound', async () => {
+  await Check('combat: shots in falloff mostly miss, and misses post no impact sound', async () => {
     await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [20150, 0, 0])], { death: 'flag' });
     const engaged = await call<EngageResult>('engage', { ships: ['rifter'], target: 'punisher', modules: ['high-0'] });
     Expect(engaged.ships[0]?.modules.length === 1, Show(engaged));
@@ -1881,7 +1921,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${combat?.misses} of ${combat?.shots} missed at ${ShipIn(done, 'rifter').target?.distance} m (chance ${combat?.lastHits[0]?.chance}); ${impacts} impact sounds for ${combat?.hits} hits`;
   });
 
-  await Check('engage arms the guns; cease_fire stops them; a lost lock re-fires after the re-lock', async () => {
+  await Check('combat: engage arms the guns; cease_fire stops them; a lost lock re-fires after the re-lock', async () => {
     await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('punisher', [5000, 0, 0])], { death: 'flag' });
     await call<EngageResult>('engage', { ships: ['rifter'], target: 'punisher' });
     const firing = await WaitFor('the engaged guns fire', 15, (polled) => ((ShipIn(polled, 'rifter').combat?.shots ?? 0) >= 3 && ShipIn(polled, 'rifter').engaged ? null : Show(ShipIn(polled, 'rifter').locks)));
@@ -1898,7 +1938,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${ShipIn(firing, 'rifter').combat?.shots} shots engaged; out of range at ${before} shots, firing again at ${ShipIn(again, 'rifter').combat?.shots} after the re-lock with no new command; stopped at ${ShipIn(quiet, 'rifter').combat?.shots}; unlocked at tick ${unlocked.simulation.tick}`;
   });
 
-  await Check('the same seed replays the same fight; another seed differs', async () => {
+  await Check('combat: the same seed replays the same fight; another seed differs', async () => {
     const Fight = async (seed?: number): Promise<string> => {
       await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0])], { death: 'flag', ...(seed == null ? {} : { seed }) });
       const engaged = await call<EngageResult>('engage', { ships: ['p1', 'p2'], target: 'rifter' });
@@ -1915,7 +1955,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `seed 1: ${first} (twice); seed 2: ${other}`;
   });
 
-  await Check('a ship at 0 hull explodes and leaves cleanly', async () => {
+  await Check('combat: a ship at 0 hull explodes and leaves cleanly', async () => {
     const loaded = await LoadCombatScene([Rifter('rifter', [0, 0, 0]), Punisher('p1', [2000, 0, 0]), Punisher('p2', [-2000, 0, 0]), Punisher('orbiter', [0, 0, 3000])]);
     const objects = (loaded.audio?.gameObjects ?? 0) - (loaded.audio?.emitters ?? 0);
     await call('order_ship', { id: 'orbiter', order: { type: 'orbit', target: 'rifter', range: 2500 } });
@@ -1968,7 +2008,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       (error: unknown) => (ErrorProblems(error) ?? []).join('; ') || ErrorMessage(error)
     );
 
-  await Check('set_hp sets layers by HP and percent and the total shield first; get_state reports the set', async () => {
+  await Check('combat: set_hp sets layers by HP and percent and the total shield first; get_state reports the set', async () => {
     const loaded = await LoadCombatScene([Rifter('r1', [0, 0, 0]), Rifter('r2', [0, 0, 3000]), Rifter('r3', [0, 0, -3000])], { death: 'flag' });
     const [shieldMax, armorMax, structureMax] = MaxOf(loaded, 'r1');
     const one = await call<SetHpResult>('set_hp', { ships: ['r1'], shield: '0%', armor: 200, structure: '50%' });
@@ -1988,7 +2028,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `r1 ${Show(HpOf(state, 'r1'))}; r2 total 40 % → ${Show(HpOf(state, 'r2'))}; r3 armor 9999 → ${HpOf(state, 'r3')[1]} (${three.ships[0]?.clamped?.join()}); maxes ${Show([shieldMax, armorMax, structureMax])}`;
   });
 
-  await Check('set_hp cinematic holds 1 HP of structure; gameplay at 0 destroys under combat.death', async () => {
+  await Check('combat: set_hp cinematic holds 1 HP of structure; gameplay at 0 destroys under combat.death', async () => {
     await LoadCombatScene([Rifter('a', [0, 0, 0]), Rifter('b', [3000, 0, 0])]);
     const held = await call<SetHpResult>('set_hp', { ships: ['a'], total: 0 });
     Expect(HpNear([held.ships[0].shield.hp, held.ships[0].armor.hp, held.ships[0].structure.hp], [0, 0, 1]) && /never kills/u.test(held.ships[0].clamped?.join() ?? ''), Show(held));
@@ -2015,7 +2055,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `a total 0 → ${Show([held.ships[0].shield.hp, held.ships[0].armor.hp, held.ships[0].structure.hp])}; b killed at the boundary +${(kill?.tick ?? 0) - killed.tick} (cause ${kill?.cause}), sounds ${Show(sounds)}; c flagged at tick ${c.destroyed?.tick}, flies on`;
   });
 
-  await Check('set_hp random draws replay with the seed and differ with another seed', async () => {
+  await Check('combat: set_hp random draws replay with the seed and differ with another seed', async () => {
     const ids = ['m1', 'm2', 'm3', 'm4', 'm5'];
     const fleets = [{ id: 'f', commander: 'm1', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ids.slice(1) }] }] }];
     const Draw = async (seed?: number): Promise<{ result: SetHpResult; hp: number[] }> => {
@@ -2038,7 +2078,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `seed 1: ${Show(first.hp)} (twice); seed 7: ${Show(other.hp)}; armor max ${max}`;
   });
 
-  await Check('set_hp shields recharge from the set HP and hits land on the armor it left', async () => {
+  await Check('combat: set_hp shields recharge from the set HP and hits land on the armor it left', async () => {
     await LoadCombatScene([Rifter('r', [0, 0, 0]), Punisher('p', [2000, 0, 0])], { death: 'flag' });
     const set = await call<SetHpResult>('set_hp', { ships: ['r'], shield: 0, armor: '50%' });
     const armor = set.ships[0].armor.hp;
@@ -2057,7 +2097,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `shield ${shield} HP after ${elapsed} boundaries (τ ${tau} s; curve ${Math.round(curve(elapsed) * 1000) / 1000}); first hits on ${Show([...new Set(rows.map((taken) => taken.layer))])}, armor ${armor} → ${ShipIn(hit, 'r').defense?.armor.hp}`;
   });
 
-  await Check('set_hp refuses bad values and changes nothing', async () => {
+  await Check('combat: set_hp refuses bad values and changes nothing', async () => {
     const loaded = await LoadCombatScene([Rifter('r', [0, 0, 0])]);
     const full = HpOf(loaded, 'r');
     const refusals = [
@@ -2079,7 +2119,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return texts.join(' | ');
   });
 
-  await Check('set_hp on a fleet right after the load waits for the fits, then applies', async () => {
+  await Check('combat: set_hp on a fleet right after the load waits for the fits, then applies', async () => {
     await call<ShipStatsAnswer>('ship_stats', { type: 'Rifter' }).catch(SkipWithoutSde);
     // Slashers with an EFT fit no earlier check names: the hub still resolves its names and dogma when the set runs.
     const fit = ['[Slasher, Pending]', 'Damage Control II', '', '1MN Afterburner II', '', '125mm Gatling AutoCannon II, EMP S'].join('\n');
@@ -2109,7 +2149,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   // The missiles from `ship` that lost their target (or their ship) with `why`.
   const LostFlights = (state: ViewerState, ship: string, why: RegExp) => Flights(state, ship).filter((flight) => flight.state === 'lost' && why.test(flight.why ?? ''));
 
-  await Check('launchers fire missiles on their cycle', async () => {
+  await Check('combat: launchers fire missiles on their cycle', async () => {
     await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [15000, 0, 0])], { death: 'flag' });
     const bare = await call<SwitchModulesResult>('switch_modules', { ships: ['caracal'], modules: ['launcher'], state: 'active' });
     Expect(!bare.ships.length && bare.skipped.length === 5 && bare.skipped.every((skip) => skip.reason === 'it needs a target: set_target or switch_modules target'), Show(bare));
@@ -2137,7 +2177,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `5 launchers waited for the lock, then ${more} launches in ${Math.round(elapsed * 10) / 10} s (expected ${Math.round(expected * 10) / 10} at ${rows[0]?.cycleTime} s); none after the stop (${quiet.missiles?.launched} launched)`;
   });
 
-  await Check("missiles hit through EVE's formula", async () => {
+  await Check("combat: missiles hit through EVE's formula", async () => {
     await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [15000, 0, 0])], { death: 'flag' });
     await call<EngageResult>('engage', { ships: ['caracal'], target: 'punisher', modules: ['launcher'] });
     const launched = await WaitFor('the first launch', 30, (polled) => (Flights(polled, 'caracal').length ? null : Show(ShipIn(polled, 'caracal').locks)));
@@ -2163,7 +2203,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `launched at tick ${launchTick} at ${distance} m, first hit at ${firstHit}; quality ${rows[0]?.quality} (37 / 105); ${rows[0]?.damage} HP per missile into the shield (volley ${volley}, kinetic resist ${kinetic} %); dealt ${caracal?.dealt} = taken ${punisher?.taken}`;
   });
 
-  await Check('a missile that cannot reach its target expires without damage', async () => {
+  await Check('combat: a missile that cannot reach its target expires without damage', async () => {
     // 11,250 m/s with Navigation V: faster than the heavy missile.
     const fast = { ...Punisher('punisher', [15000, 0, 0]), stats: { maxVelocity: 9000 } };
     await LoadCombatScene([Caracal('caracal', [0, 0, 0]), fast], { death: 'flag' });
@@ -2183,7 +2223,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `the fleeing Punisher (${ShipIn(expired, 'punisher').speed} m/s) outran ${after.missiles?.expired} missiles: ${misses} misses, its taken stayed ${taken} HP`;
   });
 
-  await Check('missiles at a dead or warping target are lost', async () => {
+  await Check('combat: missiles at a dead or warping target are lost', async () => {
     const loaded = await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Rifter('rifter', [50000, 0, 0]), Punisher('p1', [50000, 0, 2000]), Punisher('p2', [50000, 0, -2000]), Punisher('runner', [0, 0, 50000])]);
     // Far enough that a volley is always flying (≈ one cycle of flight), within the Caracal's lock range.
     const range = Math.min((ShipIn(loaded, 'caracal').targeting?.maxTargetRange ?? 50000) - 5000, 60000);
@@ -2205,7 +2245,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${LostFlights(dead, 'caracal', /destroyed/u).length} lost at the dead Rifter (${overkill.length} overkill rows in the last 3), its taken stayed ${taken} HP; ${LostFlights(warped, 'caracal', /warp/u).length} lost as the runner warped`;
   });
 
-  await Check('a shooter that warps loses its missiles', async () => {
+  await Check('combat: a shooter that warps loses its missiles', async () => {
     const loaded = await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [50000, 0, 0])], { death: 'flag' });
     await Move('punisher', [Math.min((ShipIn(loaded, 'caracal').targeting?.maxTargetRange ?? 50000) - 5000, 60000), 0, 0]);
     await call<EngageResult>('engage', { ships: ['caracal'], target: 'punisher' });
@@ -2217,7 +2257,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${LostFlights(gone, 'caracal', /warp/u).length} missiles vanished as the Caracal entered warp; ${gone.missiles?.inFlight} in flight`;
   });
 
-  await Check('missiles kill like turrets, and engage arms launchers by default', async () => {
+  await Check('combat: missiles kill like turrets, and engage arms launchers by default', async () => {
     const loaded = await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Rifter('rifter', [8000, 0, 0])]);
     const objects = (loaded.audio?.gameObjects ?? 0) - (loaded.audio?.emitters ?? 0);
     const engaged = await call<EngageResult>('engage', { ships: ['caracal'], target: 'rifter' });
@@ -2231,7 +2271,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `engage armed 5 launchers by default; killed by ${kill?.by} ${kill?.module} (${kill?.weapon}) ${(kill?.tick ?? 0) - engaged.tick} ticks after engage; ${ShipIn(gone, 'rifter').destroyed?.explosion?.file} gone at tick ${gone.simulation.tick}; gameObjects − emitters ${after}`;
   });
 
-  await Check('launcher and missile impact sounds post', async () => {
+  await Check('combat: launcher and missile impact sounds post', async () => {
     await LoadCombatScene([Caracal('caracal', [0, 0, 0]), Punisher('punisher', [15000, 0, 0])], { death: 'flag' });
     const beyond = (state: ViewerState) => (state.audio?.gameObjects ?? 0) - (state.audio?.emitters ?? 0);
     const before = await WaitFor('the audio settles', 90, (state) => (state.audio && state.audio.state !== 'loading' ? null : JSON.stringify(state.audio)));
@@ -2260,7 +2300,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   const fleetFightShips = [Punisher('fc', [0, 0, 0]), Punisher('wc', [0, 0, -1500]), Rifter('lead', [1500, 0, 0]), Rifter('member', [3000, 0, 0]), Punisher('k1', [0, 0, 2500]), Punisher('k2', [1500, 0, 2500])];
   const fleetFight = { fleets: [{ id: 'f', commander: 'fc', wings: [{ id: 'w', commander: 'wc', squads: [{ id: 's', role: 'dps', commander: 'lead', members: ['lead', 'member'], anchor: { ship: 'lead', range: 1500 } }] }] }] };
 
-  await Check('a dead squad lead and a dead FC fall back like a removal', async () => {
+  await Check('combat: a dead squad lead and a dead FC fall back like a removal', async () => {
     await LoadCombatScene(fleetFightShips, undefined, fleetFight);
     await call<EngageResult>('engage', { ships: ['k1', 'k2'], target: 'lead' });
     const leadDead = await WaitFor("the lead's death re-anchors the squad", 60, (polled) => {
@@ -2278,7 +2318,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `lead dead at tick ${ShipIn(leadDead, 'lead').destroyed?.tick}: the squad anchors on wc; FC dead at tick ${ShipIn(fcDead, 'fc').destroyed?.tick}: wc acts for fc (destroyed ${Show(fcDead.fleets[0]?.destroyed)}), member ${ShipIn(fcDead, 'member').following?.state} on ${ShipIn(fcDead, 'member').anchor?.ship}`;
   });
 
-  await Check('a moving FC dies and its fleet flies on: the heir inherits its order', async () => {
+  await Check('combat: a moving FC dies and its fleet flies on: the heir inherits its order', async () => {
     await LoadCombatScene(fleetFightShips, undefined, fleetFight);
     await call('order_fleet', { fleet: 'f', order: { type: 'direction', direction: [1, 0, 0], speed: 0.5 } });
     for (const id of ['k1', 'k2']) await call('order_ship', { id, order: { type: 'keep-at-range', target: 'fc', range: 1000 } });
@@ -2311,7 +2351,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `FC dead at tick ${deathTick}; wc flies ${Show(ShipIn(flying, 'wc').order)} at ${ShipIn(flying, 'wc').speed} m/s (${before} before, the FC at ${fcBefore}, slowest ${slowest}); member ${ShipIn(flying, 'member').following?.state} on ${ShipIn(flying, 'member').anchor?.ship}`;
   });
 
-  await Check('load_scene revives the dead', async () => {
+  await Check('combat: load_scene revives the dead', async () => {
     const revived = await LoadCombatScene(fleetFightShips, undefined, fleetFight);
     const ships = fleetFightShips.map((ship) => ShipIn(revived, ship.id));
     const hurt = ships.filter((ship) => ship.destroyed || ship.position == null || (['shield', 'armor', 'structure'] as const).some((layer) => (ship.defense?.[layer].hp ?? 0) < (ship.defense?.[layer].max ?? 1)));
@@ -2337,7 +2377,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       (error: unknown) => String(error)
     );
 
-  await Check("a called primary focuses a squad's fire and the next called target follows the kill", async () => {
+  await Check("fleets: a called primary focuses a squad's fire and the next called target follows the kill", async () => {
     const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Punisher('g1', [-1500, 0, 0]), Rifter('r1', [5000, 0, 0]), Rifter('r2', [5000, 0, 1500])];
     const fleets = [
       {
@@ -2385,7 +2425,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `bfc, p1, p2 on r1 (called), g1 logi, p1 pre-locked r2 at tick ${called.simulation.tick}; r1 killed at tick ${killTick}, first shot on r2 at ${firstOnR2} (+${firstOnR2 - killTick}, slowest cycle ${slowest} s); the live list keeps ${Show(CalledOf(switched)?.targets)}, the document none; r2 dead, primary null, guns settled at tick ${settled.simulation.tick}`;
   });
 
-  await Check("own targets win over the called targets, and a squad's call beats the fleet's", async () => {
+  await Check("fleets: own targets win over the called targets, and a squad's call beats the fleet's", async () => {
     const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Punisher('p3', [-1200, 0, 0]), Punisher('g1', [-1500, 0, 1500]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000]), Tempest('r3', [6000, 0, -3000])];
     const fleets = [
       {
@@ -2425,7 +2465,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `calls at tick ${calls.simulation.tick}: bfc, p1, p2 on r1, p3 on r2 (squad c), g1 on r3 (logi squad); set_target made p1 own on r3 (tick ${own.tick}, ${Show(ShipIn(owned, 'p1').call)}); p2's null skipped: "${follows.skipped[0]?.reason}"; p1's null handed it r1 (called); squad c clear: p3 on ${ShipIn(back, 'p3').target?.id}`;
   });
 
-  await Check('cease_fire holds a called fleet until it calls again; a delayed call staggers the pilots', async () => {
+  await Check('fleets: cease_fire holds a called fleet until it calls again; a delayed call staggers the pilots', async () => {
     const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Punisher('p3', [-1200, 0, 0]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000])];
     const fleets = [{ id: 'b', commander: 'bfc', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['p1', 'p2', 'p3'] }] }] }];
     const all = ['bfc', 'p1', 'p2', 'p3'];
@@ -2467,7 +2507,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `held at ${before} shots for 5 s; delay 1: switch ticks ${Show(Object.fromEntries(switchedAt))} (order at ${order.tick}, delays ${Show(delays)}); stood down, then next re-armed onto r1 (${shotsOf(rearmed)} shots)`;
   });
 
-  await Check("removing a called target advances the document's queue and the live lists; a load keeps the call; bad calls are refused", async () => {
+  await Check("fleets: removing a called target advances the document's queue and the live lists; a load keeps the call; bad calls are refused", async () => {
     const ships = [Punisher('bfc', [0, 0, 0]), Punisher('p1', [0, 0, 1200]), Punisher('p2', [0, 0, -1200]), Tempest('r1', [6000, 0, 0]), Tempest('r2', [6000, 0, 3000]), Rifter('r3', [4000, 0, -2000]), Rifter('r4', [5000, 0, 2000])];
     const fleets = [{ id: 'b', commander: 'bfc', targets: ['r1', 'r2'], wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ['p1', 'p2'] }] }] }];
     const members = ['bfc', 'p1', 'p2'];
@@ -2617,7 +2657,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     });
   };
 
-  await Check('a fit without guns gets no default guns', async () => {
+  await Check('fittings: a fit without guns gets no default guns', async () => {
     const state = await LoadModulesScene();
     const fits = ['logi', 'tfi'].map((id) => ShipIn(state, id).fit);
     const guns = fits.flatMap((fit) => fit?.modules.filter((module) => module.module.startsWith('high-') && /cannon|laser|railgun|blaster|launcher/iu.test(module.name)) ?? []);
@@ -2625,7 +2665,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'the Guardian logi fit and the bare TFI keep their own fits: no guns';
   });
 
-  await Check("switch_modules runs a Guardian's armor hardener on EVE's timing", async () => {
+  await Check("fittings: switch_modules runs a Guardian's armor hardener on EVE's timing", async () => {
     const before = await LoadModulesScene();
     const thermal = ShipIn(before, 'logi').defense?.armor.resists.thermal ?? Number.NaN;
     Expect(ModuleRow(before, 'logi', 'low-0').state === 'online', JSON.stringify(ModuleRow(before, 'logi', 'low-0')));
@@ -2651,7 +2691,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `thermal ${thermal} % -> ${raised} % while active, back after a ${stopping?.stopsIn} s stop; passive and unmatched selectors skipped`;
   });
 
-  await Check('switch_modules prop matches switch_prop_mods', async () => {
+  await Check('fittings: switch_modules prop matches switch_prop_mods', async () => {
     await LoadModulesScene();
     const on = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['prop'], state: 'active' });
     Expect(on.ships[0]?.modules[0]?.module === 'mid-0' && on.ships[0].modules[0].state === 'activating', JSON.stringify(on));
@@ -2669,7 +2709,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `mid-0 ${ModuleRow(state, 'logi', 'mid-0').name} active at ${ShipIn(state, 'logi').physics?.maxVelocity} m/s through Destiny; switch_prop_mods off reads stopping in its row; offline refused`;
   });
 
-  await Check('remote reps take a target and stop when it is removed', async () => {
+  await Check('fittings: remote reps take a target and stop when it is removed', async () => {
     await LoadModulesScene();
     const untargeted = await call<SwitchModulesResult>('switch_modules', { ships: ['logi'], modules: ['remote-armor-repairer'], state: 'active' });
     Expect(!untargeted.ships.length && untargeted.skipped.length === 2 && untargeted.skipped.every((skip) => /needs a target/.test(skip.reason)), JSON.stringify(untargeted));
@@ -2896,7 +2936,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     });
   };
 
-  await Check('webs slow their target and points pin it', async () => {
+  await Check('fittings: webs slow their target and points pin it', async () => {
     const before = await LoadTackleScene();
     const base: Record<string, number> = { tfi: MaxVelocityOf(before, 'tfi'), free: MaxVelocityOf(before, 'free') };
     const webbed: string[] = [];
@@ -2939,7 +2979,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${webbed.join('; ')}; pointed: ${ShipIn(pinned, 'tfi').targeted?.warpNote}; refused "${refused}"; after the point's cycle end the warp was accepted (${ShipIn(aligning, 'tfi').warp?.phase ?? 'ordered'}), then placed back`;
   });
 
-  await Check("a scram switches its target's MWD off and keeps it off", async () => {
+  await Check("fittings: a scram switches its target's MWD off and keeps it off", async () => {
     await LoadTackleScene();
     const on = await call<SwitchPropModsResult>('switch_prop_mods', { ships: ['free'], active: true });
     Expect(on.ships[0]?.state === 'activating', JSON.stringify(on));
@@ -2965,7 +3005,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${ShipIn(blocked, 'free').propMod?.name} ${ShipIn(blocked, 'free').propMod?.note}; switch-on refused: ${refused.skipped[0]?.reason}; stayed off after the scram, then switched on`;
   });
 
-  await Check("neuts drain and transmitters refill a fitted target's capacitor", async () => {
+  await Check("fittings: neuts drain and transmitters refill a fitted target's capacitor", async () => {
     const before = await LoadTackleScene();
     const full = ShipIn(before, 'tfi').capacitor;
     if (!full || full.level == null) throw new Error(`tfi capacitor ${JSON.stringify(full)}`);
@@ -3008,7 +3048,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `neut moved ${neutRow?.moved} GJ: ${start} -> ${low} of ${capacity} GJ; the transmitter gave ${given.join(', ')} GJ up to ${ShipIn(topped, 'tfi').capacitor?.level}; the shuttle: "${ShipIn(unfitted, 'shuttle').targeted?.by[0]?.note}"`;
   });
 
-  await Check('add_fleet_composition drops the TFIs fleet in formation', async () => {
+  await Check('fleets: add_fleet_composition drops the TFIs fleet in formation', async () => {
     await call('load_scene', { scene: { name: 'verify-fleets', ships: [{ id: 'bystander', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
     const result = await call<AddedFleetResult>('add_fleet_composition', { name: 'tfis', position: [0, 0, 80000], heading: 180, team: 'blue' });
     Expect(result.added.fleet === 'tfis' && result.added.ships.length === 44, JSON.stringify(result.added));
@@ -3056,7 +3096,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `44 ships, smallest surface gap ${smallestGap.toFixed(0)} m, logi lead ${Math.hypot(lead[0] - origin[0], lead[1] - origin[1], lead[2] - origin[2]).toFixed(0)} m off the FC`;
   });
 
-  await Check('a fleet added in formation starts following without a scramble', async () => {
+  await Check('fleets: a fleet added in formation starts following without a scramble', async () => {
     const added = tfis;
     if (!added) throw new Skipped('the TFIs fleet was not added');
     const hullRadius = new Map(added.hulls.map((hull) => [hull.hull, hull.radius]));
@@ -3080,7 +3120,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${members.length} members in formation, the most moved ${worst.toFixed(2)} m`;
   });
 
-  await Check('a fleet switches its prop mods on and keeps formation', async () => {
+  await Check('fleets: a fleet switches its prop mods on and keeps formation', async () => {
     const added = tfis;
     if (!added) throw new Skipped('the TFIs fleet was not added');
     const unresolved = added.propMods.filter((propMod) => propMod.from !== 'sde');
@@ -3120,7 +3160,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `41 on (${JSON.stringify(counts)}), FC at ${fc.speed} m/s; every member in formation or catching up above its base speed; the 8 logi stopping`;
   });
 
-  await Check('a fitted TFIs fleet reports fit-driven defense', async () => {
+  await Check('fleets: a fitted TFIs fleet reports fit-driven defense', async () => {
     const added = tfis;
     if (!added) throw new Skipped('the TFIs fleet was not added');
     const started = Date.now();
@@ -3144,7 +3184,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `44 fits on dogma in ${seconds.toFixed(1)} s; tfis-fc armor ${fc.defense.armor.max} HP (ship_stats ${armor.toFixed(1)}), EHP ${fc.defense.ehp}, 23 modules online; fleet modules ${JSON.stringify(counts)}`;
   });
 
-  await Check("a fit's guns load their charges from cargo", async () => {
+  await Check("fleets: a fit's guns load their charges from cargo", async () => {
     if (!tfis) throw new Skipped('the TFIs fleet was not added');
     const state = await call<ViewerState>('get_state');
     const guns = ShipIn(state, 'tfis-fc').fit?.modules.filter((module) => /Repeating Cannon/u.test(module.name)) ?? [];
@@ -3152,7 +3192,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `tfis-fc ${guns.map((module) => module.module).join(', ')} load Barrage L from cargo`;
   });
 
-  await Check('compositions save, list, add by name with a unique id, and delete', async () => {
+  await Check('fleets: compositions save, list, add by name with a unique id, and delete', async () => {
     const rifter = { hull: 'Rifter', dna: 'mf1_t1:minmatarbase:minmatar', radius: 31 };
     const mini = { id: 'tfis', commander: rifter, wings: [{ id: 'w', squads: [{ id: 'dps', role: 'dps', ships: [{ ...rifter, count: 3 }] }] }] };
     await call('save_fleet_composition', { composition: mini, name: 'verify-mini' });
@@ -3166,7 +3206,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'fleet tfis-2 added and removed';
   });
 
-  await Check('add_fleet_composition resolves a hull name through the EVE data', async () => {
+  await Check('fleets: add_fleet_composition resolves a hull name through the EVE data', async () => {
     const added = await call<AddedFleetResult>('add_fleet_composition', { composition: { id: 'named', commander: { hull: 'Rifter' }, wings: [] }, position: [0, 0, -40000] }).catch((error: unknown) => {
       if (/cjs-sde-prepare/u.test(`${ErrorMessage(error)} ${(ErrorProblems(error) ?? []).join(' ')}`)) throw new Skipped('the SDE is not prepared');
       throw error;
@@ -3205,7 +3245,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   };
   const fleetFormation = (state: ViewerState): Maybe<FleetFormationState> => state.fleets.find((fleet) => fleet.id === 'flw')?.formation;
 
-  await Check('fleet members form up on their anchors', async () => {
+  await Check('fleets: fleet members form up on their anchors', async () => {
     await call('load_scene', { scene: followScene });
     await WaitFor('the formation is ready', 30, (state) => (fleetFormation(state)?.ready ? null : JSON.stringify(fleetFormation(state))));
     const state = await WaitFor(
@@ -3227,7 +3267,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${fleetFormation(state)?.inFormation} in formation, flw-l1 ${ShipIn(state, 'flw-l1').following?.distance} m off the FC`;
   });
 
-  await Check('the fleet follows a moving FC', async () => {
+  await Check('fleets: the fleet follows a moving FC', async () => {
     await call('order_ship', { id: 'flw-fc', order: { type: 'direction', direction: [1, 0, 0], speed: 0.5 } });
     const start = ShipIn(await call<ViewerState>('get_state'), 'flw-fc').position ?? [0, 0, 0];
     const state = await WaitFor(
@@ -3251,7 +3291,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `FC at ${ShipIn(state, 'flw-fc').speed} m/s, ${fleetFormation(state)?.inFormation} in formation`;
   });
 
-  await Check('re-anchoring breaks a squad off and brings it back', async () => {
+  await Check('fleets: re-anchoring breaks a squad off and brings it back', async () => {
     const out = await call<SceneResult>('patch_scene', { operations: [{ op: 'set_anchor', fleet: 'flw', squad: 'logi', anchor: { range: 12000 } }] });
     Expect(out.changes['regrouped'] === 1, JSON.stringify(out.changes));
     const off = await WaitFor('flw-l1 in formation 12 km off', 60, (state) => {
@@ -3266,7 +3306,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `out at ${ShipIn(off, 'flw-l1').following?.distance} m, then back at 4000 m`;
   });
 
-  await Check('an order detaches a member and rejoin brings it back', async () => {
+  await Check('fleets: an order detaches a member and rejoin brings it back', async () => {
     const stopped = await call<{ following?: unknown }>('order_ship', { id: 'flw-d1', order: { type: 'stop' } });
     Expect(stopped.following === 'detached', JSON.stringify(stopped));
     await WaitFor('flw-d1 detached and stopping', 10, (state) => {
@@ -3289,7 +3329,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'detached, rejoined, and rejoin refused for the FC and a loner';
   });
 
-  await Check('removing a squad lead falls its squad back onto the FC', async () => {
+  await Check('fleets: removing a squad lead falls its squad back onto the FC', async () => {
     const removed = await call<SceneResult>('patch_scene', { operations: [{ op: 'remove_ship', id: 'flw-l1' }] });
     Expect(removed.changes['stopped'] === 0, JSON.stringify(removed.changes));
     await WaitFor('flw-l2 in formation 4 km off the FC', 60, (state) => {
@@ -3299,7 +3339,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'flw-l2 keeps 4000 m on flw-fc';
   });
 
-  await Check("the fleet settles facing the FC's heading when it stops", async () => {
+  await Check("fleets: the fleet settles facing the FC's heading when it stops", async () => {
     await call('order_ship', { id: 'flw-fc', order: { type: 'stop' } });
     const members = FLW_MEMBERS.filter((id) => id !== 'flw-l1');
     const state = await WaitFor('every member settled in formation, facing the FC', 120, (polled) => {
@@ -3330,7 +3370,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   const gap = (a: Maybe<ArrayLike<number>>, b: Maybe<ArrayLike<number>>): number => (a && b ? Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) : Number.NaN);
   const DPS = ['flw-d1', 'flw-d2', 'flw-d3', 'flw-d4'];
 
-  await Check('order_fleet moves the fleet through its FC', async () => {
+  await Check('fleets: order_fleet moves the fleet through its FC', async () => {
     await call('load_scene', { scene: followScene });
     const formed = await WaitFor('the fleet in formation', 90, (state) => (fleetFormation(state)?.ready ? NotInFormation(state, FLW_MEMBERS) : 'not planned yet'));
     const start = ShipIn(formed, 'flw-fc').position;
@@ -3350,7 +3390,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `stopped ${Math.round(gap(ShipIn(idle, 'flw-fc').position, start))} m on, last ${commandOf(idle, 'fleet', 'flw')?.last?.order.type}`;
   });
 
-  await Check('order_fleet moves a squad on its commander, and regroup brings it back', async () => {
+  await Check('fleets: order_fleet moves a squad on its commander, and regroup brings it back', async () => {
     await call('patch_scene', { operations: [{ op: 'update_squad', fleet: 'flw', squad: 'dps', set: { commander: 'flw-d1' } }] });
     const formed = await WaitFor('the fleet in formation', 60, (state) => NotInFormation(state, FLW_MEMBERS));
     const fc = ShipIn(formed, 'flw-fc');
@@ -3386,7 +3426,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'moved 8 km apart on flw-d1, regrouped onto flw-fc';
   });
 
-  await Check('order_fleet break-off and regroup write the document', async () => {
+  await Check('fleets: order_fleet break-off and regroup write the document', async () => {
     const broke = await call<OrderFleetResult>('order_fleet', { fleet: 'flw', squad: 'logi', order: { type: 'break-off', range: 12000 } });
     Expect(broke.operations?.length === 1 && broke.operations[0].op === 'update_squad', JSON.stringify(broke.operations));
     const brokenLogi = await squadDocument('flw', 'logi');
@@ -3412,7 +3452,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return 'logi broke off to 12 km with its home, regrouped to 4 km, fleet anchor set and undone';
   });
 
-  await Check('order_fleet refuses a warp from a ship without command', async () => {
+  await Check('fleets: order_fleet refuses a warp from a ship without command', async () => {
     const WARP = { type: 'warp', point: [0, 0, 600000] };
     for (const [args, pattern] of [
       [{ fleet: 'flw', by: 'flw-d2', order: WARP }, /no command over fleet "flw"/u],
@@ -3463,7 +3503,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     ]
   };
 
-  await Check("the FC warps the fleet and it lands in formation at the members' own warp speeds", async () => {
+  await Check("fleets: the FC warps the fleet and it lands in formation at the members' own warp speeds", async () => {
     await call('load_scene', { scene: fleetWarpScene });
     await WaitFor('the warp fleet in formation', 180, (state) => (state.fleets.find((fleet) => fleet.id === 'fw')?.formation?.ready ? NotInFormation(state, FW_MEMBERS) : 'not planned yet'));
     const warp = await call<OrderFleetResult>('order_fleet', { fleet: 'fw', order: { type: 'warp', point: [0, 0, 400000] } });
@@ -3497,7 +3537,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `warp speeds ${[...speeds].sort().join('/')} AU/s, counts ${counts}`;
   });
 
-  await Check('a squad warp lands it apart, and a delayed regroup warps it back', async () => {
+  await Check('fleets: a squad warp lands it apart, and a delayed regroup warps it back', async () => {
     const before = await call<ViewerState>('get_state');
     const at = ShipIn(before, 'fw-fc').position ?? [0, 0, 0];
     const warp = await call<OrderFleetResult>('order_fleet', { fleet: 'fw', squad: 'logi', order: { type: 'warp', point: [at[0] + 300000, at[1], at[2]] } });
@@ -3523,7 +3563,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   const FORGE_NEBULA = 'res:/dx9/scene/universe/c02_cube.black';
   let moonLocation: Maybe<SceneLocation> = null;
 
-  await Check('search_map finds Jita and the Perimeter gate in Jita', async () => {
+  await Check('locations: search_map finds Jita and the Perimeter gate in Jita', async () => {
     const jita = await call<MapSearchResult>('search_map', { query: 'Jita' }).catch(SkipWithoutSde);
     Expect(jita.items[0]?.id === 30000142, JSON.stringify(jita.items[0]));
     const gates = await call<MapSearchResult>('search_map', { query: 'Stargate (Perimeter)', kinds: ['stargate'] });
@@ -3532,7 +3572,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `${gates.items.length} Stargate (Perimeter) hits`;
   });
 
-  await Check("get_system lists Jita's celestials with type radii", async () => {
+  await Check("locations: get_system lists Jita's celestials with type radii", async () => {
     const jita = await call<SystemResult>('get_system', { system: 'Jita' }).catch(SkipWithoutSde);
     const radius = (id: number) => jita.celestials.find((celestial) => celestial.id === id)?.radius;
     Expect(jita.celestials.find((celestial) => celestial.id === 60003760)?.kind === 'station' && radius(60003760) === 100000, `CNAP radius ${radius(60003760)}`);
@@ -3542,7 +3582,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return JSON.stringify(jita.counts);
   });
 
-  await Check('set_location puts the scene 30 km off the CNAP and get_state reports it', async () => {
+  await Check('locations: set_location puts the scene 30 km off the CNAP and get_state reports it', async () => {
     await call('load_scene', { scene: { name: 'verify-location', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
     const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
     const offset = set.location.anchor?.offset ?? [0, 0, 0];
@@ -3563,7 +3603,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       .join(', ');
   });
 
-  await Check('set_location dresses the CNAP (validated without a renderer)', async () => {
+  await Check('locations: set_location dresses the CNAP (validated without a renderer)', async () => {
     await call('load_scene', { scene: { name: 'verify-dressing', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar' }] } });
     const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
     Expect(!set.reloading && set.nebula === FORGE_NEBULA, JSON.stringify({ reloading: set.reloading, nebula: set.nebula }));
@@ -3578,7 +3618,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return DressingSummary(dressing);
   });
 
-  await Check('re-dressing at the Perimeter gate does not reload', async () => {
+  await Check('locations: re-dressing at the Perimeter gate does not reload', async () => {
     const before = await call<ViewerState>('get_state');
     if (before.location?.dressing?.state !== 'ready') throw new Skipped('the CNAP was not dressed');
     const status = ShipIn(before, 'rifter').status;
@@ -3594,7 +3634,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return DressingSummary(dressing);
   });
 
-  await Check('set_location finds the Perimeter gate in Jita and a moon by name', async () => {
+  await Check('locations: set_location finds the Perimeter gate in Jita and a moon by name', async () => {
     for (const args of [{ celestial: 'Perimeter gate', system: 'Jita' }, { celestial: 'the Perimeter gate in Jita' }]) {
       const set = await call<SetLocationResult>('set_location', args).catch(SkipWithoutSde);
       Expect(set.location.anchor?.celestial === 50001249 && Math.abs((set.range ?? 0) - 2500) <= 0.01, `${JSON.stringify(args)}: ${JSON.stringify(set.location.anchor)} range ${set.range}`);
@@ -3604,7 +3644,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     moonLocation = moon.location;
   });
 
-  await Check('the location round-trips through scene files and clear_location removes it', async () => {
+  await Check('locations: the location round-trips through scene files and clear_location removes it', async () => {
     if (!moonLocation) throw new Skipped('no location was set');
     await call('save_scene', { name: 'verify-location' });
     await call('load_scene', { scene: { name: 'empty', ships: [] } });
@@ -3615,13 +3655,13 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     Expect((await call<{ deleted: boolean }>('delete_scene', { name: 'verify-location' })).deleted, 'not deleted');
   });
 
-  await Check('set_location on a passed scene leaves environment.universe alone', async () => {
+  await Check('locations: set_location on a passed scene leaves environment.universe alone', async () => {
     const set = await call<SetLocationResult>('set_location', { system: 'Jita', celestial: 'star', scene: { name: 'nebula' } }).catch(SkipWithoutSde);
     Expect(set.loaded === false && set.scene?.environment.universe === DEFAULT_UNIVERSE && set.nebula === FORGE_NEBULA, JSON.stringify({ loaded: set.loaded, environment: set.scene?.environment, nebula: set.nebula }));
     Expect(set.location.anchor?.kind === 'star', JSON.stringify(set.location.anchor));
   });
 
-  await Check('add_ships adds Rifters in a wedge off a ship, facing it', async () => {
+  await Check('staging: add_ships adds Rifters in a wedge off a ship, facing it', async () => {
     await call('load_scene', { scene: { name: 'verify-staging', ships: [{ id: 'anchor', dna: TFI_DNA, type: 'Tempest Fleet Issue' }] } });
     const result = await call<AddShipsResult>('add_ships', { hull: 'Rifter', count: 5, formation: 'wedge', near: { ship: 'anchor', range: 10000 }, facing: 'anchor', team: 'red' }).catch(SkipWithoutSde);
     Expect(JSON.stringify(result.added.ships) === JSON.stringify(['rifter-01', 'rifter-02', 'rifter-03', 'rifter-04', 'rifter-05']), JSON.stringify(result.added));
@@ -3642,7 +3682,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `closest pair ${least.toFixed(0)} m`;
   });
 
-  await Check('add_ships joins a squad at its formation slots', async () => {
+  await Check('staging: add_ships joins a squad at its formation slots', async () => {
     const composition = {
       id: 'jn',
       commander: { hull: 'Tempest Fleet Issue' },
@@ -3677,7 +3717,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `the joiners moved at most ${worst.toFixed(2)} m`;
   });
 
-  await Check('add_ships adds a logi squad with its role from the EVE group', async () => {
+  await Check('staging: add_ships adds a logi squad with its role from the EVE group', async () => {
     const result = await call<AddShipsResult>('add_ships', { hull: 'Scimitar', count: 2, fleet: { id: 'jn', squad: { id: 'logi-2' } } }).catch(SkipWithoutSde);
     Expect(result.added.fleet?.created === 'squad' && result.added.fleet.squad === 'logi-2', JSON.stringify(result.added.fleet));
     Expect(!(result.warnings ?? []).some((warning) => warning.includes('formation slots')), JSON.stringify(result.warnings));
@@ -3688,7 +3728,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     Expect(second.anchor?.ship === 'jn-logi-2-01' && second.anchor.range === 1000, JSON.stringify(second.anchor));
   });
 
-  await Check('stage_engagement sets the TFIs and a Ferox fleet 20 km apart off the CNAP', async () => {
+  await Check('staging: stage_engagement sets the TFIs and a Ferox fleet 20 km apart off the CNAP', async () => {
     await call('load_scene', { scene: { name: 'verify-engagement' } });
     const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 }).catch(SkipWithoutSde);
     const result = await call<StageEngagementResult>('stage_engagement', {
@@ -3740,7 +3780,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `FCs ${gap.toFixed(0)} m apart, centre ${fromStation.toFixed(0)} m from the CNAP`;
   });
 
-  await Check('stage_engagement on a passed scene with free sides', async () => {
+  await Check('staging: stage_engagement on a passed scene with free sides', async () => {
     const result = await call<StageEngagementResult>('stage_engagement', {
       scene: { name: 'free' },
       sides: [
@@ -3759,7 +3799,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     );
   });
 
-  await Check('search_objects finds structures, wrecks and LCOs', async () => {
+  await Check('objects: search_objects finds structures, wrecks and LCOs', async () => {
     const astrahus = await call<{ items: { typeID: number; dna?: string }[] }>('search_objects', { query: 'Astrahus' }).catch(SkipWithoutSde);
     Expect(astrahus.items[0]?.typeID === 35832 && astrahus.items[0]?.dna === 'cm1_t1:upwell:generic', JSON.stringify(astrahus.items[0]));
     const wrecks = await call<{ items: { typeID: number; dna?: string; radius?: number; radiusFrom?: string }[] }>('search_objects', { query: 'Frigate Wreck', group: 'wreck' });
@@ -3777,7 +3817,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
 
   const OBJECT_SCENE = { name: 'verify-objects', ships: [{ id: 'rifter', dna: 'mf1_t1:minmatarbase:minmatar', type: 'Rifter', stats: { maxVelocity: 2000, agility: 1 } }] };
   let objectsPlaced = false;
-  await Check('add_objects places an Astrahus off a ship and a wreck field off it, in one patch', async () => {
+  await Check('objects: add_objects places an Astrahus off a ship and a wreck field off it, in one patch', async () => {
     await call('load_scene', { scene: OBJECT_SCENE });
     const result = await call<AddObjectsResult>('add_objects', {
       objects: [
@@ -3804,7 +3844,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `astra sofRadius ${row?.sofRadius} m, radius ${row?.radius} m`;
   });
 
-  await Check('add_objects refuses a type with no graphic and changes nothing', async () => {
+  await Check('objects: add_objects refuses a type with no graphic and changes nothing', async () => {
     const before = await call<SceneDocument>('get_scene');
     const error = await call('add_objects', { type: 'Tritanium' }).then(
       () => null,
@@ -3817,7 +3857,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   });
 
   if (objectsPlaced) {
-    await Check("add_objects gives a titan wreck its model's radius, not the SDE's 14 m", async () => {
+    await Check("objects: add_objects gives a titan wreck its model's radius, not the SDE's 14 m", async () => {
       const result = await call<AddObjectsResult>('add_objects', { type: 'Minmatar Titan Wreck', id: 'titan-wreck', position: [0, 0, -400000] });
       Expect(result.added[0]?.radius === 10891 && result.types[0]?.radiusFrom === 'sof' && result.types[0]?.sdeRadius === 14, JSON.stringify({ added: result.added, types: result.types }));
       const titan = (polled: ViewerState) => (polled.objects ?? []).find((object) => object.id === 'titan-wreck');
@@ -3828,7 +3868,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `radius ${row?.radius} m, sofRadius ${row?.sofRadius} m`;
     });
 
-    await Check('ships orbit, keep at range on and approach an object', async () => {
+    await Check('objects: ships orbit, keep at range on and approach an object', async () => {
       const distanceTo = (polled: ViewerState): number => ShipIn(polled, 'rifter').targetDistance ?? Infinity;
       await call('order_ship', { id: 'rifter', order: { type: 'orbit', target: 'astra', range: 5000 } });
       await WaitFor('the orbit to settle', 240, (polled) => (distanceTo(polled) >= 4000 && distanceTo(polled) <= 7000 ? null : `targetDistance ${distanceTo(polled)}`), 3);
@@ -3840,7 +3880,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `approached to ${Math.round(distanceTo(state))} m`;
     });
 
-    await Check('moving an object makes its followers chase it; removing it stops them', async () => {
+    await Check('objects: moving an object makes its followers chase it; removing it stops them', async () => {
       await call('patch_scene', { operations: [{ op: 'move_object', id: 'astra', position: [0, 0, 200000] }] });
       const moved = await WaitFor('the chase', 20, (polled) => ((ShipIn(polled, 'rifter').targetDistance ?? 0) > 50000 ? null : `targetDistance ${ShipIn(polled, 'rifter').targetDistance}`));
       Expect((moved.objects ?? [])[0]?.targetedBy?.includes('rifter'), 'no longer targeted');
@@ -3850,7 +3890,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       Expect(ShipIn(state, 'rifter').orderNote === 'stopped: target "astra" was removed', ShipIn(state, 'rifter').orderNote ?? 'no note');
     });
 
-    await Check('objects round-trip through scene files and frame_camera frames one', async () => {
+    await Check('objects: objects round-trip through scene files and frame_camera frames one', async () => {
       const before = await call<SceneDocument>('get_scene');
       await call('save_scene', { name: 'verify-objects', store: 'disk' });
       await call('open_scene', { name: 'verify-objects', store: 'disk' });
@@ -3862,7 +3902,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `${after.objects?.length} objects`;
     });
 
-    await Check('the scene extent refuses objects and ships past 10,000 km and warns past 2,000 km', async () => {
+    await Check('objects: the scene extent refuses objects and ships past 10,000 km and warns past 2,000 km', async () => {
       const far = await call('add_objects', { type: 'Minmatar Frigate Wreck', position: [0, 0, 12e6] }).then(
         () => null,
         (failure: unknown) => (ErrorProblems(failure) ?? []).join(' ') + ErrorMessage(failure)
@@ -3881,14 +3921,14 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       await call('patch_scene', { operations: [{ op: 'remove_object', id: 'far-wreck' }] });
     });
 
-    await Check('add_ships stages Rifters 5 km off an object', async () => {
+    await Check('objects: add_ships stages Rifters 5 km off an object', async () => {
       await call('add_objects', { type: 'Astrahus', id: 'astra', position: [0, 0, 100000] });
       const result = await call<{ added: { ships: string[]; lead: { position: SceneVector } } }>('add_ships', { hull: 'Rifter', count: 3, near: { object: 'astra' } });
       const lead = result.added.lead.position;
       Expect(result.added.ships.length === 3 && Math.abs(Math.hypot(lead[0], lead[1], lead[2] - 100000) - (45000 + 5000 + 31)) <= 2, JSON.stringify(lead));
     });
 
-    await Check('add_objects places a Ruined Stargate off the CNAP, and the CNAP is an order target', async () => {
+    await Check('objects: add_objects places a Ruined Stargate off the CNAP, and the CNAP is an order target', async () => {
       await call('load_scene', { scene: OBJECT_SCENE });
       const set = await call<SetLocationResult>('set_location', { celestial: CNAP, range: 30000 });
       const result = await call<AddObjectsResult>('add_objects', { type: 'Ruined Stargate', id: 'ruin', near: { celestial: CNAP, range: 20000 } });
@@ -3912,7 +3952,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return row && ['validated', 'ready'].includes(row.status) && (digest == null || row.digest === digest) ? null : `status ${row?.status ?? 'none'} ${row?.error ?? ''} digest ${row?.digest ?? ''}`;
   };
   let fieldAdded = false;
-  await Check('add_asteroid_field resolves Veldspar and Dark Ochre and validates the rocks', async () => {
+  await Check('asteroid-fields: add_asteroid_field resolves Veldspar and Dark Ochre and validates the rocks', async () => {
     await call('load_scene', { scene: FIELD_SCENE });
     const result = await call<AddAsteroidFieldResult>('add_asteroid_field', { id: 'veld', ores: ['Veldspar', 'Dark Ochre'], count: 150, radius: 25000, near: { ship: 'rifter', range: 10000 } }).catch(SkipWithoutSde);
     Expect(result.ores.length === 2 && result.ores.every((ore) => ore.models.small === 4 && ore.models.medium === 4 && ore.models.large === 4), JSON.stringify(result.ores));
@@ -3929,7 +3969,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   });
 
   if (fieldAdded) {
-    await Check('add_asteroid_field refuses a non-asteroid and a field past the extent; nothing changes', async () => {
+    await Check('asteroid-fields: add_asteroid_field refuses a non-asteroid and a field past the extent; nothing changes', async () => {
       const before = await call<SceneDocument>('get_scene');
       const refusal = (args: Record<string, unknown>): Promise<string> =>
         call('add_asteroid_field', args).then(
@@ -3944,7 +3984,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       Expect(JSON.stringify(after.asteroidFields) === JSON.stringify(before.asteroidFields), 'the fields changed');
     });
 
-    await Check('update_asteroid_field moves a field without rebuilding it and rebuilds on a seed change', async () => {
+    await Check('asteroid-fields: update_asteroid_field moves a field without rebuilding it and rebuilds on a seed change', async () => {
       const digest = fieldRow(await call<ViewerState>('get_state'), 'veld')?.digest;
       const moved = await call<FieldChanges>('patch_scene', { operations: [{ op: 'update_asteroid_field', id: 'veld', set: { position: [0, 0, 80000], rotation: [30, 0, 0] } }] });
       Expect(JSON.stringify(moved.changes.asteroidFields) === JSON.stringify({ added: 0, rebuilt: 0, moved: 1, removed: 0 }), JSON.stringify(moved.changes.asteroidFields));
@@ -3956,7 +3996,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `digest ${digest} -> ${fieldRow(state, 'veld')?.digest}`;
     });
 
-    await Check('a field off an asteroid belt centres on it', async () => {
+    await Check('asteroid-fields: a field off an asteroid belt centres on it', async () => {
       const set = await call<SetLocationResult>('set_location', { celestial: 'Perimeter II - Asteroid Belt 1' }).catch(SkipWithoutSde);
       const result = await call<AddAsteroidFieldResult>('add_asteroid_field', { id: 'belt', ores: ['Veldspar'], count: 60, near: { celestial: 'Perimeter II - Asteroid Belt 1' } });
       const offset = set.location.anchor?.offset ?? [0, 0, 0];
@@ -3967,7 +4007,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `radius ${result.added.radius} m, ${result.added.placed} rocks`;
     });
 
-    await Check('fields round-trip through scene files and frame_camera frames one', async () => {
+    await Check('asteroid-fields: fields round-trip through scene files and frame_camera frames one', async () => {
       const before = await call<SceneDocument>('get_scene');
       const digest = fieldRow(await call<ViewerState>('get_state'), 'belt')?.digest;
       await call('save_scene', { name: 'verify-fields', store: 'disk' });
@@ -3984,7 +4024,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
       return `${after.asteroidFields?.length} fields`;
     });
 
-    await Check('remove_asteroid_field clears camera.target and the field entry', async () => {
+    await Check('asteroid-fields: remove_asteroid_field clears camera.target and the field entry', async () => {
       await call('frame_camera', { target: 'belt', persist: true });
       Expect((await call<SceneDocument>('get_scene')).camera.target === 'belt', 'camera.target is not the field');
       const removed = await call<FieldChanges>('patch_scene', { operations: [{ op: 'remove_asteroid_field', id: 'belt' }] });
@@ -4010,7 +4050,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     ]
   };
 
-  await Check('a cinema shot plays on the scene clock', async () => {
+  await Check('cinema: a cinema shot plays on the scene clock', async () => {
     await call('load_scene', { scene: CINEMA_SCENE });
     await playShot({ hardpoint: { name: 'chase', ship: 'hero' }, duration: 60 });
     const first = await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
@@ -4025,7 +4065,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `elapsed +${advanced.toFixed(2)} s over ${scene.toFixed(2)} scene s; near ${cinemaOf(later).near} m`;
   });
 
-  await Check('the cinema flyby eye holds while the ship flies past', async () => {
+  await Check('cinema: the cinema flyby eye holds while the ship flies past', async () => {
     await call('order_ship', { id: 'hero', order: { type: 'direction', direction: [0, 0, 1] } });
     await WaitFor('the hero to get going', 15, (polled) => ((ShipIn(polled, 'hero').speed ?? 0) > 50 ? null : `speed ${ShipIn(polled, 'hero').speed}`));
     await playShot({ hardpoint: { name: 'flyby', ship: 'hero' } });
@@ -4039,13 +4079,13 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `eye ${JSON.stringify(later.pose?.eye)}; look z ${before?.look[2]} -> ${later.pose?.look[2]}`;
   });
 
-  await Check('a cinema sequence advances on its durations', async () => {
+  await Check('cinema: a cinema sequence advances on its durations', async () => {
     await call('play_sequence', { shots: [{ hardpoint: { name: 'chase', ship: 'hero' }, duration: 1 }, { hardpoint: { name: 'behind-fc', ships: ['hero', 'wing'] }, transition: { type: 'blend', duration: 1 }, duration: 1 }, { hardpoint: { name: 'overlook' } }] });
     const state = await WaitFor('the third shot', 10, (polled) => (cinemaOf(polled).sequence?.index === 2 ? null : JSON.stringify(polled.cinema?.sequence ?? polled.cinema?.state)));
     return `shot ${cinemaOf(state).sequence?.index} of ${cinemaOf(state).sequence?.count}`;
   });
 
-  await Check('cinema list_hardpoints resolves a ship, a group, the engagement and an object', async () => {
+  await Check('cinema: cinema list_hardpoints resolves a ship, a group, the engagement and an object', async () => {
     const ship = await call<HardpointListingResult>('list_hardpoints', { ship: 'hero' });
     const centre = ship.subject?.centre ?? [0, 0, 0];
     const radius = ship.subject?.radius ?? Infinity;
@@ -4069,7 +4109,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `ship ${ship.hardpoints.length}, group ${group.hardpoints.length}, engagement ${engagement.hardpoints.length}; ${object}`;
   });
 
-  await Check('a cinema library shot pauses and resumes on the scene clock', async () => {
+  await Check('cinema: a cinema library shot pauses and resumes on the scene clock', async () => {
     const played = await call<{ driver: string; shots: { library?: string }[] }>('play_shot', { shot: 'overlook-pull-out' });
     Expect(played.driver === 'claude' && played.shots[0]?.library === 'overlook-pull-out', JSON.stringify(played));
     await WaitFor('the pull-out to play', 10, (polled) => (cinemaOf(polled).state === 'playing' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
@@ -4086,7 +4126,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `frozen at ${paused.shot?.elapsed} s, resumed to ${resumed.shot?.elapsed} s`;
   });
 
-  await Check('a stopped cinema shot hands back to the user and resumes where it stopped', async () => {
+  await Check('cinema: a stopped cinema shot hands back to the user and resumes where it stopped', async () => {
     await playShot({ hardpoint: { name: 'chase', ship: 'hero' }, duration: 60 });
     await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' && cinemaOf(polled).pose ? null : JSON.stringify(polled.cinema)));
     await Delay(1000);
@@ -4097,7 +4137,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `stopped at ${stopped.resumable?.elapsed} s; resumed at ${resumed.shot?.elapsed} s`;
   });
 
-  await Check('a held cinema shot stays on its last frame', async () => {
+  await Check('cinema: a held cinema shot stays on its last frame', async () => {
     await playShot({ hardpoint: { name: 'chase', ship: 'hero' }, duration: 1, end: 'hold' });
     await Delay(2500);
     const held = cinemaOf(await call<ViewerState>('get_state'));
@@ -4105,7 +4145,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `progress ${held.shot?.progress}, holding`;
   });
 
-  await Check('the cinema warp-in waits at the landing', async () => {
+  await Check('cinema: the cinema warp-in waits at the landing', async () => {
     await call('patch_scene', { operations: [{ op: 'add_ship', ship: { id: 'lander', dna: 'mf1_t1:minmatarbase:minmatar', position: [0, 0, -300000] } }] });
     await WaitFor('the lander gets its warp speed', 60, (state) => ((ShipIn(state, 'lander').physics?.warpSpeed ?? 0) > 0 ? null : JSON.stringify(ShipIn(state, 'lander').physics)));
     await call('order_ship', { id: 'lander', order: { type: 'warp', point: [0, 0, -2000] } });
@@ -4128,7 +4168,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
     return `the eye held; the ship landed ${Math.round(range)} m in front of the lens`;
   });
 
-  await Check('removing the subject releases the cinema shot, and a load cuts it', async () => {
+  await Check('cinema: removing the subject releases the cinema shot, and a load cuts it', async () => {
     await playShot({ hardpoint: { name: 'hero-port', ship: 'wing' } });
     await WaitFor('the shot to play', 10, (polled) => (cinemaOf(polled).state === 'playing' ? null : JSON.stringify(polled.cinema)));
     await call('patch_scene', { operations: [{ op: 'remove_ship', id: 'wing' }] });
@@ -5155,7 +5195,7 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
   });
 
   if (rendering) {
-    await Check('screenshot returns a PNG', async () => {
+    await Check('dev-env: screenshot returns a PNG', async () => {
       const shot = await call<{ image: { data: string }; width: number; height: number }>('screenshot', { maxWidth: 960 });
       await mkdir(path.dirname(SCREENSHOT_FILE), { recursive: true });
       await writeFile(SCREENSHOT_FILE, Buffer.from(shot.image.data, 'base64'));
@@ -5960,8 +6000,8 @@ async function EveDataChecks(page: Page, status: ToolsCoreStatus): Promise<void>
 
   const errors = await call<LogEntry[]>('page_log', { level: 'error', limit: 20 });
   const unexpected = errors.filter((entry) => !/bogus|nosuchhull|renderer unavailable/u.test(entry.message));
-  results.push(`info  page errors: ${errors.length} (${unexpected.length} unexpected)`);
-  for (const entry of unexpected.slice(0, 8)) results.push(`        ${entry.message.split('\n')[0].slice(0, 200)}`);
+  report.Info(`page errors: ${errors.length} (${unexpected.length} unexpected)`);
+  for (const entry of unexpected.slice(0, 8)) report.Info(`  ${entry.message.split('\n')[0].slice(0, 200)}`);
 }
 
 /**
@@ -6277,7 +6317,7 @@ async function NoEveDataChecks(page: Page, requests: readonly string[]): Promise
     const log = await call<{ readonly level: string; readonly message: string }[]>('page_log', { limit: 500 });
     const gpu = log.filter((entry) => entry.level !== 'info' && HeadlessGpu(entry.message));
     const loud = log.filter((entry) => entry.level !== 'info' && !HeadlessGpu(entry.message));
-    if (gpu.length) results.push(`info  headless WebGPU: ${gpu.length} error(s), first: ${gpu[0].message.split('\n')[0].slice(0, 120)}`);
+    if (gpu.length) report.Info(`headless WebGPU: ${gpu.length} error(s), first: ${gpu[0].message.split('\n')[0].slice(0, 120)}`);
     const mode = log.filter((entry) => /ships and objects draw as stand-in cubes on a green screen/u.test(entry.message));
     Expect(
       loud.length === 0,
@@ -6520,26 +6560,26 @@ async function RecordChecks(page: Page): Promise<void> {
 }
 
 /**
- * Runs one check and records its outcome.
+ * Runs one check and prints its outcome the moment it ends, so a run cut short keeps every result it reached.
  *
- * @param label - What is checked.
+ * @param label - What is checked: `<area>: <what>` (sd-dev-env → verify-page lists the areas), or the connect check.
  * @param action - The check; its string result is reported as detail.
  */
 async function Check(label: string, action: () => Promise<string | void>): Promise<void> {
   if (ONLY && label !== CONNECT_CHECK && !ONLY.split('|').some((text) => label.toLowerCase().includes(text))) return;
+  if (label !== CONNECT_CHECK) matched += 1;
   try {
     const detail = await action();
-    results.push(detail ? `ok    ${label} - ${detail}` : `ok    ${label}`);
+    report.Point(label, { kind: 'ok', detail: detail || null });
   } catch (error) {
-    if (error instanceof Skipped) {
-      results.push(`skip  ${label} - ${error.message}`);
-    } else {
-      failed += 1;
-      results.push(`FAIL  ${label} - ${ErrorMessage(error)}`);
-    }
+    report.Point(label, error instanceof Skipped ? { kind: 'skip', reason: error.message } : { kind: 'fail', message: ErrorMessage(error) });
   }
 }
 
+/**
+ * An error outside every check (the page did not open, a group's own setup threw): the run could not proceed.
+ */
+let outside: Maybe<string> = null;
 try {
   const page = await browser.newPage({ viewport: { width: 1280, height: 720 } });
   // Every path the tab asks the hub for, from the first load: the no-EVE-data run checks none is EVE data.
@@ -6556,13 +6596,16 @@ try {
   if (status) await EveDataChecks(page, status);
   else await NoEveDataChecks(page, requests);
   await RecordChecks(page);
+} catch (error) {
+  outside = `an error outside a check: ${ErrorMessage(error)}`;
 } finally {
   await browser.close();
   await hub.Stop();
 }
 
-console.log(results.join('\n'));
-process.exit(failed ? 1 : 0);
+if (outside) await Bail(outside);
+if (ONLY && !matched) await Bail(`--only "${ONLY}" matched no check`);
+await Exit(report.End());
 
 function DressingProgress(state: ViewerState): string {
   const dressing = state.location?.dressing;

@@ -136,13 +136,52 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
 Chromium through the hub's tools, against a running tools-core: boot, the hub link, SOF builds from real EVE data,
 edits, storage and reload, prop mod audio events (launched with `--autoplay-policy=no-user-gesture-required`; it sees
 events posted, it cannot hear them). It uses temp file stores. `--only <text>` runs the checks whose label contains the
-text (`a|b` for either), each loading its own scene.
+text (any case; `a|b` for either) after the always-run connect check.
 
-The full suite is ~180 checks and ~40 min (2026-10-24), and prints its results only at its end: run it as `--only`
-batches of contiguous labels, never alongside the test suites, with a runner limit generous enough that a slow batch
-(weapons and combat: ~400 s for a dozen) is not killed with its results. A few checks build on the one before (the
-compositions check expects the TFIs check's `tfis`), so cut batches at group starts. The M6 runner and its label list
-are `.scratch/movie-gpu/batch.mjs` / `chain.sh` on dbxpc (`sd-timeline` doc `movie`, the M6 evidence).
+- **Output**: each result prints as its check ends (`ok    ` / `FAIL  ` / `skip  `, `info  ` notes, then a tally
+  `N ok, M FAIL, K skip`), so a run that is killed keeps every result it reached.
+- **`--tap`**: stdout is only a TAP version 13 stream, the contract dbx-claude's test suites parse: `TAP version 13`
+  once the hub and Chromium are up; `ok N - <label>` / `not ok N - <label>` / `ok N - <label> # SKIP <reason>`; the
+  detail or failure message as one `# ` line after its point (`info` notes too, as `# info …`); `1..N` when the run
+  completes. Labels are one line with `#` escaped `\#`. The formatter is `src/lib/verify/tap.ts` (`VerifyReport`).
+- **Exit codes**: 0 every check passed (skips included), 1 a check failed, 2 the run could not proceed: `Bail out!
+  <reason>` (a `verify-page cannot run:` stderr line without `--tap`) for tools-core unreachable, a temp store, hub
+  start or Chromium launch failure, an error outside a check, and an `--only` that matched no check. A bail has no plan
+  line.
+- **Areas**: every label starts with `<area>: `, so `--only "<area>:"` runs one area (`--only "export:|record:"` two).
+  `src/lib/verify/labels.spec.ts` fails on a label without a listed prefix, or with one inside another label: **a new
+  check takes its group's prefix; a new area goes in that spec's list and this table.** One prefix covers a group of
+  checks that share a scene, so selecting an area never runs a check without the one it builds on (the
+  compositions check expects the TFIs check's `tfis`; the first-scene chain's saves expect its fleet).
+
+| Prefix | Ref | Checks |
+|---|---|---|
+| `scene-document:` | `sd-scene-document` | the first-scene chain: load, Destiny placement and flight, patch, orders, warp, prop mods and their audio, the fleet tree, saves to IndexedDB and files, reload (Destiny and prop mod changes ride here) |
+| `ship-stats:` | `sd-ship-stats` | `search_hulls`, `ship_stats`, the skill table |
+| `fittings:` | `sd-fittings` | the dogma path, module activation (hardener, prop, remote reps), tackle (webs, scrams, neuts) |
+| `weapons:` | `sd-weapons` | default guns, turrets on their cycle, targets, turret sounds |
+| `piloting:` | `sd-piloting` | `get_overview`, stances |
+| `combat:` | `sd-combat` | locks, hits, engage / cease_fire, seeds, kills, `set_hp`, missiles, fleet deaths, revival |
+| `fleets:` | `sd-fleets` | called targets, TFIs compositions, Follow the FC, `order_fleet`, fleet warp |
+| `personality:`, `free fire:` | `sd-personalities` | the FC brain, free fire |
+| `logi:` | `sd-logi` | auto-repair |
+| `locations:` | `sd-locations` | the environment report, `search_map`, `get_system`, `set_location`, dressing |
+| `staging:` | `sd-staging` | `add_ships`, `stage_engagement` |
+| `warp-in:` | `sd-staging` | arriving fleets |
+| `objects:` | `sd-objects` | `search_objects`, `add_objects`, orders on objects, the scene extent |
+| `asteroid-fields:` | `sd-asteroid-fields` | fields: add, refuse, update, belts, round-trip, remove |
+| `cinema:` | `sd-cinema` | shots, sequences, hardpoints, the warp-in shot |
+| `director:` | `sd-cinema` | `auto_camera` |
+| `timeline:` | `sd-timeline` | cues, ship orders, live edits, replay, `at` |
+| `movie:` | `sd-timeline` | event cues, the movie tool, letterbox |
+| `time:` | `sd-time` | rate, pause, jumps, the tape, seek |
+| `export:`, `record:` | `sd-export` | `export_movie`, `record_movie` |
+| `dev-env:` | `sd-dev-env` | the screenshot (with a renderer) |
+| `no EVE data:` | `sd-dev-env` | the `--eve-data off` run (`record:` runs there too) |
+
+The full suite is ~210 checks and ~40 min (2026-10-24): run it as `--only` area batches, never alongside the test
+suites. The M6 runner and its label list are `.scratch/movie-gpu/batch.mjs` / `chain.sh` on dbxpc (`sd-timeline` doc
+`movie`, the M6 evidence; its labels predate the area prefixes, but a substring filter still matches).
 
 **Headless Chromium in this WSL has no WebGPU adapter** (Dawn finds SwiftShader but cannot create its context
 provider). Do not sink time into headless GPU.
