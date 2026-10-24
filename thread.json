@@ -1,0 +1,16 @@
+{
+  "dbxHandoff": 1,
+  "thread": "finish-auto-camera-shot-rules-on-dbxpc-verify-page-and-floor-calibration",
+  "project": "carbon-engine-scene-director",
+  "from": "Michelles-MacBook-Air",
+  "to": "dbxpc",
+  "createdAt": "2026-10-24T23:06:55.824Z",
+  "base": {
+    "ref": "develop",
+    "sha": "fe933bf44ecfb4799328be6d21554e631efad87a"
+  },
+  "work": {
+    "branch": "dbx-claude/work/finish-auto-camera-shot-rules-on-dbxpc-verify-page-and-floor-calibration"
+  },
+  "merge": false
+}
