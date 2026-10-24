@@ -1,0 +1,16 @@
+{
+  "dbxHandoff": 1,
+  "thread": "stances-and-piloting-p6-dbxpc-evidence-verify-page-real-gpu-fps",
+  "project": "carbon-engine-scene-director",
+  "from": "Michelles-MacBook-Air",
+  "to": "dbxpc",
+  "createdAt": "2026-10-24T21:15:26.089Z",
+  "base": {
+    "ref": "develop",
+    "sha": "bff0fff55f95d7aa0148e9d398fe728c3fa002ed"
+  },
+  "work": {
+    "branch": "dbx-claude/work/stances-and-piloting-p6-dbxpc-evidence-verify-page-real-gpu-fps"
+  },
+  "merge": false
+}
