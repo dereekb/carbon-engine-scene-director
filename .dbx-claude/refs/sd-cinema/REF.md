@@ -172,7 +172,8 @@ events and plays the picks through the rig as driver `director`.
   push ×2.2 multiplies; the fly-through's radii path is judged at its farthest point, 1.51 R; push-in, zoom and orbit
   moves leave the base pose. Ship and pair framings measure about their fill (hero 0.59).
 - **`DEFAULT_MIN_SHIP_SIZE` 0.005** (0.5 % of the frame height: ~4 px of an 820 px iPad view, 5.4 px at 1080 p);
-  0 off, at most 0.25. Provisional: the real-page calibration (no-EVE and real hulls) may move it within 0.005–0.01.
+  0 off, at most 0.25. Provisional: the no-EVE page (below) reads specks near 0.5 % and points to 0.01; the move
+  waits for the real-hull check on dbxpc, which may still pick anywhere in 0.005–0.01.
 - **Tighten before skipping**: a group framing (not warp-in) or an engagement framing (not the fly-through) under the
   floor is re-resolved at fill′ = min(`MAX_HARDPOINT_FILL` 1.5, fill × floor ÷ size × 1.05), at most twice, from its
   own fill (the core factor's) else the row's (engagement fills, groups 0.85); kept if it reaches the floor (the shot
@@ -186,6 +187,16 @@ events and plays the picks through the rig as driver `director`.
   height, stand-ins (100 m) / EVE radii: overlook 0.16 % / 0.37 %, the pull-out at its end 0.09 % / 0.21 %, into-sun
   0.13 % / 0.31 %, group-top-down (fleet) 0.27 % / 0.62 %, flank 0.48 % / 1.08 %, behind-fc 0.60 % / 1.36 %,
   leading-edge 1.32 % / 2.90 %. So the stand-in engagement wides are skipped; the EVE-radius overlook tightens to ~0.6 %.
+- **The no-EVE page (2026-10-24, Mac Chrome 1180 wide, Apple Metal-3, a private `--eve-data off` hub)**: the exact
+  repro (`stage_engagement` TFIs brawler vs kiter at 30 km), `auto_camera {}` once 70 ships fired: first pick
+  `behind-fc` wide on fleet red at 1.15 % ("fleet red in action · … · first pick", `ruledOut.size` 6, no pull-out, no
+  "open fire"). Its cubes are small but read as a fleet. A near-floor wide (`scales: ["wide"]`: `behind-fc` on fleet
+  blue at 0.63 %) is 1–3 px specks. A pointer take then `auto_camera { favour: "medium" }` took back on a medium kill
+  ("taking back", the log kept its first pick); later cuts were kill, chase and flyby at medium and close. A
+  `set_auto_camera` block came back after a tab reload (`layers.scene`, a close first pick), a live `scales` override
+  listed under `layers.live` and its null returned the scene's value, and a refused call left the settings as they were.
+  The director yielded to "the pointer" twice in that run (once right after a Claude in Chrome screenshot, once with
+  only hub tools touching the tab), so take pictures with the hub's `screenshot` tool and expect to hand back.
 
 ### The opening, coming back, and "open fire"
 
