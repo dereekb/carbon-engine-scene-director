@@ -1,0 +1,16 @@
+{
+  "dbxHandoff": 1,
+  "thread": "live-recording-r3-on-dbxpc-tools-core-regression-and-windows-gpu-runs",
+  "project": "carbon-engine-scene-director",
+  "from": "Michelles-MacBook-Air",
+  "to": "dbxpc",
+  "createdAt": "2026-10-24T16:25:45.531Z",
+  "base": {
+    "ref": "develop",
+    "sha": "f5f813e600edd33f952d441ab4ed29fc227a5ef8"
+  },
+  "work": {
+    "branch": "dbx-claude/work/live-recording-r3-on-dbxpc-tools-core-regression-and-windows-gpu-runs"
+  },
+  "merge": false
+}
