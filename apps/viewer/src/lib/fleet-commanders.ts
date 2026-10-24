@@ -13,8 +13,9 @@
  *   its document list (beyond pruning a removed id), and prunes removed ships and objects from the live lists, with
  *   remove_ship's warning; a group gone also ends its free fire.
  * - The brain (Step, each Destiny boundary): per personality fleet in document order, the gate (the formation planned,
- *   every ship's numbers and fit settled, no member arriving or in warp; it gives up after FLEET_GATE_TICKS), the
- *   succession (CommanderDown: the protocol's designate, the handover), the picture (toFleetPicture over the port's
+ *   every ship's numbers and fit settled, no member arriving or in warp; it waits out a warp-in, then gives up on
+ *   unsettled ships after FLEET_GATE_TICKS), the succession (CommanderDown: the protocol's designate, the handover; a
+ *   leaderless fleet runs it again each boundary), the picture (toFleetPicture over the port's
  *   facts), stepFleetBrain, and its actions run through the port as the tool calls a model makes, the acting FC as
  *   `by`. A model pulling a lever (TakeLevers) makes it manual until set_fleet_personality re-arms it (Rearm).
  *
@@ -128,7 +129,8 @@ function sameList(a: readonly string[], b: readonly string[]): boolean {
 export const FLEET_PILOTED_LEVERS: readonly FleetBrainLever[] = ['move', 'prop-mods'];
 
 /**
- * Ticks: the gate stops waiting for unsettled ships after this many boundaries (they count as they are, noted).
+ * Ticks: the gate stops waiting for unsettled ships after this many boundaries with no member away (a warp-in is waited
+ * out first); they count as they are, noted.
  */
 export const FLEET_GATE_TICKS = 20;
 
@@ -276,7 +278,7 @@ interface FleetHandover {
  */
 interface FleetBrain {
   /**
-   * The first boundary the gate ran at.
+   * The first boundary the gate ran at with no member away (arriving or in warp): its give-up clock.
    */
   since: Maybe<number>;
   readyAt: Maybe<number>;
@@ -722,8 +724,9 @@ export class FleetCommanders {
    * A personality fleet's commander went down (destroyed, flagged or exploded): the protocol picks the designate over
    * the live members, who takes command after its handover (toHandoverTicks). When the old commander leaves the
    * formation (it exploded) the designate becomes the formation's root at once (the overlay); when it still flies
-   * (`flagged`) it stays the root until the handover. Nobody found: leaderless (the default rule keeps a root). Fleets
-   * with no personality are left to the default rule.
+   * (`flagged`) it stays the root until the handover. Nobody found: leaderless (the default rule keeps a root, and the
+   * step runs the protocol again each boundary until it finds someone). Fleets with no personality are left to the
+   * default rule.
    *
    * @param fleet - The fleet id.
    * @param down - The commander that went down.
@@ -738,19 +741,14 @@ export class FleetCommanders {
     const personality = book?.personalities.get(fleet);
     if (!port || !scene || !book || !doc || !personality) return;
     const brain = this.BrainOf(fleet);
-    const gone = new Set(toFleetShipOrder(doc).filter((ship) => ship === down || port.Destroyed(ship)));
-    const designate = toFleetSuccessor({ fleet: doc, gone, steps: personality.command.succession, abilityOf: (ship) => book.pilots.get(ship)?.command ?? null });
-    const flagged = options.flagged === true;
+    const designate = this.DesignateOf(doc, personality, book, down);
     if (!designate) {
       brain.leaderless = true;
       brain.handover = null;
       this.SetCommander(fleet, null);
       return;
     }
-    brain.leaderless = false;
-    const unit = fleetTraitUnit(sceneCombatOf(scene).seed, `${fleet}|handover|${designate.ship}|${tick - (brain.readyAt ?? tick)}`);
-    brain.handover = { from: down, designate, at: tick + toHandoverTicks({ ability: designate.ability, handover: personality.command.handover, unit }), flagged };
-    if (!flagged) this.SetCommander(fleet, designate.ship);
+    this.HandTo(fleet, brain, down, designate, tick, options.flagged === true);
   }
 
   /**
@@ -874,6 +872,12 @@ export class FleetCommanders {
     const pending = brain.handover;
     if (pending && port.Destroyed(pending.designate.ship)) this.CommanderDown(fleet.id, pending.flagged ? pending.from : pending.designate.ship, tick, { flagged: pending.flagged });
     else if (!pending && !brain.leaderless && port.Destroyed(before.commander)) this.CommanderDown(fleet.id, before.commander, tick, { flagged: true });
+    else if (brain.leaderless) {
+      // The protocol again over the live members: a ship that can command may have joined since. The root the default
+      // rule picked flies on until the handover, as a flagged FC does, unless it is the designate itself.
+      const designate = this.DesignateOf(fleet, personality, book, null);
+      if (designate) this.HandTo(fleet.id, brain, before.commander, designate, tick, designate.ship !== before.commander);
+    }
     const handover = brain.handover;
     if (handover && tick >= handover.at) {
       const to = handover.designate.ship;
@@ -882,10 +886,12 @@ export class FleetCommanders {
     }
     const facts = input.factsOf();
     if (brain.readyAt == null) {
-      const waiting = this.GateWaits(fleet, facts);
-      if (waiting.length && tick - (brain.since ?? tick) < FLEET_GATE_TICKS) return;
+      const { waits, away } = this.GateWaits(fleet, facts);
+      // A warp-in is waited out (its landings are scheduled): the give-up clock runs from the last landing.
+      if (away) brain.since = tick;
+      if (waits.length && (away || tick - (brain.since ?? tick) < FLEET_GATE_TICKS)) return;
       brain.readyAt = tick;
-      if (waiting.length) brain.note = `the gate gave up waiting for ${waiting.join(', ')} after ${FLEET_GATE_TICKS} s`;
+      if (waits.length) brain.note = `the gate gave up waiting for ${waits.join(', ')} after ${FLEET_GATE_TICKS} s`;
     }
     const live = port.Live();
     const now = liveFleet();
@@ -931,20 +937,23 @@ export class FleetCommanders {
    *
    * @param fleet - The fleet (the document's).
    * @param facts - The scene's live ships.
-   * @returns A label per wait; none when the fleet is ready.
+   * @returns A label per wait (none when the fleet is ready), and whether a member is away (arriving or in warp).
    */
-  private GateWaits(fleet: SceneFleet, facts: readonly FleetShipFacts[]): string[] {
+  private GateWaits(fleet: SceneFleet, facts: readonly FleetShipFacts[]): { readonly waits: string[]; readonly away: boolean } {
     const port = this.port as FleetBrainPort;
     const members = new Set(toFleetShipOrder(fleet));
     const teams = facts.filter((ship) => members.has(ship.id) && ship.team != null).map((ship) => ship.team);
     const waits: string[] = [];
+    let away = false;
     if (!port.Ready(fleet.id)) waits.push('the formation');
     for (const ship of facts) {
       const member = members.has(ship.id);
-      if (member && ship.away && !port.Destroyed(ship.id)) waits.push(`"${ship.id}" (arriving or in warp)`);
-      else if ((member || (ship.team != null && teams.length > 0 && !teams.includes(ship.team))) && !port.Settled(ship.id)) waits.push(`"${ship.id}"`);
+      if (member && ship.away && !port.Destroyed(ship.id)) {
+        away = true;
+        waits.push(`"${ship.id}" (arriving or in warp)`);
+      } else if ((member || (ship.team != null && teams.length > 0 && !teams.includes(ship.team))) && !port.Settled(ship.id)) waits.push(`"${ship.id}"`);
     }
-    return waits;
+    return { waits, away };
   }
 
   /**
@@ -953,6 +962,31 @@ export class FleetCommanders {
   private Counts(id: string, tick: number): boolean {
     const since = this.unsettledSince.get(id);
     return since == null || tick - since >= FLEET_GATE_TICKS;
+  }
+
+  /**
+   * The protocol's designate over the fleet's live members (the document's commander, `down` and the destroyed left
+   * out); null when it finds nobody.
+   */
+  private DesignateOf(fleet: SceneFleet, personality: ResolvedFleetPersonality, book: FleetTraitBook, down: Maybe<string>): Maybe<FleetSuccessor> {
+    const port = this.port as FleetBrainPort;
+    const gone = new Set(toFleetShipOrder(fleet).filter((ship) => ship === down || port.Destroyed(ship)));
+    return toFleetSuccessor({ fleet, gone, steps: personality.command.succession, abilityOf: (ship) => book.pilots.get(ship)?.command ?? null });
+  }
+
+  /**
+   * Starts the designate's handover from `from` (toHandoverTicks, its unit keyed on the fleet, the designate and the
+   * ticks since the gate). Not flagged, the designate becomes the formation's root at once (the overlay); flagged, `from`
+   * stays the root until the handover.
+   */
+  private HandTo(fleet: string, brain: FleetBrain, from: string, designate: FleetSuccessor, tick: number, flagged: boolean): void {
+    const scene = this.port?.Document();
+    const personality = this.Book()?.personalities.get(fleet);
+    if (!scene || !personality) return;
+    brain.leaderless = false;
+    const unit = fleetTraitUnit(sceneCombatOf(scene).seed, `${fleet}|handover|${designate.ship}|${tick - (brain.readyAt ?? tick)}`);
+    brain.handover = { from, designate, at: tick + toHandoverTicks({ ability: designate.ability, handover: personality.command.handover, unit }), flagged };
+    if (!flagged) this.SetCommander(fleet, designate.ship);
   }
 
   private BrainOf(fleet: string): FleetBrain {

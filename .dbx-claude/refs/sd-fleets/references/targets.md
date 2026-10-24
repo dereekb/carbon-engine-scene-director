@@ -7,8 +7,8 @@ page lever `apps/viewer/src/lib/fleet-targets.ts` (`FleetTargets`, node-tested) 
 
 **Status: delivered** (the document, the order, the call rules; the page lever: members lock, pre-lock and shoot the
 call, own targets win, cease_fire holds, get_state `call` / `called`, `OnPrimary`; the real-GPU look, below). **Free
-fire** (2026-10-23, S6 of the fleet-personalities plan; below) is node-tested, its verify-page check not yet run on
-tools-core.
+fire** (2026-10-23, S6 of the fleet-personalities plan; below) is node-tested, and its verify-page check passes on
+tools-core (2026-10-23, dbxpc, below).
 
 ## The document: `targets` on fleets, wings and squads
 
@@ -160,7 +160,7 @@ or the group's removal ends it), never the document. `readFreeFireOrder`: `on` m
   once, re-pick after reaction on a kill or leaving reach, an order's delays vs a re-pick's, own wins, hold / stand-down
   / off), `fleet-commanders.spec.ts` (free fire kept out of the view, dropped with its group, cleared on a load),
   `orders.spec.ts` "reads free fire". verify-page: `free fire: members with no call pick …` (bfc, p1 with reaction 0,
-  p2, logi g1 vs two teamed Tempests; not yet run on tools-core).
+  p2, logi g1 vs two teamed Tempests; passes on tools-core, below).
 
 ## The page lever: `FleetTargets` (`apps/viewer/src/lib/fleet-targets.ts`)
 
@@ -254,7 +254,17 @@ freeFire?)` takes the group keys with free fire on (`FleetCommanders.FreeFireKey
 Recorded before calls went live (2026-10-23 S1 of the fleet-personalities plan). The checks now read the live list from
 get_state (`targets` on the fleet) and assert the document untouched (`get_scene` has no `targets` after a live call);
 the removal check adds a live-only call on `r4` that `remove_ship r4` prunes with one warning, its emptied list
-shadowing the document's `["r2"]`. Not yet re-run against tools-core (this Mac has none): run `--only called` on dbxpc.
+shadowing the document's `["r2"]`.
+
+**Re-run with live calls (2026-10-23, dbxpc, SDE 3646012, headless), in the whole suite and in `--only
+"personality|called|FC|free fire"`**: all four pass with the numbers below. The focus check: `r1` killed, first shot
+on `r2` +1 tick (slowest cycle 2.52 s), "the live list keeps ["r1","r2"], the document none", guns settled 11 ticks
+after the kill. Own vs called: as below. cease_fire: held at 16 shots for 5 s; `delay: 1` switched bfc at the order
+tick and p3, p1, p2 at +2, +7, +10 (delays 0 / 1 / 6 / 9 s, within a tick). Removal: the loaded call fired on `r1`,
+`remove_ship r1` warned and moved the members to `r2`, the six refusals as below, and the live call on `r4` pruned at
+its removal ("fleet "b" no longer calls "r4" (it was removed)"), nobody called after, the document still `["r2"]`.
+**Free fire**: on at tick T, bfc and p2 on `r1` by T + 4, p1 (reaction 0) 9 ticks later (its delay 8);
+`set_target null` skipped p2; a call took all three onto `r2`, clearing it gave `r1` back; off cleared them.
 
 The four checks (`--only called`) pass:
 

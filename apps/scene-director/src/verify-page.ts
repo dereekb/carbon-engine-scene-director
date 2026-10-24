@@ -2061,8 +2061,12 @@ try {
     await WaitFor('the fleet is under way', 40, (polled) => ((ShipIn(polled, 'wc').speed ?? 0) > 100 ? null : Show(ShipIn(polled, 'wc').speed)));
     await call<EngageResult>('engage', { ships: ['k1', 'k2'], target: 'fc' });
     let before = 0;
+    let fcBefore = 0;
     const dead = await WaitFor('the FC dies under way', 90, (polled) => {
-      if (!ShipIn(polled, 'fc').destroyed) before = ShipIn(polled, 'wc').speed ?? 0;
+      if (!ShipIn(polled, 'fc').destroyed) {
+        before = ShipIn(polled, 'wc').speed ?? 0;
+        fcBefore = ShipIn(polled, 'fc').speed ?? 0;
+      }
       return ShipIn(polled, 'fc').destroyed ? null : Show(ShipIn(polled, 'fc').defense?.structure);
     });
     const deathTick = ShipIn(dead, 'fc').destroyed?.tick ?? dead.simulation.tick;
@@ -2075,9 +2079,12 @@ try {
         ? null
         : Show({ tick: polled.simulation.tick, commander: polled.fleets[0]?.commander, wc: [wc.order, wc.speed], member: [member.following?.state, member.speed] });
     });
-    // Halted, a Punisher loses most of its speed within 5 ticks; inheriting, it never slows.
-    Expect(slowest >= 0.9 * before, `wc slowed from ${before} to ${slowest} m/s across the FC's death`);
-    return `FC dead at tick ${deathTick}; wc flies ${Show(ShipIn(flying, 'wc').order)} at ${ShipIn(flying, 'wc').speed} m/s (${before} before, slowest ${slowest}); member ${ShipIn(flying, 'member').following?.state} on ${ShipIn(flying, 'member').anchor?.ship}`;
+    // Halted, a Punisher keeps about a third of its speed after 5 ticks. Inheriting the FC's order, it never drops below
+    // the FC's speed: it may slow from its slot's catch-up speed to the fleet's (on tools-core once 295 → 228 m/s, the FC
+    // at about 222).
+    const floor = Math.min(before, fcBefore);
+    Expect(slowest >= 0.9 * floor, `wc slowed from ${before} to ${slowest} m/s across the FC's death (the FC flew at ${fcBefore})`);
+    return `FC dead at tick ${deathTick}; wc flies ${Show(ShipIn(flying, 'wc').order)} at ${ShipIn(flying, 'wc').speed} m/s (${before} before, the FC at ${fcBefore}, slowest ${slowest}); member ${ShipIn(flying, 'member').following?.state} on ${ShipIn(flying, 'member').anchor?.ship}`;
   });
 
   await Check('load_scene revives the dead', async () => {

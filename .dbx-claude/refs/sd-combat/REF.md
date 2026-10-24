@@ -506,13 +506,25 @@ shots, the kill 15 ticks after `engage`, by p2 high-0, dealt [824.6, 748]; seed 
 ## Verify-page (K3)
 
 `a ship at 0 hull explodes and leaves cleanly`, `a dead squad lead and a dead FC fall back like a removal`,
-`a moving FC dies and its fleet flies on: the heir inherits its order` (added 2026-10-23, not yet run on tools-core),
+`a moving FC dies and its fleet flies on: the heir inherits its order` (added 2026-10-23; result below),
 `load_scene revives the dead`. Evidence (2026-10-23, SDE 3632936, headless): Rifter killed by p2 15 ticks after
 `engage`; the orbiter `stopped: target "rifter" was destroyed`; `order_ship` refused; posted
 `ecx_generic_explosive_short_individual_01b_play` and `..._global_01b_play`; the ball gone at tick 85 (removesAt 84),
 `audio.gameObjects − emitters` 1 before and after. Fleet: the lead dead at tick 21, the squad anchors on the wing
 commander; the FC dead at tick 39, the wing commander acts for it and the member follows it. A load: 6 ships alive at
 full HP, no kills, the FC back.
+
+**Re-run 2026-10-23 on dbxpc** (SDE 3646012, headless) for the fleet-personalities S8 regression, the whole suite: 158
+ok, 1 skip (`SOF ships' own audio emitters stay inert`: no renderer), 1 FAIL outside combat (`warp-in: the warp-in
+shot anchors at an arriving fleet's landing ...`, a cinema check: the refusal note needs every ship of the group still
+arriving, and its FC now lands before the shot; filed). K2's and K3's checks give the numbers above (lock 2.617 s; 16 /
+16 hits, dealt 803.1 = taken 803.1; 11 of 12 missed at 20,085 m; seed 1 twice 40 shots, the kill 15 ticks after
+`engage`; the load revives 6 ships). The moving-FC check first failed on its own assertion: it compared the heir's
+speed with its catch-up speed in its slot (wc 295 m/s), but an heir inheriting `direction` at 0.5 slows to the
+fleet's speed, the FC's. It now floors at the slower of the two (a halt keeps about a third after 5 ticks): `FC dead at
+tick 493; wc flies direction [1,0,0] at 0.5, 228.2 m/s (295.2 before, the FC at 221.8, slowest 228.2)`; run alone,
+`FC dead at tick 23; 216.4 m/s (188.9 before, the FC at 221.7, slowest 196.6)`. The four `called` checks and
+free fire: `sd-fleets` doc `targets`; the personality check: `sd-personalities`.
 
 The kill check also asserts no `audio.foreign`. Headless draws no hull, so the hull's damage effects (the VDS fires)
 never load there and its result says `(no renderer: the hull's damage effects never load)`; the real-GPU run covers

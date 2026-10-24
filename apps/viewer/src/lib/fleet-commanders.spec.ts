@@ -147,13 +147,17 @@ interface BrainRun extends FleetBrainAction {
 
 /**
  * The brain over a fake port: every ship settled and planned, facts from the document's positions, the brain's calls
- * landing in the call book, its moves as the FC's order. `Kill` explodes a ship (out of the live view), `Flag` flags it.
+ * landing in the call book, its moves as the FC's order. `Kill` explodes a ship (out of the live view), `Flag` flags it,
+ * `arriving` holds ships still warping in (away), `Edit` patches the document.
  */
-function BrainRig(scene: SceneDocument, piloted: ReadonlySet<string> = new Set()) {
+function BrainRig(initial: SceneDocument, piloted: ReadonlySet<string> = new Set()) {
+  let scene = initial;
   const runs: BrainRun[] = [];
   const handovers: { fleet: string; from: string; to: string }[] = [];
   const destroyed = new Set<string>();
   const dead = new Set<string>();
+  const arriving = new Set<string>();
+  const unsettled = new Set<string>();
   const orders = new Map<string, ShipOrder>();
   // The port reads the commanders it is built into (set below, before any call).
   const holder: { commanders?: FleetCommanders } = {};
@@ -164,7 +168,7 @@ function BrainRig(scene: SceneDocument, piloted: ReadonlySet<string> = new Set()
     Live: live,
     Destroyed: (id) => destroyed.has(id),
     Ready: () => true,
-    Settled: () => true,
+    Settled: (id) => !unsettled.has(id),
     Facts: () =>
       scene.ships
         .filter((doc) => !dead.has(doc.id))
@@ -178,7 +182,7 @@ function BrainRig(scene: SceneDocument, piloted: ReadonlySet<string> = new Set()
           dps: 100,
           signature: 40,
           speed: 400,
-          ...(destroyed.has(doc.id) ? { away: true } : {}),
+          ...(destroyed.has(doc.id) || arriving.has(doc.id) ? { away: true } : {}),
           reach: { lock: 30_000, optimal: 5000, falloff: 10_000 },
           attackedBy: []
         })),
@@ -203,7 +207,14 @@ function BrainRig(scene: SceneDocument, piloted: ReadonlySet<string> = new Set()
     commanders,
     runs,
     handovers,
+    arriving,
+    unsettled,
     live,
+    Edit(operations: unknown[]) {
+      const before = scene;
+      scene = applySceneOperations(scene, operations as Parameters<typeof applySceneOperations>[1]).scene;
+      commanders.AfterEdit(before, scene);
+    },
     Steps(from: number, to: number) {
       for (let tick = from; tick <= to; tick++) commanders.Step(tick);
     },
@@ -384,6 +395,42 @@ describe('FleetCommanders: the FC brain', () => {
     const free = BrainRig(BrainScene('sharp'));
     free.Steps(1, 30);
     expect(free.commanders.Report(FLEET, 30)).not.toHaveProperty('piloted');
+  });
+
+  it('a leaderless fleet runs the protocol again each boundary: a ship that can command ends it after its handover', () => {
+    const rig = BrainRig(BrainScene('lone'));
+    rig.Steps(1, 2);
+    rig.Kill('fc', 2);
+    rig.commanders.SetCall(WHOLE, []);
+    rig.Steps(3, 5);
+    expect(rig.commanders.Report(FLEET, 5)).toMatchObject({ state: 'leaderless' });
+    // d2 can command now (a reinforcement joins the same way): it is designated over d1, the default rule's root, who
+    // flies on until the handover moves the formation to d2.
+    rig.Edit([{ op: 'update_ship', id: 'd2', set: { pilot: { command: 1 } } }]);
+    rig.Steps(6, 6);
+    expect(rig.commanders.Report(FLEET, 6)).toMatchObject({ ship: 'd1', state: 'handover', successor: 'd2', takesOverIn: 2 });
+    expect(rig.live().fleets?.[0].commander).toBe('d1');
+    rig.Steps(7, 8);
+    expect(rig.handovers).toEqual([{ fleet: FLEET, from: 'd1', to: 'd2' }]);
+    expect(rig.live().fleets?.[0].commander).toBe('d2');
+    expect(rig.commanders.Report(FLEET, 8)).toMatchObject({ ship: 'd2', ability: 1, state: 'commanding' });
+    expect(rig.runs.at(-1)).toMatchObject({ tick: 8, args: CallArgs('d2', ['r1', 'r2']) });
+  });
+
+  it('the gate waits out a warp-in, then gives up on unsettled ships 20 boundaries after the last landing', () => {
+    const rig = BrainRig(BrainScene('sharp'));
+    for (const id of ['fc', 'd1', 'd2']) rig.arriving.add(id);
+    rig.unsettled.add('r2');
+    rig.Steps(1, 30);
+    expect(rig.commanders.Report(FLEET, 30)).toMatchObject({ state: 'waiting' });
+    expect(rig.commanders.Report(FLEET, 30)).not.toHaveProperty('note');
+    rig.arriving.clear();
+    rig.Steps(31, 49);
+    expect(rig.commanders.Report(FLEET, 49)).toMatchObject({ state: 'waiting' });
+    expect(rig.runs).toEqual([]);
+    rig.Steps(50, 50);
+    expect(rig.commanders.Report(FLEET, 50)).toMatchObject({ state: 'commanding', readyAt: 50, note: 'the gate gave up waiting for "r2" after 20 s' });
+    expect(rig.runs.map((run) => [run.tick, run.args])).toEqual([[50, CallArgs('fc', ['r1', 'r2'])]]);
   });
 
   it('a lever a model pulls is manual until set_fleet_personality; cease_fire also holds the fleet', () => {
