@@ -28,10 +28,14 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 - **One hub per port.** `scene-director mcp` starts the hub or, when 5520 is taken, joins it through `RemoteHub`
   (`hub/remote-hub.ts`, same `Call` surface as `Hub`; `hub/tool-call.ts`). A joined hub keeps the owner's scenes and
   fleets directories.
+- **WebSocket messages** are JSON (`hello`, `call`, `result`, `log`), plus a movie export's (`sd-export`): page → hub
+  `{ type: "export", id, kind: config | progress | end | failed | cancelled }` and binary chunk packets (`SDX1` + u32
+  header length + JSON header + bytes, `packages/scene/src/lib/export/wire.ts`), hub → page `saved` / `failed`.
 - **HTTP routes** (`hub.ts`): `/build`, `/resfileindex.txt`, `/resource/<path>`, `/ship-stats`, `/prop-mod`,
   `/fit/type`, `/dogma/types`, `/dogma/skills` (`sd-fittings`), `/weapon` (`sd-weapons`), `/audio/library`,
-  `/audio/path/<encoded res:/ path>` (streams, forwards `Range`), `/map/system`, `/ws`. The hub's HTTP layer is
-  GET-only; tools-core POSTs go through `hub/sde-client.ts` (`SdeClient`, shared by `ShipData`, `DogmaData` and
+  `/audio/path/<encoded res:/ path>` (streams, forwards `Range`), `/map/system`, `/movies/<file>` (an exported movie
+  from the movies directory, GET / HEAD with `Range`: `sd-export`), `/ws`. The hub's HTTP layer is GET-only (and HEAD
+  on `/movies`); tools-core POSTs go through `hub/sde-client.ts` (`SdeClient`, shared by `ShipData`, `DogmaData` and
   `WeaponData`: the SDE build pin, the cache, the failure mapping).
 
 ## Layout
@@ -75,7 +79,8 @@ Claude Code ──stdio──▶ scene-director mcp (Node)      apps/scene-direc
 
 - **The MCP process writes nothing to stdout but MCP protocol messages**; the hub logs to stderr.
 - **Tests never touch per-user data dirs.** Specs and verify-page pass a temp `SceneFileStore` /
-  `FleetCompositionFileStore` / `FleetPersonalityFileStore` (server.spec passes `--personalities <tmp>`). tools-core is faked with `hub/ship-data.testing.ts` and `hub/map-data.testing.ts`
+  `FleetCompositionFileStore` / `FleetPersonalityFileStore` / `MovieFileStore` (server.spec passes `--personalities
+  <tmp> --movies <tmp>`). tools-core is faked with `hub/ship-data.testing.ts` and `hub/map-data.testing.ts`
   (shapes captured live against SDE build 3632936); tests run offline.
 - **Node-tested viewer modules import `./runtime-sim`, never `./runtime`** (type-only imports are fine). See
   `sd-runtime`.

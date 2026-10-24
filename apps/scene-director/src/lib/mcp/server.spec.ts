@@ -15,9 +15,10 @@ describe('mcp server', () => {
     expect(existsSync(CLI), `${CLI} is missing; run "npx nx build scene-director"`).toBe(true);
     // Port 0 picks a free port; an unreachable tools-core keeps the test offline; the personalities store is a temp one.
     const personalities = await mkdtemp(path.join(os.tmpdir(), 'scene-director-mcp-personalities-'));
+    const movies = await mkdtemp(path.join(os.tmpdir(), 'scene-director-mcp-movies-'));
     const transport = new StdioClientTransport({
       command: process.execPath,
-      args: [CLI, 'mcp', '--port', '0', '--tools-core', 'http://127.0.0.1:9', '--personalities', personalities],
+      args: [CLI, 'mcp', '--port', '0', '--tools-core', 'http://127.0.0.1:9', '--personalities', personalities, '--movies', movies],
       stderr: 'ignore'
     });
     const client = new Client({ name: 'scene-director-test', version: '0.0.0' });
@@ -45,7 +46,21 @@ describe('mcp server', () => {
       expect(orderFleet).toMatch(/with at the same object becomes a timeline cue/u);
       expect(tools.find((tool) => tool.name === 'add_fleet_composition')?.description).toMatch(/get_scene \{ at \}/u);
       expect(tools.find((tool) => tool.name === 'get_state')?.inputSchema.properties).not.toHaveProperty('at');
-      expect(tools.find((tool) => tool.name === 'time_control')?.inputSchema).toMatchObject({ properties: { pause: { type: 'boolean' }, rate: { minimum: 1 / 16, maximum: 32 }, back: { exclusiveMinimum: 0 }, seek: { anyOf: [{ type: 'number', minimum: 0 }, { type: 'object', required: ['timeline'] }] }, every: { minimum: 1, maximum: 60 }, window: { minimum: 10, maximum: 3600 } } });
+      expect(tools.find((tool) => tool.name === 'time_control')?.inputSchema).toMatchObject({
+        properties: {
+          pause: { type: 'boolean' },
+          rate: { minimum: 1 / 16, maximum: 32 },
+          back: { exclusiveMinimum: 0 },
+          seek: {
+            anyOf: [
+              { type: 'number', minimum: 0 },
+              { type: 'object', required: ['timeline'] }
+            ]
+          },
+          every: { minimum: 1, maximum: 60 },
+          window: { minimum: 10, maximum: 3600 }
+        }
+      });
       expect(tools.find((tool) => tool.name === 'time_control')?.description).toMatch(/back jumps that many scene seconds back/u);
       expect(tools.find((tool) => tool.name === 'get_state')?.description).toMatch(/back \(scene seconds a jump can go back now\)/u);
       expect(client.getInstructions()).toMatch(/time_control \{ back: 10 \} jumps back 10 scene seconds/u);
@@ -71,6 +86,14 @@ describe('mcp server', () => {
       expect(body.connectedTabs).toBe(0);
       expect(body.toolsCore.reachable).toBe(false);
       expect((body as { personalitiesDirectory?: string }).personalitiesDirectory).toBe(personalities);
+      expect((body as { moviesDirectory?: string }).moviesDirectory).toBe(movies);
+
+      // export_movie is a hub tool: its status answers with no tab.
+      expect(tools.find((tool) => tool.name === 'export_movie')?.description).toMatch(/fixed scene clock/u);
+      expect(client.getInstructions()).toMatch(/export_movie renders the movie offline/u);
+      const exportStatus = (await client.callTool({ name: 'export_movie', arguments: {} })) as { isError?: boolean; content: { text: string }[] };
+      expect(exportStatus.isError).toBeFalsy();
+      expect(JSON.parse(exportStatus.content[0].text)).toMatchObject({ state: 'idle' });
 
       // The built-in personalities are static data on the hub: they list with no tab.
       const listed = (await client.callTool({ name: 'list_fleet_personalities', arguments: {} })) as { isError?: boolean; content: { text: string }[] };

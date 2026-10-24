@@ -18,6 +18,8 @@
  *          --fleets <dir> (saved fleet compositions; a scene-director/fleets folder in the per-user data directory by default),
  *          --personalities <dir> (saved fleet personalities; a scene-director/personalities folder in the per-user data
  *          directory by default),
+ *          --movies <dir> (export_movie's MP4 files, served at /movies/<file>; a scene-director/movies folder in the
+ *          per-user data directory by default),
  *          --audio-cache <dir> (local copies of tools-core's sound banks the page reads ranges from; a
  *          scene-director-audio-cache folder in the OS temp directory by default)
  */
@@ -33,10 +35,11 @@ import { ErrorMessage, ErrorProblems, type ToolCaller } from './lib/hub/tool-cal
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
 import { ImageOf, ServeMcp } from './lib/mcp/server';
 import { defaultFleetCompositionsDirectory, FleetCompositionFileStore } from './lib/store/composition-files';
+import { DefaultMoviesDirectory, MovieFileStore } from './lib/store/movie-files';
 import { defaultFleetPersonalitiesDirectory, FleetPersonalityFileStore } from './lib/store/personality-files';
 import { DefaultScenesDirectory, SceneFileStore } from './lib/store/scene-files';
 
-const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
+const USAGE = 'usage: scene-director serve|mcp|call <tool> [json] [--port 5520] [--host 127.0.0.1] [--tools-core http://127.0.0.1:5510] [--build <n>] [--viewer <dir>] [--scenes <dir>] [--fleets <dir>] [--personalities <dir>] [--movies <dir>] [--audio-cache <dir>] [--in scene.json] [--out file]\n';
 
 /**
  * The tools whose --in file is a fleet composition rather than a scene.
@@ -62,6 +65,7 @@ const viewerDirectory = Option('--viewer', process.env['SCENE_DIRECTOR_VIEWER'] 
 const scenes = new SceneFileStore(Option('--scenes', process.env['SCENE_DIRECTOR_SCENES'] || DefaultScenesDirectory()));
 const compositions = new FleetCompositionFileStore(Option('--fleets', process.env['SCENE_DIRECTOR_FLEETS'] || defaultFleetCompositionsDirectory()));
 const personalities = new FleetPersonalityFileStore(Option('--personalities', process.env['SCENE_DIRECTOR_PERSONALITIES'] || defaultFleetPersonalitiesDirectory()));
+const movies = new MovieFileStore(Option('--movies', process.env['SCENE_DIRECTOR_MOVIES'] || DefaultMoviesDirectory()));
 const audioCache = new AudioBankCache({ directory: Option('--audio-cache', process.env['SCENE_DIRECTOR_AUDIO_CACHE'] || DEFAULT_AUDIO_CACHE_DIRECTORY), log: LogToStderr });
 const toolsCore = new ToolsCore({
   url: Option('--tools-core', process.env['CJS_TOOLS_CORE'] ?? DEFAULT_TOOLS_CORE),
@@ -74,12 +78,12 @@ const toolsCore = new ToolsCore({
  * @returns The hub to send calls to.
  */
 async function StartHubOrJoin(): Promise<ToolCaller> {
-  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, personalities, audioCache, log: LogToStderr });
+  const hub = new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr });
   try {
     return await hub.Start();
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'EADDRINUSE') throw error;
-    LogToStderr(`port ${port} is in use; joining the hub there as a controller (its scenes, fleets and personalities directories apply, not ${scenes.directory}, ${compositions.directory} and ${personalities.directory})`);
+    LogToStderr(`port ${port} is in use; joining the hub there as a controller (its scenes, fleets, personalities and movies directories apply, not ${scenes.directory}, ${compositions.directory}, ${personalities.directory} and ${movies.directory})`);
     return new RemoteHub({ host, port, log: LogToStderr });
   }
 }
@@ -88,7 +92,7 @@ async function StartHubOrJoin(): Promise<ToolCaller> {
  * Runs the hub until SIGINT or SIGTERM.
  */
 async function Serve(): Promise<void> {
-  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, personalities, audioCache, log: LogToStderr }).Start();
+  const hub = await new Hub({ host, port, toolsCore, viewerDirectory, scenes, compositions, personalities, movies, audioCache, log: LogToStderr }).Start();
   const stop = async (): Promise<void> => {
     await hub.Stop();
     process.exit(0);

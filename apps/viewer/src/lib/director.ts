@@ -233,7 +233,10 @@ import {
   movieLookOf,
   normalizeMovieCommand,
   type MovieBeatTarget,
-  type MovieReport
+  type MovieReport,
+  exportPictureRect,
+  type MovieExportPlan,
+  normalizeMovieExportCommand
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -276,7 +279,10 @@ import { type CalledPrimaryChange, type FleetGroupCalledReport, FleetTargets, ty
 import { FleetFollowing, type ShipFollowingReport } from './following';
 import { Arrivals, WARP_IN_HIDDEN_DISTANCE } from './arrivals';
 import { EncodePng, type CameraEye, type DrawnCamera, type Engine, type EngineStats } from './engine';
-import type { ToolHandler } from './link';
+import type { HubLink, ToolHandler } from './link';
+import { ExportAllows, type ExportCapture, ExportRefusal, MovieExport, type MovieExportPort, PlanMovieExport, WebCodecsEncoder } from './movie-export';
+import { DrawSlate } from './export-slate';
+import type { ExportStep } from './export-frames';
 import { ReadDressParts } from './celestials';
 import { LocationKey, LocationLookup } from './location';
 import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrders } from './objects';
@@ -302,7 +308,7 @@ import { BuildShipValues, HydrateShip, RetireShips } from './ships';
 import { CURRENT_KEY, type SceneStore } from './store';
 import { ShipScripts } from './ship-scripts';
 import { TIMELINE_PREPARE_LIMIT_SECONDS, TimelinePlayer, type CueFireResult, type TimelineSettled, type TimelineSnapshot } from './timeline';
-import { BeatReportOf, BeatTime, MovieLookApplies, MovieReportOf, SeekChunks, type FramePresentation } from './movie';
+import { BeatReportOf, BeatTime, MovieLookApplies, MoviePresentation, MovieReportOf, SeekChunks, type FramePresentation } from './movie';
 import { TurretAudioPosts, TurretSoundQueue, type TurretAimTransition, type TurretShotSound, type TurretSoundFacts } from './turret-audio';
 import { TurretFiles, TurretMountsOf, type TurretMountReport } from './turret-plan';
 import type { CapturedSim, JumpLanding, TapeEntry, TimeControl } from './time-control';
@@ -1137,6 +1143,18 @@ export class Director {
    */
   private time: Maybe<TimeControl> = null;
   /**
+   * The page's movie export (export_movie, movie-export.ts): the running one, or the last one this page session.
+   */
+  exporter: Maybe<MovieExport> = null;
+  /**
+   * The hub link a movie export streams to (AttachLink).
+   */
+  private link: Maybe<HubLink> = null;
+  /**
+   * While a movie export holds the page: audio muted, the time port's unmute held off.
+   */
+  private exportLocked = false;
+  /**
    * The cinematic camera (cinema.ts).
    */
   readonly cinema = new CinemaRig();
@@ -1586,7 +1604,8 @@ export class Director {
       play_sequence: (args) => this.PlayShot({ shots: args['shots'] }),
       stop_shot: (args) => this.StopShot(args),
       resume_shot: () => this.ResumeShot(),
-      auto_camera: (args) => this.AutoCamera(args)
+      auto_camera: (args) => this.AutoCamera(args),
+      export_movie: (args) => this.ExportMovie(args)
     };
     // Live commands go on the time-control tape: a jump back replays them at their ticks (sd-time).
     for (const tool of JOURNALED_TOOLS) {
@@ -1598,7 +1617,182 @@ export class Director {
       const run = handlers[action];
       handlers[action] = (args) => (args['at'] != null || args['when'] != null || args['cue'] != null ? this.AddCue(action, args) : run(args));
     }
+    // The outermost wrapper: a movie export refuses every page tool but its allow-list (sd-export).
+    for (const [name, run] of Object.entries(handlers)) handlers[name] = (args) => this.ExportGuard(name, args, () => run(args));
     return handlers;
+  }
+
+  /**
+   * Whether a movie export holds the page (preparing to finishing): tools are refused, input is locked.
+   */
+  get exporting(): boolean {
+    return this.exporter?.running ?? false;
+  }
+
+  /**
+   * Takes the hub link a movie export streams to; its export messages go to the exporter.
+   *
+   * @param link - main.ts's HubLink.
+   */
+  AttachLink(link: HubLink): void {
+    this.link = link;
+    link.onExport = (message) => this.exporter?.OnHub(message);
+  }
+
+  /**
+   * The hub link's status: closing fails a running export.
+   *
+   * @param connected - Whether the link is up.
+   */
+  LinkStatus(connected: boolean): void {
+    if (!connected && this.exporting) this.exporter?.LinkClosed();
+  }
+
+  /**
+   * Cancels a running movie export (Esc in the tab).
+   *
+   * @param why - Who cancelled.
+   */
+  CancelExport(why: string): void {
+    if (this.exporting) this.exporter?.Cancel(why);
+  }
+
+  /**
+   * Runs a page tool, or refuses it while a movie export holds the page (ExportAllows).
+   */
+  private ExportGuard(name: string, args: Record<string, unknown>, run: () => unknown): unknown {
+    const exporter = this.exporter;
+    if (exporter?.running && !ExportAllows(name, args)) throw new Error(ExportRefusal(exporter.Report()));
+    return run();
+  }
+
+  /**
+   * export_movie on the page (the hub's calls; sd-export): start plans and arms an export (returning before its
+   * prepare), status reports it, cancel stops it.
+   *
+   * @throws {SceneError} When the command or the page's checks fail.
+   * @throws {Error} When the encoder does not support the plan, or nothing runs to cancel.
+   */
+  async ExportMovie(args: Record<string, unknown> = {}): Promise<object> {
+    const { id, ...rest } = args;
+    const command = normalizeMovieExportCommand(rest);
+    if (command.action === 'status') return this.exporter?.Report() ?? { state: 'idle', note: 'no movie export ran in this page session' };
+    if (command.action === 'cancel') {
+      const exporter = this.exporter;
+      if (!exporter?.running) throw new Error('no movie export is running');
+      if (typeof id === 'string' && id !== exporter.id) throw new Error(`the running export is ${exporter.id}, not ${id}`);
+      return exporter.Cancel('export_movie cancel');
+    }
+    if (typeof id !== 'string' || !id) throw new Error('export_movie start reaches the page through the hub: call export_movie on the MCP server');
+    const time = this.RequireTime();
+    const summary = this.timeline.Summary();
+    const block = this.authored?.timeline?.movie;
+    const { plan, warnings } = PlanMovieExport({
+      command,
+      timeline: summary ? { state: summary.state, started: this.timeline.startTick != null, held: this.clock.held, end: block?.end ?? null, letterbox: block ? movieLookOf(block).letterbox : null } : null,
+      jumping: time.isJumping,
+      exporting: this.exporting,
+      noRenderer: this.engine ? null : (this.engineError?.message ?? 'WebGPU is unavailable')
+    });
+    const hardware = await WebCodecsEncoder.Support(plan);
+    const ready: MovieExportPlan = { ...plan, hardware };
+    const exporter = new MovieExport({ id, plan: ready, port: this.ExportPort(ready), encoder: new WebCodecsEncoder(), warnings });
+    this.exporter = exporter;
+    void exporter.Start();
+    return { id, state: exporter.state, plan: ready, scene: this.scene?.name ?? null, warnings };
+  }
+
+  /**
+   * The exporter's side of the page (MovieExportPort).
+   */
+  private ExportPort(plan: MovieExportPlan): MovieExportPort {
+    const time = this.RequireTime();
+    const slate = plan.source === 'slate' ? new OffscreenCanvas(plan.width, plan.height).getContext('2d') : null;
+    const link = (): Maybe<HubLink> => this.link;
+    return {
+      time,
+      clock: this.clock,
+      world: this.world,
+      Lock: (on) => this.LockForExport(on),
+      Restart: () => this.ExportRestart(),
+      TimelineOrigin: () => {
+        const start = this.timeline.startTick;
+        return start == null ? null : this.world.BoundaryTime(start);
+      },
+      CanSeek: () => time.ring.length > 0,
+      Seek: (clock) => this.MovieJumpTo(clock),
+      Capture: (step, seconds) => this.ExportCapture(plan, step, seconds, slate),
+      Send: (message) => link()?.SendMessage(message) ?? false,
+      SendBinary: (bytes) => link()?.SendBinary(bytes) ?? false,
+      get buffered() {
+        return link()?.buffered ?? 0;
+      },
+      get hidden() {
+        return document.visibilityState === 'hidden';
+      },
+      GpuErrors: () => this.engine?.Stats().gpuErrors.count ?? 0,
+      now: () => performance.now(),
+      Changed: () => this.onChange()
+    };
+  }
+
+  /**
+   * Locks the page for an export (audio muted; the guard and main.ts's input lock read `exporting`) or gives it back.
+   */
+  private LockForExport(on: boolean): void {
+    this.exportLocked = on;
+    if (on) this.audio.Mute(true);
+    else {
+      this.audio.Mute(this.time?.muted ?? false);
+      this.audio.Suspend(this.time?.paused ?? false);
+    }
+    this.onChange();
+  }
+
+  /**
+   * An export's restart: the movie replayed from its placements, held at t = 0 until it prepared, then played with the
+   * clock paused (as movie retake does).
+   *
+   * @returns t = 0's clock.
+   * @throws {Error} When the restart did not prepare.
+   */
+  private async ExportRestart(): Promise<number> {
+    const time = this.RequireTime();
+    if (!this.authored) throw new Error('no scene is loaded');
+    await this.Timeline({ action: 'restart', paused: true });
+    const deadline = performance.now() + (TIMELINE_PREPARE_LIMIT_SECONDS + 10) * 1000;
+    while (this.timeline.state === 'preparing' && performance.now() < deadline) await this.NextFrames(1);
+    if (this.timeline.state !== 'ready') throw new Error(`the restarted movie did not prepare: the timeline is ${this.timeline.state}, not ready at t = 0`);
+    time.Pause(true);
+    this.timeline.Play();
+    this.MarkTimelineOrigin('ready');
+    const zero = this.world.NextBoundaryTime();
+    if (zero == null) throw new Error('the restarted movie has no next tick to start at');
+    return zero;
+  }
+
+  /**
+   * The frame just drawn for an export step: the slate drawn now, or the engine's canvas (composited onto bars).
+   */
+  private ExportCapture(plan: MovieExportPlan, step: ExportStep, seconds: number, slate: Maybe<OffscreenCanvasRenderingContext2D>): ExportCapture {
+    if (slate) {
+      DrawSlate(slate, { scene: this.scene?.name, time: seconds, index: step.index, frames: plan.frames, tick: step.tick, fps: plan.fps });
+      return { source: slate.canvas };
+    }
+    const engine = this.engine;
+    if (!engine) return { error: 'no renderer', fatal: true };
+    if (engine.deviceLost) return { error: `the WebGPU device was lost: ${engine.deviceLost}`, fatal: true };
+    const source = engine.ExportSource(plan, this.ExportLook(plan).picture);
+    return source ? { source } : { error: engine.lastError ?? 'the frame drew nothing' };
+  }
+
+  /**
+   * An export's look: its letterbox (a playing shot's own wins while it plays) and the picture's rect in the frame.
+   */
+  private ExportLook(plan: MovieExportPlan): { readonly letterbox: Maybe<number>; readonly picture: ReturnType<typeof exportPictureRect> } {
+    const shot = this.cinema.Presentation();
+    const { letterbox } = MoviePresentation({ page: { letterbox: null, hud: true }, movie: { letterbox: plan.letterbox, hud: true }, shot: shot.letterbox !== undefined ? { letterbox: shot.letterbox } : {} });
+    return { letterbox, picture: exportPictureRect(plan.width, plan.height, letterbox) };
   }
 
   /**
@@ -2808,7 +3002,7 @@ export class Director {
     time.AttachPort({
       Presentation: ({ paused, muted }) => {
         this.audio.Suspend(paused);
-        if (!this.silent) this.audio.Mute(muted);
+        if (!this.silent) this.audio.Mute(muted || this.exportLocked);
         this.onChange();
       }
     });
@@ -2842,7 +3036,8 @@ export class Director {
     const command = normalizeTimeControlCommand(input);
     const time = this.time;
     if (!time) throw new Error('time control is not attached yet: the page is still starting');
-    const warnings = time.Command(command);
+    // time_control {} only reads, so it answers while a movie export locks the clock.
+    const warnings = Object.keys(command).length ? time.Command(command) : [];
     return { ...time.Report(), warnings };
   }
 
@@ -3109,7 +3304,7 @@ export class Director {
       this.cameraDirector.Clear({ keep: 'settings', time: this.SceneSeconds(this.world.tick) });
     }
     this.movieCamera = false;
-    this.audio.Mute(this.time?.muted ?? false);
+    this.audio.Mute((this.time?.muted ?? false) || this.exportLocked);
     this.onChange();
   }
 
@@ -3361,7 +3556,10 @@ export class Director {
   Presentation(): FramePresentation {
     const block = this.authored?.timeline?.movie;
     const movie = block && MovieLookApplies(this.timeline.state) ? { ...movieLookOf(block), run: this.timeline.startTick ?? -1 } : null;
-    return { shot: this.cinema.Presentation(), movie };
+    const exporter = this.exporter;
+    if (!exporter?.running) return { shot: this.cinema.Presentation(), movie };
+    const { plan } = exporter;
+    return { shot: this.cinema.Presentation(), movie, export: { ...this.ExportLook(plan), output: { width: plan.width, height: plan.height } } };
   }
 
   /**
@@ -3746,6 +3944,7 @@ export class Director {
       environment: this.engine?.Environment() ?? null,
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, ...(this.clock.held ? { held: true } : {}), warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
       time: this.time?.Report() ?? null,
+      export: this.exporter?.Report() ?? null,
       timeline: this.TimelineSummary(),
       ships: ships.map((ship) => {
         const script = this.timeline.Script(ship.id);

@@ -9,7 +9,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -36,15 +36,20 @@ import {
   type TimeReport,
   type CueReport,
   type MovieReport,
+  type MovieExportReport,
+  type MovieExportResult,
+  type MovieExportStartResult,
   type SceneCue
 } from '@scene-director/scene';
 import { AudioBankCache } from './lib/hub/audio-cache';
 import { Hub } from './lib/hub/hub';
+import { ReadMp4 } from './lib/hub/mp4-reader.testing';
 import { ShipDataError } from './lib/hub/ship-data';
 import type { ShipStatsAnswer } from './lib/hub/ship-stats-tool';
 import { ErrorMessage, ErrorProblems } from './lib/hub/tool-call';
 import { DEFAULT_TOOLS_CORE, ToolsCore } from './lib/hub/tools-core';
 import { FleetCompositionFileStore } from './lib/store/composition-files';
+import { MovieFileStore } from './lib/store/movie-files';
 import { FleetPersonalityFileStore } from './lib/store/personality-files';
 import { SceneFileStore } from './lib/store/scene-files';
 
@@ -895,8 +900,9 @@ if (!status.reachable) {
 const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-')));
 const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-fleets-')));
 const personalities = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-personalities-')));
+const movies = new MovieFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-verify-movies-')));
 // The audio cache is shared with every hub on the machine (a copy of tools-core's banks, not a store).
-const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, personalities, audioCache: new AudioBankCache(), log: () => undefined }).Start();
+const hub = await new Hub({ port: 0, toolsCore, viewerDirectory: Option('--viewer', path.resolve(import.meta.dirname, '../viewer')), scenes, compositions, personalities, movies, audioCache: new AudioBankCache(), log: () => undefined }).Start();
 const call = <T>(name: string, args: Record<string, unknown> = {}): Promise<T> => hub.Call(name, args) as Promise<T>;
 // Autoplay lets the page turn audio on without a gesture, so the audio check sees the engine stems post.
 const browser = await chromium.launch({ headless: !process.argv.includes('--headed'), args: ['--enable-unsafe-webgpu', '--enable-features=Vulkan', '--autoplay-policy=no-user-gesture-required'] });
@@ -2009,7 +2015,11 @@ try {
     const ids = ['m1', 'm2', 'm3', 'm4', 'm5'];
     const fleets = [{ id: 'f', commander: 'm1', wings: [{ id: 'w', squads: [{ id: 's', role: 'dps', members: ids.slice(1) }] }] }];
     const Draw = async (seed?: number): Promise<{ result: SetHpResult; hp: number[] }> => {
-      await LoadCombatScene(ids.map((id, index) => Rifter(id, [index * 2000, 0, 0])), { death: 'flag' }, { fleets });
+      await LoadCombatScene(
+        ids.map((id, index) => Rifter(id, [index * 2000, 0, 0])),
+        { death: 'flag' },
+        { fleets }
+      );
       const result = await call<SetHpResult>('set_hp', { fleet: 'f', armor: { min: '10%', max: '90%', distribution: 'normal' }, ...(seed == null ? {} : { seed }) });
       const state = await call<ViewerState>('get_state');
       return { result, hp: ids.map((id) => HpOf(state, id)[1]) };
@@ -5700,6 +5710,248 @@ try {
     } finally {
       await Playing();
     }
+  });
+
+  // Movie export (sd-export): headless, so the slate source runs the whole pipeline (the export clock, the encoder, the
+  // wire, the hub's writer and the file), and a second page plays the file back. Each check loads its own scene;
+  // --only export: runs them alone.
+  type ExportStatus = MovieExportReport & { readonly file: { readonly path: string; readonly url: string }; readonly result?: MovieExportResult; readonly note?: string };
+  const ExportMovie = (args: Record<string, unknown> = {}) => call<ExportStatus>('export_movie', args);
+  const StartExport = (args: Record<string, unknown>) => call<MovieExportStartResult>('export_movie', { action: 'start', source: 'slate', ...args });
+  const ExportUntil = async (what: string, seconds: number, test: (status: ExportStatus) => boolean): Promise<ExportStatus> => {
+    const end = Date.now() + seconds * 1000;
+    let status = await ExportMovie();
+    while (!test(status) && Date.now() < end) {
+      await Delay(250);
+      status = await ExportMovie();
+    }
+    Expect(test(status), `${what} within ${seconds} s: ${Show({ state: status.state, frame: status.frame, waiting: status.waiting, error: status.error })}`);
+    return status;
+  };
+  const ExportEnded = (seconds = 60) => ExportUntil('the export ends', seconds, (status) => ['done', 'failed', 'cancelled'].includes(status.state));
+  const Refused = async (run: () => Promise<unknown>): Promise<string> => {
+    const error = await run().then(
+      () => null,
+      (caught: unknown) => caught
+    );
+    Expect(error != null, 'it was not refused');
+    return [ErrorMessage(error), ...(ErrorProblems(error) ?? [])].join(' | ');
+  };
+  const MasterOf = (state: ViewerState, id: string): SceneVector => {
+    const ship = ShipIn(state, id) as ShipState & { readonly motion?: { readonly position?: SceneVector } };
+    return ship.motion?.position ?? (ship.position as SceneVector);
+  };
+  const Gap = (a: SceneVector, b: SceneVector) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+  const ExportScene = (end: number) => ({
+    ships: [Scripted('a', [0, 0, 0]), Scripted('b', [3000, 0, 0])],
+    timeline: {
+      cues: [{ id: 'b-go', at: 0, ...Direction('b', [0, 0, 1]) }, { id: 'go', at: 1, ...Direction('a', [1, 0, 0]) }, EventCue('stop-b', { cue: 'go', after: 1 }, { order_ship: { id: 'b', order: { type: 'stop' } } })],
+      movie: { letterbox: 2.39, end }
+    }
+  });
+  const MovieFiles = async () => (await readdir(movies.directory)).sort();
+  /**
+   * The position of ship a at timeline second 4 of the run the clock is in (a seek there, paused).
+   */
+  const AtFour = async (): Promise<SceneVector> => {
+    await TimeControl({ seek: { timeline: 4 } });
+    return MasterOf(await call<ViewerState>('get_state'), 'a');
+  };
+  let exported: Maybe<{ readonly file: string; readonly fired: Record<string, number>; readonly at4: SceneVector }> = null;
+
+  await Check('export: a slate export of a scripted movie lands an MP4 with every frame', async () => {
+    await LoadTimeline(ExportScene(4));
+    await Playing();
+    await Played('the export scene plays', 40, 0);
+    const started = await StartExport({ fps: 10, width: 320, height: 180 });
+    Expect(started.plan.frames === 40 && started.plan.picture.y === 23 && started.plan.picture.height === 134 && started.plan.restart, Show(started.plan));
+    const done = await ExportEnded();
+    Expect(done.state === 'done' && done.result, Show({ state: done.state, error: done.error }));
+    const result = done.result as MovieExportResult;
+    Expect(path.dirname(result.path) === movies.directory && (await MovieFiles()).includes(path.basename(result.path)), `${result.path} is not in ${movies.directory}`);
+    const mp4 = ReadMp4(new Uint8Array(await readFile(result.path)));
+    Expect(mp4.samples.length === 40 && Math.abs(mp4.seconds - 4) < 1e-9 && mp4.stss[0] === 1 && mp4.tkhd.width === 320 && mp4.entry.type === 'avc1', Show({ samples: mp4.samples.length, seconds: mp4.seconds, stss: mp4.stss, tkhd: mp4.tkhd }));
+    const fired = FiredAt(await TimelineTool());
+    Expect(fired['go'] === 1 && fired['stop-b'] === 2, `fired ${Show(fired)}`);
+    const after = await call<ViewerState>('get_state');
+    const time = TimeOf(after);
+    Expect(time?.state === 'paused' && time.recording.on && Math.abs((time.timeline ?? 0) - 3.9) < 1e-6, Show({ state: time?.state, recording: time?.recording, timeline: time?.timeline }));
+    const at4 = await AtFour();
+    await TimelineTool({ action: 'restart' });
+    await Playing();
+    await WaitFor('the live run reaches the movie end', 40, (polled) => ((TimeOf(polled)?.timeline ?? 0) >= 4 && TimeOf(polled)?.paused ? null : Show(TimeOf(polled))));
+    const live = FiredAt(await TimelineTool());
+    const liveAt4 = MasterOf(await call<ViewerState>('get_state'), 'a');
+    Expect(Show(live) === Show(fired) && Gap(liveAt4, at4) < 0.5, `live fired ${Show(live)}, a ${Show(liveAt4)} vs exported ${Show(at4)}`);
+    exported = { file: path.basename(result.path), fired, at4 };
+    return `${result.frames} frames, ${result.bytes} bytes, ${mp4.seconds} s in ${result.wallSeconds} s (${result.meanFps} fps); cues ${Show(fired)} as live; a within ${Gap(liveAt4, at4).toFixed(4)} m of the live run at 4 s`;
+  });
+
+  await Check('export: the exported file plays', async () => {
+    Expect(exported, 'the first export check did not land a file');
+    const player = await browser.newPage();
+    try {
+      await player.goto(`${hub.url}health`);
+      const played = await player.evaluate(async (source) => {
+        const video = document.createElement('video');
+        video.muted = true;
+        video.src = source;
+        document.body.append(video);
+        const Wait = (event: string) =>
+          new Promise<void>((resolve, reject) => {
+            video.addEventListener(event, () => resolve(), { once: true });
+            video.addEventListener('error', () => reject(new Error(`video error ${video.error?.code} ${video.error?.message}`)), { once: true });
+            setTimeout(() => reject(new Error(`no ${event} in 10 s`)), 10_000);
+          });
+        await Wait('loadedmetadata');
+        const meta = { duration: video.duration, width: video.videoWidth, height: video.videoHeight };
+        video.currentTime = 2;
+        await Wait('seeked');
+        video.currentTime = 0;
+        await Wait('seeked');
+        let frames = 0;
+        const count = () => {
+          frames++;
+          video.requestVideoFrameCallback(count);
+        };
+        video.requestVideoFrameCallback(count);
+        await video.play();
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        video.pause();
+        return { ...meta, frames, time: video.currentTime };
+      }, `/movies/${exported?.file}`);
+      Expect(Math.abs(played.duration - 4) <= 0.05 && played.width === 320 && played.height === 180 && played.frames >= 5, Show(played));
+      return `duration ${played.duration} s, ${played.width}×${played.height}, seeked to 2 s, ${played.frames} frames played to ${played.time.toFixed(2)} s`;
+    } finally {
+      await player.close();
+    }
+  });
+
+  await Check('export: frames sit on the 1/fps grid and every tick runs, the same at 20 fps', async () => {
+    Expect(exported, 'the first export check did not land a file');
+    const log = await page.evaluate(() => (globalThis as unknown as { readonly sceneDirector: { readonly director: { readonly exporter: { Log(): { index: number; clock: number; tick: number }[] } } } }).sceneDirector.director.exporter.Log());
+    const steps = log.slice(1).map((entry, index) => entry.clock - log[index].clock);
+    Expect(log.length === 40 && steps.every((step) => step === 1_000_000), `${log.length} steps: ${Show([...new Set(steps)])}`);
+    const ticks = log.map((entry) => entry.tick);
+    Expect(ticks.every((tick, index) => tick === ticks[0] + Math.floor(index / 10)) || ticks.every((tick, index) => index === 0 || tick - ticks[index - 1] <= 1), `ticks ${Show(ticks)}`);
+    await LoadTimeline(ExportScene(4));
+    await Playing();
+    await Played('the export scene plays', 40, 0);
+    await StartExport({ fps: 20, width: 320, height: 180 });
+    const done = await ExportEnded();
+    Expect(done.state === 'done' && done.frames === 80, Show({ state: done.state, frames: done.frames, error: done.error }));
+    const fired = FiredAt(await TimelineTool());
+    const at4 = await AtFour();
+    Expect(Show(fired) === Show(exported?.fired) && Gap(at4, exported?.at4 ?? [0, 0, 0]) < 1e-3, `20 fps fired ${Show(fired)} a ${Show(at4)}; 10 fps ${Show(exported)}`);
+    return `40 steps of exactly 1e6 ticks, ticks ${ticks[0]}…${ticks.at(-1)}; at 20 fps the same cues and a within ${Gap(at4, exported?.at4 ?? [0, 0, 0]).toExponential(1)} m`;
+  });
+
+  await Check('export: cancel stops it, deletes the file and gives the page back', async () => {
+    await LoadTimeline(ExportScene(4));
+    await Playing();
+    await Played('the export scene plays', 40, 0);
+    const before = await MovieFiles();
+    const started = await StartExport({ fps: 30, width: 320, height: 180, to: 30 });
+    Expect(
+      started.warnings.some((warning) => warning.includes("past the movie's end")),
+      Show(started.warnings)
+    );
+    await ExportUntil('the export renders', 60, (status) => status.state === 'rendering' && status.frame > 0);
+    await Delay(1000);
+    const cancelled = await call<ExportStatus>('export_movie', { action: 'cancel' });
+    Expect(cancelled.state === 'cancelled', Show(cancelled.state));
+    await Delay(300);
+    const after = await MovieFiles();
+    Expect(Show(after) === Show(before), `files ${Show(before)} then ${Show(after)}`);
+    await call('patch_scene', { operations: [{ op: 'update_ship', id: 'a', set: { name: 'after the export' } }] });
+    const state = await call<ViewerState>('get_state');
+    const page_export = (state as unknown as { readonly export?: Maybe<MovieExportReport> }).export;
+    Expect(TimeOf(state)?.state === 'paused' && page_export?.state === 'cancelled', Show({ time: TimeOf(state)?.state, export: page_export?.state }));
+    return `cancelled at frame ${cancelled.frame} of ${cancelled.frames}; no file left; patch_scene works; time paused`;
+  });
+
+  /**
+   * The refusals check's body, while its export renders.
+   */
+  const ExportRefusals = async (): Promise<string> => {
+    const patch = await Refused(() => call('patch_scene', { operations: [{ op: 'update_ship', id: 'a', set: { name: 'x' } }] }));
+    const pause = await Refused(() => call('time_control', { pause: false }));
+    const second = await Refused(() => StartExport({ fps: 10 }));
+    Expect(/a movie export is running \(rendering, frame \d+ of 900\)/u.test(patch) && /a movie export is running/u.test(pause) && /a movie export is running/u.test(second), Show({ patch, pause, second }));
+    await call('time_control', {});
+    await page.evaluate(() => {
+      const view = document.getElementById('view') as HTMLCanvasElement;
+      (globalThis as unknown as { pointerdowns: number }).pointerdowns = 0;
+      view.addEventListener('pointerdown', () => (globalThis as unknown as { pointerdowns: number }).pointerdowns++);
+    });
+    await page.keyboard.press(' ');
+    await page.mouse.move(640, 360);
+    await page.mouse.down();
+    await page.mouse.move(700, 380);
+    await page.mouse.up();
+    const reached = await page.evaluate(() => (globalThis as unknown as { pointerdowns: number }).pointerdowns);
+    const locked = TimeOf(await call<ViewerState>('get_state'));
+    Expect(locked?.state === 'exporting' && reached === 0, Show({ time: locked?.state, pointerdowns: reached }));
+    await page.keyboard.press('Escape');
+    const escaped = await ExportUntil('Esc cancels', 10, (status) => status.state === 'cancelled');
+    Expect(escaped.note === 'cancelled: Esc in the tab', Show(escaped.note));
+    const problems = await Refused(() => StartExport({ from: 5, to: 3, width: 321 }));
+    Expect(problems.includes('to (3 s) must be after from (5 s)') && problems.includes('321 is odd'), problems);
+    const renderer = (await call<ViewerState>('get_state')).renderer.available;
+    const scene = renderer ? 'skipped (a renderer is up)' : await Refused(() => StartExport({ source: 'scene', to: 2 }));
+    Expect(renderer || scene.includes('no renderer'), scene);
+    await LoadTimeline(ExportScene(4), { timeline: 'pause' });
+    await WaitTimeline('the timeline holds at t = 0', 30, (timeline) => (timeline?.state === 'ready' ? null : Show(timeline)));
+    const stopped = await Refused(() => StartExport({ restart: false, to: 3 }));
+    Expect(stopped.includes('restart: false needs a started timeline'), stopped);
+    await call('load_scene', { scene: { name: 'verify-export-free', ships: [Scripted('a', [0, 0, 0])] } });
+    const free = await Refused(() => StartExport({ to: 3 }));
+    Expect(free.includes('this scene has no timeline: give duration, seconds from now'), free);
+    return `while running: ${patch.slice(0, 90)}…; Space and a drag swallowed; Esc cancelled; before: ${problems.slice(0, 80)}…; scene ${scene.slice(0, 60)}`;
+  };
+
+  await Check('export: refusals while it runs and before it starts', async () => {
+    await LoadTimeline(ExportScene(4));
+    await Playing();
+    await Played('the export scene plays', 40, 0);
+    await StartExport({ fps: 30, width: 320, height: 180, to: 30 });
+    try {
+      await ExportUntil('the export renders', 60, (status) => status.state === 'rendering' && status.frame > 0);
+      return await ExportRefusals();
+    } finally {
+      if ((await ExportMovie()).state === 'rendering') await ExportMovie({ action: 'cancel' }).catch(() => undefined);
+    }
+  });
+
+  await Check('export: a range from the time window', async () => {
+    await LoadTimeline(ExportScene(8));
+    await Playing();
+    await Played('the movie reaches 6 s', 40, 6);
+    await Recorded();
+    const started = await StartExport({ restart: false, from: 2, to: 3, fps: 10, width: 320, height: 180 });
+    Expect(started.plan.frames === 10 && started.plan.preroll.frames === 20 && !started.plan.restart, Show(started.plan));
+    const done = await ExportEnded();
+    Expect(done.state === 'done' && done.result?.frames === 10, Show({ state: done.state, error: done.error }));
+    const state = await call<ViewerState>('get_state');
+    const jump = TimeOf(state)?.jump as Maybe<{ readonly from: number; readonly to: number }>;
+    const fired = FiredAt(await TimelineTool());
+    Expect(jump != null && jump.to < jump.from && fired['go'] === 1 && fired['stop-b'] === 2, Show({ jump, fired }));
+    Expect(Math.abs((TimeOf(state)?.timeline ?? 0) - 2.9) < 1e-6, Show(TimeOf(state)?.timeline));
+    return `jumped back (${Show(jump)}), 10 frames from 2 s, cues ${Show(fired)}`;
+  });
+
+  await Check('export: a scene without a timeline exports from now', async () => {
+    await call('load_scene', { scene: { name: 'verify-export-free', ships: [Scripted('a', [0, 0, 0])] } });
+    await Playing();
+    await call('order_ship', { id: 'a', order: { type: 'direction', direction: [1, 0, 0] } });
+    await Delay(1500);
+    const before = MasterOf(await call<ViewerState>('get_state'), 'a');
+    await StartExport({ duration: 2, fps: 10, width: 320, height: 180 });
+    const done = await ExportEnded();
+    const state = await call<ViewerState>('get_state');
+    const after = MasterOf(state, 'a');
+    Expect(done.state === 'done' && done.result?.frames === 20 && Math.abs(done.time - 1.9) < 1e-6 && TimeOf(state)?.paused === true && Gap(before, after) > 50, Show({ state: done.state, frames: done.result?.frames, time: done.time, moved: Gap(before, after) }));
+    return `20 frames, the clock paused at +${done.time} s, a moved ${Gap(before, after).toFixed(0)} m`;
   });
 
   const errors = await call<LogEntry[]>('page_log', { level: 'error', limit: 20 });

@@ -16,6 +16,11 @@
  * movie's look (the timeline's movie block) overrides them while its timeline
  * plays (L and H then switch it for the run), and a playing camera shot's
  * `letterbox` / `hud` override both while it plays.
+ *
+ * A movie export (export_movie, sd-export) drives the loop instead of time control: each frame steps the scene to the
+ * export clock's next frame (or draws nothing while the export waits), the canvas backing store is held at the
+ * picture's size, and the frame is captured right after it is drawn. The tab's input is locked meanwhile (Esc
+ * cancels, H toggles the overlay).
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -35,6 +40,7 @@ import { TimeControl, TimeText } from './lib/time-control';
 import { LetterboxRect } from './lib/cinema';
 import { MoviePresentation, type FramePresentation, type MovieRunOverrides } from './lib/movie';
 import { CameraDirectorText } from './lib/camera-director';
+import { ExportText } from './lib/movie-export';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
 
@@ -115,6 +121,8 @@ class Overlay {
     if (timeline) rows.push(['timeline', timeline]);
     const camera = director ? CameraDirectorText(director.cameraDirector.Report()) : null;
     if (camera) rows.push(['director', camera]);
+    const exported = director?.exporter;
+    if (exported) rows.push(['export', ExportText(exported.Report())]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
@@ -174,6 +182,11 @@ class Presentation {
    */
   private run: Maybe<number> = null;
   private overrides: MovieRunOverrides = {};
+  /**
+   * While a movie export runs: the overlay shows whatever the looks say, and H toggles it.
+   */
+  private exporting = false;
+  private exportHud = true;
 
   constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -188,7 +201,8 @@ class Presentation {
       if (event.ctrlKey || event.metaKey || event.altKey) return;
       const key = event.key.toLowerCase();
       const movie = this.run != null;
-      if (key === 'h') {
+      if (key === 'h' && this.exporting) this.exportHud = !this.exportHud;
+      else if (key === 'h') {
         if (movie) this.overrides = { ...this.overrides, hud: !this.shown.hud };
         else this.hud = !this.hud;
       } else if (key === 'l') {
@@ -204,15 +218,20 @@ class Presentation {
    *
    * @param frame - The director's presentation (Director.Presentation): the shot's look, the movie's and its run.
    */
-  Apply({ shot, movie }: FramePresentation): void {
+  Apply({ shot, movie, export: exported }: FramePresentation): void {
+    this.exporting = exported != null;
+    if (!exported) this.exportHud = true;
     if (!movie) this.run = null;
     else if (movie.run !== this.run) {
       this.run = movie.run;
       this.overrides = {};
     }
-    const { letterbox, hud } = MoviePresentation({ page: { letterbox: this.letterbox, hud: this.hud }, movie, overrides: this.overrides, shot });
-    this.shown = { letterbox, hud };
-    const key = `${letterbox}:${hud}:${innerWidth}x${innerHeight}`;
+    const look = MoviePresentation({ page: { letterbox: this.letterbox, hud: this.hud }, movie, overrides: this.overrides, shot });
+    this.shown = look;
+    // An export shows its picture (the canvas held at its size) at its aspect, downscaled to the window.
+    const letterbox = exported ? exported.picture.width / exported.picture.height : look.letterbox;
+    const hud = exported ? this.exportHud : look.hud;
+    const key = `${letterbox}:${hud}:${exported ? 'export' : ''}:${innerWidth}x${innerHeight}`;
     if (key === this.applied) return;
     this.applied = key;
     const box = LetterboxRect(innerWidth, innerHeight, letterbox);
@@ -223,6 +242,28 @@ class Presentation {
     style.height = `${box.height}px`;
     document.body.style.background = letterbox ? '#000' : '';
     this.overlay.hidden = !hud;
+  }
+}
+
+/**
+ * A movie export's input lock (sd-export): while the director exports, capture-phase listeners on the window swallow
+ * the pointer, the wheel, the context menu and the keys before the canvas's camera handlers, the overlay's buttons and
+ * every key handler see them. Esc cancels the export; H still toggles the overlay.
+ */
+class InputLock {
+  constructor(private readonly director: () => Maybe<Director>) {
+    for (const type of ['pointerdown', 'pointermove', 'pointerup', 'wheel', 'contextmenu', 'keydown'] as const) addEventListener(type, (event) => this.Swallow(event), { capture: true, passive: false });
+  }
+
+  private Swallow(event: Event): void {
+    const director = this.director();
+    if (!director?.exporting) return;
+    if (event instanceof KeyboardEvent) {
+      if (event.key === 'Escape') director.CancelExport('Esc in the tab');
+      else if (event.key.toLowerCase() === 'h' && !event.ctrlKey && !event.metaKey && !event.altKey) return;
+    }
+    event.stopImmediatePropagation();
+    event.preventDefault();
   }
 }
 
@@ -290,7 +331,15 @@ function RequireElement<T extends HTMLElement>(id: string): T {
 async function Start(): Promise<void> {
   const overlay = new Overlay(RequireElement('overlay'));
   const presentation = new Presentation(RequireElement<HTMLCanvasElement>('view'), RequireElement('overlay'), new URLSearchParams(location.search));
-  const link = new HubLink({ onStatus: (connected) => overlay.Set({ hub: connected }) });
+  let liveDirector: Maybe<Director> = null;
+  // First, so its capture listeners run before every other handler while an export locks the tab.
+  new InputLock(() => liveDirector);
+  const link = new HubLink({
+    onStatus: (connected) => {
+      overlay.Set({ hub: connected });
+      liveDirector?.LinkStatus(connected);
+    }
+  });
   link.CaptureConsole();
   ConfigureResources();
 
@@ -310,17 +359,30 @@ async function Start(): Promise<void> {
   TimeKeys(timeControl, () => overlay.Render());
   let engine: Maybe<Engine> = null;
   let engineError: Maybe<Error> = null;
-  let liveDirector: Maybe<Director> = null;
   const frame = (timestamp: number): void => {
     // A preparing timeline releases the clock here, so t = 0 is this frame's boundary at the earliest.
     liveDirector?.DriveTimeline();
-    // Every tick boundary up to the frame's time, at the clock's rate; a failing tick is logged once and the loop goes on.
-    const now = timeControl.Frame(timestamp);
+    const exporter = liveDirector?.exporter;
+    let now: number;
+    if (exporter?.driving) {
+      // A movie export steps the clock to its next frame (FrameTo); null: it waits, and nothing is drawn this frame.
+      const step = exporter.Step();
+      if (!step) {
+        requestAnimationFrame(frame);
+        return;
+      }
+      now = step.clock;
+    } else {
+      // Every tick boundary up to the frame's time, at the clock's rate; a failing tick is logged once and the loop goes on.
+      now = timeControl.Frame(timestamp);
+    }
     liveDirector?.DriveBoosters(now);
     liveDirector?.fields.DriveLod();
     liveDirector?.TrackCamera(now);
-    presentation.Apply(liveDirector?.Presentation() ?? { shot: {}, movie: null });
-    liveDirector?.DriveAudio(now);
+    const shown = liveDirector?.Presentation() ?? { shot: {}, movie: null };
+    presentation.Apply(shown);
+    // An export is silent: no sound is posted while it runs (sd-export).
+    if (!liveDirector?.exporting) liveDirector?.DriveAudio(now);
     liveDirector?.DriveModuleEffects(now);
     liveDirector?.DriveWarpEffects(now);
     liveDirector?.DriveTurrets(now);
@@ -328,7 +390,10 @@ async function Start(): Promise<void> {
     liveDirector?.DriveExplosions(now);
     // The scene update copies effect templates (a burning hull's fires, per damage locator): with the audio seams
     // detached, so the copies' emitters stay inert. No page audio is posted inside engine.Frame (sd-runtime → Audio).
+    engine?.SetFixedSize(shown.export?.picture ?? null);
     InAudioDetachScope(() => engine?.Frame(timestamp, now));
+    // The capture reads the canvas before it is presented: in this task, right after the draw.
+    liveDirector?.exporter?.AfterFrame();
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);
@@ -346,6 +411,7 @@ async function Start(): Promise<void> {
   const director: Director = new Director({ engine, engineError, store, world, clock, onChange: () => overlay.Render(director), audioDisabled });
   liveDirector = director;
   director.AttachTime(timeControl);
+  director.AttachLink(link);
   // The runtime's own object loads and the scene update build effects too (a burning hull's fires): they run with the
   // audio seams detached, like every SOF build, so only the page's emitters register (sd-runtime → Audio).
   SetAudioDetachScope((build) => director.audio.Detached(build));

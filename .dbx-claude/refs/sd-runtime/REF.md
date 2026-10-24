@@ -65,6 +65,13 @@
   about the clear colour's level, which is why it once looked like no background (real-GPU A/B 2026-10-21: default
   draws a nebula field, `?post=off` a near-black one). Whether the exposed nebula looks like the client's is still
   open (a flat brown wash that day, possibly the output device).
+- **A movie export's capture** (`sd-export`): `new VideoFrame(canvas)` reads the WebGPU canvas only in the frame's
+  own task, right after the submit (0.3 ms); in a later task, once presented, it fails (`Failed to read VideoFrame
+  data`), as the screenshot capture already found. main.ts calls the exporter's `AfterFrame()` right after
+  `engine.Frame`. `Engine.SetFixedSize(size | null)` holds the canvas backing store at the picture's size (else
+  `FitCanvasSize`), reconfiguring the render target on a change; `Engine.ExportSource` hands the canvas, or composites
+  the presented texture onto black bars on an output-sized WebGPU `OffscreenCanvas` (`copyTextureToTexture`; the canvas
+  is configured `COPY_SRC`). `lastFrameDrawn` says whether the frame reached a swap-chain image.
 - **WebGPU validation errors** reach `page_log` and `get_state.renderer.gpuErrors` only through `engine.ts`'s
   `uncapturederror` listener.
 - `Engine.universe` is the document's universe (a change still reloads the tab: the reload trick); `Engine.nebula` is

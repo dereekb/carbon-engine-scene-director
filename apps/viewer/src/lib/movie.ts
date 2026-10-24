@@ -5,7 +5,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { beatLaneOf, MAX_SEEK_AHEAD_SECONDS, movieLookOf, type MovieBeatReport, type MovieReport, type SceneMovie, type TimelineEventEntry, type TimelineState, type TimelineSummary } from '@scene-director/scene';
+import { beatLaneOf, type ExportRect, MAX_SEEK_AHEAD_SECONDS, movieLookOf, type MovieBeatReport, type MovieReport, type SceneMovie, type TimelineEventEntry, type TimelineState, type TimelineSummary } from '@scene-director/scene';
 import { TICKS_PER_SECOND } from './clock';
 import type { CueRecord } from './timeline';
 
@@ -158,6 +158,11 @@ export interface PresentationLook {
 export interface FramePresentation {
   readonly shot: PresentationLook;
   readonly movie: Maybe<{ readonly letterbox: number | false; readonly hud: boolean; readonly run: number }>;
+  /**
+   * While a movie export runs (sd-export): its letterbox (a playing shot's own wins), the picture's rect in the output
+   * frame (the canvas backing store is held at its size) and the output's size. The page's settings do not apply.
+   */
+  readonly export?: { readonly letterbox: Maybe<number>; readonly picture: ExportRect; readonly output: { readonly width: number; readonly height: number } };
 }
 
 /**

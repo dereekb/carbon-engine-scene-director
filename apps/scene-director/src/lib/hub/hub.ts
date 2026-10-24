@@ -8,7 +8,8 @@
  * types) and /dogma/skills (every published skill's), /weapon?type= (a weapon's graphic: its .black, slot collection and
  * SOF faction), /missile?charge=&launcher= (a missile's EveMissile and impact effect), /map/system?id=&origin=x,y,z (a location's system, celestials relative to the origin, nearest
  * first), /audio/library and /audio/path/<encoded res:/ path> (streaming tools-core audio proxies that forward Range;
- * with an audio cache, ranged reads come from local copies of the banks: audio-cache.ts), /health, and the viewer files.
+ * with an audio cache, ranged reads come from local copies of the banks: audio-cache.ts), /movies/<file> (an exported
+ * movie, GET and HEAD with Range: movie-files.ts), /health, and the viewer files.
  *
  * Roles on the WebSocket (`/ws`):
  *   page        a viewer tab; it implements the "page" tools and streams its console
@@ -21,6 +22,11 @@
  *   page -> hub        { type: "log", entries: [{ time, level, message }] }
  *   controller -> hub  { type: "call", id, name, args }
  *   hub -> controller  { type: "result", id, ok, value | error }
+ *
+ * A movie export (export_movie, movie-exports.ts) adds, between the page and the hub:
+ *   page -> hub        { type: "export", id, kind: "config" | "progress" | "end" | "failed" | "cancelled", ... }
+ *   page -> hub        binary: one encoded chunk, "SDX1" + u32 header length + JSON header + bytes (wire.ts)
+ *   hub -> page        { type: "export", id, kind: "saved" | "failed", ... }
  */
 
 import type { Maybe } from '@dereekb/util';
@@ -33,9 +39,11 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
-import { findTool, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
+import { findTool, isMovieExportMessage, listCameraShots, MAX_LOCATION_COORDINATE, SceneError, type SceneVector } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { FleetPersonalityFileStore } from '../store/personality-files';
+import { MovieFileStore } from '../store/movie-files';
+import { MovieExports } from './movie-exports';
 import type { AudioBankCache } from './audio-cache';
 import { SceneFileStore } from '../store/scene-files';
 import { FleetCompositions } from './fleet-compositions';
@@ -70,7 +78,7 @@ const LOG_LIMIT = 2000;
  * Building ships fetches many files on first use, so scene edits get a long deadline, and so do document fleet orders
  * (order_fleet anchor, break-off and regroup edit the document as patch_scene does).
  */
-const SLOW_TOOLS = new Set(['load_scene', 'open_scene', 'patch_scene', 'order_fleet', 'auto_repair', 'timeline', 'time_control', 'movie']);
+const SLOW_TOOLS = new Set(['load_scene', 'open_scene', 'patch_scene', 'order_fleet', 'auto_repair', 'timeline', 'time_control', 'movie', 'export_movie']);
 const LOG_LEVEL_RANK: Record<string, number> = { all: 0, info: 0, warn: 1, error: 2 };
 
 export type PageLogLevel = 'info' | 'warn' | 'error';
@@ -104,6 +112,10 @@ export interface HubOptions {
    * Saved fleet personalities on disk; the per-user default directory when omitted.
    */
   readonly personalities?: FleetPersonalityFileStore;
+  /**
+   * Exported movies on disk (export_movie, served at /movies/<file>); the per-user default directory when omitted.
+   */
+  readonly movies?: MovieFileStore;
   /**
    * Hull and prop mod values from tools-core's SDE; read from `toolsCore.url` when omitted.
    */
@@ -190,6 +202,7 @@ export class Hub implements ToolCaller {
   readonly objects: ObjectTools;
   readonly asteroidData: AsteroidDataApi;
   readonly asteroidFields: AsteroidFieldTools;
+  readonly movieExports: MovieExports;
   private readonly log: (line: string) => void;
   private readonly audioCache: Maybe<AudioBankCache>;
   private readonly pages: WebSocket[] = [];
@@ -207,6 +220,7 @@ export class Hub implements ToolCaller {
     scenes = new SceneFileStore(),
     compositions = new FleetCompositionFileStore(),
     personalities = new FleetPersonalityFileStore(),
+    movies = new MovieFileStore(),
     shipData,
     dogmaData,
     weaponData,
@@ -239,6 +253,12 @@ export class Hub implements ToolCaller {
     this.staging = new Staging({ shipData: this.shipData, mapData: this.mapData, compositions: this.fleetCompositions, personalities: this.fleetPersonalities, page });
     this.objects = new ObjectTools({ objectData: this.objectData, shipData: this.shipData, mapData: this.mapData, page });
     this.asteroidFields = new AsteroidFieldTools({ asteroidData: this.asteroidData, shipData: this.shipData, mapData: this.mapData, page });
+    this.movieExports = new MovieExports({
+      files: movies,
+      pages: { Newest: () => this.pages.at(-1), NotConnected: () => this.NotConnected(), Call: (name, args, tab) => this.CallPage(name, args, tab) },
+      url: () => this.url,
+      log
+    });
     this.log = log;
     this.audioCache = audioCache;
   }
@@ -272,7 +292,7 @@ export class Hub implements ToolCaller {
       });
     });
     this.port = (server.address() as AddressInfo).port;
-    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory}, fleet personalities in ${this.fleetPersonalities.files.directory})`);
+    this.log(`viewer at ${this.url} (tools-core ${this.toolsCore.url}, saved scenes in ${this.savedScenes.files.directory}, fleet compositions in ${this.fleetCompositions.files.directory}, fleet personalities in ${this.fleetPersonalities.files.directory}, movies in ${this.movieExports.directory})`);
     if (!this.viewerDirectory) this.log('no viewer directory is configured; the page will not be served');
     this.toolsCore.ResolveBuild().then(
       (build) => this.log(`EVE resource build ${build}`),
@@ -282,6 +302,7 @@ export class Hub implements ToolCaller {
   }
 
   async Stop(): Promise<void> {
+    await this.movieExports.Stop();
     for (const { reject } of this.pending.values()) reject(new ToolError('the hub is shutting down'));
     this.pending.clear();
     for (const ws of this.wss?.clients ?? []) ws.terminate();
@@ -303,15 +324,17 @@ export class Hub implements ToolCaller {
   }
 
   /**
-   * Sends one call to the most recently connected tab, whoever answers the tool in the list.
+   * Sends one call to a tab (the most recently connected by default), whoever answers the tool in the list.
    *
    * @param name - Tool name.
    * @param args - Tool arguments.
+   * @param target - The tab (a movie export's cancel goes to the export's own); it must still be connected.
    * @returns The page's value.
    */
-  private async CallPage(name: string, args: ToolArgs = {}): Promise<unknown> {
-    const page = this.pages.at(-1);
+  private async CallPage(name: string, args: ToolArgs = {}, target?: WebSocket): Promise<unknown> {
+    const page = target ?? this.pages.at(-1);
     if (!page) throw this.NotConnected();
+    if (!this.pages.includes(page)) throw new ToolError('that viewer tab is no longer connected');
     const id = this.nextId++;
     const timeoutMs = SLOW_TOOLS.has(name) ? 600000 : 60000;
     return new Promise((resolve, reject) => {
@@ -339,7 +362,7 @@ export class Hub implements ToolCaller {
   }
 
   private async CallHubTool(name: string, args: ToolArgs): Promise<unknown> {
-    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.fleetPersonalities.Call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args) ?? this.asteroidFields.Call(name, args);
+    const saved = this.savedScenes.Call(name, args) ?? this.fleetCompositions.call(name, args) ?? this.fleetPersonalities.Call(name, args) ?? this.locations.Call(name, args) ?? this.staging.Call(name, args) ?? this.objects.Call(name, args) ?? this.asteroidFields.Call(name, args) ?? this.movieExports.Call(name, args);
     if (saved) return saved;
     switch (name) {
       case 'list_shots':
@@ -352,6 +375,7 @@ export class Hub implements ToolCaller {
           scenesDirectory: this.savedScenes.files.directory,
           fleetsDirectory: this.fleetCompositions.files.directory,
           personalitiesDirectory: this.fleetPersonalities.files.directory,
+          moviesDirectory: this.movieExports.directory,
           hint: this.pages.length ? undefined : `Open ${this.url} in Chrome or Edge on this machine.`
         };
       case 'page_log': {
@@ -376,7 +400,11 @@ export class Hub implements ToolCaller {
 
   private Accept(ws: WebSocket): void {
     let role: Maybe<string> = null;
-    ws.on('message', (data: RawData) => {
+    ws.on('message', (data: RawData, isBinary: boolean) => {
+      if (isBinary) {
+        if (role === 'page') this.movieExports.Binary(ws, RawBytes(data));
+        return;
+      }
       const message = ParseMessage(data);
       if (!message) return;
 
@@ -389,6 +417,8 @@ export class Hub implements ToolCaller {
         ws.send(JSON.stringify({ type: 'hello', role, hub: { url: this.url } }));
       } else if (role === 'page' && message.type === 'result') {
         this.Settle(message);
+      } else if (role === 'page' && isMovieExportMessage(message)) {
+        this.movieExports.Message(ws, message as unknown as Record<string, unknown>);
       } else if (role === 'page' && message.type === 'log') {
         for (const entry of message.entries ?? []) this.Record(entry.level, entry.message, entry.time);
       } else if (role === 'controller' && message.type === 'call') {
@@ -401,6 +431,7 @@ export class Hub implements ToolCaller {
     ws.on('close', () => {
       const index = this.pages.indexOf(ws);
       if (index < 0) return;
+      this.movieExports.Closed(ws);
       this.pages.splice(index, 1);
       this.Record('info', `viewer tab disconnected (${this.pages.length} open)`);
       for (const [id, pending] of this.pending) {
@@ -453,6 +484,8 @@ export class Hub implements ToolCaller {
       if (!(await this.ServeCachedAudio(resPath, request, response))) await this.StreamProxy({ source: () => this.toolsCore.AudioPathUrl(resPath), request, response });
     } else if (pathname === '/map/system') {
       await this.ServeMapSystem(url, response);
+    } else if (pathname.startsWith('/movies/')) {
+      await this.ServeMovie(pathname.slice('/movies/'.length), request, response);
     } else if (pathname === '/health') {
       response.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
       response.end(JSON.stringify({ ok: true, tabs: this.pages.length }));
@@ -662,6 +695,33 @@ export class Hub implements ToolCaller {
     }
   }
 
+  /**
+   * An exported movie: GET and HEAD, with one `bytes=a-b`, `bytes=a-` or `bytes=-n` Range (206, or 416 past the end).
+   *
+   * @param fileName - The file's name in the movies directory.
+   * @param request - The request (its method and Range).
+   * @param response - The response.
+   */
+  private async ServeMovie(fileName: string, request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const file = this.movieExports.Resolve(fileName);
+    const info = file ? await stat(file).catch(() => null) : null;
+    if (!file || !info?.isFile()) {
+      this.NotFound(response, `/movies/${fileName}`);
+      return;
+    }
+    const headers: OutgoingHttpHeaders = { 'content-type': 'video/mp4', 'accept-ranges': 'bytes', 'cache-control': 'no-store' };
+    const range = ByteRange(request.headers.range, info.size);
+    if (range === 'unsatisfiable') {
+      response.writeHead(416, { ...headers, 'content-range': `bytes */${info.size}` });
+      response.end();
+      return;
+    }
+    const [start, end] = range ?? [0, info.size - 1];
+    response.writeHead(range ? 206 : 200, { ...headers, 'content-length': Math.max(0, end - start + 1), ...(range ? { 'content-range': `bytes ${start}-${end}/${info.size}` } : {}) });
+    if (request.method === 'HEAD' || info.size === 0) response.end();
+    else await pipeline(createReadStream(file, { start, end }), response);
+  }
+
   private async Proxy(source: string, response: ServerResponse): Promise<void> {
     let upstream: Response;
     try {
@@ -703,6 +763,42 @@ function ShipStatsErrorStatus(error: unknown): number {
   if (error instanceof ShipDataError) status = SHIP_DATA_FAILURE_STATUS[error.failure];
   else if (error instanceof SceneError || error instanceof ToolError) status = 400;
   return status;
+}
+
+/**
+ * A binary socket message's bytes.
+ *
+ * @param data - The raw frame (a Buffer, an ArrayBuffer or fragments).
+ * @returns The bytes.
+ */
+function RawBytes(data: RawData): Uint8Array {
+  let bytes: Uint8Array;
+  if (Array.isArray(data)) bytes = Buffer.concat(data);
+  else if (data instanceof ArrayBuffer) bytes = new Uint8Array(data);
+  else bytes = data;
+  return bytes;
+}
+
+/**
+ * One satisfiable byte range from a Range header.
+ *
+ * @param header - The Range header.
+ * @param size - The file's size.
+ * @returns [start, end] inclusive, null for none or one this does not read (the whole file), or unsatisfiable.
+ */
+export function ByteRange(header: Maybe<string>, size: number): Maybe<[number, number]> | 'unsatisfiable' {
+  const match = typeof header === 'string' ? /^bytes=(\d*)-(\d*)$/u.exec(header.trim()) : null;
+  if (!match || (!match[1] && !match[2])) return null;
+  let start: number;
+  let end: number;
+  if (match[1]) {
+    start = Number(match[1]);
+    end = match[2] ? Math.min(Number(match[2]), size - 1) : size - 1;
+  } else {
+    start = Math.max(0, size - Number(match[2]));
+    end = size - 1;
+  }
+  return start >= size || end < start ? 'unsatisfiable' : [start, end];
 }
 
 /**

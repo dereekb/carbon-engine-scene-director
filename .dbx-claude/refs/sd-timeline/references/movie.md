@@ -231,6 +231,15 @@ started, `end` changed, a load) calls `TimeControl.StopAt(origin + end s)` when 
 fired; the stop then clears itself, so `movie play` goes on past it. `movie play`, `seek` and `retake` reset the key: a
 landing before the end stops there again. A `time_control` jump back before the end does not re-arm it.
 
+### Exporting the movie
+
+`export_movie` (`sd-export`) renders the movie to an MP4 offline: by default it replays it from t = 0 (a `timeline
+restart { paused: true }`, the prepare, `Play` with the clock paused, as `movie retake` does), silently seeks to `from`
+less the preroll, and steps every frame at exactly 1/fps of scene time, so the cues and event cues fire on their ticks
+as in the straight run (verify-page: the same cue ticks and positions as a live run, at 10 and 20 fps). The movie
+block's letterbox is the file's look and its `end` the default `to`; `restart: false` exports the run in the time
+window instead. While it runs every movie edit, play and seek is refused (`movie status` still answers).
+
 ## Limits
 
 - An event's facts are the document membership at the time (a ship moved to another fleet by a live edit reports its

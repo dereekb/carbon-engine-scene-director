@@ -38,18 +38,58 @@ const CONSOLE_LEVELS: [keyof Pick<Console, 'log' | 'info' | 'warn' | 'error'>, L
 
 export interface HubLinkOptions {
   readonly onStatus?: (connected: boolean) => void;
+  /**
+   * The hub's movie export messages (`{ type: "export", ... }`: saved, failed; sd-export).
+   */
+  readonly onExport?: (message: Record<string, unknown>) => void;
 }
 
 export class HubLink {
   connected = false;
+  /**
+   * The hub's movie export messages; the director sets it (kept across reconnects).
+   */
+  onExport: (message: Record<string, unknown>) => void;
   private readonly handlers = new Map<string, ToolHandler>();
   private readonly onStatus: (connected: boolean) => void;
   private readonly logs: LogEntry[] = [];
   private ws: Maybe<WebSocket> = null;
   private flushTimer: Maybe<ReturnType<typeof setTimeout>> = null;
 
-  constructor({ onStatus = () => undefined }: HubLinkOptions = {}) {
+  constructor({ onStatus = () => undefined, onExport = () => undefined }: HubLinkOptions = {}) {
     this.onStatus = onStatus;
+    this.onExport = onExport;
+  }
+
+  /**
+   * Bytes queued on the socket and not yet sent (a movie export's backpressure).
+   */
+  get buffered(): number {
+    return this.ws?.bufferedAmount ?? 0;
+  }
+
+  /**
+   * Sends a binary message (a movie export's chunk packet).
+   *
+   * @param bytes - The packet.
+   * @returns False when the socket is not open.
+   */
+  SendBinary(bytes: Uint8Array): boolean {
+    const open = this.ws?.readyState === WebSocket.OPEN;
+    if (open) this.ws?.send(bytes as Uint8Array<ArrayBuffer>);
+    return open;
+  }
+
+  /**
+   * Sends a JSON message (a movie export's config, progress and end).
+   *
+   * @param message - The message.
+   * @returns False when the socket is not open.
+   */
+  SendMessage(message: object): boolean {
+    const open = this.ws?.readyState === WebSocket.OPEN;
+    if (open) this.ws?.send(JSON.stringify(message));
+    return open;
   }
 
   /**
@@ -97,6 +137,10 @@ export class HubLink {
     try {
       message = JSON.parse(data) as CallMessage;
     } catch {
+      return;
+    }
+    if (message.type === 'export') {
+      this.onExport(message as Record<string, unknown>);
       return;
     }
     if (message.type !== 'call') return;

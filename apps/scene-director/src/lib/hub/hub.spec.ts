@@ -1,4 +1,4 @@
-import { mkdtemp, readFile } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import os from 'node:os';
@@ -7,10 +7,12 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { ToContent } from '../mcp/server';
 import { Hub, type HubOptions } from './hub';
-import { applySceneOperations, createEmptyScene } from '@scene-director/scene';
+import { applySceneOperations, createEmptyScene, encodeExportPacket, exportBytesToBase64, type MovieExportPlan, type MovieExportStatus } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { FleetPersonalityFileStore } from '../store/personality-files';
 import { SceneFileStore } from '../store/scene-files';
+import { MovieFileStore } from '../store/movie-files';
+import { ReadMp4 } from './mp4-reader.testing';
 import { RemoteHub } from './remote-hub';
 import { ToolError } from './tool-call';
 import { MakeFakeShipData, SDE, TFI_DNA, UnpreparedSdeRoutes } from './ship-data.testing';
@@ -58,12 +60,13 @@ type Handler = (args: Record<string, unknown>) => unknown;
 
 let hub: Hub;
 
-/** A hub on a free port whose saved scene, fleet composition and fleet personality files go to fresh temp directories. */
+/** A hub on a free port whose saved scene, fleet composition, fleet personality and movie files go to fresh temp directories. */
 async function StartHub(options: Partial<HubOptions> = {}): Promise<Hub> {
   const scenes = new SceneFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-hub-')));
   const compositions = new FleetCompositionFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-fleets-')));
   const personalities = new FleetPersonalityFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-personalities-')));
-  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, compositions, personalities, log: () => undefined, ...options }).Start();
+  const movies = new MovieFileStore(await mkdtemp(path.join(os.tmpdir(), 'scene-director-movies-')));
+  return new Hub({ port: 0, toolsCore, viewerDirectory: VIEWER_SOURCE, scenes, compositions, personalities, movies, log: () => undefined, ...options }).Start();
 }
 
 beforeAll(async () => {
@@ -652,6 +655,208 @@ describe('locations', () => {
     } finally {
       page.close();
       await located.Stop();
+    }
+  });
+});
+
+/** A page's plan for a small export. */
+function ExportPlan(frames: number): MovieExportPlan {
+  return {
+    source: 'slate',
+    from: 0,
+    to: frames / 10,
+    seconds: frames / 10,
+    frames,
+    fps: 10,
+    width: 320,
+    height: 180,
+    picture: { x: 0, y: 23, width: 320, height: 134 },
+    letterbox: 2.39,
+    codec: 'h264',
+    codecString: 'avc1.64001F',
+    bitrate: 500000,
+    hardware: 'no-preference',
+    restart: true,
+    timeline: true,
+    preroll: { seconds: 0, frames: 0 },
+    keyframeEvery: 20
+  };
+}
+
+/** Waits until the hub's export status satisfies a check. */
+async function ExportStatus(target: Hub, done: (status: MovieExportStatus) => boolean): Promise<MovieExportStatus> {
+  for (let attempt = 0; attempt < 200; attempt++) {
+    const status = (await target.Call('export_movie')) as MovieExportStatus;
+    if (done(status)) return status;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error('the export status never got there');
+}
+
+describe('movie export', () => {
+  const AVCC = new Uint8Array([1, 0x64, 0, 0x1f, 0xff, 0xe1, 0, 0]);
+
+  /** A page that arms an export and records the export messages the hub sends it. */
+  async function ExportPage(target: Hub, handlers: Record<string, Handler> = {}): Promise<{ ws: WebSocket; calls: Record<string, unknown>[]; hubMessages: Record<string, unknown>[] }> {
+    const calls: Record<string, unknown>[] = [];
+    const hubMessages: Record<string, unknown>[] = [];
+    const ws = await ConnectPage(
+      {
+        export_movie: (args) => {
+          calls.push(args);
+          return args['action'] === 'start' ? { id: args['id'], state: 'preparing', plan: ExportPlan(30), scene: 'Duel at Jita', warnings: ['a page warning'] } : { state: 'cancelled' };
+        },
+        ...handlers
+      },
+      target
+    );
+    ws.on('message', (data) => {
+      const message = JSON.parse(String(data)) as Record<string, unknown>;
+      if (message['type'] === 'export') hubMessages.push(message);
+    });
+    return { ws, calls, hubMessages };
+  }
+
+  function Report(id: string, state: string, frame: number): Record<string, unknown> {
+    return {
+      id,
+      state,
+      plan: ExportPlan(30),
+      frame,
+      frames: 30,
+      progress: frame / 30,
+      time: frame / 10,
+      rate: { fps: 30, realtime: 3 },
+      eta: 0,
+      encoder: { queue: 0, chunks: frame, keyFrames: 2, bytes: frame * 50 },
+      frameMs: { mean: 2, max: 4, retries: 0 },
+      startedAt: new Date().toISOString(),
+      wallSeconds: 1,
+      gpuErrors: 0,
+      warnings: []
+    };
+  }
+
+  it('status answers idle with no tab, and start with no tab explains what to open', async () => {
+    const fresh = await StartHub();
+    try {
+      expect(await fresh.Call('export_movie')).toMatchObject({ state: 'idle' });
+      await expect(fresh.Call('export_movie', { action: 'start', source: 'slate' })).rejects.toThrow(/No viewer tab is connected/);
+      await expect(fresh.Call('export_movie', { action: 'cancel' })).rejects.toThrow(/no movie export is running/);
+      await expect(fresh.Call('export_movie', { action: 'start', width: 321 })).rejects.toThrow(/width must be pixels/);
+    } finally {
+      await fresh.Stop();
+    }
+  });
+
+  it("writes the page's chunks to an MP4 the /movies route serves with Range", async () => {
+    const target = await StartHub();
+    const { ws, calls, hubMessages } = await ExportPage(target);
+    try {
+      const started = (await target.Call('export_movie', { action: 'start', source: 'slate', fps: 10, width: 320, height: 180 })) as { id: string; file: { path: string; url: string }; warnings: string[] };
+      expect(calls[0]).toMatchObject({ action: 'start', id: started.id, fps: 10, source: 'slate' });
+      expect(path.basename(started.file.path)).toMatch(/^duel-at-jita-\d{8}-\d{6}\.mp4$/u);
+      expect(started.file.url).toBe(`${target.url}movies/${path.basename(started.file.path)}`);
+      expect(started.warnings).toEqual(['a page warning']);
+      await expect(target.Call('export_movie', { action: 'start' })).rejects.toThrow(/a movie export is running/);
+      ws.send(JSON.stringify({ type: 'export', id: started.id, kind: 'config', track: { codec: 'h264', codecString: 'avc1.64001F', width: 320, height: 180, fps: 10, description: exportBytesToBase64(AVCC) } }));
+      for (let seq = 0; seq < 30; seq++) ws.send(encodeExportPacket({ id: started.id, seq, key: seq % 20 === 0, timestamp: seq * 100_000, duration: 100_000 }, new Uint8Array(50).fill(seq)));
+      ws.send(JSON.stringify({ type: 'export', id: started.id, kind: 'progress', report: Report(started.id, 'rendering', 30) }));
+      ws.send(JSON.stringify({ type: 'export', id: started.id, kind: 'end', report: Report(started.id, 'finishing', 30) }));
+      const status = await ExportStatus(target, (entry) => entry.state === 'done');
+      expect(status).toMatchObject({ id: started.id, frame: 30, result: { frames: 30, seconds: 3, fps: 10, width: 320, height: 180, path: started.file.path } });
+      expect(hubMessages.at(-1)).toMatchObject({ kind: 'saved', id: started.id, file: { path: started.file.path } });
+      const mp4 = ReadMp4(new Uint8Array(await readFile(started.file.path)));
+      expect(mp4.samples).toHaveLength(30);
+      expect(mp4.stss).toEqual([1, 21]);
+      expect([...mp4.samples[7]]).toEqual(new Array(50).fill(7));
+      const full = await fetch(started.file.url);
+      expect(full.status).toBe(200);
+      expect(full.headers.get('content-type')).toBe('video/mp4');
+      expect((await full.arrayBuffer()).byteLength).toBe(mp4.boxes.at(-1)!.offset + mp4.boxes.at(-1)!.size);
+      const ranged = await fetch(started.file.url, { headers: { range: 'bytes=0-99' } });
+      expect(ranged.status).toBe(206);
+      expect(ranged.headers.get('content-range')).toMatch(/^bytes 0-99\//u);
+      expect((await ranged.arrayBuffer()).byteLength).toBe(100);
+      expect((await fetch(started.file.url, { headers: { range: 'bytes=99999999-' } })).status).toBe(416);
+      const head = await fetch(started.file.url, { method: 'HEAD' });
+      expect(head.status).toBe(200);
+      expect(head.headers.get('accept-ranges')).toBe('bytes');
+      expect((await fetch(`${target.url}movies/nothing.mp4`)).status).toBe(404);
+      expect((await fetch(`${target.url}movies/..%2Fhub.spec.ts`)).status).toBe(404);
+      expect(((await target.Call('viewer_status')) as { moviesDirectory: string }).moviesDirectory).toBe(path.dirname(started.file.path));
+    } finally {
+      ws.close();
+      await target.Stop();
+    }
+  });
+
+  it("cancel reaches the export's own tab and deletes the part", async () => {
+    const target = await StartHub();
+    const first = await ExportPage(target);
+    const second = await ExportPage(target);
+    try {
+      second.ws.close();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      const started = (await target.Call('export_movie', { action: 'start', source: 'slate' })) as { id: string; file: { path: string } };
+      first.ws.send(JSON.stringify({ type: 'export', id: started.id, kind: 'config', track: { codec: 'h264', codecString: 'avc1.64001F', width: 320, height: 180, fps: 10, description: exportBytesToBase64(AVCC) } }));
+      first.ws.send(encodeExportPacket({ id: started.id, seq: 0, key: true, timestamp: 0, duration: 100_000 }, new Uint8Array(10)));
+      const third = await ExportPage(target);
+      const cancelled = (await target.Call('export_movie', { action: 'cancel' })) as MovieExportStatus;
+      expect(cancelled.state).toBe('cancelled');
+      expect(first.calls.at(-1)).toEqual({ action: 'cancel', id: started.id });
+      expect(third.calls).toEqual([]);
+      expect(await readdir(path.dirname(started.file.path))).toEqual([]);
+      third.ws.close();
+    } finally {
+      first.ws.close();
+      await target.Stop();
+    }
+  });
+
+  it('the tab closing fails it and deletes the part; a page failure keeps its error; a lost chunk fails it', async () => {
+    const target = await StartHub();
+    try {
+      const closing = await ExportPage(target);
+      const started = (await target.Call('export_movie', { action: 'start', source: 'slate' })) as { id: string; file: { path: string } };
+      closing.ws.close();
+      const closed = await ExportStatus(target, (entry) => entry.state === 'failed');
+      expect(closed).toMatchObject({ error: 'the viewer tab closed or reloaded during the export' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(await readdir(path.dirname(started.file.path))).toEqual([]);
+
+      const failing = await ExportPage(target);
+      const again = (await target.Call('export_movie', { action: 'start', source: 'slate' })) as { id: string };
+      failing.ws.send(JSON.stringify({ type: 'export', id: again.id, kind: 'failed', error: 'the encoder failed: boom', report: Report(again.id, 'rendering', 3) }));
+      expect(await ExportStatus(target, (entry) => entry.state === 'failed')).toMatchObject({ id: again.id, error: 'the encoder failed: boom' });
+
+      const lossy = (await target.Call('export_movie', { action: 'start', source: 'slate' })) as { id: string };
+      failing.ws.send(JSON.stringify({ type: 'export', id: lossy.id, kind: 'config', track: { codec: 'h264', codecString: 'avc1.64001F', width: 320, height: 180, fps: 10, description: exportBytesToBase64(AVCC) } }));
+      failing.ws.send(encodeExportPacket({ id: lossy.id, seq: 1, key: true, timestamp: 0, duration: 100_000 }, new Uint8Array(10)));
+      expect(await ExportStatus(target, (entry) => entry.state === 'failed')).toMatchObject({ id: lossy.id, error: 'chunk 0 never arrived (chunk 1 came instead)' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(failing.hubMessages.at(-1)).toMatchObject({ kind: 'failed', id: lossy.id });
+      failing.ws.close();
+    } finally {
+      await target.Stop();
+    }
+  });
+
+  it('a page refusal keeps its problems and leaves no file', async () => {
+    const target = await StartHub();
+    const { ws } = await ExportPage(target, {
+      export_movie: () => {
+        throw Object.assign(new Error('Invalid export'), { problems: ['this scene has no timeline: give duration, seconds from now'] });
+      }
+    });
+    try {
+      const failure = await target.Call('export_movie', { action: 'start', to: 4 }).catch((error: unknown) => error);
+      expect((failure as ToolError).details?.problems).toEqual(['this scene has no timeline: give duration, seconds from now']);
+      expect(await target.Call('export_movie')).toMatchObject({ state: 'idle' });
+      expect(await readdir(target.movieExports.directory)).toEqual([]);
+    } finally {
+      ws.close();
+      await target.Stop();
     }
   });
 });

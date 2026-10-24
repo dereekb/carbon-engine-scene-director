@@ -73,6 +73,12 @@ A ship with all four `stats` and every composition line with `dna` + `radius` (t
   ~372 MB for `turrets.bnk`; shared by every hub, verify-page included; build-keyed, safe to delete). Without it each
   range costs tools-core a whole-file read (`sd-runtime` → Audio). The proxy uses `pipeline`: an upstream body cut
   short (a tab reloading mid-read) once crashed the hub on an unhandled stream error.
+- **Movies directory** (`export_movie`, `sd-export`): `--movies <dir>` / `SCENE_DIRECTOR_MOVIES`, default
+  `scene-director/movies` in the per-user data directory (`~/.local/share/scene-director/movies` here); tests,
+  verify-page and GPU checks use temp ones. Open an export in Chrome at `http://127.0.0.1:<port>/movies/<file>` (the
+  status's `url`; Range-served, so seeking works), or from Windows Explorer at the status's `windowsPath`
+  (`\\wsl.localhost\<distro>\…`). There is **no ffmpeg or ffprobe** on dbxpc: read a file with
+  `hub/mp4-reader.testing.ts` (`ReadMp4`), as the specs and verify-page do.
 - WSL on a 9p-mounted Windows drive: don't rename directories a running process uses as its working directory.
 
 ## verify-page (everything but drawing)

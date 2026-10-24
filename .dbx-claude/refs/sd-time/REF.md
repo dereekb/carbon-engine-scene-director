@@ -54,7 +54,9 @@ movie's end (below, "The movie's end"), and the `movie` tool's seeks over `Jump`
 - **A movie export steps with `FrameTo` instead** (`sd-export`): every boundary up to the frame's exact target
   (T0 + i / fps), no budget, no `StopAt`; `Frame` steps nothing meanwhile, and `Command`, `Jump`, `Resimulate`, `Pause`
   and `SetRate` throw `EXPORT_LOCKED_TEXT`. Recording goes on. `EndExport` pauses at the last frame and resyncs the
-  clock (`SceneClock.Resync`), so the first live frame does not count the export as one long frame.
+  clock (`SceneClock.Resync`), so the first live frame does not count the export as one long frame. While an export
+  holds the page (preparing to finishing) the time_control tool is refused too, but its status form `time_control {}`
+  (the director's `ExportGuard`, `sd-export` → Locks); the exporter's own seek runs before `BeginExport`.
 - So every pending order, Follow the FC steering, module cycle, lock and combat roll runs at the same tick, in the same
   order, at any rate. `time-control.spec.ts` proves it: a 1× harness world and `TimeControl` worlds at 8× (two
   boundaries a frame) and at 32× behind its budget (one a frame) give identical master `BallStates` and boundary

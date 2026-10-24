@@ -193,7 +193,17 @@ export class Engine {
   nebula: EngineNebula = { path: null, source: 'universe', state: 'applied' };
   lastError: Maybe<string> = null;
   deviceLost: Maybe<string> = null;
+  /**
+   * Whether the last Frame drew into a swap-chain image (no error, not lost): a movie export captures only such a
+   * frame (sd-export).
+   */
+  lastFrameDrawn = false;
   private readonly capture: FrameCapture;
+  /**
+   * The canvas backing store's size while a movie export holds it (SetFixedSize), else null: fit to the CSS box.
+   */
+  private fixedSize: Maybe<{ readonly width: number; readonly height: number }> = null;
+  private compositor: Maybe<ExportCompositor> = null;
   private readonly fps = { frames: 0, since: performance.now(), value: 0 };
   private readonly gpuErrors = { count: 0, messages: [] as string[], capped: false };
   private dresser: Maybe<SceneDresser> = null;
@@ -268,6 +278,34 @@ export class Engine {
    */
   SetCinematicFrame(frame: Maybe<CinemaFrame>): void {
     this.cinematic = frame;
+  }
+
+  /**
+   * Holds the canvas backing store at a size (a movie export's picture, sd-export), or fits it to the CSS box again
+   * with null. The next Frame reconfigures the render target on a change.
+   *
+   * @param size - The picture's size in pixels, or null.
+   */
+  SetFixedSize(size: Maybe<{ readonly width: number; readonly height: number }>): void {
+    this.fixedSize = size ? { width: Math.max(1, Math.round(size.width)), height: Math.max(1, Math.round(size.height)) } : null;
+  }
+
+  /**
+   * The frame just drawn as a movie export's source, called right after Frame in the same task (a VideoFrame reads
+   * the canvas only before it is presented, sd-runtime): the canvas itself when the picture fills the output, else the
+   * picture composited onto black bars on an output-sized WebGPU OffscreenCanvas.
+   *
+   * @param output - The output frame's size.
+   * @param picture - Where the picture sits in it.
+   * @returns The source, or null when the frame did not draw.
+   */
+  ExportSource(output: { readonly width: number; readonly height: number }, picture: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }): Maybe<HTMLCanvasElement | OffscreenCanvas> {
+    const presented = this.presented;
+    if (!this.lastFrameDrawn || !presented) return null;
+    const fills = picture.x === 0 && picture.y === 0 && this.canvas.width === output.width && this.canvas.height === output.height;
+    if (fills) return this.canvas;
+    this.compositor ??= new ExportCompositor(this.device, this.Parts().format);
+    return this.compositor.Compose(presented, output, picture);
   }
 
   /**
@@ -576,11 +614,14 @@ export class Engine {
   }
 
   Frame(timestamp: number, now: number): void {
+    this.lastFrameDrawn = false;
     if (this.deviceLost) return;
     this.frameNow = now;
     const { camera, renderTarget, pump, al, format } = this.Parts();
     try {
-      if (FitCanvasSize(this.canvas)) renderTarget.Configure({ width: this.canvas.width, height: this.canvas.height });
+      const resized = this.fixedSize ? HoldCanvasSize(this.canvas, this.fixedSize) : FitCanvasSize(this.canvas);
+      if (resized) renderTarget.Configure({ width: this.canvas.width, height: this.canvas.height });
+      this.presented = null;
       camera.Update(Math.round(timestamp * TICKS_PER_MS));
       // The orbit camera updates underneath a cinematic shot, so its release blend has a live target.
       this.drawn = this.cinematic ? this.free.Apply(camera, this.cinematic, this.Aspect()) : camera.Drawn();
@@ -588,6 +629,7 @@ export class Engine {
       this.capture.AfterFrame(this.presented, this.canvas.width, this.canvas.height, format);
       al.DrainTransitions?.();
       this.lastError = null;
+      this.lastFrameDrawn = this.presented != null;
     } catch (error) {
       // A failed frame must not end the loop; the next one may succeed.
       const message = ErrorText(error);
@@ -903,6 +945,57 @@ function PackRows(bytes: Uint8Array, { width, height, bytesPerRow, bgra }: { wid
     }
   }
   return pixels;
+}
+
+/**
+ * Holds the canvas backing store at a fixed size (a movie export's picture).
+ *
+ * @param canvas - The canvas.
+ * @param size - The size in pixels.
+ * @returns True when the size changed.
+ */
+function HoldCanvasSize(canvas: HTMLCanvasElement, size: { readonly width: number; readonly height: number }): boolean {
+  const changed = size.width !== canvas.width || size.height !== canvas.height;
+  if (changed) {
+    canvas.width = size.width;
+    canvas.height = size.height;
+  }
+  return changed;
+}
+
+/**
+ * A movie export's letterbox compositor (sd-export): an output-sized OffscreenCanvas with a WebGPU context on the
+ * engine's device, in the canvas's format. Each frame it clears to black and copies the presented picture into its
+ * rect (the canvas is configured COPY_SRC), then submits; a VideoFrame of it reads the composite.
+ */
+class ExportCompositor {
+  private canvas: Maybe<OffscreenCanvas> = null;
+  private context: Maybe<GPUCanvasContext> = null;
+
+  constructor(
+    private readonly device: GPUDevice,
+    private readonly format: GPUTextureFormat
+  ) {}
+
+  Compose(source: GPUTexture, output: { readonly width: number; readonly height: number }, picture: { readonly x: number; readonly y: number; readonly width: number; readonly height: number }): OffscreenCanvas {
+    let { canvas, context } = this;
+    if (!canvas || !context || canvas.width !== output.width || canvas.height !== output.height) {
+      canvas = new OffscreenCanvas(output.width, output.height);
+      context = canvas.getContext('webgpu');
+      if (!context) throw new Error('the export compositor has no WebGPU context');
+      context.configure({ device: this.device, format: this.format, usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST, alphaMode: 'opaque' });
+      this.canvas = canvas;
+      this.context = context;
+    }
+    const target = context.getCurrentTexture();
+    const encoder = this.device.createCommandEncoder({ label: 'movie export compositor' });
+    encoder.beginRenderPass({ label: 'movie export bars', colorAttachments: [{ view: target.createView(), loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 } }] }).end();
+    const width = Math.min(picture.width, source.width, output.width - picture.x);
+    const height = Math.min(picture.height, source.height, output.height - picture.y);
+    if (width > 0 && height > 0) encoder.copyTextureToTexture({ texture: source }, { texture: target, origin: { x: picture.x, y: picture.y } }, { width, height });
+    this.device.queue.submit([encoder.finish()]);
+    return canvas;
+  }
 }
 
 /**

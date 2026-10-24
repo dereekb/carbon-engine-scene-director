@@ -145,7 +145,8 @@ export class ExportStepper {
     this.time = time;
     this.world = world;
     this.grid = grid;
-    this.nextIndex = -grid.preroll;
+    // 0 - preroll, not -preroll: no preroll starts at +0 (a -0 index would give a -0 timestamp).
+    this.nextIndex = 0 - grid.preroll;
   }
 
   /**
