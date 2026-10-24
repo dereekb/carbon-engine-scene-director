@@ -6,7 +6,7 @@ import { ResolveFlight, type PublishedHull } from './flight';
 import { ResolveShipPropMod } from './prop-mods';
 import { ExportFrameTicks } from './export-frames';
 import { EstimateBytes } from './state-capture';
-import { EXPORT_LOCKED_TEXT, RateText, SceneSeconds, SceneTicks, TimeControl, TimeText, type LockedFrameResult, type TapeEntry, type TimeBeatEnd, type TimePresentation, type TimeSimPort } from './time-control';
+import { EXPORT_LOCKED_TEXT, RateText, RECORD_LOCKED_TEXT, SceneSeconds, SceneTicks, TimeControl, TimeText, type LockedFrameResult, type TapeEntry, type TimeBeatEnd, type TimePresentation, type TimeSimPort } from './time-control';
 import type { ShipOrder } from '@scene-director/scene';
 import type { DestinySnapshot } from './destiny';
 
@@ -929,5 +929,69 @@ describe('TimeControl beats (sd-time)', () => {
     expect(control.stopsAt).toBeNull();
     expect(() => control.PlayFor(1, () => undefined)).toThrow(EXPORT_LOCKED_TEXT);
     expect(ends).toHaveLength(4);
+  });
+});
+
+describe('TimeControl record lock (sd-export)', () => {
+  it("holds the clock on the recording's grid, refuses jumps and lock changes, and gives the user's lock back", () => {
+    const { clock, control, Locked } = LockRig(10);
+    Locked();
+    control.BeginRecording({ fps: 30 });
+    expect(control.recordingMovie).toBe(true);
+    expect(control.frameLock).toBe(30);
+    expect(control.Report().lock).toEqual({ fps: 30, by: 'record_movie' });
+    expect(TimeText(control.Report())).toMatch(/^1× · 30 fps record lock/u);
+    // Frame 0 is the anchor itself: the time before the recording is not one long frame.
+    const start = clock.now;
+    expect(Locked(5000)).toEqual({ kind: 'grid', clock: start, index: 0 });
+    for (let frame = 1; frame <= 6; frame++) expect(Locked(300)).toEqual({ kind: 'grid', clock: start + ExportFrameTicks(frame, 30), index: frame });
+    expect(() => control.Jump(start)).toThrow(RECORD_LOCKED_TEXT);
+    expect(() => control.Command({ back: 1 })).toThrow(RECORD_LOCKED_TEXT);
+    expect(() => control.Command({ seek: 1 })).toThrow(RECORD_LOCKED_TEXT);
+    expect(() => control.Command({ fps: 60 })).toThrow(RECORD_LOCKED_TEXT);
+    expect(() => control.SetFrameLock(null)).toThrow(RECORD_LOCKED_TEXT);
+    expect(() => control.Resimulate({ accept: () => true, restored: () => undefined })).toThrow(RECORD_LOCKED_TEXT);
+    expect(() => control.BeginExport({ fps: 30 })).toThrow('a live recording is running');
+    expect(() => control.BeginRecording({ fps: 30 })).toThrow('a live recording is already running');
+    // Pause, the rate and stops still work.
+    control.Command({ rate: 0.5, pause: true });
+    expect([control.rate, control.paused]).toEqual([0.5, true]);
+    const at = clock.now;
+    expect(Locked()).toEqual({ kind: 'hold', clock: at });
+    control.Pause(false);
+    control.SetRate(1);
+    control.EndRecording();
+    expect(control.recordingMovie).toBe(false);
+    expect(control.Report().lock).toEqual({ fps: 10, by: 'time_control' });
+    // The user's lock is re-anchored at now: its frame 0 is the clock the recording ended at.
+    expect(Locked()).toEqual({ kind: 'grid', clock: clock.now, index: 0 });
+    expect(Locked(100)).toMatchObject({ kind: 'grid', index: 1 });
+  });
+
+  it('plays a beat under the record lock and lands exactly on its clock', () => {
+    const { clock, control, Locked } = LockRig(10);
+    control.SetFrameLock(null);
+    control.BeginRecording({ fps: 24 });
+    expect(control.frameLock).toBe(24);
+    Locked();
+    control.Pause(true);
+    const from = clock.now;
+    const ends: TimeBeatEnd[] = [];
+    control.PlayFor(1, (end) => ends.push(end));
+    for (let frame = 0; frame < 200 && !control.paused; frame++) Locked(250);
+    expect([clock.now, control.paused]).toEqual([from + TICKS_PER_SECOND, true]);
+    expect(ends).toMatchObject([{ endedBy: 'played', played: 1 }]);
+    control.EndRecording();
+    expect(control.frameLock).toBeNull();
+  });
+
+  it('is refused during an export, and nothing changes outside a recording', () => {
+    const { control } = LockRig(10);
+    control.EndRecording();
+    expect(control.Report().lock).toEqual({ fps: 10, by: 'time_control' });
+    control.BeginExport({ fps: 30 });
+    expect(() => control.BeginRecording({ fps: 30 })).toThrow(EXPORT_LOCKED_TEXT);
+    control.EndExport();
+    expect(() => control.BeginRecording({ fps: 0 })).toThrow(RangeError);
   });
 });

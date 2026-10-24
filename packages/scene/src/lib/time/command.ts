@@ -5,7 +5,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import { MAX_EXPORT_FPS, MIN_EXPORT_FPS } from '../export/command';
+import { MAX_EXPORT_FPS, MIN_EXPORT_FPS } from '../export/output';
 import { isPlainObject } from '../json';
 import { SceneError } from '../scene';
 

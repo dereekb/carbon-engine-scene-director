@@ -888,14 +888,14 @@
         "tone": "hint",
         "triggers": [
           {
-            "words": ["movie export", "export_movie", "export mode", "FrameTo", "BeginExport", "ExportStepper", "WebCodecs", "VideoEncoder", "VideoFrame", "mp4", "encode"]
+            "words": ["movie export", "export_movie", "export mode", "FrameTo", "BeginExport", "ExportStepper", "WebCodecs", "VideoEncoder", "VideoFrame", "mp4", "encode", "record_movie", "live recording", "record lock", "MovieRecording", "BeginRecording"]
           },
           {
-            "pathContains": ["apps/viewer/src/lib/export-", "apps/viewer/src/lib/movie-export", "packages/scene/src/lib/export/", "apps/scene-director/src/lib/hub/movie-exports", "apps/scene-director/src/lib/hub/mp4", "apps/scene-director/src/lib/store/movie-files"],
+            "pathContains": ["apps/viewer/src/lib/export-", "apps/viewer/src/lib/movie-export", "packages/scene/src/lib/export/", "apps/scene-director/src/lib/hub/movie-exports", "apps/scene-director/src/lib/hub/mp4", "apps/scene-director/src/lib/store/movie-files", "apps/viewer/src/lib/movie-record", "apps/viewer/src/lib/movie-sink"],
             "every": 12
           },
           {
-            "toolNames": ["mcp__scene-director__export_movie"]
+            "toolNames": ["mcp__scene-director__export_movie", "mcp__scene-director__record_movie"]
           }
         ]
       }

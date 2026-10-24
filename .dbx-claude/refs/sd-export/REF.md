@@ -1,19 +1,26 @@
-# Movie export: the movie rendered offline on a fixed 1/fps scene clock
+# Movie export and live recording: the movie rendered offline on a fixed 1/fps scene clock, or recorded live on it
 
 > `export_movie` renders the authored movie (or a time range, or N seconds of an unscripted scene) to an MP4 at a chosen
 > size and fps. Every frame sits at exactly T0 + i / fps on the scene clock, however long the GPU takes to draw it, so a
-> battle the tab draws at 4 fps still exports as a smooth 30 fps file, just more slowly than real time. Fetch before
-> touching `TimeControl`'s export mode, `export-frames.ts`, a frame-timed camera path, or (from E2) the export pipeline,
-> the hub's MP4 writer and `/movies`. The plan:
-> `~/.claude/plans/movie-export-render-an-authored-movie-offline-to-a-video-file-on-a-fixed-1-fps-s.md` (slices E1 the
-> fixed-step clock and the camera-timing specs → E2 the pipeline, the hub writer and `export_movie`, headless-verified →
-> E3 the real-GPU export).
+> battle the tab draws at 4 fps still exports as a smooth 30 fps file, just more slowly than real time. `record_movie`
+> records the live scene while the tools stay open: the clock runs under the record lock (the frame lock at the file's
+> fps, `sd-time`) and every grid frame is encoded, so video time is scene time. Fetch before touching `TimeControl`'s
+> export mode or record lock, `export-frames.ts`, a frame-timed camera path, the export or recording pipeline
+> (`movie-sink.ts`, `movie-export.ts`, `movie-record.ts`), the hub's MP4 writer and `/movies`. The plans:
+> `~/.claude/plans/movie-export-render-an-authored-movie-offline-to-a-video-file-on-a-fixed-1-fps-s.md` (E1 the
+> fixed-step clock and the camera-timing specs → E2 the pipeline, the hub writer and `export_movie` → E3 the real-GPU
+> export) and `~/.claude/plans/i-want-to-think-expressive-volcano.md` (live recording: R1 the frame lock and beats →
+> R2 `record_movie` → R3 the real GPU).
 
 **Status: E3 landed** (2026-10-24): the fixed-step export clock, the frame grid and stepper, the camera-timing specs
 (E1); `export_movie`, the page's exporter with WebCodecs, the slate source, the wire, the hub's `Mp4Writer`, sessions
 and `/movies`, the locks, and verify-page `export:` headless (E2); the real-GPU export in Windows Chrome on the
 animation clock (`sd-time`): the M6 movie, a 60 fps range, a slow 300-ship fight, HEVC 4K and cancel, two camera fixes
 (E3, Evidence below).
+
+**Live recording: R2 landed** (2026-10-24): `record_movie`, the record lock, the shared `MovieSink`, the quality preset
+and the HEVC High tier, the hub's sessions of either kind, verify-page `record:` headless (Live recording below). R3 (the
+real GPU) is open.
 
 **No-EVE-data mode** (`sd-dev-env`): exports work, holding the green screen and stand-in cubes (a 2 s 640×360 export on
 Mac Chrome, 2026-10-24).
@@ -28,17 +35,19 @@ Mac Chrome, 2026-10-24).
 | `apps/viewer/src/lib/export-frames.ts` | the grid (`ExportFrameTicks`, `ExportFrameMicros`, `ExportFrameCount`, `ExportPrerollFrames`), `ExportGrid`, `ExportStep`, `ExportStepper` (`Next`, `Again`, `index`, `done`, `Log`, `Summary`). Node-tested, no runtime |
 | `apps/viewer/src/lib/timeline.spec-helper.ts` | `TimelineRig` (moved out of `movie.spec.ts`; `ExportTo` drives it as an export), `Cue`, `Direction`, `CUES_A`, `SHIPS_A` |
 | `apps/viewer/src/lib/cinema.ts` / `cinema-moves.ts` | `FrameRun` (a shot framed at its exact end before what follows), `SmoothTrack` (the lag, exact for a moving target) |
-| `packages/scene/src/lib/export/` | `command.ts` (the constants, `MovieExportCommand`, `normalizeMovieExportCommand`: every problem at once), `codec.ts` (`exportCodecString` and the H.264 / HEVC level tables, `defaultExportBitrate`, `exportPictureRect`), `wire.ts` (the SDX1 packet, the JSON messages, base64), `report.ts` (`MOVIE_EXPORT_STATES`, the plan, report, status and result) |
+| `packages/scene/src/lib/export/` | `command.ts` (`MovieExportCommand`, `normalizeMovieExportCommand`: every problem at once), `output.ts` (the output fields both tools share and their constants: `readMovieOutput`, `MovieOutputPlan`, `movieOutputPlan`), `codec.ts` (`exportCodecString` and the H.264 / HEVC level tables with the HEVC High tier, `MOVIE_QUALITIES` and `defaultExportBitrate`, `exportPictureRect`, the bitrate bounds), `record.ts` (`MOVIE_RECORD_ACTIONS`, `normalizeMovieRecordCommand`, the record plan, report, status and states), `wire.ts` (the SDX1 packet, the JSON messages, base64), `report.ts` (`MOVIE_EXPORT_STATES`, the plan, report, status and result) |
 | `packages/scene/src/lib/tools.ts` | `export_movie` (hub, after `movie`); get_state's `export` sentence |
-| `apps/viewer/src/lib/movie-export.ts` | `MovieExport` over a `MovieExportPort` (states, `Start`, `Step`, `AfterFrame`, `Cancel`, `OnHub`, `LinkClosed`, `Report`, `Log`), `ExportEncoderPort` + `WebCodecsEncoder` (with `Support`), `PlanMovieExport` (the page's checks), `ExportAllows` / `EXPORT_ALLOWED_TOOLS`, `ExportRefusal`, `ExportText`, the backpressure / retry / save constants. Node-tested, no runtime |
+| `apps/viewer/src/lib/movie-sink.ts` | `MovieSink`, the half both drivers share: the encoder (configure, encode, flush, close), the config message and SDX1 packets with their counts, `Progress`, the end → saved handshake and its timeout, `OnHub`, `Waiting` (backpressure), the draw rate and failure count; `ExportEncoderPort` + `WebCodecsEncoder` (with `Support`), the backpressure / retry / save constants. Node-tested, no runtime |
+| `apps/viewer/src/lib/movie-export.ts` | `MovieExport` over a `MovieExportPort` and the sink (states, `Start`, `Step`, `AfterFrame`, `Cancel`, `OnHub`, `LinkClosed`, `Report`, `Log`), `PlanMovieExport` (the page's checks), `ExportAllows` / `EXPORT_ALLOWED_TOOLS`, `ExportRefusal`, `ExportText`; re-exports the sink's encoder types. Node-tested, no runtime |
+| `apps/viewer/src/lib/movie-record.ts` | `MovieRecording` over a `MovieRecordPort` and the sink (`Start`, `Step(timestamp, drawAnyway)`, `AfterFrame`, `Stop`, `Cancel`, `OnHub`, `LinkClosed`, `Report`, `Log`), `RECORD_WARMUP_FRAMES`, `PlanMovieRecord`, `RecordRefusal`, `RecordText`. Node-tested, no runtime |
 | `apps/viewer/src/lib/export-slate.ts` | `SlateLines` (pure) and `DrawSlate` (Canvas 2D): the slate source |
 | `apps/viewer/src/lib/engine.ts` | `SetFixedSize`, `ExportSource` with the private `ExportCompositor`, `lastFrameDrawn` |
-| `apps/viewer/src/lib/director.ts` | `exporter`, `exporting`, `ExportMovie` (the page's `export_movie`), `ExportGuard`, `ExportPort`, `ExportRestart`, `ExportCapture`, `ExportLook`, `CancelExport`, `AttachLink` / `LinkStatus`, get_state `export`, `Presentation().export` |
-| `apps/viewer/src/main.ts` | the loop's export branch (`Step` for `timeControl.Frame`, `SetFixedSize`, `AfterFrame` right after `engine.Frame`, no `DriveAudio`), `InputLock`, the overlay's `export` row, `Presentation.Apply` for the export |
+| `apps/viewer/src/lib/director.ts` | `exporter`, `exporting`, `ExportMovie` (the page's `export_movie`), `MovieGuard` (the export's allow-list, the recording's refusals), `ExportPort`, `ExportRestart`, `ExportCapture` / `ExportLook` (on the output plan, shared), `CancelExport`; `recorder`, `recordingMovie`, `RecordMovie` (the page's `record_movie`), `RecordPort`, `StopRecording`; `AttachLink` / `LinkStatus`, get_state `export` and `record`, `Presentation().export` (export or recording) |
+| `apps/viewer/src/main.ts` | the loop's export branch (`Step` for `timeControl.Frame`, `SetFixedSize`, `AfterFrame` right after `engine.Frame`, no `DriveAudio`) and recorder branch (`Step(timestamp, capturePending)`, `AfterFrame`), `InputLock` (Esc also stops a recording), the overlay's `export` and `record` rows, `Presentation.Apply` for both |
 | `apps/viewer/src/lib/link.ts` / `movie.ts` | `SendBinary`, `SendMessage`, `buffered`, `onExport`; `FramePresentation.export` |
-| `apps/scene-director/src/lib/hub/` | `movie-exports.ts` (`MovieExports`: one session), `mp4-writer.ts` (`Mp4Writer`), `mp4-reader.testing.ts` (`ReadMp4`, for the specs and verify-page); `hub.ts` (binary messages, `CallPage(name, args, page?)`, `/movies/<file>`, `ByteRange`, `viewer_status.moviesDirectory`) |
+| `apps/scene-director/src/lib/hub/` | `movie-exports.ts` (`MovieExports`: one session of either kind, `record_movie` stop and `RECORD_STOP_TIMEOUT_MS`), `mp4-writer.ts` (`Mp4Writer`), `mp4-reader.testing.ts` (`ReadMp4`, for the specs and verify-page); `hub.ts` (binary messages, `CallPage(name, args, page?)`, `/movies/<file>`, `ByteRange`, `viewer_status.moviesDirectory`) |
 | `apps/scene-director/src/lib/store/movie-files.ts` | `MovieFileStore` (`Reserve`, `Resolve`), `DefaultMoviesDirectory`, `DefaultMovieName`, `MovieFileStem`; the CLI's `--movies` / `SCENE_DIRECTOR_MOVIES` |
-| specs | `export-frames.spec.ts` (grid, `FrameTo`, the determinism oracle, the preroll, `StopAt`, drawn attitudes), `time-control.spec.ts` "export mode", the `… at any frame rate (sd-export)` cases of `cinema.spec.ts`, `camera.spec.ts`, `camera-director.spec.ts`; `export.spec.ts` (scene), `movie-export.spec.ts` (viewer), `mp4-writer.spec.ts`, `movie-files.spec.ts`, `hub.spec.ts` "movie export", `server.spec.ts`; verify-page `export:` |
+| specs | `export-frames.spec.ts` (grid, `FrameTo`, the determinism oracle, the preroll, `StopAt`, drawn attitudes), `time-control.spec.ts` "export mode", the `… at any frame rate (sd-export)` cases of `cinema.spec.ts`, `camera.spec.ts`, `camera-director.spec.ts`; `export.spec.ts` and `record.spec.ts` (scene), `movie-export.spec.ts` and `movie-record.spec.ts` (viewer), `time-control.spec.ts` "record lock", `mp4-writer.spec.ts`, `movie-files.spec.ts`, `hub.spec.ts` "movie export" and "live recording", `server.spec.ts`; verify-page `export:` and `record:` |
 
 ## The fixed-step clock
 
@@ -257,8 +266,15 @@ closing → failed + the part deleted
   | 2160p60 | `avc1.640034` (5.2) | `hvc1.1.6.L153.B0` (5.1) |
   | 4096 × 2304 at 30 / 60 | `avc1.640034` / beyond 5.2 (refused) | beyond 5.2 (its luma picture size) |
 
-- **Bitrate** `round(width × height × fps × 0.2)` clamped to 0.5–100 Mbps: 12.4 Mbps at 1080p30, 24.9 at 1080p60, 49.8
-  at 2160p30. **Keyframes** every `round(2 × fps)` frames (`keyframeEvery`).
+- **Bitrate** (when `bitrate` is not given) from the **quality** preset (both tools): `draft` 0.08, `standard` (the
+  default) 0.2, `high` 0.35 and `max` 0.6 bits a pixel a frame, at least 0.5 Mbps; draft and standard clamp at 100 Mbps,
+  high and max at `MAX_EXPORT_BITRATE` (200 Mbps). Standard: 12.4 Mbps at 1080p30, 24.9 at 1080p60, 49.8 at 2160p30;
+  max: 149 Mbps at 2160p30. The plan carries `quality`.
+- **The HEVC High tier**: above `HEVC_HIGH_TIER_BITRATE` (25 Mbps, the Main tier's top at level 5) the codec string takes
+  the High tier (`hvc1.1.6.H150.B0`) at the lowest level whose size, rate and High-tier bitrate fit (4 30, 4.1 50, 5 100,
+  5.1 160, 5.2 240 Mbps): 2160p30 standard (49.8 Mbps) `H150`, max (149 Mbps) `H153`. This changed 2160p30 HEVC's
+  default from E3's `L150` to `H150`; R3 checks the GPU encoder takes it. H.264 levels are not raised for the bitrate
+  (Chrome's encoder writes its own level). **Keyframes** every `round(2 × fps)` frames (`keyframeEvery`).
 - **Backpressure**: `Step()` returns null (main.ts draws nothing, the clock does not move) while the tab is hidden
   (`the tab is hidden: drawing stops until it shows`), the encoder is configuring, its `encodeQueueSize` > 8, or the
   link buffers > 8 MiB; the report names it in `waiting`.
@@ -345,6 +361,85 @@ decoder for turret and impact sounds.
 - A restart that is not `ready` within `TIMELINE_PREPARE_LIMIT_SECONDS + 10`: `the restarted movie did not prepare: …`.
 - Cancel and failure both close the encoder, `EndExport({ pause: true })` when it began, `Lock(false)` and keep the
   report.
+
+## Live recording (`record_movie`, R2)
+
+**The record lock.** A recording is the frame lock (`sd-time`) at the file's fps plus the export's capture/encode/write
+on every grid frame, with the tools left open. File frame k is scene time T0 + k / F at `ExportFrameMicros(k, F)`:
+video time is scene time. Rate and pause only change how fast it goes live; hold frames (paused, a timeline prepare,
+an off-grid stop) are drawn and never encoded, so a pause leaves no gap and no freeze frame. Beats (`time_control
+{ play }`) work during a recording; an agent directs in exact beats: pause, set up, play 5, repeat.
+
+**The page** (`MovieRecording`, `movie-record.ts`):
+- `Start()` configures the sink's encoder. **preparing**: `Step` draws `RECORD_WARMUP_FRAMES` (3) at the frozen clock
+  (the canvas takes the picture size, TAA settles), then `TimeControl.BeginRecording({ fps })` (anchored at now) and
+  **recording** (a forced progress message, so the hub's status follows).
+- **`Step(timestamp, drawAnyway)`**: null while the sink waits (hidden tab, encoder configuring or queue > 8, socket
+  > 8 MiB: the clock does not move) or on a `wait` frame of `LockedFrame`; a `hold` frame draws at the clock; a `grid`
+  frame is pending for `AfterFrame`. `drawAnyway` (main.ts passes `engine.capturePending`) draws a frame that would draw
+  nothing at the clock, never encoded. A progress message goes at most once a second while driving.
+- **`AfterFrame()`** captures the pending grid frame (`Director.ExportCapture`, shared with the export: the slate, the
+  canvas or the compositor) and encodes it; a failed capture redraws the same grid frame (no clock step) and the third
+  failure fails the recording; a lost device fails it at once. At `plan.maxFrames` (`duration` × F, else
+  `MAX_EXPORT_SECONDS` × F) it stops by itself (`stopped: its duration (1.5 s of video)` / `the cap`).
+- **`Stop(why)`**: `EndRecording` (the user's lock comes back), finishing, the sink's flush, `end`, the hub's `saved`
+  (30 s timeout), done. With no frame encoded it ends **cancelled** (`…, before any frame was recorded: no file`).
+  `Cancel(why)` closes, releases and tells the hub. The link closing fails it quietly.
+- `Log()` keeps the last 2,000 encoded frames `{ index, clock, tick }` (verify-page reads the steps from it).
+
+**`PlanMovieRecord`** refuses, all at once: a running export, a running recording, a running jump, and `source: "scene"`
+without a renderer (`record_movie needs WebGPU; source: "slate" records the timing only`); a paused scene is a warning
+(nothing is recorded until it plays). Then `WebCodecsEncoder.Support`. The plan is the output plan plus `duration` and
+`maxFrames`; the look is the command's letterbox, else the movie block's, else none.
+
+**The guard** (`Director.MovieGuard`, outermost, `RecordRefusal`): during a recording only what would cut the video is
+refused: `time_control` back / seek / fps, `movie` seek / retake, `export_movie` start (the hub refuses it first:
+`a live recording is running (recording, 1 s recorded): record_movie { action: "stop" } ends it`). Everything else
+runs, input is not locked. Behind it, `TimeControl` throws `RECORD_LOCKED_TEXT` for a jump, re-simulation or lock change.
+- **Script edits** take the fallback path (`ScriptEditable()` false while `time.recordingMovie`): future cues pend,
+  past cues are missed, nothing re-simulates the present.
+- **Loads** (`load_scene`, `open_scene`, `timeline restart`, `movie restart`) are allowed: the file cuts to the new scene;
+  its prepare holds the clock, so nothing is recorded meanwhile. Loads never move the clock back, so the grid goes on.
+- **`Apply` refuses a change of `environment.universe`** while recording (with a renderer it reloads the tab, which
+  would fail the recording).
+- **Esc** in the tab stops and saves (`InputLock`: `StopRecording('Esc in the tab')`).
+- `Presentation().export` is set while recording too: the canvas is held at the picture size and shown scaled. Audio
+  stays live (not muted, unlike an export).
+
+**The hub** (`MovieExports`): one session of either kind (`export-…` / `record-…` ids); a start of either kind is
+refused while one runs, naming the running kind. Each tool's `status` reports its own kind's last session (`idle`
+before one). `record_movie stop` calls the page's `record_movie { action: "stop", id }`, then waits for the session to
+end, at most `RECORD_STOP_TIMEOUT_MS` (120 s): saved returns the status with `result`, cancelled the status, failed
+throws, and a timeout returns the status (finishing) with `note: the file is still being written…`. `cancel` is the
+export's. The wire, the packets, the tab closing and `Mp4Writer` are unchanged: every recorded frame is one 1/F step,
+so the one `stts` entry holds. `record_movie` is in `SLOW_TOOLS` (600 s).
+
+**The tool**: `record_movie` (hub, `where: 'hub'`) `action` status (default) | start | stop | cancel; start takes the
+output fields (`fps`, `width`, `height`, `letterbox`, `codec`, `bitrate` or `quality`, `name`, `source`) and `duration`
+(seconds of video, up to `MAX_EXPORT_SECONDS`). get_state `record` is the page's report `{ id, state, plan, frame,
+seconds, sceneSeconds, rate { fps, realtime }, left, waiting?, encoder, frameMs, startedAt, wallSeconds, gpuErrors,
+warnings, error?, note?, file? }`; the overlay's `record` row: `recording · 1:23.4 · 2,502 frames · 30 fps · 0.42× real
+time · Esc stops`.
+
+**verify-page `record:`** (`RecordChecks`, both runs: it needs no EVE data). 2026-10-24, this Mac, headless Chromium,
+`--eve-data off --only record:`, stand-in ships by dna with stats, `source: "slate"`, 320 × 180 at 10 fps:
+- (a) start → an `order_ship` mid-recording applies → stop: 42 frames (4.2 s) in 4.24 s wall, `ReadMp4` samples =
+  frames, every encoded step exactly 1,000,000 ticks, the lock off again after.
+- (b) a 2 s pause mid-recording: 0 frames encoded while paused (the page's own count), steps all 1e6: no gap.
+- (c) refused: `time_control` back / seek / fps, `movie seek` (`would cut the video`), `export_movie start` (the hub);
+  `time_control {}`, rate and pause work, `time.lock.by` `record_movie`.
+- (d) cancel at frame 12: no file left. (e) `duration: 1.5`: 15 frames, `stopped: its duration (1.5 s of video)`.
+- (f) the lock alone, `time_control { fps: 10 }`: every clock change on the page's rAF is 1,000,000 ticks; off again.
+- (g) beats: `time_control { play: 2 }` returns paused 2.00 scene s later, free and under a 10 fps lock; during a
+  recording two 1 s beats with an order between: 21 frames, steps all 1e6.
+
+Two fixes the run found: the hub's status read `preparing` for a recording paused after its warm-up (no frame encoded,
+so no progress message): the move to recording sends one, and `Step` sends one a second while driving; and (b) first
+read the hub's lagging status instead of the page's report.
+
+**R3 (open)**: the real-GPU runs in the plan (the 150 vs 150 fight at 4K HEVC in beats, a 10-ship 1080p60 recording, a
+10 s pause, Esc, `/movies` playback, `fps: 10` live on the big fight, `quality: max` 4K HEVC and the High tier) on
+dbxpc, and the cube run on this Mac's Chrome.
 
 ## verify-page evidence (E2, 2026-10-24, dbxpc, tools-core SDE build 3646012, headless Chromium: `--only export:`)
 

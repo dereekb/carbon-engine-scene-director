@@ -236,7 +236,10 @@ import {
   type MovieReport,
   exportPictureRect,
   type MovieExportPlan,
-  normalizeMovieExportCommand
+  type MovieOutputPlan,
+  type MovieRecordPlan,
+  normalizeMovieExportCommand,
+  normalizeMovieRecordCommand
 } from '@scene-director/scene';
 import { CapacitorModel } from './capacitor';
 import { CombatRules, MISSILE_EXPIRED_NOTE, type ShipCombatReport } from './combat';
@@ -281,8 +284,8 @@ import { Arrivals, WARP_IN_HIDDEN_DISTANCE } from './arrivals';
 import { EncodePng, type CameraEye, type DrawnCamera, type Engine, type EngineStats } from './engine';
 import type { HubLink, ToolHandler } from './link';
 import { ExportAllows, type ExportCapture, ExportRefusal, MovieExport, type MovieExportPort, PlanMovieExport, WebCodecsEncoder } from './movie-export';
+import { MovieRecording, type MovieRecordPort, PlanMovieRecord, RecordRefusal } from './movie-record';
 import { DrawSlate } from './export-slate';
-import type { ExportStep } from './export-frames';
 import { ReadDressParts } from './celestials';
 import { LocationKey, LocationLookup } from './location';
 import { ObjectBallRadius, ObjectStateRow, PlanCelestialTargetSync, type ShipOrders } from './objects';
@@ -1172,6 +1175,10 @@ export class Director {
    */
   exporter: Maybe<MovieExport> = null;
   /**
+   * The page's live recording (record_movie, movie-record.ts): the running one, or the last one this page session.
+   */
+  recorder: Maybe<MovieRecording> = null;
+  /**
    * The hub link a movie export streams to (AttachLink).
    */
   private link: Maybe<HubLink> = null;
@@ -1651,7 +1658,8 @@ export class Director {
       stop_shot: (args) => this.StopShot(args),
       resume_shot: () => this.ResumeShot(),
       auto_camera: (args) => this.AutoCamera(args),
-      export_movie: (args) => this.ExportMovie(args)
+      export_movie: (args) => this.ExportMovie(args),
+      record_movie: (args) => this.RecordMovie(args)
     };
     // Live commands go on the time-control tape: a jump back replays them at their ticks (sd-time).
     for (const tool of JOURNALED_TOOLS) {
@@ -1663,8 +1671,9 @@ export class Director {
       const run = handlers[action];
       handlers[action] = (args) => (args['at'] != null || args['when'] != null || args['cue'] != null ? this.AddCue(action, args) : run(args));
     }
-    // The outermost wrapper: a movie export refuses every page tool but its allow-list (sd-export).
-    for (const [name, run] of Object.entries(handlers)) handlers[name] = (args) => this.ExportGuard(name, args, () => run(args));
+    // The outermost wrapper: a movie export refuses every page tool but its allow-list, a live recording what would cut
+    // its video (sd-export).
+    for (const [name, run] of Object.entries(handlers)) handlers[name] = (args) => this.MovieGuard(name, args, () => run(args));
     return handlers;
   }
 
@@ -1682,16 +1691,38 @@ export class Director {
    */
   AttachLink(link: HubLink): void {
     this.link = link;
-    link.onExport = (message) => this.exporter?.OnHub(message);
+    link.onExport = (message) => {
+      this.exporter?.OnHub(message);
+      this.recorder?.OnHub(message);
+    };
   }
 
   /**
-   * The hub link's status: closing fails a running export.
+   * The hub link's status: closing fails a running export or recording.
    *
    * @param connected - Whether the link is up.
    */
   LinkStatus(connected: boolean): void {
-    if (!connected && this.exporting) this.exporter?.LinkClosed();
+    if (connected) return;
+    if (this.exporting) this.exporter?.LinkClosed();
+    if (this.recordingMovie) this.recorder?.LinkClosed();
+  }
+
+  /**
+   * Whether a live recording runs (preparing to finishing): the canvas is held at the picture size, the movie guard
+   * refuses what would cut the video.
+   */
+  get recordingMovie(): boolean {
+    return this.recorder?.running ?? false;
+  }
+
+  /**
+   * Stops a live recording and saves it (Esc in the tab).
+   *
+   * @param why - Who stopped it.
+   */
+  StopRecording(why: string): void {
+    if (this.recorder?.driving) this.recorder.Stop(why);
   }
 
   /**
@@ -1704,11 +1735,14 @@ export class Director {
   }
 
   /**
-   * Runs a page tool, or refuses it while a movie export holds the page (ExportAllows).
+   * Runs a page tool, or refuses it while a movie export holds the page (ExportAllows) or while a live recording runs
+   * and it would cut the video (RecordRefusal).
    */
-  private ExportGuard(name: string, args: Record<string, unknown>, run: () => unknown): unknown {
+  private MovieGuard(name: string, args: Record<string, unknown>, run: () => unknown): unknown {
     const exporter = this.exporter;
     if (exporter?.running && !ExportAllows(name, args)) throw new Error(ExportRefusal(exporter.Report()));
+    const refusal = this.recordingMovie ? RecordRefusal(name, args) : null;
+    if (refusal) throw new Error(refusal);
     return run();
   }
 
@@ -1737,7 +1771,7 @@ export class Director {
       command,
       timeline: summary ? { state: summary.state, started: this.timeline.startTick != null, held: this.clock.held, end: block?.end ?? null, letterbox: block ? movieLookOf(block).letterbox : null } : null,
       jumping: time.isJumping,
-      exporting: this.exporting,
+      exporting: this.exporting || this.recordingMovie,
       noRenderer: this.engine ? null : (this.engineError?.message ?? 'WebGPU is unavailable')
     });
     const hardware = await WebCodecsEncoder.Support(plan);
@@ -1767,7 +1801,7 @@ export class Director {
       },
       CanSeek: () => time.ring.length > 0,
       Seek: (clock) => this.MovieJumpTo(clock),
-      Capture: (step, seconds) => this.ExportCapture(plan, step, seconds, slate),
+      Capture: (step, seconds) => this.ExportCapture(plan, { index: step.index, tick: step.tick, frames: plan.frames }, seconds, slate),
       Send: (message) => link()?.SendMessage(message) ?? false,
       SendBinary: (bytes) => link()?.SendBinary(bytes) ?? false,
       get buffered() {
@@ -1818,11 +1852,12 @@ export class Director {
   }
 
   /**
-   * The frame just drawn for an export step: the slate drawn now, or the engine's canvas (composited onto bars).
+   * The frame just drawn for an export step or a recorded grid frame: the slate drawn now, or the engine's canvas
+   * (composited onto bars).
    */
-  private ExportCapture(plan: MovieExportPlan, step: ExportStep, seconds: number, slate: Maybe<OffscreenCanvasRenderingContext2D>): ExportCapture {
+  private ExportCapture(plan: MovieOutputPlan, step: { readonly index: number; readonly tick: number; readonly frames: number }, seconds: number, slate: Maybe<OffscreenCanvasRenderingContext2D>): ExportCapture {
     if (slate) {
-      DrawSlate(slate, { scene: this.scene?.name, time: seconds, index: step.index, frames: plan.frames, tick: step.tick, fps: plan.fps });
+      DrawSlate(slate, { scene: this.scene?.name, time: seconds, index: step.index, frames: step.frames, tick: step.tick, fps: plan.fps });
       return { source: slate.canvas };
     }
     const engine = this.engine;
@@ -1833,12 +1868,78 @@ export class Director {
   }
 
   /**
-   * An export's look: its letterbox (a playing shot's own wins while it plays) and the picture's rect in the frame.
+   * An export's or a recording's look: its letterbox (a playing shot's own wins while it plays) and the picture's rect
+   * in the frame.
    */
-  private ExportLook(plan: MovieExportPlan): { readonly letterbox: Maybe<number>; readonly picture: ReturnType<typeof exportPictureRect> } {
+  private ExportLook(plan: MovieOutputPlan): { readonly letterbox: Maybe<number>; readonly picture: ReturnType<typeof exportPictureRect> } {
     const shot = this.cinema.Presentation();
     const { letterbox } = MoviePresentation({ page: { letterbox: null, hud: true }, movie: { letterbox: plan.letterbox, hud: true }, shot: shot.letterbox !== undefined ? { letterbox: shot.letterbox } : {} });
     return { letterbox, picture: exportPictureRect(plan.width, plan.height, letterbox) };
+  }
+
+  /**
+   * record_movie on the page (the hub's calls; sd-export → Live recording): start plans and arms a recording (returning
+   * at once: main.ts draws its warm-up, then the record lock takes the clock), status reports it, stop ends it and
+   * saves the file, cancel discards it.
+   *
+   * @throws {SceneError} When the command or the page's checks fail.
+   * @throws {Error} When the encoder does not support the plan, or nothing runs to stop or cancel.
+   */
+  async RecordMovie(args: Record<string, unknown> = {}): Promise<object> {
+    const { id, ...rest } = args;
+    const command = normalizeMovieRecordCommand(rest);
+    if (command.action === 'status') return this.recorder?.Report() ?? { state: 'idle', note: 'no live recording ran in this page session' };
+    if (command.action === 'stop' || command.action === 'cancel') {
+      const recorder = this.recorder;
+      if (!recorder?.running) throw new Error('no live recording is running');
+      if (typeof id === 'string' && id !== recorder.id) throw new Error(`the running recording is ${recorder.id}, not ${id}`);
+      return command.action === 'stop' ? recorder.Stop('record_movie stop') : recorder.Cancel('record_movie cancel');
+    }
+    if (typeof id !== 'string' || !id) throw new Error('record_movie start reaches the page through the hub: call record_movie on the MCP server');
+    const time = this.RequireTime();
+    const block = this.authored?.timeline?.movie;
+    const { plan, warnings } = PlanMovieRecord({
+      command,
+      movieLetterbox: block ? movieLookOf(block).letterbox : null,
+      jumping: time.isJumping,
+      exporting: this.exporting,
+      recording: this.recordingMovie,
+      paused: time.paused,
+      noRenderer: this.engine ? null : (this.engineError?.message ?? 'WebGPU is unavailable')
+    });
+    const hardware = await WebCodecsEncoder.Support(plan);
+    const ready: MovieRecordPlan = { ...plan, hardware };
+    const recorder = new MovieRecording({ id, plan: ready, port: this.RecordPort(ready), encoder: new WebCodecsEncoder(), warnings });
+    this.recorder = recorder;
+    recorder.Start();
+    this.onChange();
+    return { id, state: recorder.state, plan: ready, scene: this.scene?.name ?? null, warnings };
+  }
+
+  /**
+   * The recorder's side of the page (MovieRecordPort).
+   */
+  private RecordPort(plan: MovieRecordPlan): MovieRecordPort {
+    const time = this.RequireTime();
+    const slate = plan.source === 'slate' ? new OffscreenCanvas(plan.width, plan.height).getContext('2d') : null;
+    const link = (): Maybe<HubLink> => this.link;
+    return {
+      time,
+      clock: this.clock,
+      world: this.world,
+      Capture: (frame, seconds) => this.ExportCapture(plan, { index: frame.index, tick: frame.tick, frames: plan.maxFrames }, seconds, slate),
+      Send: (message) => link()?.SendMessage(message) ?? false,
+      SendBinary: (bytes) => link()?.SendBinary(bytes) ?? false,
+      get buffered() {
+        return link()?.buffered ?? 0;
+      },
+      get hidden() {
+        return document.visibilityState === 'hidden';
+      },
+      GpuErrors: () => this.engine?.Stats().gpuErrors.count ?? 0,
+      now: () => performance.now(),
+      Changed: () => this.onChange()
+    };
   }
 
   /**
@@ -3669,9 +3770,9 @@ export class Director {
   Presentation(): FramePresentation {
     const block = this.authored?.timeline?.movie;
     const movie = block && MovieLookApplies(this.timeline.state) ? { ...movieLookOf(block), run: this.timeline.startTick ?? -1 } : null;
-    const exporter = this.exporter;
-    if (!exporter?.running) return { shot: this.cinema.Presentation(), movie };
-    const { plan } = exporter;
+    // An export or a live recording holds the canvas at its picture size, shown scaled in the window (sd-export).
+    const plan = this.exporter?.running ? this.exporter.plan : this.recorder?.running ? this.recorder.plan : null;
+    if (!plan) return { shot: this.cinema.Presentation(), movie };
     return { shot: this.cinema.Presentation(), movie, export: { ...this.ExportLook(plan), output: { width: plan.width, height: plan.height } } };
   }
 
@@ -4059,6 +4160,7 @@ export class Director {
       simulation: { tick: this.world.tick, seconds: Math.round(this.clock.seconds * 100) / 100, ...(this.clock.held ? { held: true } : {}), warpFlashes: this.warpFx.Counts() satisfies WarpFlashCounts },
       time: this.time?.Report() ?? null,
       export: this.exporter?.Report() ?? null,
+      record: this.recorder?.Report() ?? null,
       timeline: this.TimelineSummary(),
       ships: ships.map((ship) => {
         const script = this.timeline.Script(ship.id);
@@ -4242,12 +4344,13 @@ export class Director {
   }
 
   /**
-   * Whether a script edit can re-simulate now: time control records, no jump runs, the clock is not held, and the
-   * timeline started (playing or paused past its t = 0).
+   * Whether a script edit can re-simulate now: time control records, no jump runs, no live recording runs (a
+   * re-simulation would cut its video: the edit takes the fallback path), the clock is not held, and the timeline
+   * started (playing or paused past its t = 0).
    */
   private ScriptEditable(): boolean {
     const time = this.time;
-    return Boolean(time?.recordingOn && !time.isJumping && !this.clock.held && this.timeline.startTick != null && (this.timeline.state === 'playing' || this.timeline.state === 'paused'));
+    return Boolean(time?.recordingOn && !time.isJumping && !time.recordingMovie && !this.clock.held && this.timeline.startTick != null && (this.timeline.state === 'playing' || this.timeline.state === 'paused'));
   }
 
   /**
@@ -4353,6 +4456,7 @@ export class Director {
     // the reload trick CLAUDE.md names). A location's region nebula swaps in
     // live instead (Engine.SetNebula, location-dressing.ts).
     if (this.engine && target && this.engine.universe !== target.scene.environment.universe) {
+      if (this.recordingMovie) throw new Error(`a live recording is running: changing environment.universe (to ${target.scene.environment.universe}) reloads the tab, which would fail it (record_movie { action: "stop" } ends it first)`);
       await this.store.Put(CURRENT_KEY, authored?.scene ?? this.Authored());
       setTimeout(() => location.reload(), 200);
       return { reloading: true, note: 'The environment changed, so the viewer is reloading with the new scene. Call get_state in a few seconds.', warnings };

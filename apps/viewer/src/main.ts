@@ -42,6 +42,7 @@ import { LetterboxRect } from './lib/cinema';
 import { MoviePresentation, type FramePresentation, type MovieRunOverrides } from './lib/movie';
 import { CameraDirectorText } from './lib/camera-director';
 import { ExportText } from './lib/movie-export';
+import { RecordText } from './lib/movie-record';
 import { ConfigureResources, ErrorText } from './lib/resources';
 import { CURRENT_KEY, SceneStore } from './lib/store';
 
@@ -127,6 +128,8 @@ class Overlay {
     if (camera) rows.push(['director', camera]);
     const exported = director?.exporter;
     if (exported) rows.push(['export', ExportText(exported.Report())]);
+    const recorded = director?.recorder;
+    if (recorded) rows.push(['record', RecordText(recorded.Report())]);
     for (const fleet of scene?.fleets ?? []) {
       const formation = director?.following.FleetReport(fleet);
       if (formation) rows.push([`fleet ${fleet.id}`, formation.ready ? `${formation.following} following · ${formation.inFormation} in formation` : `${formation.following} waiting for hull radii`]);
@@ -255,7 +258,8 @@ class Presentation {
 /**
  * A movie export's input lock (sd-export): while the director exports, capture-phase listeners on the window swallow
  * the pointer, the wheel, the context menu and the keys before the canvas's camera handlers, the overlay's buttons and
- * every key handler see them. Esc cancels the export; H still toggles the overlay.
+ * every key handler see them. Esc cancels the export; H still toggles the overlay. A live recording locks nothing: Esc
+ * stops it and saves the file.
  */
 class InputLock {
   constructor(private readonly director: () => Maybe<Director>) {
@@ -264,7 +268,10 @@ class InputLock {
 
   private Swallow(event: Event): void {
     const director = this.director();
-    if (!director?.exporting) return;
+    if (!director?.exporting) {
+      if (event instanceof KeyboardEvent && event.key === 'Escape' && director?.recordingMovie) director.StopRecording('Esc in the tab');
+      return;
+    }
     if (event instanceof KeyboardEvent) {
       if (event.key === 'Escape') director.CancelExport('Esc in the tab');
       else if (event.key.toLowerCase() === 'h' && !event.ctrlKey && !event.metaKey && !event.altKey) return;
@@ -381,10 +388,20 @@ async function Start(): Promise<void> {
     // A preparing timeline releases the clock here, so t = 0 is this frame's boundary at the earliest.
     liveDirector?.DriveTimeline();
     const exporter = liveDirector?.exporter;
+    const recorder = liveDirector?.recorder;
     let now: number;
     if (exporter?.driving) {
       // A movie export steps the clock to its next frame (FrameTo); null: it waits, and nothing is drawn this frame.
       const step = exporter.Step();
+      if (!step) {
+        requestAnimationFrame(frame);
+        return;
+      }
+      now = step.clock;
+    } else if (recorder?.driving) {
+      // A live recording steps the record lock (sd-export): null waits (backpressure, no grid frame due) and draws nothing,
+      // unless a screenshot waits for a frame.
+      const step = recorder.Step(timestamp, engine?.capturePending ?? false);
       if (!step) {
         requestAnimationFrame(frame);
         return;
@@ -422,6 +439,7 @@ async function Start(): Promise<void> {
     InAudioDetachScope(() => engine?.Frame(timestamp, now));
     // The capture reads the canvas before it is presented: in this task, right after the draw.
     liveDirector?.exporter?.AfterFrame();
+    liveDirector?.recorder?.AfterFrame();
     requestAnimationFrame(frame);
   };
   requestAnimationFrame(frame);

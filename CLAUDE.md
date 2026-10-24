@@ -57,7 +57,7 @@ files you touch and the scene-director tools you call. Fetch before designing or
   tape, jumps and what cuts the window
 - `sd-piloting`: stances, the ideal range from both sides' numbers, the orbit model, maneuvers and the pilot step
 - `sd-export`: movie export: the fixed-step export clock, what samples scene time, the picture and WebCodecs encoding,
-  the hub's MP4 writer and `/movies`, `export_movie`
+  the hub's MP4 writer and `/movies`, `export_movie`; live recording (`record_movie`)
 
 When a change alters behavior a ref describes, update the ref in the same commit (a new area gets a new `sd-*` ref,
 declared with its triggers in `.dbx-claude/dbx-claude.json` `references.project`, and a row in the README's

@@ -93,6 +93,8 @@ What works today:
 - **Movie export**: the movie (or a time range) renders offline to an MP4 at a set size and fps on a fixed 1/fps
   scene clock, smooth however slowly the battle draws: H.264 or HEVC encoded in the page with WebCodecs and written
   by the hub (`export_movie`).
+- **Live recording**: record the live scene to an MP4 while directing it, the tools left open; the clock runs on the
+  file's 1/fps grid, so a heavy scene slows instead of jerking and video time is scene time (`record_movie`).
 - **No-EVE-data mode** (`--eve-data off` / `SCENE_DIRECTOR_EVE_DATA=off`): on a machine without tools-core the hub
   and page ask for no EVE file or lookup. The simulation, orders, the camera, cinema, screenshots and exports run on
   a green screen, each ship and object a cube in its team colour.
@@ -213,6 +215,7 @@ connected tab.
 | `timeline` | page | the scene's script: status (every cue and ship script), play, pause, restart; the lever tools and `add_ships`, `add_fleet_composition`, `stage_engagement`, `add_objects` take `at` to add a cue instead of acting now |
 | `movie` | page | the timeline as a movie: beats in a fleet and a camera lane, add / move / edit / remove them, seek to a beat (paused, for a screenshot), play from one, retake after a cut, and the movie's look and end |
 | `export_movie` | hub | render the movie or a time range offline to an MP4 on a fixed 1/fps clock: start, status (progress, the file), cancel |
+| `record_movie` | hub | record the live scene to an MP4 under the record lock while you direct it: start, status, stop (saves), cancel |
 
 Each tool's arguments are described in its MCP schema (`packages/scene/src/lib/tools.ts`).
 
@@ -265,7 +268,7 @@ behavior, the rules, the files and the gotchas of one area:
 | The timeline and ship orders: cues, steps, validation, the timeline ops | [`sd-timeline`](.dbx-claude/refs/sd-timeline/REF.md), with [Movie mode](.dbx-claude/refs/sd-timeline/references/movie.md) |
 | Time control: rate, pause and fast-forward stepping, snapshots of the parks and per-tick state, the tape, jumps and what cuts the window | [`sd-time`](.dbx-claude/refs/sd-time/REF.md) |
 | Piloting: stances, the ideal range, the orbit model, maneuvers and the pilot step | [`sd-piloting`](.dbx-claude/refs/sd-piloting/REF.md) |
-| Movie export: the fixed-step export clock, what samples scene time, the picture, encoding, the hub's MP4 writer | [`sd-export`](.dbx-claude/refs/sd-export/REF.md) |
+| Movie export and live recording: the fixed-step export clock, the record lock, what samples scene time, the picture, encoding, the hub's MP4 writer | [`sd-export`](.dbx-claude/refs/sd-export/REF.md) |
 | Locations, map data, name resolution | [`sd-locations`](.dbx-claude/refs/sd-locations/REF.md), with [dressing](.dbx-claude/refs/sd-locations/references/dressing.md) |
 | The CarbonEngineJS runtime: imports, bundling, renderer | [`sd-runtime`](.dbx-claude/refs/sd-runtime/REF.md) |
 

@@ -25,7 +25,7 @@
  *   controller -> hub  { type: "call", id, name, args }
  *   hub -> controller  { type: "result", id, ok, value | error }
  *
- * A movie export (export_movie, movie-exports.ts) adds, between the page and the hub:
+ * A movie export or a live recording (export_movie, record_movie: movie-exports.ts) adds, between the page and the hub:
  *   page -> hub        { type: "export", id, kind: "config" | "progress" | "end" | "failed" | "cancelled", ... }
  *   page -> hub        binary: one encoded chunk, "SDX1" + u32 header length + JSON header + bytes (wire.ts)
  *   hub -> page        { type: "export", id, kind: "saved" | "failed", ... }
@@ -80,7 +80,7 @@ const LOG_LIMIT = 2000;
  * Building ships fetches many files on first use, so scene edits get a long deadline, and so do document fleet orders
  * (order_fleet anchor, break-off and regroup edit the document as patch_scene does).
  */
-const SLOW_TOOLS = new Set(['load_scene', 'open_scene', 'patch_scene', 'order_fleet', 'auto_repair', 'timeline', 'time_control', 'movie', 'export_movie']);
+const SLOW_TOOLS = new Set(['load_scene', 'open_scene', 'patch_scene', 'order_fleet', 'auto_repair', 'timeline', 'time_control', 'movie', 'export_movie', 'record_movie']);
 const LOG_LEVEL_RANK: Record<string, number> = { all: 0, info: 0, warn: 1, error: 2 };
 
 export type PageLogLevel = 'info' | 'warn' | 'error';

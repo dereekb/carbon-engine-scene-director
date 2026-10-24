@@ -4,8 +4,7 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { ExportRect } from './codec';
-import type { MovieExportCodec, MovieExportSource } from './command';
+import type { MovieOutputPlan } from './output';
 
 /**
  * An export's states: preparing (locks, the fixed size, the restart and its prepare), seeking (the silent seek to the
@@ -22,15 +21,9 @@ export type MovieExportState = (typeof MOVIE_EXPORT_STATES)[number];
 export const RUNNING_MOVIE_EXPORT_STATES: ReadonlySet<MovieExportState> = new Set(['preparing', 'seeking', 'prerolling', 'rendering', 'finishing']);
 
 /**
- * The encoder preference WebCodecs accepted.
+ * What an export renders, resolved by the page at its start: the output (output.ts) and the span.
  */
-export type MovieExportHardware = 'prefer-hardware' | 'no-preference';
-
-/**
- * What an export renders, resolved by the page at its start.
- */
-export interface MovieExportPlan {
-  readonly source: MovieExportSource;
+export interface MovieExportPlan extends MovieOutputPlan {
   /**
    * Timeline seconds of the first encoded frame (scene seconds from now for a scene without a timeline: 0).
    */
@@ -41,18 +34,6 @@ export interface MovieExportPlan {
    * Frames encoded.
    */
   readonly frames: number;
-  readonly fps: number;
-  readonly width: number;
-  readonly height: number;
-  /**
-   * Where the picture sits in the frame (the rest is black bars).
-   */
-  readonly picture: ExportRect;
-  readonly letterbox: number | false;
-  readonly codec: MovieExportCodec;
-  readonly codecString: string;
-  readonly bitrate: number;
-  readonly hardware: MovieExportHardware;
   /**
    * A fresh run from the placements (timeline restart); false: the run in the time window, or now without a timeline.
    */
@@ -62,10 +43,6 @@ export interface MovieExportPlan {
    * Drawn, not encoded, before from.
    */
   readonly preroll: { readonly seconds: number; readonly frames: number };
-  /**
-   * Frames between keyframes.
-   */
-  readonly keyframeEvery: number;
 }
 
 /**

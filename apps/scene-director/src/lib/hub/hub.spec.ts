@@ -7,7 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
 import { ToContent } from '../mcp/server';
 import { Hub, type HubOptions } from './hub';
-import { applySceneOperations, createEmptyScene, encodeExportPacket, exportBytesToBase64, type MovieExportPlan, type MovieExportStatus } from '@scene-director/scene';
+import { applySceneOperations, createEmptyScene, encodeExportPacket, exportBytesToBase64, type MovieExportPlan, type MovieExportStatus, type MovieRecordPlan } from '@scene-director/scene';
 import { FleetCompositionFileStore } from '../store/composition-files';
 import { FleetPersonalityFileStore } from '../store/personality-files';
 import { SceneFileStore } from '../store/scene-files';
@@ -675,6 +675,7 @@ function ExportPlan(frames: number): MovieExportPlan {
     codec: 'h264',
     codecString: 'avc1.64001F',
     bitrate: 500000,
+    quality: 'standard',
     hardware: 'no-preference',
     restart: true,
     timeline: true,
@@ -956,6 +957,142 @@ describe('no EVE data', () => {
     } finally {
       page.close();
       await offHub.Stop();
+    }
+  });
+});
+
+describe('live recording', () => {
+  const AVCC = new Uint8Array([1, 0x64, 0, 0x1f, 0xff, 0xe1, 0, 0]);
+  const RECORD_PLAN: MovieRecordPlan = {
+    source: 'slate',
+    fps: 10,
+    width: 320,
+    height: 180,
+    picture: { x: 0, y: 0, width: 320, height: 180 },
+    letterbox: false,
+    codec: 'h264',
+    codecString: 'avc1.64001F',
+    bitrate: 500000,
+    quality: 'standard',
+    hardware: 'no-preference',
+    keyframeEvery: 20,
+    duration: null,
+    maxFrames: 36_000
+  };
+
+  function RecordReport(id: string, state: string, frame: number): Record<string, unknown> {
+    return {
+      id,
+      state,
+      plan: RECORD_PLAN,
+      frame,
+      seconds: frame / 10,
+      sceneSeconds: 5 + frame / 10,
+      rate: { fps: 10, realtime: 1 },
+      left: 3600 - frame / 10,
+      encoder: { queue: 0, chunks: frame, keyFrames: 1, bytes: frame * 50 },
+      frameMs: { mean: 100, max: 120, retries: 0 },
+      startedAt: new Date().toISOString(),
+      wallSeconds: 2,
+      gpuErrors: 0,
+      warnings: []
+    };
+  }
+
+  /** A page that arms a recording; its stop answers finishing (then ends the file) unless `empty`. */
+  async function RecordPage(target: Hub, { empty = false, save = true }: { readonly empty?: boolean; readonly save?: boolean } = {}) {
+    const calls: Record<string, unknown>[] = [];
+    let ws: WebSocket | null = null;
+    const send = (message: object): void => ws?.send(JSON.stringify(message));
+    ws = await ConnectPage(
+      {
+        record_movie: (args) => {
+          calls.push(args);
+          const id = String(args['id']);
+          if (args['action'] === 'start') return { id, state: 'preparing', plan: RECORD_PLAN, scene: 'Brawl', warnings: [] };
+          if (args['action'] === 'cancel') return RecordReport(id, 'cancelled', 0);
+          if (empty) {
+            send({ type: 'export', id, kind: 'cancelled', report: RecordReport(id, 'cancelled', 0) });
+            return RecordReport(id, 'cancelled', 0);
+          }
+          // The page flushes the encoder, then ends the file: the hub saves it.
+          setTimeout(() => {
+            send({ type: 'export', id, kind: 'config', track: { codec: 'h264', codecString: 'avc1.64001F', width: 320, height: 180, fps: 10, description: exportBytesToBase64(AVCC) } });
+            for (let seq = 0; seq < 12; seq++) ws?.send(encodeExportPacket({ id, seq, key: seq === 0, timestamp: seq * 100_000, duration: 100_000 }, new Uint8Array(50).fill(seq)));
+            if (save) send({ type: 'export', id, kind: 'end', report: RecordReport(id, 'finishing', 12) });
+          }, 30);
+          return RecordReport(id, 'finishing', 12);
+        },
+        export_movie: (args) => (args['action'] === 'start' ? { id: args['id'], state: 'preparing', plan: ExportPlan(30), scene: 'Duel', warnings: [] } : { state: 'cancelled' })
+      },
+      target
+    );
+    return { ws, calls };
+  }
+
+  it('stop waits for the saved file and returns the status with its result', async () => {
+    const target = await StartHub();
+    const { ws, calls } = await RecordPage(target);
+    try {
+      expect(await target.Call('record_movie')).toMatchObject({ state: 'idle' });
+      const started = (await target.Call('record_movie', { action: 'start', source: 'slate', fps: 10, width: 320, height: 180, name: 'Brawl take' })) as { id: string; file: { path: string } };
+      expect(started.id).toMatch(/^record-/u);
+      expect(path.basename(started.file.path)).toBe('brawl-take.mp4');
+      expect(calls[0]).toMatchObject({ action: 'start', id: started.id, fps: 10 });
+      const stopped = await target.Call('record_movie', { action: 'stop' });
+      expect(calls[1]).toEqual({ action: 'stop', id: started.id });
+      expect(stopped).toMatchObject({ id: started.id, state: 'done', frame: 12, result: { frames: 12, seconds: 1.2, fps: 10, path: started.file.path } });
+      expect(ReadMp4(new Uint8Array(await readFile(started.file.path))).samples).toHaveLength(12);
+      await expect(target.Call('record_movie', { action: 'stop' })).rejects.toThrow(/no live recording is running/);
+    } finally {
+      ws.close();
+      await target.Stop();
+    }
+  });
+
+  it('runs one session of either kind, and reports each kind its own last session', async () => {
+    const target = await StartHub();
+    const { ws } = await RecordPage(target);
+    try {
+      const started = (await target.Call('record_movie', { action: 'start', source: 'slate' })) as { id: string };
+      await expect(target.Call('export_movie', { action: 'start', source: 'slate' })).rejects.toThrow(/a live recording is running \(preparing\): record_movie \{ action: "stop" \} ends it/u);
+      await expect(target.Call('record_movie', { action: 'start', source: 'slate' })).rejects.toThrow(/a live recording is running/u);
+      await expect(target.Call('export_movie', { action: 'cancel' })).rejects.toThrow(/no movie export is running/u);
+      expect(await target.Call('export_movie')).toMatchObject({ state: 'idle' });
+      expect(await target.Call('record_movie')).toMatchObject({ id: started.id, state: 'preparing', frame: 0, seconds: 0 });
+      expect(await target.Call('record_movie', { action: 'cancel' })).toMatchObject({ id: started.id, state: 'cancelled' });
+      expect(await readdir(target.movieExports.directory)).toEqual([]);
+      const exported = (await target.Call('export_movie', { action: 'start', source: 'slate' })) as { id: string };
+      await expect(target.Call('record_movie', { action: 'start', source: 'slate' })).rejects.toThrow(/a movie export is running/u);
+      expect(await target.Call('record_movie')).toMatchObject({ id: started.id, state: 'cancelled' });
+      expect(await target.Call('export_movie')).toMatchObject({ id: exported.id, state: 'preparing' });
+    } finally {
+      ws.close();
+      await target.Stop();
+    }
+  });
+
+  it('a stop with nothing recorded ends cancelled; a save that never comes answers still finishing; the tab closing fails it', async () => {
+    const target = await StartHub({});
+    (target.movieExports as unknown as { options: { stopTimeoutMs: number } }).options.stopTimeoutMs = 200;
+    const empty = await RecordPage(target, { empty: true });
+    try {
+      await target.Call('record_movie', { action: 'start', source: 'slate' });
+      expect(await target.Call('record_movie', { action: 'stop' })).toMatchObject({ state: 'cancelled' });
+    } finally {
+      empty.ws.close();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const unsaved = await RecordPage(target, { save: false });
+    try {
+      await target.Call('record_movie', { action: 'start', source: 'slate' });
+      expect(await target.Call('record_movie', { action: 'stop' })).toMatchObject({ state: 'finishing', note: 'the file is still being written: record_movie status shows when it is saved' });
+      unsaved.ws.close();
+      for (let attempt = 0; attempt < 50 && ((await target.Call('record_movie')) as { state: string }).state !== 'failed'; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(await target.Call('record_movie')).toMatchObject({ state: 'failed', error: 'the viewer tab closed or reloaded during the recording' });
+      expect(await readdir(target.movieExports.directory)).toEqual([]);
+    } finally {
+      await target.Stop();
     }
   });
 });

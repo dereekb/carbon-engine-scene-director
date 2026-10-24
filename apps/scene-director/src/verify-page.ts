@@ -43,6 +43,8 @@ import {
   type CueReport,
   type MovieReport,
   type MovieExportReport,
+  type MovieRecordReport,
+  type MovieRecordStartResult,
   type MovieExportResult,
   type MovieExportStartResult,
   type SceneCue
@@ -899,7 +901,8 @@ const toolsCore = new ToolsCore({ url: Option('--tools-core', DEFAULT_TOOLS_CORE
 const ONLY = Option('--only', '').toLowerCase();
 const CONNECT_CHECK = 'the tab connects to the hub';
 /**
- * `--eve-data off`: the hub runs in no-EVE-data mode and only the "no EVE data:" checks run; tools-core is never asked.
+ * `--eve-data off`: the hub runs in no-EVE-data mode and only the "no EVE data:" and "record:" checks run; tools-core is
+ * never asked.
  */
 const EVE_DATA_OFF = Option('--eve-data', '') === 'off';
 const status = EVE_DATA_OFF ? null : await toolsCore.Status();
@@ -6197,6 +6200,205 @@ async function NoEveDataChecks(requests: readonly string[]): Promise<void> {
 }
 
 /**
+ * Live recording and the frame lock (sd-export, sd-time), in both runs (the record lock needs no EVE data): headless, so
+ * the slate source records the timing through the record lock, the encoder, the wire and the hub's writer. --only
+ * record: runs them alone.
+ */
+async function RecordChecks(page: Page): Promise<void> {
+  const Show = (value: unknown): string => JSON.stringify(value) ?? 'undefined';
+  const TimeControl = (args: Record<string, unknown>) => call<TimeReport & { readonly warnings: string[] }>('time_control', args);
+  const Playing = () => TimeControl({ rate: 1, pause: false, fps: false }).catch(() => TimeControl({ rate: 1, pause: false }));
+  const TimeOf = (state: object): Maybe<TimeReport> => (state as { readonly time?: Maybe<TimeReport> }).time ?? null;
+  const MovieFiles = async () => (await readdir(movies.directory)).sort();
+  const Refused = async (run: () => Promise<unknown>): Promise<string> => {
+    const error = await run().then(
+      () => null,
+      (caught: unknown) => caught
+    );
+    Expect(error != null, 'it was not refused');
+    return [ErrorMessage(error), ...(ErrorProblems(error) ?? [])].join(' | ');
+  };
+  type RecordStatus = MovieRecordReport & { readonly file: { readonly path: string; readonly url: string }; readonly result?: MovieExportResult; readonly note?: string };
+  type RecordLog = { readonly index: number; readonly clock: number; readonly tick: number }[];
+  const RecordMovie = (args: Record<string, unknown> = {}) => call<RecordStatus>('record_movie', args);
+  const StartRecording = (args: Record<string, unknown> = {}) => call<MovieRecordStartResult>('record_movie', { action: 'start', source: 'slate', fps: 10, width: 320, height: 180, ...args });
+  const RecordUntil = async (what: string, seconds: number, test: (status: RecordStatus) => boolean): Promise<RecordStatus> => {
+    const end = Date.now() + seconds * 1000;
+    let status = await RecordMovie();
+    while (!test(status) && Date.now() < end) {
+      await Delay(200);
+      status = await RecordMovie();
+    }
+    Expect(test(status), `${what} within ${seconds} s: ${Show({ state: status.state, frame: status.frame, waiting: status.waiting, error: status.error })}`);
+    return status;
+  };
+  const RecordLogOf = () => page.evaluate(() => (globalThis as unknown as { readonly sceneDirector: { readonly director: { readonly recorder: { Log(): { index: number; clock: number; tick: number }[] } } } }).sceneDirector.director.recorder.Log());
+  /**
+   * The encoded frames' clocks step exactly 1e7 / fps ticks (floor or ceil), from file frame 0 with no gap.
+   */
+  const OnGrid = (log: RecordLog, fps: number): string => {
+    const steps = [...new Set(log.slice(1).map((entry, index) => entry.clock - log[index].clock))];
+    Expect(log.every((entry, index) => entry.index === index) && steps.every((step) => step === Math.floor(1e7 / fps) || step === Math.ceil(1e7 / fps)), `${log.length} frames, steps ${Show(steps)}`);
+    return Show(steps);
+  };
+  // Ships by dna with their own stats: the same in both runs (stand-in cubes without EVE data).
+  const Ship = (id: string, position: readonly number[]) => ({ id, dna: 'mf4_t1:minmatarbase:minmatar', position, stats: { mass: 1_067_000, maxVelocity: 365, agility: 3.2, signatureRadius: 35 } });
+  const RecordScene = () => call('load_scene', { scene: { name: 'verify-record', ships: [Ship('a', [0, 0, 0]), Ship('b', [3000, 0, 0])] } });
+  const Stopped = async (): Promise<RecordStatus> => {
+    const status = await RecordMovie({ action: 'stop' });
+    Expect(status.state === 'done' && status.result, Show({ state: status.state, error: status.error, note: status.note }));
+    return status;
+  };
+  /**
+   * The scene clock at every animation frame for a while (the page's own rAF).
+   */
+  const ClockSteps = (ms: number) =>
+    page.evaluate(async (span) => {
+      const clock = (globalThis as unknown as { readonly sceneDirector: { readonly clock: { readonly now: number } } }).sceneDirector.clock;
+      const seen: number[] = [];
+      const end = performance.now() + span;
+      while (performance.now() < end) {
+        seen.push(clock.now);
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+      }
+      return seen.slice(1).map((now, index) => now - seen[index]);
+    }, ms);
+
+  await Check('record: start, an order mid-recording, stop: every grid frame lands in the file', async () => {
+    await RecordScene();
+    await Playing();
+    const started = await StartRecording();
+    Expect(started.plan.maxFrames === 36_000 && started.plan.duration == null && /^record-/u.test(started.id), Show(started.plan));
+    await RecordUntil('the recording records', 20, (status) => status.state === 'recording' && status.frame > 5);
+    await Delay(1500);
+    await call('order_ship', { id: 'a', order: { type: 'direction', direction: [1, 0, 0] } });
+    await Delay(1500);
+    const ordered = (await call<{ readonly ships: readonly { readonly id: string; readonly order?: { readonly type?: string } }[] }>('get_state')).ships.find((ship) => ship.id === 'a');
+    Expect(ordered?.order?.type === 'direction', `the order did not apply: ${Show(ordered?.order)}`);
+    const done = await Stopped();
+    const result = done.result as MovieExportResult;
+    const mp4 = ReadMp4(new Uint8Array(await readFile(result.path)));
+    const log = await RecordLogOf();
+    Expect(mp4.samples.length === result.frames && log.length === result.frames && Math.abs(mp4.seconds - result.frames / 10) < 1e-9, Show({ samples: mp4.samples.length, frames: result.frames, log: log.length, seconds: mp4.seconds }));
+    const steps = OnGrid(log, 10);
+    const time = TimeOf(await call<object>('get_state'));
+    Expect(time?.lock == null && time?.paused === false, `the lock did not come off: ${Show(time?.lock)}`);
+    return `${result.frames} frames (${mp4.seconds} s) in ${result.wallSeconds} s wall, steps ${steps}, the order applied mid-recording`;
+  });
+
+  await Check('record: a pause mid-recording leaves no gap and no repeated frame', async () => {
+    await RecordScene();
+    await Playing();
+    await StartRecording();
+    await RecordUntil('the recording records', 20, (status) => status.state === 'recording' && status.frame > 5);
+    await Delay(1000);
+    // The page's own report (get_state record): the hub's status hears from the page once a second.
+    const PageFrame = async () => (await call<{ readonly record: Maybe<MovieRecordReport> }>('get_state')).record?.frame ?? -1;
+    await TimeControl({ pause: true });
+    const paused = await PageFrame();
+    await Delay(2000);
+    const still = await PageFrame();
+    await TimeControl({ pause: false });
+    await Delay(1000);
+    const done = await Stopped();
+    const log = await RecordLogOf();
+    Expect(still === paused, `${still - paused} frames were encoded while paused`);
+    const steps = OnGrid(log, 10);
+    return `${done.result?.frames} frames, ${still - paused} encoded in the 2 s pause, steps ${steps}`;
+  });
+
+  await Check('record: what would cut the video is refused, the rest works', async () => {
+    await RecordScene();
+    await Playing();
+    await StartRecording();
+    try {
+      await RecordUntil('the recording records', 20, (status) => status.state === 'recording' && status.frame > 2);
+      const refused = [
+        await Refused(() => TimeControl({ back: 1 })),
+        await Refused(() => TimeControl({ seek: { timeline: 0 } })),
+        await Refused(() => TimeControl({ fps: 24 })),
+        await Refused(() => call('movie', { action: 'seek', at: 0 })),
+        await Refused(() => call('export_movie', { action: 'start', source: 'slate', duration: 1, fps: 10, width: 320, height: 180 }))
+      ];
+      Expect(refused.slice(0, 4).every((text) => /would cut the video/u.test(text)) && /a live recording is running/u.test(refused[4]), Show(refused));
+      const status = await TimeControl({});
+      const slow = await TimeControl({ rate: 0.5 });
+      const paused = await TimeControl({ pause: true });
+      await TimeControl({ pause: false, rate: 1 });
+      Expect(status.lock?.by === 'record_movie' && slow.rate === 0.5 && paused.paused, Show({ lock: status.lock, rate: slow.rate, paused: paused.paused }));
+      return `refused: ${refused.map((text) => text.slice(0, 60)).join(' | ')}; time_control {}, rate and pause work`;
+    } finally {
+      await RecordMovie({ action: 'cancel' }).catch(() => undefined);
+    }
+  });
+
+  await Check('record: cancel leaves no file', async () => {
+    const before = await MovieFiles();
+    await RecordScene();
+    await Playing();
+    await StartRecording({ name: 'verify-record-cancel' });
+    await RecordUntil('the recording records', 20, (status) => status.state === 'recording' && status.frame > 5);
+    const cancelled = await RecordMovie({ action: 'cancel' });
+    await Delay(300);
+    const after = await MovieFiles();
+    Expect(cancelled.state === 'cancelled' && Show(after) === Show(before), Show({ state: cancelled.state, files: after.filter((file) => !before.includes(file)) }));
+    return `cancelled at frame ${cancelled.frame}, no file left`;
+  });
+
+  await Check('record: duration stops it by itself', async () => {
+    await RecordScene();
+    await Playing();
+    await StartRecording({ duration: 1.5 });
+    const done = await RecordUntil('the recording stops by itself', 30, (status) => status.state === 'done');
+    const mp4 = ReadMp4(new Uint8Array(await readFile(done.result?.path ?? '')));
+    Expect(done.result?.frames === 15 && mp4.samples.length === 15, Show({ frames: done.result?.frames, samples: mp4.samples.length, note: done.note }));
+    return `15 frames (1.5 s), ${done.note}`;
+  });
+
+  await Check('record: the frame lock alone steps exactly one grid frame', async () => {
+    await RecordScene();
+    await Playing();
+    const locked = await TimeControl({ fps: 10 });
+    try {
+      Expect(locked.lock?.fps === 10 && locked.lock.by === 'time_control', Show(locked.lock));
+      const steps = [...new Set((await ClockSteps(1500)).filter((step) => step !== 0))];
+      Expect(steps.length === 1 && steps[0] === 1_000_000, `clock steps ${Show(steps)}`);
+      return `steps ${Show(steps)}, lock ${Show(locked.lock)}`;
+    } finally {
+      const off = await TimeControl({ fps: false });
+      Expect(off.lock == null, Show(off.lock));
+    }
+  });
+
+  await Check('record: beats play exactly N scene seconds, with and without a lock, and record with no gap', async () => {
+    await RecordScene();
+    await Playing();
+    await TimeControl({ pause: true });
+    const Beat = async (seconds: number): Promise<number> => {
+      const before = TimeOf(await call<object>('get_state'))?.seconds ?? 0;
+      const played = await TimeControl({ play: seconds });
+      Expect(played.paused && Math.abs(played.seconds - before - seconds) < 0.011, Show({ before, after: played.seconds, paused: played.paused }));
+      return played.seconds - before;
+    };
+    const free = await Beat(2);
+    await TimeControl({ fps: 10 });
+    const locked = await Beat(2);
+    await TimeControl({ fps: false });
+    await StartRecording();
+    await RecordUntil('the recording warms up', 20, (status) => status.state === 'recording');
+    await Beat(1);
+    await call('order_ship', { id: 'b', order: { type: 'direction', direction: [0, 0, 1] } });
+    await Delay(1000);
+    await Beat(1);
+    const done = await Stopped();
+    const log = await RecordLogOf();
+    const steps = OnGrid(log, 10);
+    Expect((done.result?.frames ?? 0) >= 20 && (done.result?.frames ?? 0) <= 21, Show({ frames: done.result?.frames }));
+    return `free ${free.toFixed(2)} s, locked ${locked.toFixed(2)} s; two 1 s beats with a set-up between: ${done.result?.frames} frames, steps ${steps}`;
+  });
+}
+
+/**
  * Runs one check and records its outcome.
  *
  * @param label - What is checked.
@@ -6232,6 +6434,7 @@ try {
 
   if (status) await EveDataChecks(page, status);
   else await NoEveDataChecks(requests);
+  await RecordChecks(page);
 } finally {
   await browser.close();
   await hub.Stop();

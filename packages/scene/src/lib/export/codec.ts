@@ -4,12 +4,44 @@
  */
 
 import type { Maybe } from '@dereekb/util';
-import type { MovieExportCodec } from './command';
+import type { MovieExportCodec } from './output';
 
 /**
- * The default bitrate's bits per pixel per frame (12.4 Mbps at 1080p30).
+ * The bitrate bounds a command takes, bits a second.
+ */
+export const MIN_EXPORT_BITRATE = 100_000;
+export const MAX_EXPORT_BITRATE = 200_000_000;
+
+/**
+ * The default bitrate's bits per pixel per frame (12.4 Mbps at 1080p30): the standard quality.
  */
 export const EXPORT_BITS_PER_PIXEL = 0.2;
+
+/**
+ * The quality presets (export_movie, record_movie): each sets the bitrate when bitrate is not given. draft is small,
+ * standard (the default) is EXPORT_BITS_PER_PIXEL, high and max go past the default's 100 Mbps clamp up to
+ * MAX_EXPORT_BITRATE.
+ */
+export const MOVIE_QUALITIES = ['draft', 'standard', 'high', 'max'] as const;
+
+export type MovieQuality = (typeof MOVIE_QUALITIES)[number];
+
+export const DEFAULT_MOVIE_QUALITY: MovieQuality = 'standard';
+
+/**
+ * Each quality's bits a pixel a frame, and the most bits a second it asks for.
+ */
+export const MOVIE_QUALITY_BITRATES: Readonly<Record<MovieQuality, { readonly bitsPerPixel: number; readonly max: number }>> = {
+  draft: { bitsPerPixel: 0.08, max: 100_000_000 },
+  standard: { bitsPerPixel: EXPORT_BITS_PER_PIXEL, max: 100_000_000 },
+  high: { bitsPerPixel: 0.35, max: MAX_EXPORT_BITRATE },
+  max: { bitsPerPixel: 0.6, max: MAX_EXPORT_BITRATE }
+};
+
+/**
+ * Above this many bits a second an HEVC output takes the High tier: the Main tier tops out at 25 Mbps at level 5.
+ */
+export const HEVC_HIGH_TIER_BITRATE = 25_000_000;
 
 /**
  * The default bitrate's bounds, bits a second.
@@ -42,24 +74,26 @@ export const H264_LEVELS: readonly H264Level[] = [
 ];
 
 /**
- * An HEVC Main tier level (Table A.8): luma samples a picture and a second; the codec string carries level × 30.
+ * An HEVC level (Table A.8): luma samples a picture and a second, and the High tier's bits a second; the codec string
+ * carries level × 30.
  */
 export interface HevcLevel {
   readonly level: string;
   readonly idc: number;
   readonly maxLumaPictureSize: number;
   readonly maxLumaSampleRate: number;
+  readonly maxHighTierBitrate: number;
 }
 
 /**
  * HEVC levels from 4 to 5.2. A smaller output takes 4.
  */
 export const HEVC_LEVELS: readonly HevcLevel[] = [
-  { level: '4', idc: 120, maxLumaPictureSize: 2_228_224, maxLumaSampleRate: 66_846_720 },
-  { level: '4.1', idc: 123, maxLumaPictureSize: 2_228_224, maxLumaSampleRate: 133_693_440 },
-  { level: '5', idc: 150, maxLumaPictureSize: 8_912_896, maxLumaSampleRate: 267_386_880 },
-  { level: '5.1', idc: 153, maxLumaPictureSize: 8_912_896, maxLumaSampleRate: 534_773_760 },
-  { level: '5.2', idc: 156, maxLumaPictureSize: 8_912_896, maxLumaSampleRate: 1_069_547_520 }
+  { level: '4', idc: 120, maxLumaPictureSize: 2_228_224, maxLumaSampleRate: 66_846_720, maxHighTierBitrate: 30_000_000 },
+  { level: '4.1', idc: 123, maxLumaPictureSize: 2_228_224, maxLumaSampleRate: 133_693_440, maxHighTierBitrate: 50_000_000 },
+  { level: '5', idc: 150, maxLumaPictureSize: 8_912_896, maxLumaSampleRate: 267_386_880, maxHighTierBitrate: 100_000_000 },
+  { level: '5.1', idc: 153, maxLumaPictureSize: 8_912_896, maxLumaSampleRate: 534_773_760, maxHighTierBitrate: 160_000_000 },
+  { level: '5.2', idc: 156, maxLumaPictureSize: 8_912_896, maxLumaSampleRate: 1_069_547_520, maxHighTierBitrate: 240_000_000 }
 ];
 
 export interface ExportCodecInput {
@@ -67,29 +101,38 @@ export interface ExportCodecInput {
   readonly width: number;
   readonly height: number;
   readonly fps: number;
+  /**
+   * Bits a second: an HEVC output above HEVC_HIGH_TIER_BITRATE takes the High tier, at a level whose High tier carries
+   * it. Left out: the Main tier.
+   */
+  readonly bitrate?: number;
 }
 
 export interface ExportCodecChoice {
   /**
-   * The WebCodecs codec string: `avc1.6400LL` (High) or `hvc1.1.6.L<idc>.B0` (Main).
+   * The WebCodecs codec string: `avc1.6400LL` (High), `hvc1.1.6.L<idc>.B0` (Main, Main tier) or `hvc1.1.6.H<idc>.B0`
+   * (Main, High tier).
    */
   readonly codecString: string;
   readonly level: string;
 }
 
 /**
- * The codec string for an output: the lowest level whose frame size and rate fit it.
+ * The codec string for an output: the lowest level whose frame size and rate fit it (and, for HEVC above
+ * HEVC_HIGH_TIER_BITRATE, whose High tier carries the bitrate).
  *
- * @param input - The codec, the output size and the fps.
+ * @param input - The codec, the output size, the fps and the bitrate.
  * @returns The codec string and its level, or null when the output is beyond the highest level (H.264 5.2, HEVC 5.2).
  */
 export function exportCodecString(input: ExportCodecInput): Maybe<ExportCodecChoice> {
-  const { codec, width, height, fps } = input;
+  const { codec, width, height, fps, bitrate = 0 } = input;
   let choice: Maybe<ExportCodecChoice>;
   if (codec === 'hevc') {
     const samples = width * height;
-    const level = HEVC_LEVELS.find((entry) => samples <= entry.maxLumaPictureSize && samples * fps <= entry.maxLumaSampleRate && Math.max(width, height) <= Math.sqrt(8 * entry.maxLumaPictureSize));
-    choice = level ? { codecString: `hvc1.1.6.L${level.idc}.B0`, level: level.level } : null;
+    const high = bitrate > HEVC_HIGH_TIER_BITRATE;
+    const fits = (entry: HevcLevel): boolean => samples <= entry.maxLumaPictureSize && samples * fps <= entry.maxLumaSampleRate && Math.max(width, height) <= Math.sqrt(8 * entry.maxLumaPictureSize);
+    const level = HEVC_LEVELS.find((entry) => fits(entry) && (!high || bitrate <= entry.maxHighTierBitrate)) ?? (high ? HEVC_LEVELS.findLast(fits) : null);
+    choice = level ? { codecString: `hvc1.1.6.${high ? 'H' : 'L'}${level.idc}.B0`, level: level.level } : null;
   } else {
     const across = Math.ceil(width / 16);
     const down = Math.ceil(height / 16);
@@ -111,17 +154,20 @@ export function exportCodecLimitText(codec: MovieExportCodec): string {
 }
 
 /**
- * The default bitrate: EXPORT_BITS_PER_PIXEL bits a pixel a frame, clamped to 0.5 to 100 Mbps.
+ * The default bitrate: the quality's bits a pixel a frame (standard: EXPORT_BITS_PER_PIXEL), clamped to 0.5 Mbps and
+ * the quality's most (100 Mbps for draft and standard, MAX_EXPORT_BITRATE for high and max).
  *
- * @param input - The output size and the fps.
+ * @param input - The output size, the fps and the quality.
  * @param input.width - Pixels.
  * @param input.height - Pixels.
  * @param input.fps - Frames a second.
- * @returns Bits a second (12.4 Mbps at 1080p30).
+ * @param input.quality - Default standard.
+ * @returns Bits a second (12.4 Mbps at 1080p30 standard).
  */
-export function defaultExportBitrate(input: { readonly width: number; readonly height: number; readonly fps: number }): number {
-  const { width, height, fps } = input;
-  return Math.min(MAX_DEFAULT_EXPORT_BITRATE, Math.max(MIN_DEFAULT_EXPORT_BITRATE, Math.round(width * height * fps * EXPORT_BITS_PER_PIXEL)));
+export function defaultExportBitrate(input: { readonly width: number; readonly height: number; readonly fps: number; readonly quality?: MovieQuality }): number {
+  const { width, height, fps, quality = DEFAULT_MOVIE_QUALITY } = input;
+  const { bitsPerPixel, max } = MOVIE_QUALITY_BITRATES[quality];
+  return Math.min(max, Math.max(MIN_DEFAULT_EXPORT_BITRATE, Math.round(width * height * fps * bitsPerPixel)));
 }
 
 /**

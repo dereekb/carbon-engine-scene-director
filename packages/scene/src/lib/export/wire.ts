@@ -8,7 +8,8 @@
 
 import type { Maybe } from '@dereekb/util';
 import { isPlainObject } from '../json';
-import type { MovieExportCodec } from './command';
+import type { MovieExportCodec } from './output';
+import type { MovieRecordReport } from './record';
 import type { MovieExportFile, MovieExportReport } from './report';
 
 export const EXPORT_PACKET_MAGIC = 'SDX1';
@@ -59,12 +60,17 @@ export interface MovieExportTrack {
   readonly colorSpace?: { readonly primaries?: Maybe<string>; readonly transfer?: Maybe<string>; readonly matrix?: Maybe<string>; readonly fullRange?: Maybe<boolean> };
 }
 
+/**
+ * The page's report on the wire: an export's or a live recording's (record_movie streams the same messages).
+ */
+export type MovieFileReport = MovieExportReport | MovieRecordReport;
+
 export type MovieExportPageMessage =
   | { readonly type: 'export'; readonly id: string; readonly kind: 'config'; readonly track: MovieExportTrack }
-  | { readonly type: 'export'; readonly id: string; readonly kind: 'progress'; readonly report: MovieExportReport }
-  | { readonly type: 'export'; readonly id: string; readonly kind: 'end'; readonly report: MovieExportReport }
-  | { readonly type: 'export'; readonly id: string; readonly kind: 'failed'; readonly error: string; readonly report: MovieExportReport }
-  | { readonly type: 'export'; readonly id: string; readonly kind: 'cancelled'; readonly report: MovieExportReport };
+  | { readonly type: 'export'; readonly id: string; readonly kind: 'progress'; readonly report: MovieFileReport }
+  | { readonly type: 'export'; readonly id: string; readonly kind: 'end'; readonly report: MovieFileReport }
+  | { readonly type: 'export'; readonly id: string; readonly kind: 'failed'; readonly error: string; readonly report: MovieFileReport }
+  | { readonly type: 'export'; readonly id: string; readonly kind: 'cancelled'; readonly report: MovieFileReport };
 
 export type MovieExportHubMessage = { readonly type: 'export'; readonly id: string; readonly kind: 'saved'; readonly file: MovieExportFile & { readonly bytes: number } } | { readonly type: 'export'; readonly id: string; readonly kind: 'failed'; readonly error: string };
 

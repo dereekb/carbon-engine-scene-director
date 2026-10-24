@@ -93,6 +93,10 @@ export const EXPORT_LOCKED_TEXT = 'a movie export is running: export_movie { act
  */
 export const PLAY_WAIT_LIMIT_MS = 240_000;
 /**
+ * The refusal of a time jump or a lock change while a live recording holds the clock (sd-export → Live recording).
+ */
+export const RECORD_LOCKED_TEXT = 'a live recording is running and this would cut the video (time jumps and the frame lock are refused): record_movie { action: "stop" } ends it';
+/**
  * StopAt's slots: the movie's end (the default), and a beat's (PlayFor).
  */
 export const MOVIE_STOP_SLOT = 'movie';
@@ -402,6 +406,10 @@ export class TimeControl {
    */
   private exportMode = false;
   private exportFps: Maybe<number> = null;
+  /**
+   * A live recording's hold on the clock (BeginRecording to EndRecording): the user's lock it replaced.
+   */
+  private recordHold: Maybe<{ readonly saved: TimeControl['lock'] }> = null;
 
   constructor({ clock, world, realNow = () => performance.now(), budgetMs = FRAME_STEP_BUDGET_MS, windowConfig = {} }: TimeControlConfig) {
     this.clock = clock;
@@ -472,6 +480,14 @@ export class TimeControl {
   }
 
   /**
+   * Whether a live recording holds the clock (BeginRecording to EndRecording): the record lock runs, jumps and lock
+   * changes are refused.
+   */
+  get recordingMovie(): boolean {
+    return this.recordHold != null;
+  }
+
+  /**
    * Whether snapshots are being taken.
    */
   get recordingOn(): boolean {
@@ -488,6 +504,7 @@ export class TimeControl {
    */
   Command(command: TimeControlCommand): string[] {
     this.Unlocked();
+    if (this.recordHold && (command.back !== undefined || command.seek !== undefined || command.fps !== undefined)) throw new Error(RECORD_LOCKED_TEXT);
     const warnings: string[] = [];
     if (command.every !== undefined || command.window !== undefined) this.Configure({ every: command.every, window: command.window });
     if (command.back !== undefined) warnings.push(...(this.Jump(this.clock.now - Math.round(command.back * TICKS_PER_SECOND)).warnings ?? []));
@@ -681,6 +698,7 @@ export class TimeControl {
     if (!this.sim) throw new Error('time control is not attached yet: the page is still starting');
     if (this.jumping) throw new Error('a jump is already running');
     this.Unlocked();
+    if (this.recordHold) throw new Error(RECORD_LOCKED_TEXT);
     if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: jump once it plays');
     const first = this.snapshots[0];
     if (!first) throw new Error(`nothing is recorded yet: ${this.NotRecordingText()}`);
@@ -855,6 +873,7 @@ export class TimeControl {
    */
   SetFrameLock(fps: Maybe<number>): void {
     this.Unlocked();
+    if (this.recordHold) throw new Error(RECORD_LOCKED_TEXT);
     if (fps != null && !(Number.isInteger(fps) && fps >= MIN_EXPORT_FPS && fps <= MAX_EXPORT_FPS)) throw new RangeError(`the frame lock must be an integer from ${MIN_EXPORT_FPS} to ${MAX_EXPORT_FPS} frames a second, not ${fps}`);
     this.lock = fps == null ? null : { pacer: new FrameLock(fps, this.clock.now), by: 'time_control' };
     this.ResetMeasure();
@@ -955,6 +974,7 @@ export class TimeControl {
     if (this.jumping) throw new Error('a jump is running: export once it lands');
     if (this.clock.held) throw new Error('the timeline holds the clock while its scene prepares: export once it plays');
     if (this.exportMode) throw new Error('a movie export is already running');
+    if (this.recordHold) throw new Error('a live recording is running: record_movie { action: "stop" } ends it');
     this.EndBeat('export');
     this.exportMode = true;
     this.exportFps = fps ?? null;
@@ -1016,6 +1036,44 @@ export class TimeControl {
     this.lastFrameMs = null;
     this.lock?.pacer.Anchor(this.clock.now);
     this.Pause(pause);
+  }
+
+  /**
+   * Hands the clock to a live recording (sd-export → Live recording): the record lock at the file's fps, anchored at now
+   * (the next frame targets now, so the time before is not one long frame). Until EndRecording, Jump, Resimulate,
+   * Command back / seek / fps and SetFrameLock throw RECORD_LOCKED_TEXT; Pause, SetRate, StopAt and PlayFor still work.
+   *
+   * @param options - `fps`: the file's frames a second, the lock's grid.
+   * @throws {Error} During a jump, an export or another recording.
+   * @throws {RangeError} For an fps out of bounds.
+   */
+  BeginRecording({ fps }: { readonly fps: number }): void {
+    if (this.jumping) throw new Error('a jump is running: record once it lands');
+    this.Unlocked();
+    if (this.recordHold) throw new Error('a live recording is already running');
+    if (!(Number.isInteger(fps) && fps >= MIN_EXPORT_FPS && fps <= MAX_EXPORT_FPS)) throw new RangeError(`a recording's fps must be an integer from ${MIN_EXPORT_FPS} to ${MAX_EXPORT_FPS}, not ${fps}`);
+    this.recordHold = { saved: this.lock };
+    this.clock.Resync();
+    this.lastFrameMs = null;
+    this.lock = { pacer: new FrameLock(fps, this.clock.now), by: 'record_movie' };
+    this.ResetMeasure();
+    this.Present();
+  }
+
+  /**
+   * Gives the clock back after a live recording: the user's lock (or none) comes back, re-anchored at now, and the next
+   * frame targets now. Nothing outside a recording.
+   */
+  EndRecording(): void {
+    const hold = this.recordHold;
+    if (!hold) return;
+    this.recordHold = null;
+    this.lock = hold.saved;
+    this.clock.Resync();
+    this.lastFrameMs = null;
+    this.lock?.pacer.Anchor(this.clock.now);
+    this.ResetMeasure();
+    this.Present();
   }
 
   /**
@@ -1381,7 +1439,7 @@ export function RateText(rate: number): string {
 export function TimeText(report: TimeReport): string {
   if (report.state === 'exporting') return report.exportFps ? `exporting · 1/${report.exportFps} s a frame` : 'exporting';
   let text = report.paused ? `paused at ${RateText(report.rate)}` : RateText(report.rate);
-  if (report.lock) text += ` · ${report.lock.fps} fps lock`;
+  if (report.lock) text += ` · ${report.lock.fps} fps ${report.lock.by === 'record_movie' ? 'record lock' : 'lock'}`;
   if (report.effectiveRate != null) text += ` (${RateText(report.effectiveRate)} actual)`;
   if (report.play) text += ` · beat ends in ${report.play.stopsIn.toFixed(1)} s`;
   if (report.held) text += ' · held for the timeline';

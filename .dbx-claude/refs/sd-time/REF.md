@@ -158,6 +158,12 @@ bounds the cost of a frame's ticks (the 40 ms budget), not the step a frame take
   so it spans whole grid steps and `effectiveRate` shows the slowdown without the ±1 frame noise of a 1 s window.
 - The lock is a viewing preference like the rate: it lasts across loads and resets on a tab reload; refused during an
   export (`EXPORT_LOCKED_TEXT`). `time.lock { fps, by: time_control }`; the HUD reads `1× · 30 fps lock (0.12× actual)`.
+- **The record lock** (R2, `sd-export` → Live recording): `BeginRecording({ fps })` saves the user's lock, `clock.Resync()`
+  and sets the lock at the file's fps anchored at now, `by: record_movie` (HUD `30 fps record lock`); `EndRecording()`
+  restores the user's lock (or none) re-anchored at now. Refused during a jump, an export or another recording. While it
+  runs, `Jump`, `Resimulate`, `Command` back / seek / fps and `SetFrameLock` throw `RECORD_LOCKED_TEXT` (a jump or a lock
+  change would cut the video), and `BeginExport` refuses; `Pause`, `SetRate`, `StopAt` and `PlayFor` work, so beats
+  direct a recording.
 - **main.ts**: when `frameLock` is set the loop calls `LockedFrame` instead of `Frame` (after `DriveTimeline`, as
   always). A wait frame does `requestAnimationFrame` and returns, except while a `screenshot` waits for a frame
   (`Engine.capturePending`): then it draws at the clock, so a slow-rate lock never keeps a screenshot waiting.
